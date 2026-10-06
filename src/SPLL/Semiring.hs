@@ -47,7 +47,7 @@ module SPLL.Semiring (
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
   prodP, onProb, onDim, onBranches, mapResult, guardP, zipResult, zip3Result,
-  scaleCoV, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, shareResult,
+  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, shareResult,
   packResult, unpackResult, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
@@ -566,6 +566,27 @@ scaleCoV sr cumulative deriv r = onProb scale r
     scale x = if not cumulative
                 then srTimes sr x (IRIf (IROp OpEq (rDim r) const0) (srOne sr) (scaleFactor (IRUnaryOp OpAbs deriv)))
                 else IRIf (IROp OpGreaterThan deriv const0) x (srComplement sr x)
+
+-- | Cumulative 'scaleCoV' through a point inverse that may be decreasing,
+-- given the operand's own point result at the inverted bound (task
+-- cdf-through-discrete-inverse-wrong).
+--
+-- For an increasing inverse @g@, @P(f v <= s) = P(v <= g s)@: the operand's
+-- CDF, unchanged. For a decreasing one it is @P(v >= g s)@, and the
+-- complement of the CDF, @1 - P(v <= x)@, is @P(v > x)@ -- short by the
+-- operand's mass AT @x@. A continuous operand has none, which is why plain
+-- 'scaleCoV' was right for every Float transform of a density; a discrete or
+-- mixed one does (@-(if Uniform < 0.5 then 1.0 else 2.0)@ at @cdf(-1.0)@
+-- answered 0.5 for 1). So that mass is added back: the point result's
+-- probability where it is a mass (dim 0) and possible, zero where it is a
+-- density or impossible.
+scaleCoVAtom :: Semiring -> IRExpr -> PResult -> PResult -> PResult
+scaleCoVAtom sr deriv atom = onProb flipped
+  where
+    atomMass = IRIf (rImposs atom) (srZero sr)
+                 (IRIf (IROp OpEq (rDim atom) const0) (unP (rProb atom)) (srZero sr))
+    flipped x = IRIf (IROp OpGreaterThan deriv const0) x
+                  (srPlus sr (srComplement sr x) atomMass)
 
 -- | The ANY-safe wrapper of 'toIRInferenceSave': a marginal query over this
 -- expression contributes mass 1, dim 0, no branches, without evaluating the body.

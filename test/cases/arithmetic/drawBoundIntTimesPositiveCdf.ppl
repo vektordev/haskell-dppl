@@ -1,0 +1,1 @@
+main = draw v = (if Uniform < 0.5 then 2 else 1) in v * 6

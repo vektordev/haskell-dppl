@@ -201,7 +201,20 @@ data InvChain = InvChain
   , invReadsAny :: IRExpr
     -- ^ See 'readsAnyChain': True exactly when a step would read a marginal
     -- wildcard, in which case 'invValue' must not be evaluated at all either.
+  , invCumValue :: IRExpr
+    -- ^ The bound a CUMULATIVE query transports to the witnessed variable:
+    -- 'invValue' with every exact integer-quotient step rounded in the
+    -- direction its bound points ('cumulativeStep'). Identical to 'invValue'
+    -- on a chain with no such step.
+  , invCumGuard :: IRExpr
+    -- ^ 'invGuard' for 'invCumValue': a rounded step is applicable at every
+    -- non-zero divisor, not only an exact one.
   }
+
+-- | A chain whose cumulative form is its point form -- a merge of several
+-- occurrences (see 'mergeExpr'), which keeps the point inverse it always had.
+pointChain :: IRExpr -> IRExpr -> IRExpr -> IRExpr -> InvChain
+pointChain v cov g ra = InvChain v cov g ra v g
 
 -- Takes the chainName of a function (May be a lambda, a variable, an Apply ...) and returns the inverse function of that lambda together with the derivative of the inverse
 toInvExpr :: FCData -> [ADTDecl] -> ChainName -> InvChain
@@ -250,13 +263,44 @@ toValueExpr clauses paramClauses adtsDecls startCN = do
   relevantSortedClauses <- toValuePath clauses paramClauses startCN
   -- Calculate the symbolic derivative
   let deriv = derivativeOfPath adtsDecls relevantSortedClauses
+  let cumStep = cumulativeStep adtsDecls relevantSortedClauses
   -- Generate code
   Just InvChain
     { invValue    = toLetInBlock clauses adtsDecls relevantSortedClauses
     , invCoV    = wrapInLetInBlock clauses adtsDecls relevantSortedClauses deriv
     , invGuard    = guardChain clauses adtsDecls relevantSortedClauses
     , invReadsAny = readsAnyChain clauses adtsDecls relevantSortedClauses
+    , invCumValue = toLetInBlockWith (\c e -> maybe e fst (cumStep c)) clauses adtsDecls relevantSortedClauses
+    , invCumGuard = guardChainWith cumStep clauses adtsDecls relevantSortedClauses
     }
+
+-- | The rounded value and applicability of each exact integer-quotient step
+-- of a chain, for a cumulative query (task cdf-through-discrete-inverse-wrong).
+--
+-- A CDF query transports a bound, not a point: @seed <= s@. Each step hands
+-- the next a bound on its own result, pointing up or down. An integer step
+-- @y * a = t@ given @t <= s@ needs @y <= floor(s/a)@ for @a > 0@ and
+-- @y >= ceil(s/a)@ for @a < 0@ ('roundedQuotientInverse'); given @t >= s@ it
+-- is the other way round. So the rounding is the floor exactly when the bound
+-- coming OUT of the step points down, i.e. when the inverse from the seed
+-- through this step is increasing -- the sign of the running product of the
+-- step derivatives, the prefix of 'derivativeOfPath' ending here. Each factor
+-- refers only to names bound earlier in the chain, so the prefix is in scope
+-- where the step is bound. The witnessed variable's bound then points the way
+-- the whole product does, which is the sign the caller's CDF flip reads.
+cumulativeStep :: [ADTDecl] -> [HornClause] -> HornClause -> Maybe (IRExpr, IRExpr)
+cumulativeStep adtsDecls path c = do
+  (floorB, ceilB, app) <- roundedClause
+  sign <- lookup (conclusion c) running
+  return (IRIf (IROp OpGreaterThan sign (IRConst (VFloat 0))) floorB ceilB, app)
+  where
+    running = zip (map conclusion path) (scanl1 (IROp OpMult) (map (derivativeOfHornClause adtsDecls) path))
+    roundedClause = case c of
+      ExprHornClause preVars _ (InjFInfo name) inv | inv > 0 ->
+        let FPair _ invInjF = lookupFPair adtsDecls name
+            correctInv = invInjF !! (inv - 1)
+        in roundedQuotientInverse (foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars))
+      _ -> Nothing
 
 -- | A Bool IRExpr, safe to evaluate unconditionally, that is True iff every step
 -- of the chain is within its inverse FDecl's applicability domain -- i.e. the
@@ -266,14 +310,19 @@ toValueExpr clauses paramClauses adtsDecls startCN = do
 -- earlier step is known to be in-domain; a failing step short-circuits to False
 -- without ever forcing the unsafe binding that follows it.
 guardChain :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
-guardChain _ _ [] = IRConst (VBool True)
-guardChain clauses adtsDecls (ParameterHornClause _:cs) = guardChain clauses adtsDecls cs
-guardChain clauses adtsDecls (c:cs) =
-  case clauseApplicability adtsDecls c of
-    IRConst (VBool True) -> IRLetIn (conclusion c) (hornClauseToIRExpr clauses adtsDecls c) (guardChain clauses adtsDecls cs)
-    appTest -> IRIf appTest
-                 (IRLetIn (conclusion c) (hornClauseToIRExpr clauses adtsDecls c) (guardChain clauses adtsDecls cs))
-                 (IRConst (VBool False))
+guardChain = guardChainWith (const Nothing)
+
+-- | 'guardChain' with some steps' value and applicability replaced (Just), as
+-- 'cumulativeStep' replaces the rounded ones.
+guardChainWith :: (HornClause -> Maybe (IRExpr, IRExpr)) -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+guardChainWith _ _ _ [] = IRConst (VBool True)
+guardChainWith override clauses adtsDecls (ParameterHornClause _:cs) = guardChainWith override clauses adtsDecls cs
+guardChainWith override clauses adtsDecls (c:cs) =
+  let (val, app) = fromMaybe (hornClauseToIRExpr clauses adtsDecls c, clauseApplicability adtsDecls c) (override c)
+      rest = IRLetIn (conclusion c) val (guardChainWith override clauses adtsDecls cs)
+  in case app of
+    IRConst (VBool True) -> rest
+    appTest -> IRIf appTest rest (IRConst (VBool False))
 
 -- | A Bool IRExpr, safe to evaluate unconditionally, that is True iff some step
 -- of the chain would read a marginal wildcard ('VAny') as an operand. An
@@ -601,7 +650,9 @@ mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
   , "IRCompiler). See docs/forward-chaining-recursion-constraint.md for the failure analysis."
   ]
 mergeExpr _ _ _ [x] = x
-mergeExpr varName lambdaCN candidateCNs (x:xs) = mergeExpr2 id x (mergeExpr varName lambdaCN candidateCNs xs)
+mergeExpr varName lambdaCN candidateCNs (x:xs) =
+  let m = mergeExpr2 id x (mergeExpr varName lambdaCN candidateCNs xs)
+  in pointChain (invValue m) (invCoV m) (invGuard m) (invReadsAny m)
 
 -- The wildcard test merges by disjunction wherever the guards merge by
 -- conjunction: a merged value is built out of both paths, so either path
@@ -609,8 +660,8 @@ mergeExpr varName lambdaCN candidateCNs (x:xs) = mergeExpr2 id x (mergeExpr varN
 mergeExpr2 :: (IRExpr -> IRExpr) -> InvChain -> InvChain -> InvChain
 mergeExpr2 bindings c1@InvChain{invValue = IRLetIn n v bodyExpr1} c2 = mergeExpr2 (bindings . IRLetIn n v) c1{invValue = bodyExpr1} c2
 mergeExpr2 bindings c1 c2@InvChain{invValue = IRLetIn n v bodyExpr2} = mergeExpr2 (bindings . IRLetIn n v) c1 c2{invValue = bodyExpr2}
-mergeExpr2 bindings (InvChain (IRConstruct TgTuple [IRConst VAny, b]) cov1 g1 ra1) (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov2 g2 ra2) = InvChain (bindings $ IRConstruct TgTuple [a, b]) (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
-mergeExpr2 bindings (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov1 g1 ra1) (InvChain (IRConstruct TgTuple [IRConst VAny, b]) cov2 g2 ra2) = InvChain (bindings $ IRConstruct TgTuple [a, b]) (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
+mergeExpr2 bindings (InvChain (IRConstruct TgTuple [IRConst VAny, b]) cov1 g1 ra1 _ _) (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov2 g2 ra2 _ _) = pointChain (bindings $ IRConstruct TgTuple [a, b]) (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
+mergeExpr2 bindings (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov1 g1 ra1 _ _) (InvChain (IRConstruct TgTuple [IRConst VAny, b]) cov2 g2 ra2 _ _) = pointChain (bindings $ IRConstruct TgTuple [a, b]) (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
 -- The same, field by field, for a user-ADT constructor: one path knows the
 -- constructor only (@isDCons ds@ inverts to @DCons ANY ANY@), another a field
 -- of it (@dig ds * 3 == 21@ to @DCons 7 ANY@). Taking the first, as below,
@@ -618,12 +669,12 @@ mergeExpr2 bindings (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov1 g1 ra
 -- digit never constrained (a silent wrong result once that inverse compiled,
 -- fuzz-admission-oracle-bugs item 9). Fields a path leaves ANY carry no
 -- coordinate, so the Jacobian is the product as for the tuple slots.
-mergeExpr2 bindings (InvChain e1 cov1 g1 ra1) (InvChain e2 cov2 g2 ra2)
+mergeExpr2 bindings (InvChain e1 cov1 g1 ra1 _ _) (InvChain e2 cov2 g2 ra2 _ _)
   | Just (c1, fs1) <- ctorSpine e1, Just (c2, fs2) <- ctorSpine e2
   , c1 == c2, length fs1 == length fs2
   , and (zipWith (\a b -> isAnyConst a || isAnyConst b) fs1 fs2)
   , any (not . isAnyConst) fs2
-  = InvChain (bindings $ foldl IRApply (IRVar c1) (zipWith (\a b -> if isAnyConst a then b else a) fs1 fs2))
+  = pointChain (bindings $ foldl IRApply (IRVar c1) (zipWith (\a b -> if isAnyConst a then b else a) fs1 fs2))
              (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
   where
     isAnyConst (IRConst VAny) = True
