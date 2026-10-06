@@ -13,6 +13,7 @@ module SPLL.IROptimizer (
 , deterministicGens
 , distributeIf
 , headHash
+, allNamesIR
 ) where
 
 import SPLL.IntermediateRepresentation

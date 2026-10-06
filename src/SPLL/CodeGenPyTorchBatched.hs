@@ -62,7 +62,7 @@ import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Control.Monad (foldM)
 import Control.Monad.State (State, evalState, get, put)
 import qualified Data.Set as Set
-import SPLL.IROptimizer (deterministicGens)
+import SPLL.IROptimizer (deterministicGens, allNamesIR)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
 -- batched backend and fallible: it runs the fragment guard over every emitted
@@ -697,15 +697,57 @@ distributeSelects env0 = go env0
   where
     go env (IRLambda n b)  = IRLambda n (go env b)
     go env (IRLetIn n v b) = IRLetIn n (go env v) (go (bindS env n v) b)
-    go env (IRSelect c t f) | tupleValued t || tupleValued f =
-      IRConstruct TgTuple
-        [ go env (IRSelect c (projTuple True t)  (projTuple True f))
-        , go env (IRSelect c (projTuple False t) (projTuple False f)) ]
+    go env (IRSelect c t f) | tupleValued t || tupleValued f = split env IRSelect c t f
     go env (IRIf c t f) | not (structural env c), tupleValued t || tupleValued f =
-      IRConstruct TgTuple
-        [ go env (IRIf c (projTuple True t)  (projTuple True f))
-        , go env (IRIf c (projTuple False t) (projTuple False f)) ]
+      split env IRIf c t f
     go env e = irDescend (go env) e
+
+    -- Hoist both arms' let-spines above the select when that captures
+    -- nothing, then distribute the bare tuple cores; otherwise distribute
+    -- through the spines as before ('projTuple').
+    split env sel c t f = case hoistArmSpines c t f of
+      Just (binds, t', f') ->
+        let wrap env' [] = IRConstruct TgTuple
+              [ go env' (sel c (projTuple True t')  (projTuple True f'))
+              , go env' (sel c (projTuple False t') (projTuple False f')) ]
+            wrap env' ((n, v) : rest) = IRLetIn n (go env' v) (wrap (bindS env' n v) rest)
+        in wrap env binds
+      Nothing -> IRConstruct TgTuple
+        [ go env (sel c (projTuple True t)  (projTuple True f))
+        , go env (sel c (projTuple False t) (projTuple False f)) ]
+
+-- | Lift the let-spines of a tuple-valued select's two arms above the select,
+-- returning the bindings (true arm's first) and the two bare arms, when doing
+-- so captures nothing: no binder of either spine may name anything in the
+-- condition or in the other arm. The check is scope-blind ('allNamesIR'), so
+-- it is conservative and linear; a clash returns 'Nothing'.
+--
+-- This is what keeps 'distributeSelects' linear in nesting depth. Projecting
+-- through a spine copies the spine into every component select, and a spine
+-- holding a further tuple-valued select copies /that/ one's spines again, so
+-- a chain of N nested such selects (a nested if over an enumerated latent,
+-- each arm a four-leaf 'PResult') emitted 4^N code (task
+-- batched-codegen-exponential-in-nested-enum-ifs). Hoisting is semantics
+-- preserving here because both select forms this is applied to -- an
+-- 'IRSelect' and a value-dependent 'IRIf' -- are emitted as @torch.where@,
+-- which evaluates both arms eagerly anyway: every binding was computed
+-- before, now it is computed once instead of once per tuple leaf (which also
+-- means a draw in a spine is no longer drawn independently per leaf).
+hoistArmSpines :: IRExpr -> IRExpr -> IRExpr -> Maybe ([(String, IRExpr)], IRExpr, IRExpr)
+hoistArmSpines c t f
+  | null tB && null fB                     = Nothing
+  | any (`Set.member` cN) (tB ++ fB)       = Nothing
+  | any (`Set.member` allNamesIR f) tB     = Nothing
+  | any (`Set.member` allNamesIR t) fB     = Nothing
+  | otherwise = Just (tBinds ++ fBinds, t', f')
+  where
+    (tBinds, t') = peelSpine t
+    (fBinds, f') = peelSpine f
+    tB = map fst tBinds
+    fB = map fst fBinds
+    cN = allNamesIR c
+    peelSpine (IRLetIn n v b) = let (bs, e) = peelSpine b in ((n, v) : bs, e)
+    peelSpine e               = ([], e)
 
 -- | Does this expression evaluate to a tuple (an @IRConstruct TgTuple@, under
 -- its let-spine)?

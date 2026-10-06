@@ -4,6 +4,7 @@ lookupFPair,
 resolveInjF,
 soleOutputVar,
 inversionFor,
+roundedQuotientInverse,
 FPair(..),
 FDecl(..),
 FEnv,
@@ -275,10 +276,14 @@ multIInv1 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "c"]
         (IROp OpEq (IROp OpMod (IRVar "c") (IRVar "a")) (IRConst $ VInt 0))
         (IRConst (VBool False)))
   False
-  -- A discrete (TInt) scheme's dim is always 0, so 'scaleCoV' never reads
-  -- these -- placeholders only, not the (undefined) derivative of integer
-  -- division.
-  [("a", IRConst (VFloat 1)), ("c", IRConst (VFloat 1))]
+  -- A discrete (TInt) scheme's dim is always 0, so the probability-mode
+  -- Jacobian ('scaleCoV' at dim 0) never reads a magnitude here. Its SIGN is
+  -- read, though: a cumulative query flips the CDF when the inverse is
+  -- decreasing, and @v * (-6) <= s@ is @v >= s / (-6)@ (task
+  -- cdf-through-discrete-inverse-wrong; a placeholder @1@ never flipped). So
+  -- the observation's entry is 'intQuotientSign', the sign of @d(c/a)/dc@,
+  -- standing in for the (undefined) derivative of integer division.
+  [("a", IRConst (VFloat 1)), ("c", intQuotientSign (IRVar "a"))]
 multIInv2 :: FDecl
 multIInv2 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"] ["a"]
   (IROp OpIntDiv (IRVar "c") (IRVar "b"))
@@ -286,7 +291,51 @@ multIInv2 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"]
         (IROp OpEq (IROp OpMod (IRVar "c") (IRVar "b")) (IRConst $ VInt 0))
         (IRConst (VBool False)))
   False
-  [("b", IRConst (VFloat 1)), ("c", IRConst (VFloat 1))]
+  [("b", IRConst (VFloat 1)), ("c", intQuotientSign (IRVar "b"))]
+
+-- | The sign of @1 / a@ for an Int divisor, as a Float (@1.0@ or @-1.0@), so
+-- it multiplies into a chain of Float derivatives on every backend. Only ever
+-- read for its sign (see 'multIInv1'); a zero divisor is excluded by the
+-- inverse's own applicability test.
+intQuotientSign :: IRExpr -> IRExpr
+intQuotientSign a = IRIf (IROp OpGreaterThan a (IRConst (VInt 0))) (IRConst (VFloat 1)) (IRConst (VFloat (-1)))
+
+-- | The rounded forms of an exact integer-quotient inverse, for a cumulative
+-- query (task cdf-through-discrete-inverse-wrong).
+--
+-- A point query asks for the one @b@ with @a * b == c@, which exists only
+-- when @a@ divides @c@ -- hence 'multIInv1''s exactness guard. A CDF asks for
+-- @P(a * b <= c)@ instead, and every bound has an answer: @b <= floor(c/a)@
+-- for a positive @a@, @b >= ceil(c/a)@ for a negative one. Which rounding a
+-- step needs depends on the direction of the bound it is handed, so both are
+-- returned, @(floor, ceil, applicability)@; the applicability drops the
+-- exactness test and keeps only the non-zero divisor.
+--
+-- Recognises any inverse whose body is @OpIntDiv (IRVar c) (IRVar a)@, read
+-- off the (possibly renamed) declaration itself, so it applies equally to an
+-- 'instantiate'd copy and a forward-chaining clause's renamed one.
+--
+-- 'OpIntDiv' rounds differently per backend (Python @//@ floors, Julia @÷@
+-- truncates), which the exactness guard used to make moot. Here it is not
+-- moot, so both roundings are spelled independently of the convention: with
+-- @q = c ÷ a@ and @r = c - q * a@ (exact on every backend), @q@ is already
+-- the floor when @r == 0@ or @r@ and @a@ share a sign (a flooring quotient
+-- always leaves such a remainder; a truncating one does exactly when the true
+-- quotient is non-negative), and is otherwise one above it; the ceiling is
+-- dually @q + 1@ when @r /= 0@ and @r@ and @a@ share a sign.
+roundedQuotientInverse :: FDecl -> Maybe (IRExpr, IRExpr, IRExpr)
+roundedQuotientInverse FDecl{body = IROp OpIntDiv c@(IRVar _) a@(IRVar _)} =
+  Just (rounded floorQ, rounded ceilQ, IRUnaryOp OpNot (IROp OpEq a zero))
+  where
+    zero = IRConst (VInt 0)
+    one  = IRConst (VInt 1)
+    q = IROp OpIntDiv c a
+    r = IROp OpSub c (IROp OpMult q a)
+    sameSign = IROp OpEq (IROp OpLessThan r zero) (IROp OpLessThan a zero)
+    floorQ = IRIf sameSign q (IROp OpSub q one)
+    ceilQ  = IRIf sameSign (IROp OpPlus q one) q
+    rounded e = IRIf (IROp OpEq r zero) q e
+roundedQuotientInverse _ = Nothing
 
 notFwd :: FDecl
 notFwd = FDecl (Forall [] [] (TBool `TArrow` TBool)) ["a"] ["b"] (IRUnaryOp OpNot (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]

@@ -217,6 +217,40 @@ covOperandMeta cumulative deriv meta
   | cumulative && not (staticallyIncreasing deriv) = unpruned meta
   | otherwise                                      = meta
 
+-- | The change of variables through one point inverse, for either mode
+-- (task cdf-through-discrete-inverse-wrong). Probability mode and a
+-- statically increasing inverse are plain 'scaleCoV'. A cumulative query
+-- through an inverse that may be decreasing needs @P(v >= x)@, which is the
+-- flipped CDF plus the operand's own mass at @x@ ('scaleCoVAtom'); @atomM@
+-- compiles that point result, and is run only here.
+--
+-- When the point result cannot be compiled (a refusal), the flip falls back
+-- to the plain complement. That is exact for an operand with no atoms -- a
+-- density, which is what a probability-mode refusal under a cumulative
+-- variant overwhelmingly is -- and the answer every such transform gave
+-- before, so no variant that compiled before becomes absent.
+pointInverseCoV :: CompilerMetadata -> Bool -> IRExpr -> PResult -> CompilerMonad PResult
+                -> CompilerMonad PResult
+pointInverseCoV meta cumulative deriv res atomM
+  | cumulative && not (staticallyIncreasing deriv) = do
+      mAtom <- (Just <$> atomM) `catchError` (\_ -> return Nothing)
+      return (maybe (scaleCoV sr True deriv res) (\atom -> scaleCoVAtom sr deriv atom res) mAtom)
+  | otherwise = return (scaleCoV sr cumulative deriv res)
+  where sr = semiringOf meta
+
+-- | The inverse body and applicability test to invert a bound through, in
+-- the given mode. A point query takes the declaration's own. A cumulative one
+-- through an exact integer quotient ('roundedQuotientInverse') takes the
+-- rounded bound instead -- the floor where the inverse is increasing, the
+-- ceiling where it is decreasing (@v * (-6) <= -7@ is @v >= ceil(7/6) = 2@) --
+-- under a guard that no longer demands divisibility, which made every
+-- non-multiple bound "impossible" (task cdf-through-discrete-inverse-wrong).
+modeInverse :: Bool -> FDecl -> IRExpr -> (IRExpr, IRExpr)
+modeInverse cumulative decl deriv
+  | cumulative, Just (floorB, ceilB, app) <- roundedQuotientInverse decl =
+      (IRIf (IROp OpGreaterThan deriv const0) floorB ceilB, app)
+  | otherwise = (body decl, applicability decl)
+
 envToIR :: CompilerConfig -> FCData -> Program -> IREnv
 envToIR conf fcDat p
   | any (null . chainName . getTypeInfo . snd) (functions p) =
@@ -2800,7 +2834,12 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) x)
                            { affineEnv = (x, form) : affineEnv meta }
           toIRInference bodyMeta cumulative lamBody sample
-     Just (InvChain invExprP0 invExprCoV0 invExprGuard0 invExprReadsAny0) -> do
+     Just chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} -> do
+      -- A cumulative query transports a bound, rounded at integer quotients
+      -- (task cdf-through-discrete-inverse-wrong); a point query the point.
+      let (invExprP0, invExprGuard0)
+            | cumulative = (invCumValue chain, invCumGuard chain)
+            | otherwise  = (invValue chain, invGuard chain)
       invExprP        <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
       invExprCoV      <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
       invExprGuard    <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
@@ -2853,11 +2892,14 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
       let resReadable = if wildcardHasOwnAnswer
             then IRIf readsAnyW (IRConst (VBool False)) (notIR (IRUnaryOp OpIsAny appliedSample))
             else notIR readsAnyW
-      (res0, resBinds) <- lift (runWriterT (toIRInference (covOperandMeta cumulative appliedCoV meta) cumulative v appliedSample))
-      res <- if null resBinds then return res0
-             else shareResult sr "inverted" [guard, resReadable] resBinds res0
-      -- Change of variables for the inverse the observation was pushed through.
-      let scaled = scaleCoV sr cumulative appliedCoV res
+      let operandAt c = do
+            (res0, resBinds) <- lift (runWriterT (toIRInference (covOperandMeta cumulative appliedCoV meta) c v appliedSample))
+            if null resBinds then return res0
+              else shareResult sr "inverted" [guard, resReadable] resBinds res0
+      res <- operandAt cumulative
+      -- Change of variables for the inverse the observation was pushed through;
+      -- a decreasing CDF flip adds the operand's mass at the bound back.
+      scaled <- pointInverseCoV meta cumulative appliedCoV res (operandAt False)
       let guarded e zero = IRIf guard e zero
       -- Guarded-to-zero: outside the inverse's domain the whole result is zero,
       -- and must not be evaluated (short-circuit, see 'guard' above).
@@ -3399,13 +3441,16 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named nam
   let detIdxs = [0..length params - 1] \\ [probIdx]
   -- Find the inversion with all deterministic input parameters
   let invDecl = inversionFor name (inVars !! probIdx) inversions
-  let FDecl {inputVars=invVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
+  let FDecl {inputVars=invVars, deconstructing=decons, derivatives=invDerivs} = invDecl
   -- All deterministic variable names
   let detVars = filter (v1 /=) invVars
   let detEs = map (params !!) detIdxs
 
   -- Find the relevant derivative of the inversion
   let invDeriv = inverseDerivative name v1 invDerivs
+  -- The bound to invert through, rounded for a cumulative integer quotient
+  -- ('modeInverse').
+  let (invExpr, appTest) = modeInverse cumulative invDecl invDeriv
   -- Generate the probabilistic sub expressions
   mapM_ (\(eVar, e) -> toIRGenerate meta e >>= \x -> setVariables [(eVar, x)]) (zip detVars detEs)
   setVariables [(v1, sample)]
@@ -3417,9 +3462,13 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named nam
   -- applicability test 'guardP' applies below.
   -- Unpruned when the cumulative CoV below may flip it through a complement.
   let metaOp = covOperandMeta cumulative invDeriv meta
-  paramRes <- guardedSubInference metaOp [appTest] (probF metaOp cumulative (params !! probIdx) invExpr)
-  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
-  return (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDeriv paramRes))
+  let operandAt c = guardedSubInference metaOp [appTest] (probF metaOp c (params !! probIdx) invExpr)
+  paramRes <- operandAt cumulative
+  -- Scale the result according to the CoV formula (the point mass at the
+  -- bound joins a decreasing CDF flip), then test whether the inversion is
+  -- applicable.
+  scaled <- pointInverseCoV meta cumulative invDeriv paramRes (operandAt False)
+  return (guardP (semiringOf meta) [appTest] scaled)
 -- Enumerate-both discrete path for forward-only binary InjFs (and/or). No point
 -- inverse exists, so loop the |L|x|R| grid and keep cells where forward(l,r) == sample,
 -- accumulating pLeft(l) * pRight(r). Mirrors the cumulative double-enum path below.
@@ -5505,7 +5554,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
   [occ] -> case target of
     WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
-      Just (InvChain g0 cov0 guard0 _) -> do
+      Just InvChain{invValue = g0, invCoV = cov0, invGuard = guard0} -> do
         g     <- pruneDeadLetIns <$> materializeAnchors meta g0
         cov   <- pruneDeadLetIns <$> materializeAnchors meta cov0
         guard <- pruneDeadLetIns <$> materializeAnchors meta guard0

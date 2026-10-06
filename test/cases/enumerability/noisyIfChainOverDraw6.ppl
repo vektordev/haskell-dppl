@@ -1,0 +1,10 @@
+-- Six nested ifs, each conditioned on a noisy read of one enumerated latent:
+-- P(True) = 0.5 * 0.9^6 + 0.5 * 0.1^6. Task
+-- batched-codegen-exponential-in-nested-enum-ifs: each level is a tuple-valued
+-- select whose arms carry let-spines, and batched codegen copied the spines
+-- into every tuple leaf (4^N code: 1.6 s and 2.6 MB here, N = 8 took 29 s).
+-- It now hoists them above the select. The depth-24 version lives inline in
+-- End2End's deep expression spill group (its budget-0 compile is exponential
+-- too, task budget-zero-exponential-in-nested-enum-ifs).
+main = draw b = Uniform < 0.5 in
+  (if (if Uniform < 0.1 then (not b) else b) then (if (if Uniform < 0.1 then (not b) else b) then (if (if Uniform < 0.1 then (not b) else b) then (if (if Uniform < 0.1 then (not b) else b) then (if (if Uniform < 0.1 then (not b) else b) then (if (if Uniform < 0.1 then (not b) else b) then True else False) else False) else False) else False) else False) else False)

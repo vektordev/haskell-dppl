@@ -1756,9 +1756,14 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
     -- The ticket's own repro (formerly the known-issues pin
     -- enumLetFreshIfChainPythonParenDepth), through the real pipeline: 24
     -- nested ifs whose conditions are noisy reads of one enumerated latent.
-    -- It stays out of the corpus because batched codegen does not finish on
-    -- it, and every corpus program goes through the batched-eligibility sweep.
-    -- Before the fix its enum-mass line was 200+ brackets deep.
+    -- Before the fix its enum-mass line was 200+ brackets deep. It stays out
+    -- of the corpus because the corpus's BudgetZeroMatchesDefault sweep
+    -- recompiles it at materialization budget 0, whose engines are exponential
+    -- in the depth (N = 8 takes over 2 minutes; task
+    -- budget-zero-exponential-in-nested-enum-ifs). Batched codegen, the
+    -- original blocker, now compiles it in under a second (task
+    -- batched-codegen-exponential-in-nested-enum-ifs); its corpus twin at
+    -- depth 6 is enumerability/noisyIfChainOverDraw6.
     enumIfChainCase = ioProperty $ do
       let levels = 24 :: Int
           cond = "(if Uniform < 0.1 then (not b) else b)"
@@ -1785,6 +1790,41 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
     shallowComprehensionCase =
       let src = comprehensionSource 5
       in counterexample src (" for x in " `isInfixOf` src && null (spillLines src))
+
+-- ===========================================================================
+-- Batched code is linear in nested tuple-valued selects
+-- (task batched-codegen-exponential-in-nested-enum-ifs)
+-- ===========================================================================
+--
+-- Nested ifs over noisy reads of one enumerated latent make every level a
+-- tuple-valued select whose arms carry let-spines. Distributing such a select
+-- into its tuple leaves used to copy the spines into every leaf, and a spine
+-- holding the next level's select copied that one's too: 4^N emitted code (N
+-- = 8 took 29 s and 42 MB, N = 24 did not finish). The spines are now hoisted
+-- above the select, so doubling the depth roughly doubles the output (the old
+-- emission failed this check at 169 KB -> 42 MB, in about 30 s). Pure
+-- Haskell (compile + emit), no torch; the program's batched values are checked
+-- by the corpus twin enumerability/noisyIfChainOverDraw6.
+
+batchedNestedSelectTests :: TestTree
+batchedNestedSelectTests = testGroup "batched nested select distribution (batched-codegen-exponential-in-nested-enum-ifs)"
+  [ testProperty "doubling the depth of a nested noisy if chain at most triples the batched output (depth 4 -> 8)" $
+      once $ case (emitted 4, emitted 8) of
+        (Right small, Right big) ->
+          counterexample ("batched output: " ++ show small ++ " chars at depth 4, "
+                          ++ show big ++ " at depth 8") (big <= 3 * small)
+        (Left err, _) -> counterexample err False
+        (_, Left err) -> counterexample err False
+  ]
+  where
+    cond = "(if Uniform < 0.1 then (not b) else b)"
+    chain levels = iterate (\e -> "(if " ++ cond ++ " then " ++ e ++ " else False)") "True" !! levels
+    emitted :: Int -> Either String Int
+    emitted levels = do
+      prog <- either (Left . show) Right (tryParseProgram "" ("main = draw b = Uniform < 0.5 in " ++ chain levels))
+      env <- either (Left . show) Right (compile defaultCompilerConfig{batched = True} prog)
+      srcLines <- generateFunctionsBatched True env
+      return (sum (map length srcLines))
 
 -- ===========================================================================
 -- Enumeration bucketing (task batched-bucketing-splits-on-nullary-constructors)
