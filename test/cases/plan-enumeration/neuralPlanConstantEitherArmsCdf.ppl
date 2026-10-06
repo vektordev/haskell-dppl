@@ -1,0 +1,7 @@
+-- Either sibling of neuralPlanConstantListBranchCdf: a constant Either arm of
+-- a neural plan-enumerated if, against a cdf target. planDetGuard matches the
+-- arm and compares the payload, as compareValueExpr does: a Left value is
+-- never <= a Right query and vice versa. Each arm has mass 0.5.
+-- Task plan-det-guard-compares-composite-values-with-greater-than.
+neural nn :: (Symbol -> Float)
+main s = draw x = nn s in if x < 0.0 then left 0.0 else right 1.0
