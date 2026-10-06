@@ -1,0 +1,1 @@
+main = snd (head (if True then [(7.785, (False, (True, False)))] else [(Uniform, (False, (False, False)))]))

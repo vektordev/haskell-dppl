@@ -1,0 +1,3 @@
+data Chain = Stop | Link lv::Float, lnext::Chain depth 3
+
+main = head (if True then [((-4, -8.479733117671657), Stop)] else [((if Uniform < 0.5 then 2 else 1, -6.918940429735155), Stop)])
