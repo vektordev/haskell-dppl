@@ -145,8 +145,9 @@ expandPerValue fastPathAllowed p0 = foldl expandOne p0 (markedFunctions p0)
             slotT = slotTypeAt path resultT
             -- The helpers' signatures pin what the declared type says about
             -- them, so a slot that is a parameter of the given part is the
-            -- slot's type rather than a type variable (a comparison against a
-            -- type variable is a float comparison).
+            -- slot's type rather than a type variable, whose comparison is a
+            -- run-time dispatch ('SPLL.IRCompiler.leafEqIR') rather than the
+            -- slot type's own.
             helperSigs = [ FnSignature point declared []
                          , FnSignature (f ++ perValuePriorSuffix) (foldr TArrow slotT argTs) []
                          , FnSignature (f ++ perValueGivenSuffix) (foldr TArrow resultT (argTs ++ [slotT])) []
