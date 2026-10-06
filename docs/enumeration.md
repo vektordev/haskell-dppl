@@ -155,7 +155,11 @@ call at three slots.
 the `DiscreteValues` tags; a rewritten program is annotated again) moves each
 enumerable, possibly-random `draw` down to the one `InjF` operand that reads
 it: past directly nested bindings that don't read it, and into an operand when
-some *other* operand may be random. That leaves `draw c` around
+some *other* operand may be random. Next to literal siblings only, it does not
+stop there (that buys nothing) but keeps going if that reaches a deeper operand
+where it does pay: `[True, (if x2 t then x3 t else False), ..]`, which is also
+what a masked slot leaves behind in a per-mask variant (task
+`compositional-answers-enumerate-heard-jointly`). That leaves `draw c` around
 `(draw o1 = .. in match c o1) ++ ...`, which is the per-slot form. Sound for
 eager draws: the binding is still evaluated at most once and every use of the
 name stays under it; nothing is ever moved under a non-binding `Lambda`, into an
