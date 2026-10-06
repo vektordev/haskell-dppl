@@ -639,3 +639,58 @@ only ever fails on a family nobody has written down yet.
 The integrate variant is evaluated too, which no other fuzz property does, and
 one of the new families is only visible there (a `cdf` through a
 projected-away draw, item 5).
+
+## Backend agreement (`prop_Fuzz_BackendsAgree`)
+
+Task `backend-agreement-fuzzing`. The interpreter is the reference semantics,
+and the scalar Python and Julia backends must give the same `(prob, dim,
+imposs)` wherever it answers. The property (Slow) draws batches of 60 programs
+(`genTypedProgram`, with the neural and named-helper generators weighted up),
+four batches a run, and for each program:
+
+1. compiles it at the default config, dropping it if there is no probability
+   function (the run's `drawn program` table says why each was dropped);
+2. draws three forward samples from the interpreter with a per-program seed,
+   plus their `ANY`-holed variants (`anyHoles`: the whole point, and each tuple
+   component or ADT field in turn) and off-support neighbours (`offSupport`: a
+   nudged scalar, the other `Either` arm, a list grown by one), at most 12
+   points;
+3. keeps the points the interpreter answers at, for `probability` and, on
+   wildcard-free points, `integrate`.
+
+All programs of a batch then go through **one** `python3` and **one** `julia
+--compile=min` process (`test/BackendAgreement.hs`; a subprocess costs 70 ms /
+470 ms against a ~1 ms compile). Each program loads into its own namespace (a
+fresh `dict` for Python, its own `module ProgN` for Julia), every load and every
+query sits in its own `try`, and results are printed one line per query with
+`repr`, so one broken program reports against itself only. A query point is
+evaluated inside the program's namespace, since it names that program's ADT
+classes. Python additionally bounds each query with a 10 s alarm; both
+processes have a 300 s bound. Comparison: `probAgrees` on the probability
+(`probTolerance`, relative above 1; NaN equals NaN, infinities exactly), exact
+on dim and the flag. A backend that raises, a module that fails to load, or
+codegen throwing on the Haskell side, where the interpreter answered, is a
+disagreement.
+
+On failure the batch is first cut to single programs (one of them fails), and
+only a single program is shrunk with `shrinkTypedProgram`. Without `julia` on
+the PATH the Julia arm is skipped with a one-line stderr note, and the run's
+`julia arm` table says so: on a machine without Julia the property checks
+interpreter vs Python only.
+
+Each run tabulates the IR constructs (`irConstructs`: `IRExpr` constructors,
+`Operand`s, `UnaryOperand`s, `Builtin`s, density/cumulative leaves,
+`ConTag`s, `Accessor`s) of the bodies it compared. The Slow unit test
+`BackendAgreementCoverage` (`test/BackendCoverage.hs`) computes the same set over
+a fixed-seed sample of the property's draws and over the corpus, and requires
+the corpus-minus-fuzz difference to be exactly `fuzzCoverageExceptions`: the
+generator's to-do list, and the exception list for
+`emitted-code-test-impact-analysis` M2. Both sides count **inference bodies
+only**, because those are all the property compares. Generate bodies are
+never compared across backends (a sample is random), nor are writeLogits or
+normal functions.
+
+Measured when it landed: a run takes ~10-15 s, compares ~150 of its 240
+programs at ~1100 queries, and the corpus uses 59 constructs in inference
+bodies of which the sample covers 54. Of the first 15 runs, 5 found a
+disagreement; the families are filed (see the task doc in the docs repo).

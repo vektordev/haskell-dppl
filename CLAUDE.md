@@ -1917,6 +1917,9 @@ current list for whichever binary you run):
 - `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`Aspirational`/`SuperSlow` groups,
   plus `Shrinker` (the typed generator's shrink contract) and `Admission
   oracle`, which are in the default suite
+- `test/BackendAgreement.hs` / `BackendCoverage.hs` — the batched backend
+  drivers behind `prop_Fuzz_BackendsAgree`, and the corpus-minus-fuzz construct
+  exception list
 - `test/AdmissionOracle.hs` — the ModalityInfer ↔ IRCompiler admission
   contract (see "The admission contract" below), driven by the `Slow` property
   `prop_Fuzz_AdmissionTotality`
@@ -2198,6 +2201,15 @@ produced each run so a silent collapse to one shape can't pass green. The
 shrinker's own contract is the `Shrinker` group, which is pure and fast and so
 lives in the **default** suite rather than in `Slow`. Details, the raw-vs-typed
 split, and the `SuperSlow` sampling-vs-PDF tier: `docs/fuzz-testing.md`.
+
+`prop_Fuzz_BackendsAgree` (Slow) is the backend differential: batches of typed
+draws, each queried at its own samples, their `ANY`-holed variants and
+off-support neighbours, evaluated by the interpreter in-process and by **one**
+Python and **one** Julia process per batch (`test/BackendAgreement.hs`), with
+`(prob, dim, imposs)` required to agree. The Julia arm skips with a note when
+`julia` is absent. Its construct coverage, and the corpus constructs it does not
+reach (`BackendCoverage.fuzzCoverageExceptions`, checked exactly by the Slow test
+`BackendAgreementCoverage`), are in `docs/fuzz-testing.md`.
 
 ### The admission contract
 

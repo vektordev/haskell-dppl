@@ -1,0 +1,5 @@
+-- cumulative of head compares the head against the query with equality, not
+-- <=: P(X <= 2) for a head that is always 1 comes out 0. The if-spelling of
+-- the same distribution (main = if Uniform < 2.0 then 1 else 2) answers 1.
+-- Task head-cdf-uses-equality.
+main = head (if Uniform < 2.0 then [1, 0] else [2])
