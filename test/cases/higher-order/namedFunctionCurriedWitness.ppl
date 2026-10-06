@@ -1,0 +1,2 @@
+mk x y = x : [x + y]
+main = mk Normal 1.0

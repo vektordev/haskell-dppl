@@ -1,0 +1,2 @@
+f x = (x, x + 1.0)
+main = (f Normal, f Normal)

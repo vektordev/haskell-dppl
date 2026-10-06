@@ -1519,6 +1519,17 @@ extendMetaForLambda meta t name =
       hasInference = case paramRType of { TArrow (TArrow _ _) _ -> True; _ -> False }
   in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta }
 
+-- | Whether variable @x@ occurs free in @e@ underneath a field constructor
+-- (@Cons@, @TCons@, a user ADT constructor). Shadowing-aware.
+occursUnderFieldCtor :: [ADTDecl] -> String -> Expr -> Bool
+occursUnderFieldCtor adtDs x = go False
+  where
+    go under (Expr _ (Var n)) = under && n == x
+    go _ (Expr _ (Lambda n _)) | n == x = False
+    go under e@(Expr _ (InjF (Named n) _)) | isFieldConstructor adtDs n = any (go True) (getSubExprs e)
+                                           | otherwise = any (go under) (getSubExprs e)
+    go under e = any (go under) (getSubExprs e)
+
 -- | True if the expression is a literal lambda (as opposed to a function reached
 -- through the higher-order equivalence machinery, e.g. a Var or an Apply result).
 isLambdaExpr :: Expr -> Bool
@@ -2736,10 +2747,37 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
    -- crashes at runtime on ADT accessors — an M0-style silent-failure path —
    -- so interception strictly improves them; bodies the traversal declines
    -- keep their current path untouched.
+   -- Whether the bound variable sits in a field of a constructed result. Only
+   -- then can forward chaining's witness leave other parts of the body
+   -- unaccounted for; a pure invertible chain down to one occurrence is exact
+   -- as a single witness, and keeps its emitted code.
+   let underField = occursUnderFieldCtor (adtDecls meta) toInvCN (exprWithCN meta lambdaBodyCN)
+   -- A saturated call of a top-level function whose leading arguments are
+   -- deterministic: its body factor is the callee's own probability function
+   -- at the recovered witness (the 'namedCall' arm of the result below).
+   let namedCall = case flattenApplySpine l of
+         (Expr _ (Var fName), fArgs)
+           | underField && not cumulative && not (isLambdaExpr l)
+           , all ((== Deterministic) . pType . getTypeInfo) fArgs
+           , Just (TArrow _ _, True) <- lookup fName (typeEnv meta) -> Just (fName, fArgs)
+         _ -> Nothing
+   -- Forward chaining sees through a field constructor in a per-invocation
+   -- (tagged) copy of a callee's body. Only the 'namedCall' arm then folds the
+   -- body back in; the single-witness branch below would recover the variable
+   -- from one field and silently drop every other one (`f Normal Normal` with
+   -- `f x y = (x, y)` answered p(y) alone). For any other tagged application
+   -- whose bound variable occurs under a field constructor, point inversion
+   -- is therefore not offered -- exactly what forward chaining answered before
+   -- it could see those fields. Integrate mode keeps the single witness, as it
+   -- does for a literal lambda: a CDF of a structured value is not a product
+   -- of per-field factors anyway.
+   let fieldWitnessUnfolded = underField && not cumulative && not (null tag) && isNothing namedCall
+   let pointInversion = if fieldWitnessUnfolded then Nothing
+                        else toInvExprMaybe clauses localAdts lChainName
    planRes <- planWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag v sample
    case planRes of
     Right result -> return result
-    Left planDiag -> case toInvExprMaybe clauses localAdts lChainName of
+    Left planDiag -> case pointInversion of
      -- No occurrence of the bound variable is point-invertible from the
      -- observation either. Fall back to set-valued witnesses: invert the
      -- observation structurally into guarded constraint sets on the bound
@@ -2855,6 +2893,49 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
       let anyW = IRIf readsAnyW (IRConst (VBool True)) (IRUnaryOp OpIsAny appliedSample)
       let constResult e = mapResult (const e) (detP (srZero sr))
       case rt of
+        -- A saturated call of a top-level function (`f v`, `step 2.0 v`) whose
+        -- parameter was just recovered: the body factor is the callee's own
+        -- probability function evaluated at the recovered witness, i.e. the
+        -- deterministic-argument call with the witness in v's place. Inlining the
+        -- body (the literal-lambda fold below) would mis-bind its tagged chain
+        -- names, which is why this used to fall into the single-witness branch
+        -- and drop the body entirely -- every other slot of `x : [x + Normal]`,
+        -- including the consistency indicator on the witnessing one (task
+        -- named-function-list-head-witness-not-recovered).
+        --
+        -- A call returning a function (`mk v 1.0`, compiled at `mk v`) gets the
+        -- same factor inside the closure over the remaining parameters, which
+        -- the call then also passes on.
+        _ | Just (fName, fArgs) <- namedCall -> do
+              let namedRefusal = IRError ("cannot compute marginal: the argument of '" ++ fName
+                    ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
+                    ++ " observed slots or further randomness; integrating it out is beyond"
+                    ++ " this engine (design modality-witnessed-inference)")
+              argIRs <- mapM (toIRGenerate meta) fArgs
+              calleeName <- calleeInferenceName meta cumulative fName
+              let callee = inferenceCall meta cumulative (IRVar calleeName) sample
+              let call = foldl IRApply callee (argIRs ++ [appliedSample] ++ map IRVar lambdaVars)
+              callVar <- mkVariable "call"
+              let bodyReadable = if bindingIsSink then notIR readsAnyW else notIR anyW
+              let whenAny whenAnySink
+                    | bindingIsSink = IRIf readsAnyW namedRefusal whenAnySink
+                    | otherwise     = namedRefusal
+              let guardAny ok whenAnySink = IRIf anyW (whenAny whenAnySink) ok
+              let withBody bodyRes = guardedZero (zipResult guardAny (prodP sr scaled bodyRes) bodyRes)
+              case rt of
+                -- Inside the closure the call reads its parameters, so its
+                -- binding cannot float out: it is let-bound in place, under the
+                -- same two guards 'shareResult' would have put on it.
+                TArrow _ _ -> do
+                  let impossible = packResult (impossibleP sr)
+                  let guardedCall = IRIf guard (IRIf bodyReadable call impossible) impossible
+                  return (detP (guarded
+                    (wrapInLambdas (IRLetIn callVar guardedCall (packResult (withBody (unpackResult (IRVar callVar))))))
+                    (wrapInLambdas (packResult (detP (srZero sr))))))
+                _ -> do
+                  bodyRes <- shareResult sr "body_factor" [guard, bodyReadable]
+                               [(callVar, call)] (unpackResult (IRVar callVar))
+                  return (withBody bodyRes)
         TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
                                      (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr)))))))
         _ | cumulative && isLambdaExpr l && null tag && bindingIsSink -> do
@@ -5312,7 +5393,8 @@ invertToWorlds meta occs exprBody target = do
 -- applied per world. For a residue that is deterministic given the witness
 -- that factor is the missing consistency indicator (dim 0); for one that
 -- draws fresh randomness it is the sibling's own density (dims add). The
--- factor is omitted where no field constructor is crossed, because there
+-- factor is omitted where no field constructor (or call, 'isNamedCallNode')
+-- is crossed, because there
 -- the inverse path already consumed every sibling and the indicator would
 -- be an always-true tautology on every transported subtree in the corpus.
 transportDirect :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
@@ -5340,7 +5422,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
         let value = substIRVar bodyCN s g
         factors <- case pathToCN occ exprBody of
           Just spine@(_:_)
-            | any (isFieldCtorNode meta) (init spine)
+            | any (\n -> isFieldCtorNode meta n || isNamedCallNode n) (init spine)
             , Expr occTI (Var boundName) <- last spine -> do
                 f <- residueFactor meta exprBody boundName (rType occTI) value s
                 return [WFactor [] f]
@@ -5381,6 +5463,17 @@ pathToCN cn e
 isFieldCtorNode :: CompilerMetadata -> Expr -> Bool
 isFieldCtorNode meta (Expr _ (InjF (Named n) _)) = isFieldConstructor (adtDecls meta) n
 isFieldCtorNode _ _ = False
+
+-- | An application whose callee is not a literal lambda: a call of a named (or
+-- otherwise resolved) function. Forward chaining inverts through such a call
+-- by a per-invocation tagged copy of the callee's body, which crosses that
+-- body's field constructors just as a syntactic one would -- `h x` with
+-- `h x = (x, 1.0)` is inverted as `fst s` -- so a spine through one carries
+-- the same residue factor (task named-function-list-head-witness-not-recovered).
+isNamedCallNode :: Expr -> Bool
+isNamedCallNode (Expr _ (Apply (Expr _ (Lambda {})) _)) = False
+isNamedCallNode (Expr _ (Apply _ _)) = True
+isNamedCallNode _ = False
 
 -- | The residue factor of a transported subtree: @subtree@ compiled as an
 -- ordinary point observation against @target@, with the bound variable

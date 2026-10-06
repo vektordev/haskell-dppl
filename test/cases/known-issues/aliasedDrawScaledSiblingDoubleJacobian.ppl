@@ -1,0 +1,1 @@
+main = draw z = Normal in draw x0 = z in (x0, 0.5 * Normal)

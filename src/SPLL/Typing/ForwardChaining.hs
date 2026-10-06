@@ -987,9 +987,22 @@ getDependentGroups clauses cn = directDependence cn ++ concatMap (getDependentGr
     --forwardConclusion cs = let fc = getForwardClauseOfGroup cs in if isEquivalenceHornClause fc && isVariableEquivalence (equivalenceType fc) then head $ premises fc else conclusion fc
     forwardConclusion = conclusion . getForwardClauseOfGroup
     -- We want to include the equivalence clauses in the dependent clauses, but don't want to follow their jumps
-    forwardPremises cs = let fc = getForwardClauseOfGroup cs in if isEquivalenceHornClause fc then [] else premises fc
+    forwardPremises cs
+      | hasForwardClause cs = let fc = getForwardClauseOfGroup cs in if isEquivalenceHornClause fc then [] else premises fc
+      -- A field constructor's group carries only its inverse clauses (see
+      -- exprToHornClauses), each deconstructing the container into one field:
+      -- the fields are that group's sub-expressions.
+      | otherwise = map conclusion cs
     --forwardPremises = premises . getForwardClauseOfGroup
-    directDependence c = filter (\cs -> hasForwardClause cs && forwardConclusion cs == c) clauses
+    directDependence c = filter (dependsOn c) clauses
+    dependsOn c cs
+      | hasForwardClause cs = forwardConclusion cs == c
+      -- Inverse-only (field constructor) group: it belongs to the container it
+      -- deconstructs. Skipping these used to drop every field of a list/tuple/ADT
+      -- constructor from a named function's per-invocation tagged copy, so its
+      -- parameter could not be recovered from e.g. the head of the returned list
+      -- (task named-function-list-head-witness-not-recovered).
+      | otherwise = any (\cl -> isExprHornClause cl && premises cl == [c]) cs
     hasForwardClause = any ((== 0) . inversion)
 
 -- Some clause groups, like TCons, may not have a forward clause. You need to make sure this is not the case when incokink this function

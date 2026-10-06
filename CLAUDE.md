@@ -800,6 +800,32 @@ different `ForwardChaining` crash, in the `l`-side resolution of the same
 `constructEquivalenceClauses` function). See task
 `arrow-lifted-mixture-for-function-values` and its `depends_on`.
 
+### A named function's parameter is witnessed through its own probability function
+
+Forward chaining inverts through a call `f v` by a per-invocation *tagged* copy
+of f's body (`constructEquivalenceClauses`, `getDependentGroups`). That copy
+used to stop at a field constructor (its clause group has no forward clause),
+so a parameter returned as a list head or tuple field (`f x = x : [x + Normal]`)
+had no point inverse and reached the set-witness engine, which refuses tagged
+invocations. `getDependentGroups` now follows inverse-only groups into their
+fields. Two consumers then had to stop dropping the sibling fields that
+inverse never reads (task `named-function-list-head-witness-not-recovered`):
+
+- `toIRInference`'s probabilistic `Apply` arm folds the body back in for a
+  saturated call of a top-level function with deterministic leading arguments
+  (`namedCall`): the body factor is the callee's own `_prob` called at the
+  recovered witness (inside the closure when the call returns a function). Any
+  other tagged application whose variable sits under a field constructor is
+  denied point inversion (`fieldWitnessUnfolded`), which is what it got before.
+- The set-witness `transportDirect` adds its residue factor when the spine
+  crosses a call (`isNamedCallNode`), not only a syntactic constructor
+  (`higher-order/namedFunctionTupleUnderIf`).
+
+Corpus `higher-order/namedFunction*`, `rewriteProbeHelperTuple*`. Still open:
+`known-issues/ouChainRecursive` (an `if` over list arms, in any spelling) and
+`namedFunctionTwoRandomArgs`; and ModalityInfer gives a top-level parameter no
+`IWit`, so a helper feeding its parameter to a neural net stays `Bottom`.
+
 ### Forward chaining never re-derives a chain name it already has
 
 `ForwardChaining.solveHCSet` fulfils, per clause group, the first clause whose

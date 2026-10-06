@@ -110,9 +110,16 @@ knownDivergences =
   , Known "maskSwappedWrapper" DrawIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" AliasIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" HelperExtract "" variantsSilenceReread
+  -- `draw z = Normal in draw x0 = z in (x0, 0.5 * Normal)`: re-binding the
+  -- witnessed draw through an alias applies a scaled sibling draw's Jacobian
+  -- twice (p((0, 0)) = 4 phi(0)^2, not 2 phi(0)^2). Pre-existing; exposed when
+  -- ouChainUnrolled joined the corpus.
+  , Known "ouChainUnrolled" DrawIntro "draw-intro Normal" aliasDoubleJacobian
+  , Known "ouChainUnrolled" AliasIntro "" aliasDoubleJacobian
   ]
   where
     zeroRandomBound = "draw-bound-random-factor-times-literal-zero-loses-dirac-mass"
+    aliasDoubleJacobian = "aliased-draw-scaled-sibling-double-jacobian"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
 
