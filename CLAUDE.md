@@ -154,7 +154,7 @@ stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
 | `semiring-presult-internals.md` | `PResult` combinators, log space, dims, the impossibility flag, branch counting, `anySafeShared`, topK and lower bounds, the query-type guard |
 | `observation-masks.md` | `ANY` query shapes, correlation classes, per-mask variants |
 | `per-value-queries.md` | `Enumerated` signatures, the per-value result layout, fast path vs fallback, refusals |
-| `neural.md` | neural declarations, input types (`Tensor`), `of` annotations, the categorical sampler, readLogits/writeLogits |
+| `neural.md` | neural declarations, input types (`Tensor`), `of` annotations, the categorical sampler, sharing one network call per argument, readLogits/writeLogits |
 | `batched-mode-pytorch-tensorizer.md` | batched backend, dense mode, refusals |
 | `backends.md` | runtime libraries under torch, float literals, Python nesting spill, safe unary math |
 | `testing.md` | suite layout, `.tst` format and expectations, the known-issues corpus and its performance pins (growth over a templated family, code size), rewrite invariance, tiers, impact analysis (skipping unchanged checks), suite time, benchmarks |

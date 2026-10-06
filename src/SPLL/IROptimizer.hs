@@ -1,6 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module SPLL.IROptimizer (
   optimizeEnv
+, optimizeEnvWith
+, shareNetworkCallsCounted
 , postProcess
 , failConversion
 , OptStats(..)
@@ -33,12 +35,17 @@ import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
 optimizeEnv :: CompilerConfig -> IREnv -> IREnv
-optimizeEnv conf (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv funcs' adtsDecl consts)
+optimizeEnv conf = optimizeEnvWith conf Set.empty
+
+-- | 'optimizeEnv' told the program's declared network names, so it can share
+-- repeated calls of one network on one argument ('shareNetworkCallsCounted').
+optimizeEnvWith :: CompilerConfig -> Set.Set Varname -> IREnv -> IREnv
+optimizeEnvWith conf neuralNames (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv funcs' adtsDecl consts)
   where
     optGroup :: IRFunGroup -> State [(String, OptStats)] IRFunGroup
     (funcs', report) = runState (mapM optGroup funcs) []
     -- Bound once for the whole environment, not per function.
-    det = (optEnvFromADTs adtsDecl) { optDetGens = deterministicGens funcs }
+    det = (optEnvFromADTs adtsDecl) { optDetGens = deterministicGens funcs, optNeurals = neuralNames }
     optGroup fg = do
       g <- onFun (groupName fg ++ "_gen")   (genFun fg)
       pr <- onFun (groupName fg ++ "_prob")  (probFun fg)
@@ -165,12 +172,15 @@ data OptEnv = OptEnv
     -- field's position in it. The owner is the one 'fieldAccessorOwners'
     -- picks, which is the constructor every backend's accessor tests for.
   , optFieldOwners :: Map.Map Varname (Varname, Int)
+    -- | The declared networks. A pure application of one is shared across
+    -- loops and if-arms ('shareNetworkCallsCounted'); empty turns that off.
+  , optNeurals :: Set.Set Varname
   }
 
 -- | Knows nothing: every rewrite that consults the environment falls back to
 -- its conservative behaviour.
 emptyOptEnv :: OptEnv
-emptyOptEnv = OptEnv Set.empty Set.empty Map.empty Map.empty
+emptyOptEnv = OptEnv Set.empty Set.empty Map.empty Map.empty Set.empty
 
 -- | The ADT facts of an 'OptEnv' (no generate function is assumed
 -- deterministic).
@@ -247,7 +257,7 @@ optimizeStats :: CompilerConfig -> OptEnv -> IRExpr -> (IRExpr, Tally)
 optimizeStats conf det = optimizeStats' conf det AllStages
 
 optimizeStats' :: CompilerConfig -> OptEnv -> StageSet -> IRExpr -> (IRExpr, Tally)
-optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= commonSubexprStage) Map.empty
+optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= networkShareStage >>= commonSubexprStage) Map.empty
   where
     nodeWise = irMapM (\e ->
       pruneAnyCkecksStage e
@@ -278,6 +288,11 @@ optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= commonSubexprStage
     commonSubexprStage =
       if oLvl >= 2 && stages /= OnceStagesOnly
         then countedBy "cse" (optimizeCommonSubexprCounted det)
+        else return
+    -- Before CSE, so CSE sees one shared name where the calls were.
+    networkShareStage =
+      if oLvl >= 2 && stages /= OnceStagesOnly
+        then countedBy "networkShare" (shareNetworkCallsCounted det)
         else return
     applyConstStage = onceStage "applyConstant" (oLvl >= 2) applyConstant
     assiciativityStage = onceStage "associativity" (oLvl >= 2) optimizeAssociativity
@@ -907,6 +922,137 @@ substCond v atom everywhere b = go
     binderOf (IRLetIn n _ _) = Set.singleton n
     binderOf (IRLambda n _)  = Set.singleton n
     binderOf _               = Set.empty
+
+-- Sharing network applications (task repeated-neural-read-not-shared).
+--
+-- A network call @n(arg)@ is the most expensive node the IR has: with a real
+-- CNN behind @n@ it dominates the whole query. The compiler emits one per read,
+-- and a program that reads several fields of one read (@define truth = see img
+-- in Face (.. x0 truth ..) (.. x1 truth ..)@) emits one per field, each inside
+-- that field's own enumeration loop and under the guards the field equations
+-- add. CSE cannot merge them: it shares only occurrences on the unconditional
+-- skeleton, and these sit in loop bodies and if-arms. Nor can the compiler's
+-- own @nn_raw@ hoist, which stops at the guarded block a sub-inference binds
+-- ('IRCompiler.guardedSubInference').
+--
+-- This pass shares them. For each distinct pure application of a declared
+-- network it places one binding at the lowest node that covers every
+-- occurrence, and it lifts even a single occurrence out of an enumeration loop
+-- whose variable the argument does not read. An occurrence is never moved
+-- across
+--
+--   * a binder of one of its free variables (it would read another value), or
+--   * an if/select whose condition reads one of its free variables. Such a
+--     condition can be what keeps the call off an argument the network cannot
+--     take, @isAny(img)@ for instance, so the call stays under it.
+--
+-- A condition that reads none of the argument's variables cannot protect the
+-- call, so leaving its arm is sound for a pure expression. The cost side is
+-- that a call previously reached only in some arms is now evaluated once even
+-- when none of those arms runs. It is never evaluated more than once where it
+-- was evaluated at least once before.
+
+-- | One child of a node, as the network-sharing pass sees it: an occurrence
+-- below the edge may move above it only if it reads none of 'nkBarrier'.
+data NetKid = NetKid
+  { nkExpr    :: IRExpr
+  , nkBarrier :: Set.Set Varname
+  , nkLoop    :: Bool   -- ^ the body of an enumeration loop
+  }
+
+-- | The children of a node and how to rebuild it. An application spine is one
+-- node whose children are its head and arguments, so a binding is never placed
+-- inside a curried call (the scalar backends flatten a spine into one call;
+-- see 'unconditionalAnns'), and an enumeration loop's lambda is not a child of
+-- its own: the loop's body is.
+netKids :: IRExpr -> ([NetKid], [IRExpr] -> IRExpr)
+netKids e = case e of
+  IRApply{} ->
+    let (hd, args) = spine e []
+    in (map plain (hd : args), rebuildSpine)
+  IRIf c t f      -> ([plain c, guarded c t, guarded c f], rebuild3 IRIf)
+  IRSelect c t f  -> ([plain c, guarded c t, guarded c f], rebuild3 IRSelect)
+  IRLetIn n v b   -> ([plain v, NetKid b (Set.singleton n) False], rebuild2 (IRLetIn n))
+  IRLambda n b    -> ([NetKid b (Set.singleton n) False], rebuild1 (IRLambda n))
+  IRBuiltin BMap [IRLambda n b, d] ->
+    ([NetKid b (Set.singleton n) True, plain d], rebuild2 (\b' d' -> IRBuiltin BMap [IRLambda n b', d']))
+  _ -> (map plain (getIRSubExprs e), setIRSubExprs e)
+  where
+    plain x = NetKid x Set.empty False
+    guarded c x = NetKid x (Set.fromList (freeVarsIR c)) False
+    spine (IRApply f a) acc = spine f (a : acc)
+    spine f acc = (f, acc)
+    rebuildSpine (h : as) = foldl' IRApply h as
+    rebuildSpine [] = error "netKids: an application spine lost its head"
+    rebuild1 k [a] = k a
+    rebuild1 _ _ = error "netKids: arity mismatch (1)"
+    rebuild2 k [a, b] = k a b
+    rebuild2 _ _ = error "netKids: arity mismatch (2)"
+    rebuild3 k [a, b, c] = k a b c
+    rebuild3 _ _ = error "netKids: arity mismatch (3)"
+
+-- | A saturated application of a declared network to a pure argument.
+isNetworkApp :: OptEnv -> IRExpr -> Bool
+isNetworkApp env (IRApply (IRVar n) arg) =
+  n `Set.member` optNeurals env && isPureGiven (optDetGens env) arg
+isNetworkApp _ _ = False
+
+-- | The network applications in @e@ that may be moved to just above it, given
+-- the names they may not read ('nkBarrier's accumulated on the way down).
+-- Visited nodes are always spine roots, so a match is a whole call.
+netOccs :: OptEnv -> Set.Set Varname -> IRExpr -> [IRExpr]
+netOccs env barrier e =
+  [ e | isNetworkApp env e, Set.disjoint barrier (Set.fromList (freeVarsIR e)) ]
+  ++ concat [ netOccs env (barrier `Set.union` nkBarrier k) (nkExpr k) | k <- fst (netKids e) ]
+
+-- | Any network application at all in @e@, ignoring scope.
+hasNetworkApp :: OptEnv -> IRExpr -> Bool
+hasNetworkApp env e = isNetworkApp env e || any (hasNetworkApp env . nkExpr) (fst (netKids e))
+
+-- | Replace the occurrences of @key@ that 'netOccs' would report from here.
+replaceNetOcc :: IRExpr -> IRExpr -> IRExpr -> IRExpr
+replaceNetOcc key rep = walk Set.empty
+  where
+    fvKey = Set.fromList (freeVarsIR key)
+    walk barrier e
+      | not (Set.disjoint barrier fvKey) = e
+      | e == key = rep
+      | otherwise =
+          let (ks, rebuild) = netKids e
+          in rebuild [ walk (barrier `Set.union` nkBarrier k) (nkExpr k) | k <- ks ]
+
+-- | The sharing pass, plus the number of bindings it introduced.
+shareNetworkCallsCounted :: OptEnv -> IRExpr -> (IRExpr, Int)
+shareNetworkCallsCounted env top
+  | Set.null (optNeurals env) || not (hasNetworkApp env top) = (top, 0)
+  | otherwise = runState (go top) 0
+  where
+    reserved = allNamesIR top
+    fresh :: State Int String
+    fresh = do
+      i <- get
+      put (i + 1)
+      let n = "cse_nn_" ++ show i
+      if n `Set.member` reserved then fresh else return n
+    go :: IRExpr -> State Int IRExpr
+    go x = do
+      let kids = fst (netKids x)
+          perKid = [ (nkLoop k, netOccs env (nkBarrier k) (nkExpr k)) | k <- kids ]
+          keys = nubEq (concatMap snd perKid)
+          -- Covered by this node and no lower one: spread over two or more
+          -- children, or confined to a loop body it does not vary with.
+          placeHere key = case [ loop | (loop, os) <- perKid, key `elem` os ] of
+            []     -> False
+            [loop] -> loop
+            _      -> True
+          here = filter placeHere keys
+      names <- mapM (const fresh) here
+      let pairs = zip here names
+          x' = foldl' (\acc (k, n) -> replaceNetOcc k (IRVar n) acc) x pairs
+          (kids', rebuild) = netKids x'
+      kids'' <- mapM (\k -> if hasNetworkApp env (nkExpr k) then go (nkExpr k) else return (nkExpr k)) kids'
+      return (foldr (\(k, n) acc -> IRLetIn n k acc) (rebuild kids'') pairs)
+    nubEq = foldl' (\acc a -> if a `elem` acc then acc else acc ++ [a]) []
 
 -- Common-subexpression elimination.
 --

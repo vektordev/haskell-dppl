@@ -26,7 +26,7 @@ import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, InputSlot(..), inp
 import MockNN (flattenMockInput, mockInputFor, shapedMockLogits)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
-import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
+import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
@@ -498,6 +498,110 @@ test_nnHoistedOutOfNestedEnumSum = testCase "nnHoistedOutOfNestedEnumSum" $ do
             irAnyLoop probExpr
           assertBool "neither operand's network call may sit inside an enumeration loop" $
             not (nnCallInsideEnumSum "n" probExpr)
+
+-- | Saturated applications of the network @name@ anywhere in the expression.
+-- The reader @name_auto_prob (name sym) x@ is not one: its head is a
+-- different name, and only the inner @name sym@ is counted.
+countNNApply :: String -> IRExpr -> Int
+countNNApply name e = here + sum (map (countNNApply name) (getIRSubExprs e))
+  where here = case e of
+          IRApply (IRVar v) _ | v == name -> 1
+          _                               -> 0
+
+-- | Task repeated-neural-read-not-shared: a program reading several fields of
+-- one network read, each through its own read, called the network once per
+-- field, inside that field's enumeration loop and under the guards the field
+-- equations add -- 2J calls of @see(img)@ per query. The optimizer now shares
+-- them, so main's probability body holds exactly one application, outside
+-- every loop. Covered: the ticket's @define@ spelling, the J=20 @draw@ corpus
+-- program, and the exact-EIG Guess-Who shape (the constructor is a further
+-- binding's value).
+test_repeatedNeuralReadShared :: TestTree
+test_repeatedNeuralReadShared = testGroup "repeatedNeuralReadShared"
+  [ testCase "define spelling, 4 fields" $ checkSrc "<define4>" (unlines
+      [ "data Face = Face x0::Bool, x1::Bool, x2::Bool, x3::Bool"
+      , "neural see :: (Symbol -> Face)"
+      , "tells yes no truth = if truth then Uniform < yes else Uniform < no"
+      , "main img ="
+      , "  define truth = see img in"
+      , "  Face (tells 0.9 0.2 (x0 truth)) (tells 0.9 0.2 (x1 truth)) (tells 0.9 0.2 (x2 truth)) (tells 0.9 0.2 (x3 truth))" ])
+  , testCase "draw spelling, 20 fields (corpus drawProductReadPerField20)" $ checkCorpus "drawProductReadPerField20"
+  , testCase "Guess-Who shape (corpus drawProductReadUnderBinding)" $ checkCorpus "drawProductReadUnderBinding"
+  ]
+  where
+    checkCorpus base = do
+      path <- corpusPplPath base
+      readFile path >>= checkSrc path
+    checkSrc label src = case tryParseProgram label src of
+      Left err -> assertFailure ("Parse error: " ++ show err)
+      Right prog -> case compile defaultCompilerConfig prog of
+        Left err -> assertFailure ("Compile error: " ++ show err)
+        Right irEnv -> do
+          (probExpr, _) <- case probFun (lookupIREnv "main" irEnv) of
+            Just pf -> return pf
+            Nothing -> assertFailure "compiled main has no probability variant"
+          -- The loops are still there (the property is not vacuous) ...
+          assertBool "main's probability body should still enumerate the fields" (irAnyLoop probExpr)
+          -- ... and the one network call is outside all of them.
+          assertEqual "network applications of see in main's probability body" 1
+            (countNNApply "see" probExpr)
+          assertBool "the shared call must not sit inside an enumeration loop"
+            (not (nnCallInsideEnumSum "see" probExpr))
+
+-- | The scoping rules of 'shareNetworkCallsCounted' (task
+-- repeated-neural-read-not-shared), on hand-built IR: what may be shared, and
+-- what must stay where it is.
+test_networkShareScoping :: TestTree
+test_networkShareScoping = testGroup "networkShareScoping"
+  [ testCase "arms whose condition does not read the argument share one call above the if" $ do
+      let e = IRIf (IRVar "c") (IROp OpPlus call one) (IROp OpMult call two)
+      case share e of
+        IRLetIn v val (IRIf (IRVar "c") t f) -> do
+          val @?= call
+          t @?= IROp OpPlus (IRVar v) one
+          f @?= IROp OpMult (IRVar v) two
+        other -> assertFailure ("expected one binding above the if, got " ++ show other)
+  , testCase "a condition reading the argument keeps the call under it" $ do
+      -- Lifted above this if, @n(x)@ would run on the ANY sentinel the
+      -- condition exists to keep away from it.
+      let guardC = IRUnaryOp OpIsAny (IRVar "x")
+          e = IRIf guardC (IROp OpPlus call one) (IROp OpMult call two)
+      share e @?= e
+      -- Within one guarded arm, sharing is still fine.
+      let e2 = IRIf guardC zero (IROp OpPlus call call)
+      case share e2 of
+        IRIf c t (IRLetIn v val body) -> do
+          c @?= guardC
+          t @?= zero
+          val @?= call
+          body @?= IROp OpPlus (IRVar v) (IRVar v)
+        other -> assertFailure ("expected the call shared inside the guarded arm, got " ++ show other)
+  , testCase "a single loop-invariant call leaves the loop; a loop-dependent one stays" $ do
+      let dep = IRApply (IRVar "n") (IRVar "k")
+          loopE = IRBuiltin BMap [IRLambda "k" (IROp OpPlus call dep), IRVar "dom"]
+      case share loopE of
+        IRLetIn v val (IRBuiltin BMap [IRLambda "k" body, IRVar "dom"]) -> do
+          val @?= call
+          body @?= IROp OpPlus (IRVar v) dep
+        other -> assertFailure ("expected the invariant call bound outside the loop, got " ++ show other)
+  , testCase "a rebound argument is a different value and is not merged" $ do
+      let e = IROp OpPlus call (IRLetIn "x" one call)
+      share e @?= e
+  , testCase "an impure argument is never shared" $ do
+      let drawCall = IRApply (IRVar "n") (IRSample IRUniform)
+          e = IROp OpPlus drawCall drawCall
+      share e @?= e
+  , testCase "a name that is not a declared network is left to CSE" $ do
+      let other = IRApply (IRVar "m") (IRVar "x")
+          e = IRIf (IRVar "c") other other
+      share e @?= e
+  ]
+  where
+    call = IRApply (IRVar "n") (IRVar "x")
+    zero = IRConst (VFloat 0.0)
+    one = IRConst (VFloat 1.0)
+    two = IRConst (VFloat 2.0)
+    share = fst . shareNetworkCallsCounted (emptyOptEnv { optNeurals = Set.fromList ["n"] })
 
 -- A program with no "main" function must be rejected with a descriptive
 -- CompilerError early on, instead of crashing deep in the IR lookup
@@ -4919,6 +5023,8 @@ internalsTests = testGroup "Internals"
       , test_writeLogitsBoolExactProbs
       , test_nnHoistedOutOfEnumSum
       , test_nnHoistedOutOfNestedEnumSum
+      , test_repeatedNeuralReadShared
+      , test_networkShareScoping
       , test_agreementFusesToElementwiseProduct
       , test_agreementPointQueryIndexes
       , test_nestedEnumerationHonoursBudget
