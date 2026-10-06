@@ -1,4 +1,4 @@
--- Verified at commit 8bb0a44 on dev: a Maybe whose Just payload is itself the
+-- Verified at commit 8bb0a44 on dev, re-verified by the evaluated pin at de391d7: a Maybe whose Just payload is itself the
 -- draw-bound Maybe m (the shape `observe (observe Normal (> 0)) isRight`
 -- desugars to). The point query is right -- p(Right Right 0.5) = phi(0.5) at
 -- dim 1 -- but the marginal over the payload is silently zero: p(Right ANY)

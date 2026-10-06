@@ -38,11 +38,13 @@ expect-failure: broken                             -- mechanism unpinned; the p(
 
 `crash`/`diagnostic` are checked against an *uncaught exception* thrown while
 forcing `compile`'s result -- a graceful `Left` (an intended, working refusal)
-does not count; that's what `TestRejection` is for. `wrong-result` rows are
-meant to pin the value the bug produces, but **nothing evaluates them yet**:
-the harness treats the shape as documentation, and this folder is excluded
-from the corpus sweeps, so a fix (or any edit to the rows) leaves the pin
-green. See docs task `known-issues-wrong-result-rows-unchecked`.
+does not count; that's what `TestRejection` is for. `wrong-result` is the
+precise shape for a program that compiles and answers wrongly: the program
+must compile, and every p()/cdf() row must still match its pinned (wrong)
+value, on the backends described below. A fix changes the number and fails
+the pin (move the program into the ordinary corpus with the idealized rows);
+so does the wrong value drifting (re-pin it). A crash, a refused query, or a
+pin with no p()/cdf() rows fails too.
 
 `broken` is the loose fallback for a repro nobody has characterized yet -- no
 exact crash message, no wrong value pinned by hand. The rows below the header
@@ -57,11 +59,11 @@ shifting a pinned message or number.
 The rows are checked on every backend the `backends:` header declares (no
 header means interpreter, julia, python, as everywhere else) that the harness
 can evaluate: the interpreter, and Python via the emitted module. A failure
-names the backend that now matches. So declare where the bug actually lives: a
+names the backend. So declare where the bug actually lives: a
 Python-only bug (say, the emitted module does not load) is `backends: python`,
 otherwise the interpreter's correct answer reads as "may be fixed". Julia,
-batched and dense are not evaluated here, and a `broken` pin that declares only
-those fails outright instead of passing vacuously.
+batched and dense are not evaluated here, and a `broken` or `wrong-result` pin
+that declares only those fails outright instead of passing vacuously.
 
 **Prefer `broken` over not filing at all.** If you have a program that
 misbehaves but you have not worked out precisely how, `broken` is the header
