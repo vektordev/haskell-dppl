@@ -284,21 +284,18 @@ function Base.iterate(lst::InferenceList, state)
 end
 
 Base.:(==)(other::Any, l::InferenceList) = begin
-    if (l isa EmptyInferenceList && other isa EmptyInferenceList)
-        return true
-    end
-    if !(other isa ConsInferenceList)
-        if (other isa AnyInferenceList)
-            return true
-        else
-            return false
-        end
-    end
-    if (l isa AnyInferenceList)
-        return true
-    end
-    if !(l isa ConsInferenceList)
+    if !(other isa InferenceList)
         return false
+    end
+    # An ANY list matches any list on either side, as in the interpreter and
+    # pythonLib. head's inverse queries prepend(x, AnyInferenceList()), whose
+    # tail is compared against the literal's EmptyInferenceList() tail
+    # (task interpreter-eq-nested-tuple-ignores-any).
+    if (l isa AnyInferenceList || other isa AnyInferenceList)
+        return true
+    end
+    if (l isa EmptyInferenceList || other isa EmptyInferenceList)
+        return l isa EmptyInferenceList && other isa EmptyInferenceList
     end
     return eq(l.value, other.value) && l.next == other.next
 end
