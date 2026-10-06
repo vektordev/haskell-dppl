@@ -33,7 +33,7 @@ import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorE
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate, isPrefixOf, isSuffixOf, sort, nub)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
@@ -4852,27 +4852,58 @@ annotationSpellingTests = testGroup "neural annotation spellings compile identic
 structuralPropagationTests :: TestTree
 structuralPropagationTests = testGroup "structural enum propagation agrees with listing"
   [ testCase "every corpus node a structural rule answers" $ do
-      paths <- listCorpusPplFiles
-      compared <- forM paths $ \path -> do
-        src <- readFile path
-        case either (Left . show) Right (tryParseProgram path src) >>= rtypedProgram of
-          Left _ -> return 0
-          Right rtyped -> do
-            let annotated = annotateEnumsProg rtyped
-                ds = adts rtyped
-                cases = [ (name, operands, structural', listed)
-                        | Expr _ (InjF (Named name) params) <- allNodes annotated
-                        , Just rule <- [structuralTag ds name]
-                        , Just operands <- [mapM tagOf params]
-                        , all listable operands
-                        , Just structural' <- [rule operands]
-                        , Just listed <- [listedTag ds Nothing name operands] ]
-            forM_ cases $ \(name, operands, s, l) ->
-              assertEqual (path ++ ": " ++ name ++ " " ++ show operands) (Just l) s
-            return (length cases)
+      compared <- compareStructuralWithListing (<= structuralListingBound)
       -- Non-vacuity: the corpus must exercise the rules.
-      assertBool ("structural rules answered only " ++ show (sum compared) ++ " corpus nodes") (sum compared > 100)
+      assertBool ("structural rules answered only " ++ show compared ++ " corpus nodes") (compared > 100)
   ]
+
+-- | The wide half of 'structuralPropagationTests': the corpus nodes whose
+-- listing is above 'structuralListingBound'. Today that is one node, the
+-- 20-field @Face@ constructor of drawProductReadPerField20 (2^20 tuples, each
+-- one an interpreter run: ~55 s on its own, the main binary's wall-clock
+-- floor while it ran in the default suite).
+slowStructuralPropagationTests :: TestTree
+slowStructuralPropagationTests = testGroup "structural enum propagation agrees with listing (wide)"
+  [ testCase "every corpus node a structural rule answers, listing above the bound" $ do
+      compared <- compareStructuralWithListing (> structuralListingBound)
+      -- Non-vacuity: if the corpus stops holding a wide node, this half
+      -- checks nothing and should be removed rather than pass.
+      assertBool "no corpus node lists above the bound" (compared > 0)
+  ]
+
+-- | How many tuples the default suite's listing may evaluate per node: the
+-- product of the operands' value counts. Listing evaluates the forward
+-- function once per tuple, ~50 us each, so this is ~3 s at worst. Every node
+-- of the corpus but one is at or below 2^14 (task
+-- structural-enum-propagation-test-is-the-critical-path).
+structuralListingBound :: Integer
+structuralListingBound = 65536
+
+-- | Compare each structural rule against listing ('listedTag') at every
+-- corpus InjF node whose operands are listable and whose listing size passes
+-- the filter, returning the number of nodes compared.
+compareStructuralWithListing :: (Integer -> Bool) -> IO Int
+compareStructuralWithListing sizeOk = do
+  paths <- listCorpusPplFiles
+  compared <- forM paths $ \path -> do
+    src <- readFile path
+    case either (Left . show) Right (tryParseProgram path src) >>= rtypedProgram of
+      Left _ -> return 0
+      Right rtyped -> do
+        let annotated = annotateEnumsProg rtyped
+            ds = adts rtyped
+            cases = [ (name, operands, structural', listed)
+                    | Expr _ (InjF (Named name) params) <- allNodes annotated
+                    , Just rule <- [structuralTag ds name]
+                    , Just operands <- [mapM tagOf params]
+                    , all listable operands
+                    , sizeOk (product (mapMaybe enumeratedCount operands))
+                    , Just structural' <- [rule operands]
+                    , Just listed <- [listedTag ds Nothing name operands] ]
+        forM_ cases $ \(name, operands, s, l) ->
+          assertEqual (path ++ ": " ++ name ++ " " ++ show operands) (Just l) s
+        return (length cases)
+  return (sum compared)
   where
     tagOf e = case [mv | DiscreteValues mv <- tags (getTypeInfo e)] of
       [mv] -> Just mv
@@ -5130,6 +5161,7 @@ slowInternalsTests = testGroup "Internals (slow)"
   , test_planEnumStructuralGrouped
   , test_planHelperOnFoldResultMatchesDense
   , test_planSharedFoldValueMatchesDense
+  , slowStructuralPropagationTests
   ]
 
 -- ===========================================================================
