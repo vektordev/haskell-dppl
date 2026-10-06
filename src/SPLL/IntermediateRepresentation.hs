@@ -534,10 +534,12 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRBuiltin Builtin [IRExpr]
               | IRError String
               -- Runtime type-tag check: True iff the value of the sub-expression
-              -- structurally conforms to the given RType. Emitted only as the
+              -- structurally conforms to the given RType. Emitted as the
               -- query-type guard at a prob/integ function root (see IRCompiler),
               -- so a wrong-typed query value fails with a clear diagnostic instead
-              -- of a silent bogus number or a deep "not a boolean" panic.
+              -- of a silent bogus number or a deep "not a boolean" panic, and, at
+              -- TFloat, as the float test of a type-variable leaf's comparison
+              -- ('SPLL.IRCompiler.leafEqIR').
               | IRConformsTo RType IRExpr
               deriving (Show, Eq)
 
