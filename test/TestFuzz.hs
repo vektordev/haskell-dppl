@@ -101,7 +101,8 @@ import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
                       typedMainCoreExpr, typedMainCoreTy, hasNeural,
                       RecShape(..), recShapeOfProgram, genRecursiveProgram,
                       withADTs, adtPool, adtPoolNames, mentionsVar, recursionSafe,
-                      unguardedProjections)
+                      unguardedProjections, genADTDecls, adtShapes, adtDeclSize, adtLeaf,
+                      genMutualADTPair)
 
 -- | `show`ing a value forces every field, catching lazily-hidden crashes
 -- (partial functions/undefined) that a bare WHNF `seq` would miss.
@@ -1123,6 +1124,7 @@ data DrawSummary = DrawSummary
   , dsArrowShape     :: ArrowShape
   , dsNeuralLabel    :: String
   , dsADTLabel       :: String
+  , dsADTShapes      :: [(String, [String])]
   , dsRecShape       :: RecShape
   } deriving (Show, Eq)
 
@@ -1145,6 +1147,7 @@ summarizeDraw p = do
     <*> guardAxis NoArrow (arrowShapeOfProgram p)
     <*> guardAxis crashedAxis (neuralLabel p)
     <*> guardAxis crashedAxis (adtLabel p)
+    <*> guardAxis [] (adtShapes (adts p))
     <*> guardAxis NoRec (recShapeOfProgram p)
 
 -- | The modality pass's verdict on @main@, as a label. This is the axis that
@@ -1235,10 +1238,17 @@ isStructured p = tyShapeLabel p `elem` ["tuple", "either", "list", "adt"]
 -- declares an ADT whenever any of its nodes builds, tests or projects one,
 -- whatever its own target type -- so this row, not "target shape", is the one
 -- that says how much of the run reached ADT code at all.
+--
+-- Since task fuzz-generate-adt-declarations most declarations are generated,
+-- with names of their own, so the row says where the declarations came from
+-- rather than naming them; their shapes are the @adt shape@ and @adt feature@
+-- rows ('adtShapes').
 adtLabel :: Program -> String
-adtLabel p = case [ dataName d | d <- adts p ] of
-  [] -> "none"
-  ns -> unwords ns
+adtLabel p = case (any (`elem` adtPool) (adts p), any (`notElem` adtPool) (adts p)) of
+  (False, False) -> "none"
+  (True,  False) -> "pool only"
+  (False, True)  -> "generated only"
+  (True,  True)  -> "pool and generated"
 
 prop_Fuzz_GeneratorCoverage :: Property
 prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
@@ -1266,6 +1276,8 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ tabulate "arrow shape"      [show (dsArrowShape s)]
       $ tabulate "neural"           [dsNeuralLabel s]
       $ tabulate "adt"              [dsADTLabel s]
+      $ tabulate "adt shape"        (map fst (dsADTShapes s))
+      $ tabulate "adt feature"      (concatMap snd (dsADTShapes s))
       $ tabulate "recursion"        [show (dsRecShape s)]
       -- Cross-tabulated, and only over the neural draws. At one draw in five
       -- the neural surface's own outcome split is invisible in the aggregate
@@ -1327,6 +1339,11 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       -- reach far more draws than ADT *targets* do, through the field
       -- projections and constructor tests open at scalar targets.
       $ cover 10 (dsADTLabel s /= "none")       "declares an ADT"
+      -- Task fuzz-generate-adt-declarations: the generated declarations
+      -- must keep showing up, and must keep reaching the shapes the pool
+      -- could not. Observe-first floors again, far below the rates measured
+      -- when the task landed (see docs/fuzz-testing.md).
+      $ cover 10 (any (notElem "pool" . snd) (dsADTShapes s)) "declares a generated ADT"
       $ cover 5  (dsRecShape s /= NoRec)        "contains a recursive declaration"
       $ property True
 
@@ -1638,8 +1655,12 @@ coreSize = maybe 0 typedExprSize . typedMainCoreExpr
 -- | 'coreSize' plus every other declaration's node count: the measure the
 -- shrinker reduces since milestone M4, when declarations started shrinking
 -- too (a helper's or a recursive function's body is part of the draw).
+--
+-- Plus the declarations' size ('adtDeclSize'), since task
+-- fuzz-generate-adt-declarations made them shrink too.
 generatedSize :: Program -> Int
 generatedSize p = coreSize p + sum [ typedExprSize e | (nm, e) <- functions p, nm /= "main" ]
+                  + sum (map adtDeclSize (adts p))
 
 neuralGeneratorTests :: TestTree
 neuralGeneratorTests = testGroup "Neural generator"
@@ -1793,18 +1814,74 @@ adtRecursionGeneratorTests = testGroup "ADT and recursion generator"
                 | (nm, e) <- functions p, nm /= "main" ]
   , testProperty "every generated recursive declaration is termination-safe" $
       forAll (resize fuzzSize genRecursiveProgram) $ \p ->
-        conjoin [ counterexample (show e) (recursionSafe nm e e) | (nm, e) <- decls p ]
+        conjoin [ counterexample (show e) (recursionSafe (adts p) nm e e) | (nm, e) <- decls p ]
   , testCase "a shrink may not unwrap a productive call" $ do
       let orig = ifThenElse (bernoulli 0.5) (injF "Stop" []) (injF "Link" [constF 1.0, var "loop"])
-      assertBool "the original" (recursionSafe "loop" orig orig)
+      assertBool "the original" (recursionSafe adtPool "loop" orig orig)
       assertBool "Link x loop -> loop"
-        (not (recursionSafe "loop" orig (ifThenElse (bernoulli 0.5) (injF "Stop" []) (var "loop"))))
+        (not (recursionSafe adtPool "loop" orig (ifThenElse (bernoulli 0.5) (injF "Stop" []) (var "loop"))))
   , testCase "a shrink may not change a counted call's argument" $ do
       let body a = "k" #-># ifThenElse (var "k" #<# constI 1) (constI 0) (apply (var "loop") a)
           orig = body (var "k" #<-># constI 1)
-      assertBool "the original" (recursionSafe "loop" orig orig)
-      assertBool "k - 1 -> k" (not (recursionSafe "loop" orig (body (var "k"))))
-      assertBool "the call removed" (recursionSafe "loop" orig ("k" #-># constI 0))
+      assertBool "the original" (recursionSafe adtPool "loop" orig orig)
+      assertBool "k - 1 -> k" (not (recursionSafe adtPool "loop" orig (body (var "k"))))
+      assertBool "the call removed" (recursionSafe adtPool "loop" orig ("k" #-># constI 0))
+  -- Task fuzz-generate-adt-declarations: the declaration generator and the
+  -- declaration shrinks.
+  , testProperty "generated declarations validate" $
+      forAll genADTDecls $ \ds ->
+        counterexample (show ds) (validateProgram (Program [("main", constB True)] [] ds [] []) === Right ())
+  , testProperty "every declared type has a finite leaf that recovers to it" $
+      -- What keeps generation and shrinking finite on a recursive or mutually
+      -- recursive declaration, and what the shrinker offers at that type.
+      forAll genADTDecls $ \ds -> conjoin
+        [ counterexample (show (dataName d) ++ "\n" ++ show ds) $ case adtLeaf ds (dataName d) of
+            Nothing -> property False
+            Just l  -> let p = Program [("main", l)] [] ds [] []
+                       in typedMainCoreTy p === Just (TyADT (dataName d))
+                          .&&. validateProgram (withADTs p) === Right ()
+        | d <- ds ]
+  , testProperty "a mutually recursive pair validates, is mutual, and has finite leaves" $
+      -- Not generated in programs yet (ArbitrarySPLL.generateMutualPairs:
+      -- such programs hang the compiler, a filed bug), so pinned here.
+      forAll genMutualADTPair $ \pair ->
+        let ds = adtPool ++ pair
+        in counterexample (show pair) $
+             validateProgram (Program [("main", constB True)] [] ds [] []) === Right ()
+             .&&. map (elem "mutually recursive" . snd) (adtShapes ds) === map (const False) adtPool ++ [True, True]
+             .&&. conjoin [ property (isJust (adtLeaf ds (dataName d))) | d <- pair ]
+  , testCase "an unused constructor and an unused field shrink away" $ do
+      let box cs = ADTDecl "Box" cs Nothing
+          full   = ("Full", [("x", TFloat), ("y", TBool)])
+          p = Program [("main", injF "Full" [constF 1.0, constB True])] [] [box [("Empty", []), full]] [] []
+          shrunk = shrinkTypedProgram p
+      assertBool "Empty dropped" ([box [full]] `elem` map adts shrunk)
+      assertBool "y dropped, with its argument"
+        (Program [("main", injF "Full" [constF 1.0])] [] [box [("Empty", []), ("Full", [("x", TFloat)])]] [] []
+           `elem` shrunk)
+  , testCase "a constructor or field the program names is never dropped" $ do
+      let box = ADTDecl "Box" [("Empty", []), ("Full", [("x", TFloat), ("y", TBool)])] Nothing
+          body = letIn "v0" (injF "Full" [constF 1.0, constB True])
+                   (ifThenElse (injF "isEmpty" [var "v0"]) (constF 0.0) (injF "x" [var "v0"]))
+          p = Program [("main", body)] [] [box] [] []
+          kept p' = [ (c, map fst fs) | d <- adts p', (c, fs) <- constructors d ]
+          -- A candidate that no longer declares Box at all shrank main past
+          -- every use of it, which is the unused-declaration rule, not this one.
+          stillBox = [ p' | p' <- shrinkTypedProgram p, not (null (adts p')) ]
+      assertBool "some candidate keeps Box" (not (null stillBox))
+      mapM_ (\p' -> do assertBool (show p') (lookup "Empty" (kept p') /= Nothing)
+                       assertBool (show p') (maybe True ("x" `elem`) (lookup "Full" (kept p'))))
+            stillBox
+  , testCase "a declaration shrink never leaves a type without a finite value" $ do
+      -- Nothing builds a Lst here -- only the network does -- so Nil is an
+      -- unused constructor; dropping it would leave Wrap w::Lst, which has
+      -- no finite value at all.
+      let lst  = ADTDecl "Lst" [("Nil", []), ("Wrap", [("w", TADT "Lst")])] (Just 2)
+          body = "sym" #-># letIn "s" (readNN "nn" (var "sym"))
+                   (ifThenElse (injF "isWrap" [var "s"]) (constF 1.0) (constF 0.0))
+          p = Program [("main", body)] [("nn", TArrow TSymbol (TADT "Lst"), Nothing)] [lst] [] []
+      mapM_ (\p' -> assertBool (show (adts p')) (any (any ((== "Nil") . fst) . constructors) (adts p')))
+            (shrinkTypedProgram p)
   , testProperty "shrinking a recursive draw keeps its stopping condition and validates" $
       forAll (resize fuzzSize genRecursiveProgram) $ \p -> conjoin
         [ counterexample (show p')

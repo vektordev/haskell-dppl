@@ -1,5 +1,8 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE RankNTypes #-}
 -- The Arbitrary instances for Program/Expr/Value/TypeInfo are orphans by
 -- design: they are test-suite fixtures, and the only way to un-orphan them
 -- would be to declare them in SPLL.Lang.*, which would put a QuickCheck
@@ -24,6 +27,11 @@ module ArbitrarySPLL (
 , withADTs
 , adtPool
 , adtPoolNames
+, genADTDecls
+, adtShapes
+, adtDeclSize
+, adtLeaf
+, genMutualADTPair
 , genTypedExpr
 , genValueWide
 , genRawFuzzExpr
@@ -62,13 +70,16 @@ module ArbitrarySPLL (
 
 import Test.QuickCheck
 import Data.List (nub, find, stripPrefix)
-import Data.Maybe (fromMaybe, listToMaybe, isJust)
+import Control.Monad (filterM, foldM)
+import Data.Maybe (fromMaybe, listToMaybe, isJust, isNothing)
+import Data.Char (isDigit)
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.Parser (reserved)
 import SPLL.ReservedNames (reservedIdentifierReason)
+import SPLL.Validator (validateProgram)
 import PredefinedFunctions (globalFEnv, parameterCount, FPair(..), FDecl, contract, applicability)
 import SPLL.IntermediateRepresentation (IRExpr(..))
 import SPLL.Prelude
@@ -286,7 +297,7 @@ data Ty = TyFloat | TyInt | TyBool
         | TyEither Ty Ty
         | TyList Ty
         | TyArrow Ty Ty
-        | TyADT String   -- ^ a declaration from 'adtPool', by name (milestone M4)
+        | TyADT String   -- ^ a declaration in the 'HasADTs' context, by name (milestone M4)
         | TyAny
   deriving (Show, Eq)
 
@@ -306,19 +317,28 @@ type TyEnv = [(String, Ty)]
 -- arrow productions open arrow-typed positions themselves, directly around
 -- the application that eliminates them.
 genTy :: Int -> Gen Ty
-genTy n
+genTy n = withPool (genTyIn n)
+
+-- | Is this type in a mutually recursive group (two or more types each
+-- reaching the other)?
+isMutualADT :: HasADTs => String -> Bool
+isMutualADT n = any (\m -> m /= n && n `elem` adtReach m) (adtReach n)
+
+-- | 'genTy' over the declarations in scope rather than the pool.
+genTyIn :: HasADTs => Int -> Gen Ty
+genTyIn n
   | n <= 0 = scalarTy
-  | otherwise = frequency
+  | otherwise = frequency $
       [ (6, scalarTy)
-      , (2, TyTuple <$> genTy half <*> genTy half)
-      , (2, TyEither <$> genTy half <*> genTy half)
-      , (2, TyList <$> genTy half)
+      , (2, TyTuple <$> genTyIn half <*> genTyIn half)
+      , (2, TyEither <$> genTyIn half <*> genTyIn half)
+      , (2, TyList <$> genTyIn half)
+      ]
       -- Milestone M4. Weighted below the other structured shapes: every ADT
       -- target also opens the field-projection eliminators at its fields'
       -- types ('adtElimProds'), so ADT nodes reach many more draws than this
       -- weight alone suggests.
-      , (1, TyADT <$> elements adtPoolNames)
-      ]
+      ++ [ (1, TyADT <$> elements adtNames) | not (null adtNames) ]
   where
     scalarTy = elements [TyFloat, TyInt, TyBool]
     half = n `div` 2
@@ -345,23 +365,24 @@ tyDepth = 2
 -- draw wants. TestFuzz's @fuzzArgs@ derives that from the program.
 --
 -- Milestone M4 adds a fourth, 'genRecursiveProgram' (a recursive top-level
--- function), and ADT declarations to all of them: any draw may build or take
--- apart a value of an 'adtPool' type, and 'withADTs' declares exactly the
--- ones it uses.
+-- function), and ADT declarations to all of them: every draw first draws a
+-- declaration context ('genADTDecls': some pool seeds plus generated
+-- declarations), any node may build or take apart a value of a type in it,
+-- and the program declares exactly the ones it uses ('declareHere').
 genTypedProgram :: Gen Program
-genTypedProgram = withADTs <$> frequency
-  [ (3, genPlainProgram)
-  , (1, genHelperProgram)
-  , (1, genNeuralProgram)
-  , (1, genRecursiveProgram)
+genTypedProgram = withGeneratedADTs $ frequency
+  [ (3, genPlainProgramIn)
+  , (1, genHelperProgramIn)
+  , (1, genNeuralProgramIn)
+  , (1, genRecursiveProgramIn)
   ]
 
 -- | The nullary shape: @main = \<expr\>@, with no neural declaration.
-genPlainProgram :: Gen Program
-genPlainProgram = do
-  ty <- genTy tyDepth
-  body <- sized (genTypedExpr ty)
-  return $ withADTs $ Program [("main", body)] [] [] [] []
+genPlainProgramIn :: HasADTs => Gen Program
+genPlainProgramIn = do
+  ty <- genTyIn tyDepth
+  body <- sized (fmap uniquifyBinders . genTypedExprIn [] ty)
+  return $ declareHere $ Program [("main", body)] [] [] [] []
 
 -- | @helper x = \<expr\>; main = helper \<expr\>@ -- the named top-level
 -- function with a probabilistic argument, which is the *low bar* of the arrow
@@ -382,14 +403,17 @@ genPlainProgram = do
 -- 'uniquifyBinders'), and two independently generated bodies both start at
 -- @v0@.
 genHelperProgram :: Gen Program
-genHelperProgram = sized $ \n -> do
-  aty <- genTy 1
-  rty <- genTy 1
+genHelperProgram = withGeneratedADTs genHelperProgramIn
+
+genHelperProgramIn :: HasADTs => Gen Program
+genHelperProgramIn = sized $ \n -> do
+  aty <- genTyIn 1
+  rty <- genTyIn 1
   hbody <- genTypedExprIn [(helperParam, aty)] rty (n `div` 2)
   arg   <- genTypedExprIn [(helperName, TyArrow aty rty)] aty (n `div` 2)
   let helper = uniquifyBindersFrom (declBinderPrefix helperName) (helperParam #-># hbody)
       body   = uniquifyBinders (apply (varE helperName) arg)
-  return $ withADTs $ Program [(helperName, helper), ("main", body)] [] [] [] []
+  return $ declareHere $ Program [(helperName, helper), ("main", body)] [] [] [] []
 
 -- | The generated top-level function's name and parameter. Neither may
 -- collide with a predefined function or a distribution leaf; both are
@@ -479,12 +503,21 @@ recShapeOfProgram p = maximum (NoRec :
   | (nm, e) <- functions p, nm /= "main", mentionsVar nm e ])
 
 genRecursiveProgram :: Gen Program
-genRecursiveProgram = sized $ \n -> oneof
-  [ do ty <- genTy 1
-       genCountedRec ty n
-  , do ty <- oneof [pure (TyADT "Chain"), TyList <$> genTy 0]
-       genGeometricRec ty n
-  ]
+genRecursiveProgram = withGeneratedADTs genRecursiveProgramIn
+
+-- | The geometric shape needs a type with a directly self-recursive
+-- constructor. A context without one gets the pool's @Chain@ added, so the
+-- ADT half of the geometric draws does not vanish with the luck of the
+-- declaration draw.
+genRecursiveProgramIn :: HasADTs => Gen Program
+genRecursiveProgramIn =
+  let ?adts = if null selfRecursiveADTs then ?adts ++ [ d | d <- adtPool, dataName d == "Chain" ] else ?adts
+  in sized $ \n -> oneof
+    [ do ty <- genTyIn 1
+         genCountedRec ty n
+    , do ty <- oneof [TyADT <$> elements selfRecursiveADTs, TyList <$> genTyIn 0]
+         genGeometricRec ty n
+    ]
 
 -- | @loop k = if k < 1 then \<base\> else \<step\>[loop (k - 1)]; main = loop \<arg\>@.
 --
@@ -492,7 +525,7 @@ genRecursiveProgram = sized $ \n -> oneof
 -- argument is a literal or a die, never a general Int expression: an Int
 -- expression can be large (products of dice), and while the recursion is
 -- linear, a few hundred levels of it is a slow compile rather than a finding.
-genCountedRec :: Ty -> Int -> Gen Program
+genCountedRec :: HasADTs => Ty -> Int -> Gen Program
 genCountedRec ty n = do
   let kenv = [(loopParam, TyInt)]
   base <- genTypedExprIn kenv ty (n `div` 3)
@@ -503,19 +536,19 @@ genCountedRec ty n = do
       body = loopParam #-># ifThenElse (varE loopParam #<# constI 1)
                                        base
                                        (linearizeHole loopHole call leaf step)
-  return $ withADTs $ Program
+  return $ declareHere $ Program
     [ (loopName, uniquifyBindersFrom (declBinderPrefix loopName) body)
     , ("main", apply (varE loopName) arg)
     ] [] [] [] []
 
 -- | @loop = if \<bernoulli p\> then \<base\> else \<step\>; main = \<expr using loop\>@,
 -- at a type with a recursive constructor ('productiveStep').
-genGeometricRec :: Ty -> Int -> Gen Program
+genGeometricRec :: HasADTs => Ty -> Int -> Gen Program
 genGeometricRec ty n = do
   p    <- choose (0.3, 0.9)
   base <- genTypedExprIn [] ty (n `div` 3)
   step <- productiveStep ty (n `div` 2)
-  mty  <- genTy 1
+  mty  <- genTyIn 1
   mainBody <- frequency
     [ (1, pure (varE loopName))
     -- At another type the program may simply not call @loop@; then @main@
@@ -525,20 +558,36 @@ genGeometricRec ty n = do
             else do e <- genTypedExprIn [(loopName, ty)] mty (n `div` 2)
                     return (if mentionsVar loopName e then e else varE loopName)) ]
   let body = ifThenElse (bernoulli p) base step
-  return $ withADTs $ Program
+  return $ declareHere $ Program
     [ (loopName, uniquifyBindersFrom (declBinderPrefix loopName) body)
     , ("main", uniquifyBinders mainBody)
     ] [] [] [] []
 
--- | One constructor around a recursive call, its other field generated in the
--- empty scope (so it cannot call @loop@ itself, unproductively). Sometimes
+-- | One constructor around a recursive call, its other fields generated in the
+-- empty scope (so they cannot call @loop@ themselves, unproductively). Sometimes
 -- inside an @if@ whose other arm is an ordinary draw, which stays productive:
 -- every path that recurses still consumes a constructor.
-productiveStep :: Ty -> Int -> Gen Expr
+--
+-- At an ADT, any constructor with a field of the type itself will do, and one
+-- such field (drawn) holds the call. Any *other* self-typed field gets a closed
+-- leaf rather than a second call: two calls per step would make the stopping
+-- coin a branching process, supercritical for the lower half of its range,
+-- which samples forever with positive probability.
+productiveStep :: HasADTs => Ty -> Int -> Gen Expr
 productiveStep ty n = do
   core <- case ty of
     TyList a -> (`cons` varE loopName) <$> genTypedExprIn [] a half
-    _        -> (\x -> injF "Link" [x, varE loopName]) <$> genTypedExprIn [] TyFloat half
+    TyADT nm | ctors@(_ : _) <- [ ctor | ctor@(_, fs) <- adtCtors nm, any ((== ty) . snd) fs ] -> do
+      (c, fs) <- elements ctors
+      i <- elements [ j | (j, (_, t)) <- zip [0 :: Int ..] fs, t == ty ]
+      args <- sequence
+        [ if j == i then pure (varE loopName)
+          else if t == ty then genTypedLeaf t
+          else genTypedExprIn [] t (half `div` max 1 (length fs))
+        | (j, (_, t)) <- zip [0 ..] fs ]
+      return (injF c args)
+    -- Unreachable: 'genRecursiveProgramIn' draws only the two shapes above.
+    _ -> genTypedLeaf ty
   frequency
     [ (3, pure core)
     , (1, do c   <- genTypedExprIn [] TyBool half
@@ -554,8 +603,13 @@ productiveStep ty n = do
 -- timeout alive, would do exactly that. So: every call in the candidate must
 -- be one the original already had, in the same productive position (a
 -- nullary declaration) or with the same argument (a counted one).
-recursionSafe :: String -> Expr -> Expr -> Bool
-recursionSafe nm orig cand = case node orig of
+--
+-- "Productive" means a direct argument of a constructor of one of @decls@ (the
+-- program's declarations) or of @Cons@: being well-typed, such a call sits in
+-- a field of the recursive type itself, so it consumes one constructor of the
+-- observation.
+recursionSafe :: [ADTDecl] -> String -> Expr -> Expr -> Bool
+recursionSafe decls nm orig cand = case node orig of
   Lambda _ _ -> all (`elem` callArgs orig) (callArgs cand) && bareCalls cand == 0
   _          -> unproductive cand == 0
   where
@@ -567,12 +621,16 @@ recursionSafe nm orig cand = case node orig of
       Var v -> if v == nm then 1 else 0 :: Int
       Apply f a | Var v <- node f, v == nm -> bareCalls a
       _ -> sum (map bareCalls (children e))
-    -- Occurrences of @nm@ other than as the recursive field of @Link@/@Cons@.
+    -- Occurrences of @nm@ other than as a direct constructor argument.
+    ctorNames = "Cons" : [ c | d <- decls, (c, _) <- constructors d ]
     unproductive e = case node e of
       Var v -> if v == nm then 1 else 0 :: Int
-      InjF (Named c) [x, r]
-        | c `elem` ["Link", "Cons"], Var v <- node r, v == nm -> unproductive x
+      InjF (Named c) args
+        | c `elem` ctorNames -> sum [ if isCall a then 0 else unproductive a | a <- args ]
       _ -> sum (map unproductive (children e))
+    isCall a = case node a of
+      Var v -> v == nm
+      _     -> False
 
 -- | Generate at a type in a scope whose innermost entry is a hole the result
 -- must mention. Retried a couple of times; if the hole is still absent --
@@ -580,7 +638,7 @@ recursionSafe nm orig cand = case node orig of
 -- one exact type -- the draw is spliced in as the alternative of a generated
 -- condition, @if \<cond\> then \<hole\> else \<draw\>@. Without that, most
 -- structured recursive draws came out not recursive at all.
-genWithHole :: TyEnv -> Ty -> Int -> Gen Expr
+genWithHole :: HasADTs => TyEnv -> Ty -> Int -> Gen Expr
 genWithHole env ty n = go (2 :: Int)
   where
     hole = case env of
@@ -636,13 +694,13 @@ withChildren e cs = Expr (ann e) $ case (node e, cs) of
 -- 'genMixturePair' does) must re-prefix at least one of them with
 -- 'uniquifyBindersFrom', since two independent draws both start at @v0@.
 genTypedExpr :: Ty -> Int -> Gen Expr
-genTypedExpr ty n = uniquifyBinders <$> genTypedExprIn [] ty n
+genTypedExpr ty n = withPool (uniquifyBinders <$> genTypedExprIn [] ty n)
 
-genTypedExprIn :: TyEnv -> Ty -> Int -> Gen Expr
+genTypedExprIn :: HasADTs => TyEnv -> Ty -> Int -> Gen Expr
 genTypedExprIn env TyAny n = do
   -- Only reachable if a caller hands us a recovered type. Resolve the free
   -- position to a concrete one rather than failing.
-  ty <- genTy 0
+  ty <- genTyIn 0
   genTypedExprIn env ty n
 genTypedExprIn env ty n
   | n <= 0 = genTypedLeafIn env ty
@@ -655,7 +713,7 @@ genTypedExprIn env ty n
 -- body never mentions its bound variable is an uninteresting draw -- the
 -- binding is dead, and none of the inversion engines this milestone exists to
 -- reach ever see it -- so once a scope is non-empty the generator leans on it.
-genTypedLeafIn :: TyEnv -> Ty -> Gen Expr
+genTypedLeafIn :: HasADTs => TyEnv -> Ty -> Gen Expr
 genTypedLeafIn env ty = case [ v | (v, t) <- env, t == ty ] of
   [] -> genTypedLeaf ty
   vs -> frequency [ (2, genTypedLeaf ty), (3, elements (map varE vs)) ]
@@ -667,7 +725,7 @@ varE v = Expr makeTypeInfo (Var v)
 -- generator never emits a bare 'nul', because an empty-list constant carries
 -- no element type and so would be opaque to 'tyOfTypedExpr'. A one-element
 -- list is the smallest list whose type can be read back off the node.
-genTypedLeaf :: Ty -> Gen Expr
+genTypedLeaf :: HasADTs => Ty -> Gen Expr
 genTypedLeaf TyFloat = oneof
   [ pure normal
   , pure uniform
@@ -693,10 +751,10 @@ genTypedLeaf (TyEither a b) = oneof
   , right <$> genTypedLeaf b
   ]
 genTypedLeaf (TyList a) = (`cons` nul) <$> genTypedLeaf a
--- A non-recursive constructor applied to leaves, so a leaf stays finite.
+-- A constructor applied to leaves, of one whose fields are all of strictly
+-- lower 'adtRanks' rank, so a leaf stays finite ('leafCtors').
 genTypedLeaf (TyADT n) = oneof
-  [ injF c <$> mapM (genTypedLeaf . snd) fs
-  | ctor@(c, fs) <- adtCtors n, not (isRecursiveCtor n ctor) ]
+  [ injF c <$> mapM (genTypedLeaf . snd) fs | (c, fs) <- leafCtors n ]
 
 -- | The binder of a closed function leaf. Any name does: 'uniquifyBinders'
 -- renames every binder in the finished expression anyway, and a leaf is by
@@ -704,7 +762,7 @@ genTypedLeaf (TyADT n) = oneof
 arrowLeafParam :: String
 arrowLeafParam = "p"
 
-genTypedRec :: TyEnv -> Ty -> Int -> [Gen Expr]
+genTypedRec :: HasADTs => TyEnv -> Ty -> Int -> [Gen Expr]
 genTypedRec env ty n =
   [ ifThenElse <$> gen TyBool half <*> gen ty half <*> gen ty half
   ]
@@ -712,9 +770,9 @@ genTypedRec env ty n =
   -- These are what put the change-of-variables/dimension bookkeeping and the
   -- IRConformsTo structural checks in front of the invariant properties --
   -- building a tuple is easy, taking one apart is where the work is.
-  ++ [ do other <- genTy 1
+  ++ [ do other <- genTyIn 1
           tfst <$> gen (TyTuple ty other) half
-     , do other <- genTy 1
+     , do other <- genTyIn 1
           tsnd <$> gen (TyTuple other ty) half
      , lhead <$> gen (TyList ty) half
      ]
@@ -767,13 +825,13 @@ genTypedRec env ty n =
         -- Structural tests: the only Bool-producing eliminators for lists and
         -- Either, and the reason those shapes get *observed* rather than just
         -- constructed and returned.
-        [ do a <- genTy 1
+        [ do a <- genTyIn 1
              isNull <$> gen (TyList a) half
-        , do a <- genTy 1
-             b <- genTy 1
+        , do a <- genTyIn 1
+             b <- genTyIn 1
              sisLeft <$> gen (TyEither a b) half
-        , do a <- genTy 1
-             b <- genTy 1
+        , do a <- genTyIn 1
+             b <- genTyIn 1
              sisRight <$> gen (TyEither a b) half
         ]
       TyTuple a b ->
@@ -831,7 +889,7 @@ isArrowTy _         = False
 -- on their discard ratio -- a measured loss of power in properties that were
 -- finding real bugs. One slot still puts a function value in a good third of
 -- all draws (see the @arrow shape@ row of the coverage property).
-arrowProds :: TyEnv -> Ty -> Int -> [Gen Expr]
+arrowProds :: HasADTs => TyEnv -> Ty -> Int -> [Gen Expr]
 arrowProds env ty n =
   [ oneof
       [ genApply env ty n
@@ -849,7 +907,7 @@ arrowProds env ty n =
 -- lambda literal drawn for the callee here makes the node a @let@ -- that is
 -- not a degenerate outcome but the "directly-applied lambda" shape, spelled
 -- the way the compiler spells every @let@ ('SPLL.Prelude.letIn').
-genApply :: TyEnv -> Ty -> Int -> Gen Expr
+genApply :: HasADTs => TyEnv -> Ty -> Int -> Gen Expr
 genApply env ty n = do
   aty <- argTyFor env ty
   f   <- genTypedExprIn env (TyArrow aty ty) half
@@ -859,10 +917,10 @@ genApply env ty n = do
 
 -- | An argument type for an application returning @ty@: one an in-scope
 -- function already takes, where there is one.
-argTyFor :: TyEnv -> Ty -> Gen Ty
+argTyFor :: HasADTs => TyEnv -> Ty -> Gen Ty
 argTyFor env ty = case [ a | (_, TyArrow a b) <- env, b == ty ] of
-  [] -> genTy 1
-  as -> frequency [ (1, genTy 1), (2, elements as) ]
+  [] -> genTyIn 1
+  as -> frequency [ (1, genTyIn 1), (2, elements as) ]
 
 -- | @(\\f -> f \<arg\>) \<function value\>@ -- a function value passed as an
 -- argument and applied inside the body, which is 'SPLL.Prelude.letIn' of a
@@ -873,9 +931,9 @@ argTyFor env ty = case [ a | (_, TyArrow a b) <- env, b == ty ] of
 -- function, so the compiler has to resolve a callee that is a lambda
 -- parameter -- the case whose absence was bug A of
 -- @modality-arrow-apply-crashes@.
-genFunctionLet :: TyEnv -> Ty -> Int -> Gen Expr
+genFunctionLet :: HasADTs => TyEnv -> Ty -> Int -> Gen Expr
 genFunctionLet env ty n = do
-  aty <- genTy 0
+  aty <- genTyIn 0
   let fv  = freshName env
       fty = TyArrow aty ty
   fun <- genTypedExprIn env fty half
@@ -886,10 +944,10 @@ genFunctionLet env ty n = do
 -- | @f a b@ -- two arguments to one function value, which is where
 -- 'SPLL.Typing.ModalityInfer''s @TArrow@ arm is exercised at more than one
 -- nesting depth.
-genCurriedApply :: TyEnv -> Ty -> Int -> Gen Expr
+genCurriedApply :: HasADTs => TyEnv -> Ty -> Int -> Gen Expr
 genCurriedApply env ty n = do
-  aty <- genTy 0
-  bty <- genTy 0
+  aty <- genTyIn 0
+  bty <- genTyIn 0
   f <- genTypedExprIn env (TyArrow aty (TyArrow bty ty)) third
   a <- genTypedExprIn env aty third
   b <- genTypedExprIn env bty third
@@ -908,9 +966,9 @@ freshName env = "v" ++ show (length env)
 -- of the target, so this reaches the whole 'Apply'/'Lambda' path: shared
 -- draws, point-invertible observations through forward chaining, and
 -- structured bound values.
-genPlainLet :: TyEnv -> Ty -> Int -> Gen Expr
+genPlainLet :: HasADTs => TyEnv -> Ty -> Int -> Gen Expr
 genPlainLet env ty n = do
-  bty <- genTy 1
+  bty <- genTyIn 1
   val <- genTypedExprIn env bty half
   let v = freshName env
   body <- genTypedExprIn ((v, bty) : env) ty half
@@ -931,7 +989,7 @@ genPlainLet env ty n = do
 -- engine seeds its interval transport at a distribution it can take a CDF of,
 -- and a compound right-hand side is the *refused* shape, not the interesting
 -- one.
-genWitnessLet :: TyEnv -> Ty -> Int -> Gen Expr
+genWitnessLet :: HasADTs => TyEnv -> Ty -> Int -> Gen Expr
 genWitnessLet env ty n = do
   let v = freshName env
       env' = (v, TyFloat) : env
@@ -972,17 +1030,59 @@ genMonotoneChain bv n
       ]
 
 -- ---------------------------------------------------------------------------
--- Milestone M4: algebraic data types.
+-- Milestone M4: algebraic data types, with generated declarations (task
+-- fuzz-generate-adt-declarations).
 --
--- A fixed *pool* of declarations rather than generated ones. What the
--- compiler distinguishes between ADTs is their shape -- how many
--- constructors, of what arity, over which field types, recursive or not --
--- and never their names, so a pool that covers the shapes covers what a
--- declaration generator would, without threading a declaration context
--- through every generation, recovery and shrinking function in this module
--- (constructor and field names are what recovery reads, and with a fixed
--- pool they are statically known). The four entries are the corpus' four
--- ADT shapes:
+-- Every program draw first draws its *declaration context* ('genADTDecls'): a
+-- random subset of the fixed pool below plus up to three generated
+-- declarations. The pool stays as a named seed set -- its four entries are the
+-- corpus' four ADT shapes, and pinned tests name them -- but a pool alone
+-- cannot reach any shape outside those four, nor anything name-sensitive.
+-- Generated declarations vary what the pool fixes:
+--
+-- * names, including (one name in seven) a name a target language claims --
+--   @None@, @T@, @Module@, @len@, @end@ -- and, now and then, a constructor
+--   spelled like its own type;
+-- * one to five constructors, nullary-only enumerations through wide records;
+-- * field types: scalars, tuples, Eithers and lists of them, other declared
+--   ADTs, lists of ADTs, the type itself (in several fields at once, too), or
+--   -- for a mutually recursive pair -- its partner;
+-- * an optional @depth N@ on a directly self-recursive type.
+--
+-- The first constructor of a generated type only ever holds already-grounded
+-- types, so every type has a finite leaf ('adtRanks', 'leafCtors').
+--
+-- The context reaches generation, recovery and shrinking as the implicit
+-- parameter @?adts@ ('HasADTs'). Constructor, accessor and test names are what
+-- recovery reads off a node, so all three need the same table; once a program
+-- is declared, its own 'adts' field *is* that table, and the program-level
+-- entry points ('shrinkTypedProgram', 'typedMainCoreTy', 'neuralTwin', ...)
+-- bind it from there. The expression-level exports ('genTy',
+-- 'genTypedExpr', 'tyOfTypedExpr', 'shrinkTypedExpr', 'typedLeaves') keep
+-- their signatures and run against the pool ('withPool').
+
+-- | The ADT declarations in scope.
+type HasADTs = (?adts :: [ADTDecl])
+
+-- | Run against the fixed pool.
+withPool :: (HasADTs => a) -> a
+withPool x = let ?adts = adtPool in x
+
+-- | Run against a program's own declarations.
+inProgram :: Program -> (HasADTs => a) -> a
+inProgram p x = let ?adts = adts p in x
+
+-- | Draw a declaration context and generate under it.
+withGeneratedADTs :: (HasADTs => Gen a) -> Gen a
+withGeneratedADTs g = do
+  ds <- genADTDecls
+  let ?adts = ds in g
+
+-- | Declare exactly the in-scope types a generated program uses.
+declareHere :: HasADTs => Program -> Program
+declareHere = declareUsed ?adts
+
+-- | The fixed seed pool, one declaration per corpus ADT shape:
 --
 -- * @Hue@   -- an enumeration, three nullary constructors: the k-way discrete
 --   that @Bool@ cannot be (the M3 note asked for one wider than two);
@@ -991,8 +1091,6 @@ genMonotoneChain bv n
 --   partial and must be guarded by a constructor test;
 -- * @Chain@ -- recursive, with a default @depth@ so a neural target
 --   auto-derives.
---
--- 'withADTs' declares, per program, exactly the pool entries it uses.
 adtPool :: [ADTDecl]
 adtPool =
   [ ADTDecl "Hue"   [("Red", []), ("Green", []), ("Blue", [])] Nothing
@@ -1007,61 +1105,127 @@ adtPool =
 adtPoolNames :: [String]
 adtPoolNames = map dataName adtPool
 
--- | A pool type's constructors with their fields' 'Ty's.
-adtCtors :: String -> [(String, [(String, Ty)])]
+-- | The names of the types in scope.
+adtNames :: HasADTs => [String]
+adtNames = map dataName ?adts
+
+-- | An in-scope type's constructors with their fields' 'Ty's.
+adtCtors :: HasADTs => String -> [(String, [(String, Ty)])]
 adtCtors n =
   [ (c, [ (f, fromMaybe TyAny (rTypeToTy rt)) | (f, rt) <- fs ])
-  | d <- adtPool, dataName d == n, (c, fs) <- constructors d ]
+  | d <- ?adts, dataName d == n, (c, fs) <- constructors d ]
 
--- | Does this constructor of @n@ hold a value of @n@ itself?
-isRecursiveCtor :: String -> (String, [(String, Ty)]) -> Bool
-isRecursiveCtor n (_, fs) = any ((== TyADT n) . snd) fs
+-- | The ADT names a type mentions.
+adtsInTy :: Ty -> [String]
+adtsInTy t = case t of
+  TyADT n      -> [n]
+  TyTuple a b  -> adtsInTy a ++ adtsInTy b
+  TyEither a b -> adtsInTy a ++ adtsInTy b
+  TyList a     -> adtsInTy a
+  TyArrow a b  -> adtsInTy a ++ adtsInTy b
+  _            -> []
+
+-- | Every type reachable from @n@'s fields, transitively. Contains @n@ itself
+-- exactly when @n@ is (directly or mutually) recursive.
+adtReach :: HasADTs => String -> [String]
+adtReach n = go [] (direct n)
+  where
+    direct m = nub [ k | (_, fs) <- adtCtors m, (_, t) <- fs, k <- adtsInTy t ]
+    go seen [] = seen
+    go seen (k : ks)
+      | k `elem` seen = go seen ks
+      | otherwise     = go (seen ++ [k]) (ks ++ direct k)
+
+isCyclicADT :: HasADTs => String -> Bool
+isCyclicADT n = n `elem` adtReach n
+
+-- | The types with a constructor holding a field of the type itself -- the
+-- ones a productive geometric recursion can be built over.
+selfRecursiveADTs :: HasADTs => [String]
+selfRecursiveADTs = [ n | n <- adtNames, any (any ((== TyADT n) . snd) . snd) (adtCtors n) ]
+
+-- | How deep the smallest closed value of each type is: a type's rank is one
+-- more than the least, over its constructors, of the largest rank among the
+-- constructor's fields (scalars rank 0). A type absent from the table has no
+-- finite value at all. Computed to a fixpoint; contexts hold a handful of
+-- types.
+adtRanks :: HasADTs => [(String, Int)]
+adtRanks = go []
+  where
+    go r = let r' = [ (n, k) | n <- adtNames, Just k <- [rankOf r n] ]
+           in if r' == r then r else go r'
+    rankOf r n = case [ m | (_, fs) <- adtCtors n, Just m <- [maxRank r (map snd fs)] ] of
+      [] -> Nothing
+      ms -> Just (1 + minimum ms)
+    maxRank r ts = maximum . (0 :) <$> mapM (tyRank r) ts
+
+tyRank :: [(String, Int)] -> Ty -> Maybe Int
+tyRank r t = case t of
+  TyFloat      -> Just 0
+  TyInt        -> Just 0
+  TyBool       -> Just 0
+  TyTuple a b  -> max <$> tyRank r a <*> tyRank r b
+  TyEither a b -> max <$> tyRank r a <*> tyRank r b
+  TyList a     -> tyRank r a
+  TyADT m      -> lookup m r
+  _            -> Nothing
+
+-- | The constructors a leaf of @n@ may use: those whose fields all rank
+-- strictly below @n@, so building leaves of the fields terminates.
+leafCtors :: HasADTs => String -> [(String, [(String, Ty)])]
+leafCtors n = case lookup n ranks of
+  Nothing -> []
+  Just k  -> [ ctor | ctor@(_, fs) <- adtCtors n
+                    , all (maybe False (< k) . tyRank ranks . snd) fs ]
+  where ranks = adtRanks
 
 -- | A constructor's owning type and field types.
-ctorInfo :: String -> Maybe (String, [Ty])
+ctorInfo :: HasADTs => String -> Maybe (String, [Ty])
 ctorInfo c = listToMaybe
-  [ (n, map snd fs) | n <- adtPoolNames, (c', fs) <- adtCtors n, c' == c ]
+  [ (n, map snd fs) | n <- adtNames, (c', fs) <- adtCtors n, c' == c ]
 
 -- | A field accessor's owning type, constructor, field type, and whether that
 -- constructor is the type's only one (in which case the accessor is total).
-fieldInfo :: String -> Maybe (String, String, Ty, Bool)
+fieldInfo :: HasADTs => String -> Maybe (String, String, Ty, Bool)
 fieldInfo f = listToMaybe
   [ (n, c, t, length (adtCtors n) == 1)
-  | n <- adtPoolNames, (c, fs) <- adtCtors n, (f', t) <- fs, f' == f ]
+  | n <- adtNames, (c, fs) <- adtCtors n, (f', t) <- fs, f' == f ]
 
 -- | The type a constructor test (@isRed@) tests for.
-testInfo :: String -> Maybe String
+testInfo :: HasADTs => String -> Maybe String
 testInfo t = listToMaybe
-  [ n | n <- adtPoolNames, (c, _) <- adtCtors n, "is" ++ c == t ]
+  [ n | n <- adtNames, (c, _) <- adtCtors n, "is" ++ c == t ]
 
--- | The pool type a predefined name (constructor, accessor or test) belongs to.
-adtOfName :: String -> Maybe String
+-- | The type a predefined name (constructor, accessor or test) belongs to.
+adtOfName :: HasADTs => String -> Maybe String
 adtOfName nm = case (ctorInfo nm, fieldInfo nm, testInfo nm) of
   (Just (n, _), _, _)          -> Just n
   (_, Just (n, _, _, _), _)    -> Just n
   (_, _, Just n)               -> Just n
   _                            -> Nothing
 
--- | The same program, declaring exactly the pool types it uses: those whose
--- constructors, accessors or tests appear in any declaration, those a neural
--- declaration's type mentions, and (closing over field types) those those
--- types mention. A draw using none declares none, so every pre-M4 shape
--- compiles exactly the program it did.
+-- | The same program, declaring exactly the types it uses, out of its own
+-- declarations and the pool (its own winning on a name clash, so a shrunk
+-- pool type stays shrunk). Used: those whose constructors, accessors or tests
+-- appear in any declaration, those a neural declaration's type mentions, and
+-- (closing over field types) those those types mention. A draw using none
+-- declares none, so every pre-M4 shape compiles exactly the program it did.
 withADTs :: Program -> Program
-withADTs p = p { adts = [ d | d <- adtPool, dataName d `elem` used ] ++ others }
+withADTs p = declareUsed (adts p ++ [ d | d <- adtPool, dataName d `notElem` map dataName (adts p) ]) p
+
+-- | 'withADTs' out of an explicit candidate list, kept in its order.
+declareUsed :: [ADTDecl] -> Program -> Program
+declareUsed cands p = p { adts = [ d | d <- cands, dataName d `elem` used ] }
+  where used = let ?adts = cands in usedADTs p
+
+usedADTs :: HasADTs => Program -> [String]
+usedADTs p = nub (direct ++ concatMap adtReach direct)
   where
-    others = [ d | d <- adts p, dataName d `notElem` adtPoolNames ]
     direct = nub $
       [ n | (_, e) <- functions p, nm <- injFNamesOf e, Just n <- [adtOfName nm] ]
       ++ [ n | (_, rt, _) <- neurals p, n <- adtsOfRType rt ]
-    used = closeOver direct
-    closeOver ns =
-      let ns' = nub (ns ++ [ m | d <- adtPool, dataName d `elem` ns
-                               , (_, fs) <- constructors d, (_, rt) <- fs
-                               , m <- adtsOfRType rt ])
-      in if length ns' == length ns then ns else closeOver ns'
     adtsOfRType rt = case rt of
-      TADT n      -> [ n | n `elem` adtPoolNames ]
+      TADT n      -> [ n | n `elem` adtNames ]
       TArrow a b  -> adtsOfRType a ++ adtsOfRType b
       Tuple a b   -> adtsOfRType a ++ adtsOfRType b
       TEither a b -> adtsOfRType a ++ adtsOfRType b
@@ -1070,19 +1234,21 @@ withADTs p = p { adts = [ d | d <- adtPool, dataName d `elem` used ] ++ others }
 
 -- | Productions for an ADT target: one constructor application per
 -- constructor, sharing a single slot (see 'arrowProds' for why slots are
--- rationed). A recursive field is generated at a reduced size like every
--- other child, which is what keeps generation finite.
-adtCtorProds :: TyEnv -> String -> Int -> [Gen Expr]
+-- rationed). Every field is generated at a strictly smaller size than the
+-- node, a unary recursive constructor included, which is what keeps
+-- generation finite.
+adtCtorProds :: HasADTs => TyEnv -> String -> Int -> [Gen Expr]
 adtCtorProds env n sz =
-  [ oneof [ injF c <$> mapM (\(_, t) -> genTypedExprIn env t (sz `div` max 1 (length fs))) fs
-          | (c, fs) <- adtCtors n ] ]
+  [ oneof [ injF c <$> mapM (\(_, t) -> genTypedExprIn env t ((sz - 1) `div` max 1 (length fs))) fs
+          | (c, fs) <- adtCtors n ]
+  | not (null (adtCtors n)) ]
 
 -- | The size below which the ADT eliminators do not fire.
 adtElimSize :: Int
 adtElimSize = 3
 
--- | Eliminators reaching @ty@ through a pool type, sharing one slot: a field
--- projection for every field of type @ty@, and at a 'TyBool' target a
+-- | Eliminators reaching @ty@ through an in-scope type, sharing one slot: a
+-- field projection for every field of type @ty@, and at a 'TyBool' target a
 -- constructor test for every constructor.
 --
 -- A field of a multi-constructor type is projected only under its own
@@ -1092,7 +1258,7 @@ adtElimSize = 3
 -- emitting partial applications measures the interpreter's error path, not
 -- the compiler. Binding the value first is what keeps the test and the
 -- projection reading *one* draw.
-adtElimProds :: TyEnv -> Ty -> Int -> [Gen Expr]
+adtElimProds :: HasADTs => TyEnv -> Ty -> Int -> [Gen Expr]
 adtElimProds env ty n
   | n < adtElimSize || null opts = []
   | otherwise = [oneof opts]
@@ -1109,7 +1275,7 @@ adtElimProds env ty n
             alt <- genTypedExprIn env' ty half
             return $ letIn v val
                    $ ifThenElse (injF ("is" ++ c) [varE v]) (injF f [varE v]) alt
-      | owner <- adtPoolNames
+      | owner <- adtNames
       , (c, fs) <- adtCtors owner
       , (f, fty) <- fs
       , fty == ty
@@ -1117,22 +1283,22 @@ adtElimProds env ty n
       ]
     tests =
       [ (\x -> injF ("is" ++ c) [x]) <$> genTypedExprIn env (TyADT owner) (n - 1)
-      | ty == TyBool, owner <- adtPoolNames, (c, _) <- adtCtors owner ]
+      | ty == TyBool, owner <- adtNames, (c, _) <- adtCtors owner ]
 
--- | Every field projection of a multi-constructor pool type, anywhere in the
--- program, whose argument is not a variable an enclosing @if@'s condition
--- tests for that constructor (on the then-arm) -- i.e. every projection that
--- may be evaluated on a value built by another constructor. The generator
--- emits none ('adtElimProds'), and the shrinker refuses to make one
--- ('shrinkTypedProgram'): collapsing @if isLink v then lv v else e@ onto its
--- then-arm is well-typed and smaller, and turns any failing draw into the
+-- | Every field projection of a multi-constructor type the program declares,
+-- anywhere in the program, whose argument is not a variable an enclosing
+-- @if@'s condition tests for that constructor (on the then-arm) -- i.e. every
+-- projection that may be evaluated on a value built by another constructor.
+-- The generator emits none ('adtElimProds'), and the shrinker refuses to make
+-- one ('shrinkTypedProgram'): collapsing @if isLink v then lv v else e@ onto
+-- its then-arm is well-typed and smaller, and turns any failing draw into the
 -- accessor's own error, which the first Aspirational run of milestone M4
 -- duly minimized a crash to.
 unguardedProjections :: Program -> [String]
 unguardedProjections p = concatMap (go [] . snd) (functions p)
   where
     multiCtorFields =
-      [ (f, c) | d <- adtPool, length (constructors d) > 1
+      [ (f, c) | d <- adts p, length (constructors d) > 1
                , (c, fs) <- constructors d, (f, _) <- fs ]
     go :: [(String, String)] -> Expr -> [String]
     go g e = case node e of
@@ -1146,6 +1312,292 @@ unguardedProjections p = concatMap (go [] . snd) (functions p)
                  _ -> False)
         -> f : concatMap (go g) args
       _ -> concatMap (go g) (children e)
+
+-- ---------------------------------------------------------------------------
+-- Generating declarations.
+
+-- | A program's declaration context: each pool type with probability one in
+-- three, then zero to three generated ones -- the last two of them, one
+-- context in four, a mutually recursive pair while 'generateMutualPairs' is
+-- on. Checked against 'SPLL.Validator' as declarations, so a name the
+-- compiler would refuse is a redraw rather than a draw every property then
+-- discards.
+genADTDecls :: Gen [ADTDecl]
+genADTDecls = (do
+  seeds  <- filterM (const (frequency [(1, pure True), (2, pure False)])) adtPool
+  k      <- frequency [(2, pure 0), (4, pure 1), (3, pure 2), (2, pure (3 :: Int))]
+  mutual <- frequency [(3, pure False), (1, pure True)]
+  fresh  <- if generateMutualPairs && mutual && k >= 2
+              then do pre  <- genSequential seeds (k - 2)
+                      pair <- genMutualPair (seeds ++ pre)
+                      return (pre ++ pair)
+              else genSequential seeds k
+  return (seeds ++ fresh)) `suchThat` declsValid
+  where
+    genSequential _ 0 = pure []
+    genSequential ctx i = do
+      tname <- genTypeName (takenNames ctx)
+      d <- genADTBody ctx tname []
+      (d :) <$> genSequential (ctx ++ [d]) (i - 1)
+
+-- | Do these declarations validate, as the declarations of a trivial program?
+declsValid :: [ADTDecl] -> Bool
+declsValid ds = validateProgram (Program [("main", constB True)] [] ds [] []) == Right ()
+
+-- | Off: a program using a mutually recursive pair of types does not finish
+-- compiling -- @data A = A0 | A1 ab::B; data B = B0 | B1 ba::A@ with @main =
+-- A0@, or @main = isA1 (head [A0])@, never returns (internal-docs
+-- @mutually-recursive-adt-hangs-compiler@; the first runs of this generator
+-- found it within a few hundred draws). A hang reads as a timeout to every
+-- property, so generating the shape would only re-find a filed bug on every
+-- run while starving the budgets -- the reason milestone M4 does not
+-- generate the diverging scalar recursion either. Turn on when that bug is
+-- fixed; 'genMutualADTPair' is pinned meanwhile so the generator does not
+-- rot.
+generateMutualPairs :: Bool
+generateMutualPairs = False
+
+-- | A mutually recursive pair over the pool, for the pin that keeps
+-- 'genMutualPair' working while 'generateMutualPairs' is off.
+genMutualADTPair :: Gen [ADTDecl]
+genMutualADTPair = genMutualPair adtPool
+
+-- | Two types each holding the other in a non-first constructor.
+genMutualPair :: [ADTDecl] -> Gen [ADTDecl]
+genMutualPair ctx = do
+  a  <- genTypeName (takenNames ctx)
+  b  <- genTypeName (takenNames ctx ++ [a])
+  da <- genADTBody' ctx [b] a [b]
+  db <- genADTBody (ctx ++ [da]) b [a]
+  return [da, db]
+
+genADTBody :: [ADTDecl] -> String -> [String] -> Gen ADTDecl
+genADTBody ctx = genADTBody' ctx []
+
+-- | One declaration named @tname@ over the context @ctx@. The first
+-- constructor's fields only use @ctx@'s types (all grounded), so the type has
+-- a finite leaf; the others may also use the type itself and @partners@, and
+-- each partner gets one extra constructor holding it. @avoid@ are names
+-- reserved for declarations still to come.
+genADTBody' :: [ADTDecl] -> [String] -> String -> [String] -> Gen ADTDecl
+genADTBody' ctx avoid tname partners = do
+  nctors <- frequency [(2, pure 1), (3, pure 2), (3, pure 3), (2, pure 4), (1, pure (5 :: Int))]
+  let ground = map dataName ctx
+  firstAr <- if nctors == 1
+               then frequency [(1, pure 0), (3, pure 1), (3, pure 2), (2, pure 3), (1, pure (4 :: Int))]
+               else frequency [(3, pure 0), (2, pure 1), (2, pure 2)]
+  firstTys <- vectorOf firstAr (genFieldTy ground [])
+  restTys  <- vectorOf (nctors - 1) $ do
+    ar <- frequency [(3, pure 0), (3, pure 1), (3, pure 2), (1, pure (3 :: Int))]
+    vectorOf ar (genFieldTy ground (tname : partners))
+  let tyss = firstTys : restTys ++ [ [TyADT q] | q <- partners ]
+  (ctors, _) <- foldM (\(acc, taken) tys -> do
+      c <- genCtorName tname taken
+      (fs, taken') <- foldM (\(fa, tk) t -> do
+          f <- genFieldName tk
+          return (fa ++ [(f, tyToRType t)], tk ++ [f])) ([], taken ++ [c, "is" ++ c]) tys
+      return (acc ++ [(c, fs)], taken')) ([], takenNames ctx ++ avoid) tyss
+  let selfRec = any (any ((== TADT tname) . snd) . snd) ctors
+  depth <- if selfRec then frequency [(1, pure Nothing), (2, Just <$> choose (1, 3))] else pure Nothing
+  return (ADTDecl tname ctors depth)
+
+-- | A field type: mostly scalars, sometimes a structure of scalars, an
+-- earlier (grounded) type, a list of a type, or one of @recs@ (the type
+-- itself, or its mutual partner).
+genFieldTy :: [String] -> [String] -> Gen Ty
+genFieldTy ground recs = frequency $
+  [ (6, scalar)
+  , (1, TyTuple <$> scalar <*> scalar)
+  , (1, TyEither <$> scalar <*> scalar)
+  , (1, TyList <$> scalar) ]
+  ++ [ (2, TyADT <$> elements ground) | not (null ground) ]
+  ++ [ (3, TyADT <$> elements recs) | not (null recs) ]
+  ++ [ (1, TyList . TyADT <$> elements (ground ++ recs)) | not (null (ground ++ recs)) ]
+  where scalar = elements [TyFloat, TyInt, TyBool]
+
+-- | Every name a declaration list claims: type names, constructors, their
+-- tests and fields.
+takenNames :: [ADTDecl] -> [String]
+takenNames ds = concat
+  [ dataName d : concat [ c : ("is" ++ c) : map fst fs | (c, fs) <- constructors d ] | d <- ds ]
+
+genTypeName :: [String] -> Gen String
+genTypeName taken = genName upperWords hazardUpper `suchThat` nameOk taken
+
+-- | A constructor name; one in eight is the type's own name (@data Box = Box
+-- ...@), which keeps the type and value namespaces honest.
+genCtorName :: String -> [String] -> Gen String
+genCtorName tname taken =
+  frequency [ (1, pure tname), (7, genName upperWords hazardUpper) ] `suchThat` ctorOk
+  where ctorOk c = nameOk taken c && nameOk taken ("is" ++ c)
+
+genFieldName :: [String] -> Gen String
+genFieldName taken = genName lowerWords hazardLower `suchThat` nameOk taken
+
+-- | A plain word, a plain word with a number, or (one in seven) a name a
+-- target language or its runtime claims.
+genName :: [String] -> [String] -> Gen String
+genName plain hazard = frequency
+  [ (4, elements plain)
+  , (2, (++) <$> elements plain <*> (show <$> choose (2, 99 :: Int)))
+  , (1, elements hazard) ]
+
+-- | A generated name must be new, not a keyword, predefined function or
+-- reserved name, not a name the generator itself uses for a declaration or
+-- binder, and not a pool name (so 'withADTs' can never confuse the two).
+nameOk :: [String] -> String -> Bool
+nameOk taken nm =
+  not (null nm)
+  && nm `notElem` taken
+  && nm `notElem` reserved
+  && nm `notElem` map fst (globalFEnv [])
+  && isNothing (reservedIdentifierReason nm)
+  && nm `notElem` generatorNames
+  && nm `notElem` takenNames adtPool
+  && nm `notElem` knownCollidingNames
+  && not (binderLike nm)
+  where
+    generatorNames = [ "main", helperName, helperParam, loopName, loopParam, loopHole
+                     , neuralName, neuralSymName, "s", "k", arrowLeafParam, "Uniform", "Normal" ]
+    binderLike n = or [ case stripPrefix pfx n of
+                          Just rest -> all isDigit rest
+                          Nothing   -> False
+                      | pfx <- ["v", "h", "r", "d", "va", "vb", "p"] ]
+
+-- | Target-language names a generated declaration may *not* use, because a
+-- backend breaks on them: a constructor @Any@ emits an @isAny@ test that
+-- shadows the runtimes' own @isAny@ (Python recurses forever, Julia
+-- overflows its stack), and a constructor @Base@ redefines Julia's @Base@
+-- module, so the module does not load. Filed as internal-docs
+-- @adt-constructor-name-shadows-runtime@, found by this generator's first
+-- Slow runs and confirmed by sweeping every hazard name below through both
+-- backends (the only two that broke). Excluded rather than re-found on every
+-- run, like the hangs 'generateMutualPairs' avoids; drop them from here when
+-- that bug is fixed.
+knownCollidingNames :: [String]
+knownCollidingNames = ["Any", "Base"]
+
+upperWords, hazardUpper, lowerWords, hazardLower :: [String]
+upperWords =
+  [ "Shape", "Item", "Node", "Cell", "Card", "Coin", "Box", "Tag", "Opt", "Tree"
+  , "Path", "Ring", "Slot", "Grid", "Pile", "Leaf", "Nil", "Wrap", "Pick", "Val"
+  , "Empty", "Full", "Unit", "Lo", "Hi", "Mid", "Edge", "Solo", "Duo", "Trio"
+  , "Step", "Halt", "Done", "More", "On", "Off", "Kind", "Sort", "Branch", "Tip" ]
+-- Names Python, Julia or the runtimes bind: 'SPLL.ReservedNames' lists the
+-- ones the backends escape, and a generated declaration is how they get used
+-- as constructors at all.
+hazardUpper =
+  [ "T", "Left", "Right", "Module", "Iterable", "None", "True", "False", "Nothing"
+  , "Some", "Int", "Float", "Bool", "String", "Tuple", "Any", "Type", "Base"
+  , "Vector", "Array", "Symbol", "Missing", "Exception", "Function", "EnumBatch"
+  , "InferenceList", "EmptyInferenceList", "Dict", "Set", "Union", "Ref", "Inf"
+  , "NaN", "Main", "Core", "Float64", "Int64", "Char", "Real", "Number", "Tensor" ]
+lowerWords =
+  [ "val", "x", "y", "w", "lo", "hi", "size", "flag", "kid", "rest", "nxt"
+  , "item", "tag", "score", "mass", "elem", "body", "key", "count", "weight"
+  , "label", "info", "left", "right", "lhs", "rhs", "pos", "amount", "idx", "level" ]
+hazardLower =
+  [ "len", "sum", "type", "id", "list", "map", "min", "max", "abs", "round"
+  , "print", "def", "end", "function", "begin", "local", "global", "in", "is"
+  , "not", "lambda", "self", "cls", "torch", "math", "value", "inf", "nan", "pi"
+  , "struct", "module", "let", "do", "try", "catch", "object", "range", "float"
+  , "int", "bool", "tuple", "dict", "set", "nothing", "missing", "isa", "typeof"
+  , "eltype", "length", "first", "last", "zip", "filter", "sort", "string"
+  , "vec", "rand", "randn", "model", "forward", "args", "kwargs", "result"
+  , "super", "next", "iter", "hash", "format", "input", "open", "exit", "quote"
+  , "macro", "export", "using", "import", "mutable", "where", "true", "false" ]
+
+-- ---------------------------------------------------------------------------
+-- Coverage and shrinking of declarations.
+
+-- | Every declaration's shape, as a base label and a list of features, for the
+-- coverage tabulation. Names are not shapes, so a run's table stays a table.
+adtShapes :: [ADTDecl] -> [(String, [String])]
+adtShapes ds = let ?adts = ds in map adtShapeOf ds
+
+adtShapeOf :: HasADTs => ADTDecl -> (String, [String])
+adtShapeOf d = (base, features)
+  where
+    n  = dataName d
+    cs = adtCtors n
+    fieldTys = [ t | (_, fs) <- cs, (_, t) <- fs ]
+    base
+      | length cs == 1 && null fieldTys = "unit"
+      | length cs == 1                  = "record"
+      | null fieldTys                   = "enumeration"
+      | otherwise                       = "mixed arity"
+    selfFields = maximum (0 : [ length (filter (== TyADT n) (map snd fs)) | (_, fs) <- cs ])
+    features =
+      [ "pool" | d `elem` adtPool ]
+      ++ [ "more than three constructors" | length cs > 3 ]
+      ++ [ "self-recursive" | selfFields == 1 ]
+      ++ [ "several recursive fields" | selfFields > 1 ]
+      ++ [ "recursive through a list" | TyList (TyADT n) `elem` fieldTys ]
+      ++ [ "mutually recursive" | isMutualADT n ]
+      ++ [ "ADT field" | any (\t -> any (/= n) (adtsInTy t)) fieldTys ]
+      ++ [ "structured field" | any isStructuredField fieldTys ]
+      ++ [ "Int, Bool and Float fields" | all (`elem` fieldTys) [TyInt, TyBool, TyFloat] ]
+      ++ [ "depth" | isJust (adtDepth d) ]
+      ++ [ "constructor named like its type" | n `elem` map fst cs ]
+      ++ [ "target-language name" | any (`elem` (hazardUpper ++ hazardLower)) (takenNames [d]) ]
+    isStructuredField t = case t of
+      TyTuple{}  -> True
+      TyEither{} -> True
+      TyList{}   -> True
+      _          -> False
+
+-- | The size a declaration contributes to a draw: one per type, constructor
+-- and field. Part of TestFuzz's shrinker measure since declarations shrink.
+adtDeclSize :: ADTDecl -> Int
+adtDeclSize d = 1 + sum [ 1 + length fs | (_, fs) <- constructors d ]
+
+-- | Shrinks of the program's declarations: drop a constructor nothing names
+-- (not built, tested, or read through one of its fields), or drop a field
+-- whose accessor nothing names, removing that argument from every
+-- application of its constructor. Unused declarations need no rule of their
+-- own: every candidate goes through 'withADTs', which drops them.
+--
+-- Termination and typing hold by construction. A dropped constructor was not
+-- built anywhere, so no value changes; a candidate leaving some type without
+-- a finite value ('adtRanks') is refused. A dropped field takes its argument
+-- subtree with it, which can only remove calls, never move one -- so a
+-- recursive declaration stays 'recursionSafe' and still makes at most one
+-- call per step. A type that is no longer directly self-recursive loses its
+-- @depth@ with it.
+adtDeclShrinks :: Program -> [Program]
+adtDeclShrinks p = filter grounded dropCtors ++ dropFields
+  where
+    used = nub (concatMap (injFNamesOf . snd) (functions p))
+    ctorUnused (c, fs) = c `notElem` used && ("is" ++ c) `notElem` used
+                         && all ((`notElem` used) . fst) fs
+    replaceD p0 d' = p0 { adts = [ if dataName d == dataName d' then d' else d | d <- adts p0 ] }
+    grounded p' = let ?adts = adts p' in all (\n -> isJust (lookup n adtRanks)) adtNames
+    settleDepth d
+      | any (any ((== TADT (dataName d)) . snd) . snd) (constructors d) = d
+      | otherwise = d { adtDepth = Nothing }
+    dropCtors =
+      [ replaceD p (settleDepth d { constructors = dropAt i (constructors d) })
+      | d <- adts p, length (constructors d) > 1
+      , (i, ctor) <- zip [0 ..] (constructors d), ctorUnused ctor ]
+    dropFields =
+      [ (replaceD p (settleDepth d { constructors = [ if c' == c then (c', dropAt i fs) else (c', fs')
+                                                    | (c', fs') <- constructors d ] }))
+          { functions = [ (nm, dropArg c (length fs) i e) | (nm, e) <- functions p ] }
+      | d <- adts p, (c, fs) <- constructors d
+      , (i, (f, _)) <- zip [0 ..] fs, f `notElem` used ]
+
+dropAt :: Int -> [a] -> [a]
+dropAt i xs = take i xs ++ drop (i + 1) xs
+
+-- | Remove argument @i@ from every application of constructor @c@ (of arity
+-- @arity@), bottom-up.
+dropArg :: String -> Int -> Int -> Expr -> Expr
+dropArg c arity i e =
+  let e' = withChildren e (map (dropArg c arity i) (children e))
+  in case node e' of
+       InjF (Named c') args | c' == c, length args == arity
+         -> Expr (ann e') (InjF (Named c) (dropAt i args))
+       _ -> e'
 
 -- ---------------------------------------------------------------------------
 -- Recognising a generated 'let'.
@@ -1354,7 +1806,7 @@ tyToRType (TyADT n)      = TADT n
 -- | Partial inverse of 'tyToRType', for reading a neural declaration's target
 -- back out of a 'Program'. 'Nothing' for anything the typed generator cannot
 -- build inhabitants of.
-rTypeToTy :: RType -> Maybe Ty
+rTypeToTy :: HasADTs => RType -> Maybe Ty
 rTypeToTy TFloat        = Just TyFloat
 rTypeToTy TInt          = Just TyInt
 rTypeToTy TBool         = Just TyBool
@@ -1362,7 +1814,7 @@ rTypeToTy (Tuple a b)   = TyTuple  <$> rTypeToTy a <*> rTypeToTy b
 rTypeToTy (TEither a b) = TyEither <$> rTypeToTy a <*> rTypeToTy b
 rTypeToTy (ListOf a)    = TyList   <$> rTypeToTy a
 rTypeToTy (TADT n)
-  | n `elem` adtPoolNames = Just (TyADT n)
+  | n `elem` adtNames = Just (TyADT n)
 rTypeToTy _             = Nothing
 
 -- | Does this type's partition plan consist of discrete slots only? Only then
@@ -1371,15 +1823,17 @@ rTypeToTy _             = Nothing
 -- it would sum over the discrete residue and silently drop the continuous
 -- mass. A @Float@ anywhere in the target therefore makes @of _@ a no-op, and
 -- the materialized-twin oracle vacuous.
-tyAllDiscrete :: Ty -> Bool
+tyAllDiscrete :: HasADTs => Ty -> Bool
 tyAllDiscrete TyBool         = True
 tyAllDiscrete (TyTuple a b)  = tyAllDiscrete a && tyAllDiscrete b
 tyAllDiscrete (TyEither a b) = tyAllDiscrete a && tyAllDiscrete b
 -- A non-recursive ADT whose fields are all discrete: @Hue@ (no fields at all).
--- A recursive one is excluded even with discrete fields -- its plan is
--- depth-truncated, so the two engines answer over different supports.
-tyAllDiscrete (TyADT n)      = and [ not (isRecursiveCtor n ctor) && all (tyAllDiscrete . snd) fs
-                                   | ctor@(_, fs) <- adtCtors n ]
+-- A recursive one (directly or mutually) is excluded even with discrete
+-- fields -- its plan is depth-truncated, so the two engines answer over
+-- different supports. Checked first, which is also what makes the descent into
+-- field types terminate: below an acyclic type every type is visited once.
+tyAllDiscrete (TyADT n)      = not (isCyclicADT n)
+                               && and [ all (tyAllDiscrete . snd) fs | (_, fs) <- adtCtors n ]
 tyAllDiscrete _              = False
 
 -- | Target types 'SPLL.Lang.Lang.autoDeriveMultiValue' can produce a plan for
@@ -1391,32 +1845,62 @@ tyAllDiscrete _              = False
 -- Depth-bounded hard: every leaf costs logits (2 for a continuous slot, 2 for
 -- a Bool, plus a selector per Either), and the mock network has to produce a
 -- vector of exactly the plan's width on every single draw.
-genAutoNeuralTy :: Int -> Gen Ty
+genAutoNeuralTy :: HasADTs => Int -> Gen Ty
 genAutoNeuralTy n
   | n <= 0 = elements [TyFloat, TyBool]
-  | otherwise = frequency
+  | otherwise = frequency $
       [ (5, elements [TyFloat, TyBool])
       , (2, TyTuple  <$> rec <*> rec)
       , (1, TyEither <$> rec <*> rec)
-      -- Milestone M4: the pool ADTs a plan auto-derives for -- an
-      -- enumeration, and a record of a continuous and a discrete slot. Not
-      -- @Mix@ (an Int field) and not @Chain@ (each unrolled level adds a
-      -- continuous slot, which every draw pays for in mock logits).
-      , (1, elements [TyADT "Hue", TyADT "Pt"])
       ]
+      -- Milestone M4: the in-scope ADTs a plan auto-derives for
+      -- ('neuralADTs') -- of the pool, @Hue@ and @Pt@. Not @Mix@ (an Int
+      -- field) and not @Chain@ (each unrolled level adds a continuous slot,
+      -- which every draw pays for in mock logits).
+      ++ [ (1, TyADT <$> elements ns) | let ns = neuralADTs False, not (null ns) ]
   where rec = genAutoNeuralTy (n - 1)
+
+-- | The in-scope types a neural target may be without an explicit @of@
+-- clause: not recursive (directly or mutually), every field auto-derivable
+-- ('SPLL.Lang.Lang.autoDeriveMultiValue': Float, Bool, tuples and Eithers of
+-- those, and nested types of the same kind) -- only Bool ones when
+-- @discreteOnly@ -- and a plan at most 'neuralADTWidth' slots wide.
+neuralADTs :: HasADTs => Bool -> [String]
+neuralADTs discreteOnly =
+  [ n | n <- adtNames, ok (TyADT n), maybe False (<= neuralADTWidth) (planWidth (TyADT n)) ]
+  where
+    ok t = case t of
+      TyFloat      -> not discreteOnly
+      TyBool       -> True
+      TyTuple a b  -> ok a && ok b
+      TyEither a b -> ok a && ok b
+      TyADT m      -> not (isCyclicADT m) && all (ok . snd) (concatMap snd (adtCtors m))
+      _            -> False
+    planWidth t = case t of
+      TyFloat      -> Just 1
+      TyBool       -> Just 1
+      TyTuple a b  -> (+) <$> planWidth a <*> planWidth b
+      TyEither a b -> (\x y -> x + y + 1) <$> planWidth a <*> planWidth b
+      TyADT m | not (isCyclicADT m)
+                   -> (1 +) . sum <$> mapM (planWidth . snd) (concatMap snd (adtCtors m))
+      _            -> Nothing
+
+-- | Cap on a generated neural ADT target's plan, counted as one per slot plus
+-- one per selector: @Pt@ is 3. Every draw pays the width in mock logits.
+neuralADTWidth :: Int
+neuralADTWidth = 6
 
 -- | 'genAutoNeuralTy' restricted to 'tyAllDiscrete' targets, for the draws
 -- whose @of@ clause is supposed to *do* something.
-genDiscreteNeuralTy :: Int -> Gen Ty
+genDiscreteNeuralTy :: HasADTs => Int -> Gen Ty
 genDiscreteNeuralTy n
   | n <= 0 = pure TyBool
-  | otherwise = frequency
+  | otherwise = frequency $
       [ (4, pure TyBool)
       , (2, TyTuple  <$> rec <*> rec)
       , (1, TyEither <$> rec <*> rec)
-      , (1, pure (TyADT "Hue"))
       ]
+      ++ [ (1, TyADT <$> elements ns) | let ns = neuralADTs True, not (null ns) ]
   where rec = genDiscreteNeuralTy (n - 1)
 
 -- | Depth budget for a neural target type. One less than 'tyDepth': the plan
@@ -1433,7 +1917,7 @@ neuralTyDepth = 2
 -- 'AnnInts' the k-way categorical that @Bool@ alone cannot produce. (Since
 -- M4 an ADT target such as @Hue@ is a second way to a plan slot wider than
 -- two.)
-genTypedNeuralDecl :: Gen (NeuralDecl, Ty)
+genTypedNeuralDecl :: HasADTs => Gen (NeuralDecl, Ty)
 genTypedNeuralDecl = do
   (annot, nty) <- frequency
     [ (3, (,) AnnAuto   <$> genAutoNeuralTy neuralTyDepth)
@@ -1461,15 +1945,18 @@ neuralSymName = "sym"
 
 -- | @main sym = let s = nn sym in \<core\>@ with a matching declaration.
 genNeuralProgram :: Gen Program
-genNeuralProgram = do
+genNeuralProgram = withGeneratedADTs genNeuralProgramIn
+
+genNeuralProgramIn :: HasADTs => Gen Program
+genNeuralProgramIn = do
   (decl, nty) <- genTypedNeuralDecl
-  ty <- genTy tyDepth
+  ty <- genTyIn tyDepth
   body <- sized (genNeuralMain nty ty)
-  return $ withADTs $ Program [("main", body)] [decl] [] [] []
+  return $ declareHere $ Program [("main", body)] [decl] [] [] []
 
 -- | The body of a neural @main@, at a given network target type and program
 -- result type.
-genNeuralMain :: Ty -> Ty -> Int -> Gen Expr
+genNeuralMain :: HasADTs => Ty -> Ty -> Int -> Gen Expr
 genNeuralMain nty ty n = do
   let s    = "s"
       env  = [(s, nty)]
@@ -1490,7 +1977,7 @@ genNeuralMain nty ty n = do
 -- reach @s@ when its type is scalar, and otherwise produces the
 -- bound-but-unobserved shape -- a legitimate program the generate path has to
 -- handle, and the control case for the observed one.
-genNeuralCore :: TyEnv -> String -> Ty -> Ty -> Int -> Gen Expr
+genNeuralCore :: HasADTs => TyEnv -> String -> Ty -> Ty -> Int -> Gen Expr
 genNeuralCore env s nty ty n = frequency
   [ (3, do obs <- genNeuralObs (varE s) nty
            t <- genTypedExprIn env ty half
@@ -1509,7 +1996,7 @@ genNeuralCore env s nty ty n = frequency
 -- already emits (and hence that 'tyOfTypedExpr' already recovers through):
 -- @fst@\/@snd@ descend into a tuple, and an @Either@ is tested for which side
 -- it is, there being no @fromLeft@\/@fromRight@ production to descend with.
-genNeuralObs :: Expr -> Ty -> Gen Expr
+genNeuralObs :: HasADTs => Expr -> Ty -> Gen Expr
 genNeuralObs e TyBool = oneof
   [ pure e
   , pure ((#!#) e)
@@ -1559,21 +2046,21 @@ hasNeural = not . null . neurals
 -- consumer of the generator's output (the shrinker, and TestFuzz's coverage
 -- axes) therefore goes through here rather than reading @main@ directly, or a
 -- neural draw would report as unrecognised and silently stop shrinking.
-typedMainCore :: Program -> Maybe (TyEnv, Expr)
+typedMainCore :: HasADTs => Program -> Maybe (TyEnv, Expr)
 typedMainCore p = fst <$> typedMainParts p
 
 -- | The generated core of @main@, for consumers that only want the expression.
 typedMainCoreExpr :: Program -> Maybe Expr
-typedMainCoreExpr p = snd <$> typedMainCore p
+typedMainCoreExpr p = inProgram p (snd <$> typedMainCore p)
 
 -- | The 'Ty' of the generated core of @main@, recovered in the scope the core
 -- actually sits in -- which for a neural draw is non-empty.
 typedMainCoreTy :: Program -> Maybe Ty
-typedMainCoreTy p = typedMainCore p >>= \(env, core) -> tyOfTypedExprIn env core
+typedMainCoreTy p = inProgram p (typedMainCore p >>= \(env, core) -> tyOfTypedExprIn env core)
 
 -- | 'typedMainCore' plus the rebuilder that puts a replacement core back
 -- inside whatever wrapper it came out of.
-typedMainParts :: Program -> Maybe ((TyEnv, Expr), Expr -> Expr)
+typedMainParts :: HasADTs => Program -> Maybe ((TyEnv, Expr), Expr -> Expr)
 typedMainParts p = do
   body <- lookup "main" (functions p)
   case node body of
@@ -1613,7 +2100,7 @@ typedMainParts p = do
 -- pass's answers in scope. A recursive body's own call recovers only in the
 -- second -- in the first, the @if@ around it recovers from the base arm alone,
 -- which is what makes the second pass possible.
-helperEnv :: Program -> TyEnv
+helperEnv :: HasADTs => Program -> TyEnv
 helperEnv p = pass (pass [])
   where
     pass scope =
@@ -1649,7 +2136,7 @@ appliedTo nm e = case node e of
 -- ('AnnInts') is left alone -- its target does not auto-derive, so there is no
 -- annotation-free twin to compare it against.
 neuralTwin :: Program -> Maybe Program
-neuralTwin p = case neurals p of
+neuralTwin p = inProgram p $ case neurals p of
   [(n, rt@(TArrow TSymbol target), annot)]
     | Just nty <- rTypeToTy target
     , tyAllDiscrete nty
@@ -1666,12 +2153,12 @@ neuralTwin p = case neurals p of
 -- so any disagreement in the answers is a disagreement between the two
 -- engines and nothing else.
 genNeuralTwinProgram :: Gen (Program, Program)
-genNeuralTwinProgram = do
+genNeuralTwinProgram = withGeneratedADTs $ do
   nty <- genDiscreteNeuralTy neuralTyDepth
-  ty  <- genTy tyDepth
+  ty  <- genTyIn tyDepth
   body <- sized (genNeuralMain nty ty)
   let decl = (neuralName, TArrow TSymbol (tyToRType nty), Nothing)
-      lazyP = withADTs $ Program [("main", body)] [decl] [] [] []
+      lazyP = declareHere $ Program [("main", body)] [decl] [] [] []
   case neuralTwin lazyP of
     Just materialized -> return (lazyP, materialized)
     -- Unreachable: the target came from 'genDiscreteNeuralTy'. Fall back to
@@ -1710,9 +2197,9 @@ genNeuralTwinProgram = do
 -- an unrecognised node simply does not shrink, rather than shrinking to
 -- something ill-typed.
 tyOfTypedExpr :: Expr -> Maybe Ty
-tyOfTypedExpr = tyOfTypedExprIn []
+tyOfTypedExpr e = withPool (tyOfTypedExprIn [] e)
 
-tyOfTypedExprIn :: TyEnv -> Expr -> Maybe Ty
+tyOfTypedExprIn :: HasADTs => TyEnv -> Expr -> Maybe Ty
 tyOfTypedExprIn env e = case node e of
   Constant (VFloat _) -> Just TyFloat
   Constant (VInt _)   -> Just TyInt
@@ -1750,7 +2237,7 @@ tyOfTypedExprIn env e = case node e of
 -- application the context knows it. Anything else must have a recoverable
 -- arrow type of its own -- a variable bound to a function value, a top-level
 -- function, or a nested application returning one.
-tyOfApplied :: TyEnv -> Ty -> Expr -> Maybe Ty
+tyOfApplied :: HasADTs => TyEnv -> Ty -> Expr -> Maybe Ty
 tyOfApplied env aty f = case node f of
   Lambda x body    -> tyOfTypedExprIn ((x, aty) : env) body
   -- Both arms are applied to the same argument, so each is pushed the same
@@ -1769,7 +2256,7 @@ tyOfApplied env aty f = case node f of
 -- @TCons@ is as wide as its components, the eliminators are as narrow as the
 -- part of their argument's type they select, and @left@/@right@ pin only one
 -- side of the Either they build (the other stays 'TyAny').
-tyOfTypedInjF :: TyEnv -> String -> [Expr] -> Maybe Ty
+tyOfTypedInjF :: HasADTs => TyEnv -> String -> [Expr] -> Maybe Ty
 tyOfTypedInjF env "TCons" [a, b] = TyTuple <$> ty a <*> ty b
   where ty = tyOfTypedExprIn env
 tyOfTypedInjF env "fst"   [x]    = tyOfTypedExprIn env x >>= \t -> case t of
@@ -1801,8 +2288,8 @@ tyOfTypedInjF env "isNull" [x]   = tyOfTypedExprIn env x >>= \t -> case t of
   _        -> Nothing
 tyOfTypedInjF env "isLeft" [x]   = tyOfTypedEitherTest env x
 tyOfTypedInjF env "isRight" [x]  = tyOfTypedEitherTest env x
--- Milestone M4: the pool ADTs' constructors, accessors and tests. Read off
--- 'adtPool', the same table generation draws from. A constructor checks its
+-- Milestone M4: the in-scope ADTs' constructors, accessors and tests. Read off
+-- the 'HasADTs' context, the same table generation draws from. A constructor checks its
 -- arguments (each must be at least as general as its field's type), because
 -- a constructor node's own type says nothing about them and the shrinker's
 -- per-node re-typing would otherwise accept an argument of the wrong type.
@@ -1843,7 +2330,7 @@ tyOfTypedInjF env f args = do
 
 -- | @isLeft@/@isRight@ recover to 'TyBool' exactly when their argument is an
 -- 'Either' (or an as-yet-uncommitted position).
-tyOfTypedEitherTest :: TyEnv -> Expr -> Maybe Ty
+tyOfTypedEitherTest :: HasADTs => TyEnv -> Expr -> Maybe Ty
 tyOfTypedEitherTest env x = tyOfTypedExprIn env x >>= \t -> case t of
   TyEither _ _ -> Just TyBool
   TyAny        -> Just TyBool
@@ -1973,6 +2460,8 @@ injFSigsOf name d
   where
     Forall tvs cs body = contract d
     scalarSig subst =
+      -- No ADT is in scope: the catalog is built from @globalFEnv []@.
+      let ?adts = [] in
       let (as, r) = arrowParts (substRType subst body)
       in case (mapM rTypeToTy as, rTypeToTy r) of
            (Just argTys, Just resTy)
@@ -2119,29 +2608,38 @@ children e = case node e of
 -- scope-safe: replacing an arbitrary subexpression with one of these can never
 -- strand a reference to a binding the replacement is no longer under.
 typedLeaves :: Ty -> [Expr]
-typedLeaves TyFloat = [constF 0]
-typedLeaves TyInt   = [constI 0]
-typedLeaves TyBool  = [constB False, constB True]
+typedLeaves t = withPool (typedLeavesIn t)
+
+-- | 'typedLeaves' over the declarations in scope.
+typedLeavesIn :: HasADTs => Ty -> [Expr]
+typedLeavesIn TyFloat = [constF 0]
+typedLeavesIn TyInt   = [constI 0]
+typedLeavesIn TyBool  = [constB False, constB True]
 -- No leaf is offered for a free position, and that propagates: a leaf for
 -- @Either Float ?@ is @left 0@ and never @right <something>@, because
 -- committing the unknown side to a concrete type is exactly the shrink that
 -- would be ill-typed in the surrounding context.
-typedLeaves TyAny   = []
-typedLeaves (TyTuple a b) =
-  [ tuple x y | x <- take 1 (typedLeaves a), y <- take 1 (typedLeaves b) ]
-typedLeaves (TyEither a b) =
-  [ left x  | x <- take 1 (typedLeaves a) ]
-  ++ [ right y | y <- take 1 (typedLeaves b) ]
-typedLeaves (TyList a) = [ cons x nul | x <- take 1 (typedLeaves a) ]
--- The first non-recursive constructor applied to the smallest field values:
--- @Red@, @MkPt 0 False@, @Zero@, @Stop@.
-typedLeaves (TyADT n) = take 1
+typedLeavesIn TyAny   = []
+typedLeavesIn (TyTuple a b) =
+  [ tuple x y | x <- take 1 (typedLeavesIn a), y <- take 1 (typedLeavesIn b) ]
+typedLeavesIn (TyEither a b) =
+  [ left x  | x <- take 1 (typedLeavesIn a) ]
+  ++ [ right y | y <- take 1 (typedLeavesIn b) ]
+typedLeavesIn (TyList a) = [ cons x nul | x <- take 1 (typedLeavesIn a) ]
+-- The first leaf constructor ('leafCtors') applied to the smallest field
+-- values: @Red@, @MkPt 0 False@, @Zero@, @Stop@.
+typedLeavesIn (TyADT n) = take 1
   [ injF c ls
-  | ctor@(c, fs) <- adtCtors n, not (isRecursiveCtor n ctor)
-  , Just ls <- [mapM (listToMaybe . typedLeaves . snd) fs] ]
+  | (c, fs) <- leafCtors n
+  , Just ls <- [mapM (listToMaybe . typedLeavesIn . snd) fs] ]
 -- A constant function, which is closed and (being independent of its
 -- argument) inhabits @TyArrow a b@ for every @a@ at once.
-typedLeaves (TyArrow _ b) = [ arrowLeafParam #-># x | x <- take 1 (typedLeaves b) ]
+typedLeavesIn (TyArrow _ b) = [ arrowLeafParam #-># x | x <- take 1 (typedLeavesIn b) ]
+
+-- | The smallest closed value of a declared type, under the given
+-- declarations ('typedLeaves' at that type).
+adtLeaf :: [ADTDecl] -> String -> Maybe Expr
+adtLeaf ds n = let ?adts = ds in listToMaybe (typedLeavesIn (TyADT n))
 
 -- | Type-preserving shrink for an expression produced by 'genTypedExpr'.
 --
@@ -2160,13 +2658,13 @@ typedLeaves (TyArrow _ b) = [ arrowLeafParam #-># x | x <- take 1 (typedLeaves b
 -- a fresh name inside 'typedLeaves' keeps the leaf a *closed* expression,
 -- which is what makes it safe to drop in at an arbitrary position.
 shrinkTypedExpr :: Expr -> [Expr]
-shrinkTypedExpr e = map uniquifyBinders (shrinkTypedExprIn [] e)
+shrinkTypedExpr e = withPool (map uniquifyBinders (shrinkTypedExprIn [] e))
 
-shrinkTypedExprIn :: TyEnv -> Expr -> [Expr]
+shrinkTypedExprIn :: HasADTs => TyEnv -> Expr -> [Expr]
 shrinkTypedExprIn env e = case tyOfTypedExprIn env e of
   Nothing -> []
   Just ty -> nub (filter (\c -> smaller c && preserves ty c)
-                         (typedLeaves ty ++ collapses e ++ childShrinks env e))
+                         (typedLeavesIn ty ++ collapses e ++ childShrinks env e))
   where
     smaller c = typedExprSize c < typedExprSize e
     -- Every candidate is re-typed *here*, at this node, including the ones
@@ -2223,7 +2721,7 @@ collapses e = case asLet e of
 -- | Shrink one child at a time, keeping the node and every sibling. This is
 -- what actually minimizes a deep program: the collapses above cut whole
 -- subtrees, this reduces the ones that have to stay.
-childShrinks :: TyEnv -> Expr -> [Expr]
+childShrinks :: HasADTs => TyEnv -> Expr -> [Expr]
 childShrinks env e = case asLet e of
   Just (x, val, body) ->
     -- The bound value is shrunk in the outer scope, the body under the
@@ -2305,8 +2803,12 @@ shrinkOne f (x:xs) =
 --
 -- And a candidate may not add an unguarded partial projection
 -- ('unguardedProjections'), for the reason given there.
+--
+-- Last, the ADT declarations themselves shrink ('adtDeclShrinks'): an unused
+-- constructor or field goes, and 'withADTs' drops a declaration nothing uses
+-- any more. Recovery runs against the program's own declarations.
 shrinkTypedProgram :: Program -> [Program]
-shrinkTypedProgram p = filter guarded $ map withADTs $ case typedMainParts p of
+shrinkTypedProgram p = inProgram p $ filter guarded $ map withADTs $ (case typedMainParts p of
   Nothing -> []
   Just ((env, core), rebuild) ->
     [ replaceDecl "main" (uniquifyBinders (rebuild core'))
@@ -2314,7 +2816,8 @@ shrinkTypedProgram p = filter guarded $ map withADTs $ case typedMainParts p of
     ]
     ++ [ replaceDecl nm (uniquifyBindersFrom (declBinderPrefix nm) e')
        | (nm, e) <- functions p, nm /= "main"
-       , e' <- declShrinks (helperEnv p) nm e ]
+       , e' <- declShrinks (helperEnv p) nm e ])
+  ++ adtDeclShrinks p
   where
     guarded p' = length (unguardedProjections p') <= length (unguardedProjections p)
     replaceDecl nm body' =
@@ -2332,7 +2835,7 @@ shrinkTypedProgram p = filter guarded $ map withADTs $ case typedMainParts p of
 -- failing"; the shrinker would then walk straight into non-termination and
 -- report *that* as the minimal counterexample. Shrinks never duplicate a
 -- subterm, so a step that made at most one call keeps making at most one.
-declShrinks :: TyEnv -> String -> Expr -> [Expr]
+declShrinks :: HasADTs => TyEnv -> String -> Expr -> [Expr]
 declShrinks scope nm e = case node e of
   Lambda x body
     | Just (TyArrow aty _) <- lookup nm scope
@@ -2352,5 +2855,5 @@ declShrinks scope nm e = case node e of
         | mentionsVar nm f ->
             [ Expr (ann b) (IfThenElse c t' f) | t' <- shrinkTypedExprIn env t ]
             ++ [ Expr (ann b) (IfThenElse c t f') | f' <- shrinkTypedExprIn env f
-                                                  , recursionSafe nm e (rebuildWith f') ]
+                                                  , recursionSafe ?adts nm e (rebuildWith f') ]
       _ -> shrinkTypedExprIn env b
