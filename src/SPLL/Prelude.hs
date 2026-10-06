@@ -108,7 +108,7 @@ import IRInterpreter (generateRand, generateDet, generateRandE)
 import Control.Monad.Random (Rand, RandomGen, evalRand)
 import System.Random (mkStdGen)
 import SPLL.IRCompiler
-import SPLL.IROptimizer (optimizeEnv)
+import SPLL.IROptimizer (optimizeEnvWith)
 import SPLL.IRSelectPass (selectPassEnv)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import Debug.Trace
@@ -455,7 +455,7 @@ compileRTyped conf rtypedWithSigs = do
   let selected = if batched conf then selectPassEnv stripped else stripped
   printStageIR conf "After Select Pass" selected
 
-  let compiled = optimizeEnv conf selected
+  let compiled = optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
   printIfVerbose conf "\n=== Compiled Program ==="
   pPrintIfMoreVerbose conf compiled
   printIfVerbose conf (pPrintIREnv compiled)

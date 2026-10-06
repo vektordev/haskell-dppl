@@ -269,7 +269,7 @@ envToIR conf fcDat p
           -- Batched mode: retag elementwise ifs to selects before optimizing
           -- (design pytorch-tensorizer). Mirrors 'Prelude.compile'.
           selected = if batched conf then selectPassEnv stripped else stripped
-      in optimizeEnv conf selected
+      in optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals p]) selected
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).

@@ -145,6 +145,34 @@ declaration and runs it. Two things are still V-deep: `main`'s own
 if-chain over an ADT's constructors, which only bites an ADT with ~100
 constructors and is left as it is.
 
+## One network call per argument per query
+
+The compiler emits a network call `n(sym)` at every read, binding it as
+`nn_raw` next to the reader. A program that reads several fields of one read
+(`define truth = see img in Face (.. x0 truth ..) (.. x1 truth ..)`, or the
+per-field draws `DrawSinking.splitProductDraw` makes of `draw truth = see img`)
+therefore gets one call per field. Each sits inside that field's enumeration
+loop and under the guards of the field equations, so a J-field read called the
+network up to 2J times per query. Neither the compiler's loop hoist
+(`hoistInvariantBindings`, which cannot see through a guarded block's binding)
+nor CSE (which shares only what is evaluated unconditionally) merged them.
+
+At `-O2` the optimizer's `shareNetworkCallsCounted` does. It runs right before
+CSE, knows the declared networks from `OptEnv.optNeurals`
+(`optimizeEnvWith`), and for each distinct pure application `n(arg)` binds one
+`cse_nn_<k>` at the lowest node covering every occurrence. It also lifts a
+single occurrence out of an enumeration loop that `arg` does not read. It never
+moves a call past a binder of `arg`'s free variables, or past an `if`/select
+whose condition reads them, since such a condition (`isAny(img)`) may be what
+keeps the call off an argument the network cannot take. The cost: a call that
+used to be reached only in some arms (an all-ANY query skips every field's
+loop) now runs once even when no arm needs it. `generate` is unaffected, because
+`n_auto_gen` samples and is not pure. Pinned by `Internals.repeatedNeuralReadShared`
+(one application of `see` in `main`'s probability body, for the `define`
+spelling, `drawProductReadPerField20` and the Guess-Who shape
+`drawProductReadUnderBinding`) and `Internals.networkShareScoping` (the scoping
+rules). Task `repeated-neural-read-not-shared`.
+
 ## AutoNeural naming: `readLogits` / `writeLogits`
 
 Two independent directions live in `SPLL.AutoNeural`, and both are named for
