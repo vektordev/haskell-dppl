@@ -1486,10 +1486,16 @@ batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
 -- or without @-G@. The known-issues corpus cannot pin this: it runs programs
 -- through the interpreter, which has no indentation limit.
 --
--- So these compile a 150-value declaration to Python and run it. 150 is past
--- the old 98-value ceiling with room to spare, and short of 200, where
--- @main@'s writeLogits (a separate V-deep emission, filed as its own ticket)
--- trips CPython's parenthesis limit. The network is a mock returning a
+-- So these compile a 250-value declaration to scalar Python and run it. 250 is past
+-- the old 98-value ceiling, and past 200, where @main@'s writeLogits -- one
+-- @main.forward(v, img)[0]@ cell per value, consed right-nested -- used to
+-- trip CPython's parenthesis limit and fail the import the same way (task
+-- writelogits-cons-chain-nests-v-deep; the scalar backend now spills that
+-- chain, see 'SPLL.CodeGenPyTorch.spillable'). The scalar case also reads the
+-- writeLogits vector back. The batched case stays at 150: its table domain's
+-- sample-to-slot lookup is a nested @where_anchored@ chain that is V deep in
+-- the same way (task batched-table-domain-lookup-nests-v-deep). The network
+-- is a mock returning a
 -- one-hot weight vector, so the draw is deterministic whatever the random
 -- stream does, and a wrong slot or a wrong slot-to-value mapping fails
 -- outright rather than statistically.
@@ -1499,14 +1505,14 @@ batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
 -- (read out of a constant table).
 wideNeuralDomainTests :: TestTree
 wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sampler-nests-v-deep)"
-  [ testGroup "Python" [ testProperty name (once (scalarCase domain)) | (name, domain) <- domains ]
-  , testGroup "BatchedPython" [ testProperty name (once (batchedCase domain)) | (name, domain) <- domains ]
+  [ testGroup "Python" [ testProperty name (once (scalarCase domain)) | (name, domain) <- domains 250 ]
+  , testGroup "BatchedPython" [ testProperty name (once (batchedCase domain)) | (name, domain) <- domains 150 ]
   ]
   where
-    width = 150 :: Int
     hot = 137 :: Int
-    domains = [ ("contiguous 0..149", [0 .. width - 1])
-              , ("table 0,2..298", [0, 2 .. 2 * (width - 1)]) ]
+    domains :: Int -> [(String, [Int])]
+    domains width = [ ("contiguous 0.." ++ show (width - 1), [0 .. width - 1])
+                    , ("table 0,2.." ++ show (2 * (width - 1)), [0, 2 .. 2 * (width - 1)]) ]
     src domain = unlines
       [ "neural readDigit :: (Symbol -> Int) of [" ++ intercalate ", " (map show domain) ++ "]"
       , "main img = readDigit img" ]
@@ -1514,7 +1520,7 @@ wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sample
       p <- either (Left . ("fixture failed to parse: " ++) . show) Right (tryParseProgram "" (src domain))
       either (Left . ("fixture failed to compile: " ++)) Right
              (compile defaultCompilerConfig{batched = batchedMode} p)
-    oneHot = "[" ++ intercalate ", " [ if i == hot then "1.0" else "0.0" | i <- [0 .. width - 1] ] ++ "]"
+    oneHot domain = "[" ++ intercalate ", " [ if i == hot then "1.0" else "0.0" | i <- [0 .. length domain - 1] ] ++ "]"
     runScript py name script = do
       (code, out, err) <- withSystemTempFile name $ \tmpPath tmpHandle -> do
         hPutStr tmpHandle script
@@ -1532,13 +1538,19 @@ wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sample
         runScript "python3" "wide_neural_domain.py" $ unlines
           [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", code
           , "def readDigit(s):", "    return s"
-          , "w = " ++ oneHot
+          , "w = " ++ oneHot domain
           , "for _ in range(20):"
           , "    r = main.generate(w)"
           , "    if r != " ++ show (domain !! hot) ++ ":"
           , "        raise ValueError('generate drew ' + repr(r) + ', expected " ++ show (domain !! hot) ++ "')"
           , "if abs(main.forward(" ++ show (domain !! hot) ++ ", w)[0] - 1.0) > 1e-9:"
           , "    raise ValueError('forward disagrees with the one-hot network')"
+          , "logits, cell = [], main.writeLogits(w)"
+          , "while isinstance(cell, ConsInferenceList):"
+          , "    logits.append(cell.value)"
+          , "    cell = cell.next"
+          , "if logits != w:"
+          , "    raise ValueError('writeLogits does not return the one-hot vector: ' + repr(logits))"
           ]
     batchedCase domain = ioProperty $ do
       mpy <- findTorchPython
@@ -1555,7 +1567,7 @@ wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sample
               , "import torch"
               , "def readDigit(s):", "    return s"
               , "B = 64"
-              , "w = torch.tensor(" ++ oneHot ++ ").expand(B, -1)"
+              , "w = torch.tensor(" ++ oneHot domain ++ ").expand(B, -1)"
               , "r = main.generate(w, B)"
               , "if not bool((torch.as_tensor(r) == " ++ show (domain !! hot) ++ ").all()):"
               , "    raise ValueError('batched generate drew ' + repr(r) + ', expected all " ++ show (domain !! hot) ++ "')"
