@@ -744,7 +744,9 @@ irPDF _ x = error ("Expression must be the density of a valid distribution" ++ s
 
 irCDF :: Distribution -> IRValue -> IRValue
 irCDF IRUniform (VFloat x) = VFloat $ if x < 0 then 0 else if x > 1 then 1 else x
-irCDF IRNormal (VFloat x) = VFloat $ (1/2)*(1 + erf(x/sqrt(2)))
+-- erfc rather than 1 + erf, which cancels in the lower tail (task
+-- cumulative-normal-upper-tail-cancellation; see Semiring.upperTailComplement).
+irCDF IRNormal (VFloat x) = VFloat $ erfc (-x / sqrt 2) / 2
 irCDF _ x = error ("Expression must be the CDF of a valid distribution" ++ show x)
 
 -- | Native log-pdf/log-cdf (task log-space-probability-computation): computed
@@ -758,7 +760,7 @@ irLogPDF _ x = error ("Expression must be the log-density of a valid distributio
 
 irLogCDF :: Distribution -> IRValue -> IRValue
 irLogCDF IRUniform (VFloat x) = VFloat $ log (if x < 0 then 0 else if x > 1 then 1 else x)
-irLogCDF IRNormal (VFloat x) = VFloat $ log ((1/2) * (1 + erf (x/sqrt(2))))
+irLogCDF IRNormal (VFloat x) = VFloat $ log (erfc (-x / sqrt 2) / 2)
 irLogCDF _ x = error ("Expression must be the log-cumulative of a valid distribution" ++ show x)
 
 -- | Structural runtime-tag check backing 'IRConformsTo': does the value match the

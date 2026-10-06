@@ -2,7 +2,7 @@
 
 module End2EndTesting where
 
-import System.Directory (getCurrentDirectory)
+import System.Directory (getCurrentDirectory, findExecutable)
 import System.FilePath (stripExtension, takeBaseName)
 import System.IO.Temp (withSystemTempFile)
 import System.IO (hPutStr, hClose, hPutStrLn, stderr)
@@ -1825,6 +1825,165 @@ batchedNestedSelectTests = testGroup "batched nested select distribution (batche
       env <- either (Left . show) Right (compile defaultCompilerConfig{batched = True} prog)
       srcLines <- generateFunctionsBatched True env
       return (sum (map length srcLines))
+
+-- ===========================================================================
+-- Normal upper tails keep their relative precision
+-- (task cumulative-normal-upper-tail-cancellation)
+-- ===========================================================================
+--
+-- @P(Normal > z)@ used to be @1 - Phi(z)@, with @Phi@ itself spelled
+-- @(1 + erf(z / sqrt 2)) / 2@: both cancel, so a tail of size @P@ kept about
+-- @1e-16 / P@ of relative precision (@P(Normal > 8)@ answered 6.66e-16 for
+-- 6.22e-16, and Julia's 5-term erf was worse still). Now the compiler spells
+-- the complement of a normal CDF leaf as the leaf at @-z@
+-- ('SPLL.Semiring.upperTailComplement', 'SPLL.Semiring.complementWhen') and
+-- every runtime computes @Phi(x) = erfc(-x / sqrt 2) / 2@.
+--
+-- The corpus cannot pin this: its tolerance is 1e-4 absolute, which a 1e-16
+-- answer passes whatever it is. So each case is checked to 1e-12 relative
+-- (linear) or 1e-12 absolute on the log (@--logSpace@), on the interpreter
+-- and every text backend, one process per backend. The cases cover each
+-- complement site: the four deterministic-bound comparisons, an affine
+-- operand, a decreasing transform ('SPLL.Semiring.scaleCoV''s flip, in both
+-- a comparison and a plain cdf), and the two-normal comparison. The shift
+-- in the last one is itself rounded, so its reference is the CDF at the
+-- rounded difference.
+
+-- | (label, source, cumulative query?, query point, exact probability)
+normalTailCases :: [(String, String, Bool, IRValue, Double)]
+normalTailCases =
+  [ ("Normal > 8",                 "main = Normal > 8.0",                 False, VBool True,   q8)
+  , ("Normal > 5",                 "main = Normal > 5.0",                 False, VBool True,   q5)
+  , ("8 < Normal",                 "main = 8.0 < Normal",                 False, VBool True,   q8)
+  , ("Normal < 8 is False",        "main = Normal < 8.0",                 False, VBool False,  q8)
+  , ("8 > Normal is False",        "main = 8.0 > Normal",                 False, VBool False,  q8)
+  , ("affine operand",             "main = Normal * 2.0 + 3.0 > 19.0",    False, VBool True,   q8)
+  , ("decreasing operand",         "main = Normal * (0.0 - 1.0) < -8.0",  False, VBool True,   q8)
+  , ("cdf at -8",                  "main = Normal",                       True,  VFloat (-8),  q8)
+  , ("cdf of a negated normal",    "main = Normal * (0.0 - 1.0)",         True,  VFloat (-8),  q8)
+  , ("two normals",                "main = Normal + 11.313708498984761 < Normal", False, VBool True, q8shifted)
+  ]
+  where
+    q8 = 6.220960574271784e-16
+    q5 = 2.866515718791939e-7
+    -- Phi(-c / sqrt 2) at the double c, not at 8 * sqrt 2: erfc's own value
+    -- at the rounded argument, which agrees with the true tail to ~1e-14.
+    q8shifted = 6.220960574271693e-16
+
+normalTailPrecisionTests :: TestTree
+normalTailPrecisionTests = testGroup "normal upper-tail precision (cumulative-normal-upper-tail-cancellation)"
+  [ testGroup "Interpreter"
+      [ testProperty (name_ ++ logLabel ls) $ once $
+          case compiledTail ls src of
+            Left err -> counterexample err False
+            Right (prog, env) ->
+              let run = (if cumul then runIntegC else runProbC) prog env [] q
+              in case run of
+                   Right (VProbDim p _) -> tailClose ls expected p
+                   other -> counterexample ("no probability: " ++ show other) False
+      | (name_, src, cumul, q, expected) <- normalTailCases, ls <- [False, True] ]
+  , testProperty "Python" $ once $ ioProperty $ backendCheck "python" (Just "python3") (const True) pythonScript
+  , testProperty "BatchedPython" $ once $ ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> do
+          hPutStrLn stderr "normal tail precision: batched case skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
+          return (property True)
+        -- Linear variants only: the tensor fragment admits no log-space CDF
+        -- leaf ('SPLL.CodeGenPyTorchBatched' refuses @IRCumulative _ Log@).
+        Just py -> backendCheck "batched" (Just py) not batchedScript
+  , testProperty "Julia" $ once $ ioProperty $ do
+      mj <- findExecutable "julia"
+      case mj of
+        Nothing -> do
+          hPutStrLn stderr "normal tail precision: Julia case skipped -- no julia on the PATH."
+          return (property True)
+        Just _ -> backendCheck "julia" Nothing (const True) juliaScript
+  ]
+  where
+    logLabel ls = if ls then " (logSpace)" else ""
+    variants = [ (name_ ++ logLabel ls, src, cumul, q, expected, ls)
+               | (name_, src, cumul, q, expected) <- normalTailCases, ls <- [False, True] ]
+    compiledTail ls src = do
+      prog <- either (Left . ("parse: " ++) . show) Right (tryParseProgram "" src)
+      env <- either (Left . ("compile: " ++)) Right (compile defaultCompilerConfig{logSpace = ls} prog)
+      return (prog, env)
+    -- linear: relative error; log space: absolute error of the log, which is
+    -- the same measure to first order
+    tailClose ls expected got =
+      let err = if ls then abs (got - log expected) else abs (got - expected) / expected
+      in counterexample ("expected " ++ (if ls then "log " else "") ++ show expected
+                         ++ ", got " ++ show got ++ " (error " ++ show err ++ ")")
+           (err <= 1e-12)
+    -- Every case's emitted module, one per variant; each script prints one
+    -- "name_<TAB>value" line per variant, and the Haskell side compares.
+    -- @keepLog@ picks variants by their log-space flag.
+    backendCheck name mpy keepLog mkScript = do
+      cwd <- getCurrentDirectory
+      let kept = [ v | v@(_, _, _, _, _, ls) <- variants, keepLog ls ]
+      case mapM (\(l, src, c, q, e, ls) -> fmap (\(_, env) -> (l, env, c, q, e, ls)) (compiledTail ls src)) kept of
+        Left err -> return (counterexample err False)
+        Right compiled -> case mkScript cwd compiled of
+          Left err -> return (counterexample (name ++ " codegen: " ++ err) False)
+          Right (ext, script) -> do
+            (code, out, err) <- withSystemTempFile ("normal_tail." ++ ext) $ \tmpPath tmpHandle -> do
+              hPutStr tmpHandle script
+              hClose tmpHandle
+              case mpy of
+                Just py -> readProcessWithExitCode py [tmpPath] ""
+                Nothing -> readProcessWithExitCode "julia" (juliaTestFlags ++ [tmpPath]) ""
+            let answers = [ (l, v) | ln <- lines out, (l, '\t' : v) <- [break (== '\t') ln] ]
+                checks = [ case lookup l answers >>= readTailNum of
+                             Just got -> counterexample (name ++ " " ++ l) (tailClose ls e got)
+                             Nothing -> counterexample (name ++ " " ++ l ++ ": no answer") False
+                         | (l, _, _, _, e, ls) <- compiled ]
+            return $ case code of
+              ExitSuccess -> conjoin checks
+              ExitFailure _ -> counterexample (name ++ " script failed:\n" ++ out ++ err) False
+    readTailNum v = case v of
+      "-inf" -> Just (-1 / 0)
+      "-Inf" -> Just (-1 / 0)
+      _ -> readMaybeDouble v
+    readMaybeDouble v = case reads (fixExp v) :: [(Double, String)] of
+      [(d, "")] -> Just d
+      _ -> Nothing
+    -- Python's repr writes 1e-05 and Julia 1.0e-5; both are fine for 'reads'
+    -- once a mantissa without a point gets one.
+    fixExp v = let (m, ex) = break (`elem` "eE") v
+                   m' = if '.' `elem` m then m else m ++ ".0"
+                   ex' = case ex of
+                           (c : '+' : r) -> c : r
+                           _ -> ex
+               in m' ++ ex'
+    pythonScript cwd compiled = Right ("py", unlines $
+      [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")" ] ++
+      concat [ [ "_ns = {}"
+               , "exec(" ++ show (stubTorchModule (unlines (SPLL.CodeGenPyTorch.generateFunctions True env))) ++ ", _ns)"
+               , "print(" ++ show l ++ " + '\\t' + repr(float(_ns['main']." ++ method c ++ "(" ++ pyVal q ++ ")[0])))" ]
+             | (l, env, c, q, _, _) <- compiled ])
+    batchedScript cwd compiled = do
+      blocks <- mapM (\(l, env, c, q, _, _) -> do
+                        srcLines <- generateFunctionsBatched True env
+                        -- A float sample as float64: 'batchLiteral' leaves it at
+                        -- torch's float32 default, and a float32 query is computed
+                        -- in float32 (~1e-7 relative), whatever the runtime does.
+                        lit <- case q of
+                          VFloat f -> Right ("torch.tensor([" ++ show f ++ "], dtype=torch.float64)")
+                          _ -> maybe (Left ("no batch literal for " ++ show q)) Right (batchLiteral [q])
+                        return [ "_ns = {}"
+                               , "exec(" ++ show (unlines srcLines) ++ ", _ns)"
+                               , "_r = _ns['main']." ++ method c ++ "(" ++ lit ++ ")[0]"
+                               , "print(" ++ show l ++ " + '\\t' + repr(float(_r[0] if torch.is_tensor(_r) and _r.dim() > 0 else _r)))" ])
+                     compiled
+      return ("py", unlines ([ "import sys, torch", "sys.path.insert(0, " ++ show cwd ++ ")" ] ++ concat blocks))
+    juliaScript cwd compiled = Right ("jl", unlines $
+      [ "include(" ++ show (cwd ++ "/juliaLib.jl") ++ ")", "using .JuliaSPPLLib" ] ++
+      concat [ [ "module Prog" ++ show i, "using ..JuliaSPPLLib" ] ++ SPLL.CodeGenJulia.generateFunctions env ++ [ "end" ]
+               ++ [ "println(" ++ show l ++ ", \"\\t\", repr(Float64(Base.invokelatest(Prog" ++ show i ++ "." ++ juliaFn c ++ ", " ++ juliaVal q ++ ")[1])))" ]
+             | (i, (l, env, c, q, _, _)) <- zip [0 :: Int ..] compiled ])
+    method c = if c then "integrate" else "forward"
+    juliaFn c = if c then "main_integ" else "main_prob"
+    stubTorchModule = unpack . replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") . pack
 
 -- ===========================================================================
 -- Enumeration bucketing (task batched-bucketing-splits-on-nullary-constructors)

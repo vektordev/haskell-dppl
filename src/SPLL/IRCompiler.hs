@@ -2511,22 +2511,23 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
 toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
-    -- p(left > right) = p(diff > 0) = 1 - cdf(0)
-    return (mass (IRIf sample (srComplement (semiringOf meta) cdfAt0) cdfAt0))
+    -- p(left > right) = p(diff > 0) = 1 - cdf(0), spelled through
+    -- 'complementWhen' so the upper tail keeps its precision
+    mass <$> complementWhen (semiringOf meta) sample cdfAt0
 toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left < right) = p(diff < 0) = cdf(0)
-    return (mass (IRIf sample cdfAt0 (srComplement (semiringOf meta) cdfAt0)))
+    mass <$> complementWhen (semiringOf meta) (notIR sample) cdfAt0
 toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
     setVariables [(var, l)]
     integ <- toIRInference (unpruned meta) True right (IRVar var)  -- complemented below, see 'unpruned'
-    var2 <- mkVariable "rhs_integral"
-    let returnExpr = IRIf sample (IRVar var2) (srComplement (semiringOf meta) (IRVar var2))
-    setVariables [(var2, unP (rProb integ))]
+    -- 'complementWhen' rather than a let-bound CDF and its complement, so a
+    -- normal upper tail keeps its precision ('upperTailComplement')
+    returnExpr <- complementWhen (semiringOf meta) (notIR sample) (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
     return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
   | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
@@ -2534,9 +2535,9 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
     r <- toIRGenerate meta right
     setVariables [(var, r)]
     integ <- toIRInference (unpruned meta) True left (IRVar var)  -- complemented below, see 'unpruned'
-    var2 <- mkVariable "lhs_integral"
-    let returnExpr = IRIf sample (srComplement (semiringOf meta) (IRVar var2)) (IRVar var2)
-    setVariables [(var2, unP (rProb integ))]
+    -- 'complementWhen' rather than a let-bound CDF and its complement, so a
+    -- normal upper tail keeps its precision ('upperTailComplement')
+    returnExpr <- complementWhen (semiringOf meta) sample (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
     return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
 toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
@@ -2545,9 +2546,9 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     l <- toIRGenerate meta left
     setVariables [(var, l)]
     integ <- toIRInference (unpruned meta) True right (IRVar var)  -- complemented below, see 'unpruned'
-    var2 <- mkVariable "rhs_integral"
-    let returnExpr = IRIf sample (srComplement (semiringOf meta) (IRVar var2)) (IRVar var2)
-    setVariables [(var2, unP (rProb integ))]
+    -- 'complementWhen' rather than a let-bound CDF and its complement, so a
+    -- normal upper tail keeps its precision ('upperTailComplement')
+    returnExpr <- complementWhen (semiringOf meta) sample (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
     return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
   | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
@@ -2555,9 +2556,9 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     r <- toIRGenerate meta right
     setVariables [(var, r)]
     integ <- toIRInference (unpruned meta) True left (IRVar var)  -- complemented below, see 'unpruned'
-    var2 <- mkVariable "lhs_integral"
-    setVariables [(var2, unP (rProb integ))]
-    let returnExpr = IRIf sample (IRVar var2) (srComplement (semiringOf meta) (IRVar var2))
+    -- 'complementWhen' rather than a let-bound CDF and its complement, so a
+    -- normal upper tail keeps its precision ('upperTailComplement')
+    returnExpr <- complementWhen (semiringOf meta) (notIR sample) (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
     return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
 -- mult(0, y) = 0 for every y, whatever y's own distribution or shape (task

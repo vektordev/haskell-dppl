@@ -39,6 +39,20 @@ value, gradient and dtype for both runtimes, and **fails on any new public
 one means deciding whether a tensor can reach it. All but that classification
 check need a torch-enabled python and skip without one, like `BatchedPython`.
 
+## The normal CDF is `erfc(-x / sqrt 2) / 2`
+
+Every runtime, the interpreter (`irCDF`/`irLogCDF`) and the optimizer's
+constant folder compute `Phi(x)` as `erfc(-x / sqrt 2) / 2`, not
+`(1 + erf(x / sqrt 2)) / 2`. The latter cancels in the lower tail
+(`Phi(-8)` came out 6.1e-16 for 6.22e-16), which is where the compiler puts
+every upper tail too, as `Phi(-z)` (`Semiring.upperTailComplement`). Python
+uses `math.erfc`/`torch.special.erfc`. Julia calls `erfc` from the libm it
+already links (`ccall((:erfc, Base.Math.libm), ...)`), because Base has no
+`erfc` and SpecialFunctions is not a dependency. It used to carry a 5-term
+Abramowitz-Stegun `erf` with ~1.5e-7 absolute error. A batched query passed
+as a float32 tensor is still computed in float32 (~1e-7 relative), since a
+caller's tensor keeps its dtype (see above).
+
 ## Emitting float literals
 
 Haskell's `show` renders the non-finite doubles as `Infinity`, `-Infinity` and

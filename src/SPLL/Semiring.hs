@@ -40,7 +40,7 @@ module SPLL.Semiring (
   maxLinearSemiring, maxLogSemiring,
   semiringSuffix,
   negInfIR, logSumExpIR, logSubExpIR, maskSR, fromLinearSR, measureDiffSR, sumAllSR,
-  distDensity, distCumulative, scaledNormalDensity,
+  distDensity, distCumulative, scaledNormalDensity, upperTailComplement, complementWhen,
   -- * IR boolean/constant helpers
   const0, const1, constTrueIR, constFalseIR, notIR, orIR, andIR,
   outsideUnitInterval, anyGuardedDim,
@@ -240,11 +240,11 @@ mkSemiring SRCounting   _     = error $ "Semiring.mkSemiring: SRCounting has no 
 
 linearSemiring :: Semiring
 linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) OpMult (IROp OpPlus) (IROp OpSub)
-                          (IROp OpSub const1)
+                          (upperTailComplement Linear (IROp OpSub const1))
 
 logSemiring :: Semiring
 logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus logSumExpIR logSubExpIR
-                       (\x -> IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp x)))
+                       (upperTailComplement Log logComplement)
 
 -- | Max-product (MAP/Viterbi), linear domain: independent conjunction is still
 -- plain multiply (maximizing a product of independent factors over independent
@@ -262,7 +262,7 @@ logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus lo
 -- error at the point it would be compiled -- see 'mapHasNoExcept'.
 maxLinearSemiring :: Semiring
 maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult maxPairIR
-                             mapHasNoExcept (IROp OpSub const1)
+                             mapHasNoExcept (upperTailComplement Linear (IROp OpSub const1))
 
 -- | Max-product, log domain: 'srTimes' is add (as in ordinary log-space
 -- sum-product -- independent factors still combine by adding their logs), and
@@ -273,7 +273,56 @@ maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult max
 -- stabilize).
 maxLogSemiring :: Semiring
 maxLogSemiring = Semiring True ROpMax negInfIR const0 (IROp OpPlus) OpPlus maxPairIR
-                          mapHasNoExcept (\x -> IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp x)))
+                          mapHasNoExcept (upperTailComplement Log logComplement)
+
+-- | The log-space complement @log(1 - exp x)@ of a log-probability.
+logComplement :: IRExpr -> IRExpr
+logComplement x = IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp x))
+
+-- | 'srComplement' that keeps a normal upper tail's relative precision (task
+-- cumulative-normal-upper-tail-cancellation). @1 - Phi(z)@ subtracts two
+-- numbers within @Phi(-z)@ of each other, so a tail of size @P@ keeps only
+-- about @1e-16 / P@ of relative precision: @P(Normal > 8)@ answered
+-- 6.66e-16 for 6.22e-16. The normal is symmetric, so the complement of a
+-- standard-normal CDF leaf is the same leaf at @-z@, which the runtimes
+-- compute through @erfc@ without cancelling. The log form is the same leaf
+-- too: @log(1 - exp(log Phi(z))) = log Phi(-z)@.
+--
+-- Structural, so it fires only where the leaf is visible: through 'IRIf'
+-- arms and an 'IRLetIn' body (both commute with a pointwise complement), and
+-- only for a leaf in the semiring's own 'LogSpace'. Anything else -- a
+-- let-bound 'IRVar', a mixture sum, a uniform CDF (whose @1 - x@ is already
+-- exact for @x@ in [0.5, 1], by Sterbenz) -- takes @fallback@, the plain
+-- complement this replaced. 'complementWhen' is the variant for a site that
+-- would otherwise let-bind the operand and complement the variable.
+upperTailComplement :: LogSpace -> (IRExpr -> IRExpr) -> IRExpr -> IRExpr
+upperTailComplement ls fallback = go
+  where
+    go (IRCumulative IRNormal ls' z) | ls' == ls = IRCumulative IRNormal ls' (IRUnaryOp OpNeg z)
+    go (IRIf c a b) = IRIf c (go a) (go b)
+    go (IRLetIn v x b) = IRLetIn v x (go b)
+    go e = fallback e
+
+-- | @if cond then srComplement x else x@, without either duplicating @x@ or
+-- hiding it behind a variable from 'upperTailComplement'. The comparison
+-- sites (@v > c@, @v < c@) pick between a CDF and its complement on the
+-- queried Bool; they used to let-bind the CDF and complement the variable,
+-- which 'upperTailComplement' cannot see through. Here the choice is pushed
+-- down to the leaves instead: a standard-normal CDF leaf takes its argument
+-- times @-1@ or @1@ (exact, and @z@ is evaluated once), and any other leaf is
+-- let-bound locally -- in place, so it stays inside any 'IRLetIn' scope it
+-- was pushed through -- and selected as before.
+complementWhen :: Semiring -> IRExpr -> IRExpr -> CompilerMonad IRExpr
+complementWhen sr cond = go
+  where
+    ls = if srLogSpace sr then Log else Linear
+    go (IRCumulative IRNormal ls' z) | ls' == ls =
+      return (IRCumulative IRNormal ls' (IROp OpMult (IRIf cond (IRConst (VFloat (-1))) const1) z))
+    go (IRIf c a b) = IRIf c <$> go a <*> go b
+    go (IRLetIn v x b) = IRLetIn v x <$> go b
+    go e = do
+      v <- mkVariable "cdf"
+      return (IRLetIn v e (IRIf cond (srComplement sr (IRVar v)) (IRVar v)))
 
 -- | Pairwise max of two already-let-bound values (both 'mixWith' and
 -- 'enumSumP' bind their operands before combining them, so this never

@@ -45,20 +45,14 @@ function density_IRNormal(x)
     return (1.0 / sqrt(2 * pi)) * exp(-0.5 * x^2)
 end
 
+# Phi(x) = erfc(-x / sqrt 2) / 2, through the libm Julia already links
+# (openlibm; Base has no erfc and SpecialFunctions is not a dependency). This
+# replaced a 5-term Abramowitz-Stegun erf with ~1.5e-7 absolute error, and the
+# erfc form, unlike 1 + erf, does not cancel in the lower tail -- where the
+# compiler puts every upper tail too, as Phi(-z) (Semiring.upperTailComplement;
+# task cumulative-normal-upper-tail-cancellation).
 function cumulative_IRNormal(x)
-    # Approximation of CDF using error function
-    function erf(t::Float64)
-        a1, a2, a3, a4, a5 = 0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429
-        p = 0.3275911
-        sign = t < 0 ? -1.0 : 1.0
-        t = abs(t)
-        
-        t1 = 1.0 / (1.0 + p * t)
-        
-        return sign * (1.0 - (((((a5 * t1 + a4) * t1) + a3) * t1 + a2) * t1 + a1) * t1 * exp(-t^2))
-    end
-    
-    return 0.5 * (1 + erf(x / sqrt(2)))
+    return ccall((:erfc, Base.Math.libm), Float64, (Float64,), -Float64(x) / sqrt(2.0)) / 2.0
 end
 
 # Native log-pdf/log-cdf (task log-space-probability-computation), computed
