@@ -4920,7 +4920,11 @@ mergeWitnessValue p1 p2
   | Just (c1, fs1) <- ctorSpineIR p1, Just (c2, fs2) <- ctorSpineIR p2
   , c1 == c2, length fs1 == length fs2 =
   foldl IRApply (IRVar c1) (zipWith mergeWitnessValue fs1 fs2)
-mergeWitnessValue p1 p2 = IRIf (irRuntimeContainsAny p1) p2 p1
+-- A bare wildcard on the second side is the least informative witness of all,
+-- so the first wins even when it is only partly known: @isRight m@ witnesses
+-- @Right ANY@, @right m@ at @Right ANY@ witnesses a bare @ANY@, and taking the
+-- latter measured the draw at a sentinel (a type error in its @isLeft@).
+mergeWitnessValue p1 p2 = IRIf (IRUnaryOp OpIsAny p2) p1 (IRIf (irRuntimeContainsAny p1) p2 p1)
 
 -- | A witness built with a wildcard inside a constructor (not at its root):
 -- statically a set of values rather than one.

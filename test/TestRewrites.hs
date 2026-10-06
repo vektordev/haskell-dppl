@@ -98,6 +98,11 @@ knownDivergences =
   , Known "drawDestructuredShared" HelperExtract "" structuredReread
   , Known "setWitnessTupleDisjointFields" HelperExtract "" structuredReread
   , Known "letBoundEitherDestructure" HelperExtract "isLeft" structuredReread
+  -- `isR m = isRight m` on the draw-bound Maybe m: every point query answers
+  -- P(isRight) = 0.5, the payload's density dropped. Pre-existing (the same
+  -- 0.5 at the base compiler); exposed when observeMaybePayloadRightAny left
+  -- known-issues for the corpus.
+  , Known "observeMaybePayloadRightAny" HelperExtract "isRight" structuredReread
   -- `h z = z * Normal; main = h 0.0`: inside the helper the zero is a
   -- parameter, not statically zero, and the product inverts through a
   -- division by it (NaN at dim 1). Exposed when drawBoundZeroTimesNormal
