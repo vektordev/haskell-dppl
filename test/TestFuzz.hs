@@ -867,9 +867,9 @@ prop_Fuzz_MixtureFollowsCombinationRules =
   withMaxSuccess (fuzzCases 25) $ forAll genMixturePair $ \(exprA, exprB, q) -> ioProperty $ withinBudgetScaled "prop_Fuzz_MixtureFollowsCombinationRules" 10 $ do
     -- 'withADTs': since milestone M4 an arm of any type may build or take
     -- apart a pool ADT internally, and has to declare it.
-    let progA = withADTs $ Program [("main", exprA)] [] [] []
-        progB = withADTs $ Program [("main", exprB)] [] [] []
-        progM = withADTs $ Program [("main", ifThenElse (bernoulli q) exprA exprB)] [] [] []
+    let progA = withADTs $ Program [("main", exprA)] [] [] [] []
+        progB = withADTs $ Program [("main", exprB)] [] [] [] []
+        progM = withADTs $ Program [("main", ifThenElse (bernoulli q) exprA exprB)] [] [] [] []
     envs <- mapM (compileSafe defaultCompilerConfig) [progA, progB, progM]
     case envs of
       [Just envA, Just envB, Just envM]
@@ -1743,15 +1743,15 @@ adtRecursionGeneratorTests :: TestTree
 adtRecursionGeneratorTests = testGroup "ADT and recursion generator"
   [ testCase "withADTs declares exactly the pool types a program uses" $ do
       let declared p = map dataName (adts (withADTs p))
-      assertEqual "unused" [] (declared (Program [("main", constF 1.0)] [] [] []))
+      assertEqual "unused" [] (declared (Program [("main", constF 1.0)] [] [] [] []))
       assertEqual "test on a constructor" ["Hue"]
-        (declared (Program [("main", injF "isRed" [injF "Red" []])] [] [] []))
+        (declared (Program [("main", injF "isRed" [injF "Red" []])] [] [] [] []))
       assertEqual "recursive" ["Chain"]
-        (declared (Program [("main", injF "Link" [constF 1.0, injF "Stop" []])] [] [] []))
+        (declared (Program [("main", injF "Link" [constF 1.0, injF "Stop" []])] [] [] [] []))
       assertEqual "a neural target counts although nothing reads it" ["Pt"]
-        (declared (Program [("main", constB True)] [("nn", TArrow TSymbol (TADT "Pt"), Nothing)] [] []))
+        (declared (Program [("main", constB True)] [("nn", TArrow TSymbol (TADT "Pt"), Nothing)] [] [] []))
   , testCase "the whole pool validates as declarations" $
-      assertEqual "" (Right ()) (validateProgram (Program [("main", constB True)] [] adtPool []))
+      assertEqual "" (Right ()) (validateProgram (Program [("main", constB True)] [] adtPool [] []))
   , testCase "every pool type's smallest leaf recovers to it" $
       mapM_ (\n -> case typedLeaves (TyADT n) of
                (l : _) -> assertEqual n (Just (TyADT n)) (tyOfTypedExpr l)
@@ -1780,7 +1780,7 @@ adtRecursionGeneratorTests = testGroup "ADT and recursion generator"
       -- error, by taking the then-arm of the guard.
       let guardedLv = letIn "v0" (injF "Stop" [])
                         (ifThenElse (injF "isLink" [var "v0"]) (injF "lv" [var "v0"]) (constF 1.0))
-          prog = withADTs (Program [("main", guardedLv)] [] [] [])
+          prog = withADTs (Program [("main", guardedLv)] [] [] [] [])
       assertEqual "the original is guarded" [] (unguardedProjections prog)
       mapM_ (\p' -> assertEqual (show p') [] (unguardedProjections p')) (shrinkTypedProgram prog)
   , testProperty "a recursive draw validates and its main type is recoverable" $
@@ -2070,7 +2070,7 @@ fuzzScalingTests = testGroup "Fuzz scaling"
 -- 'Left' from constant folding.)
 staticallyEmptyTailProgram :: Program
 staticallyEmptyTailProgram =
-  Program [("main", ltail (ltail (cons (left (constI 0)) nul)))] [] [] []
+  Program [("main", ltail (ltail (cons (left (constI 0)) nul)))] [] [] [] []
 
 -- | A draw that crashes the compiler no matter how the error channels are
 -- wired: the bottom is inside a constant, so every pass that forces it throws.
@@ -2078,7 +2078,7 @@ staticallyEmptyTailProgram =
 -- 'prop_Fuzz_GeneratorCoverage' must classify such a draw, not die of it.
 crashingProgram :: Program
 crashingProgram =
-  Program [("main", constI (error "deliberate crash: this draw crashes the compiler"))] [] [] []
+  Program [("main", constI (error "deliberate crash: this draw crashes the compiler"))] [] [] [] []
 
 errorChannelTests :: TestTree
 errorChannelTests = testGroup "Error channels"
@@ -2169,7 +2169,7 @@ shrinkerTests = testGroup "Shrinker"
       -- Every candidate must still be a *valid program*: that is the property
       -- an unbound v0 would break, and validation is what would catch it.
       conjoin [ counterexample (show e')
-                  (validateProgram (withADTs (Program [("main", e')] [] [] [])) === Right ())
+                  (validateProgram (withADTs (Program [("main", e')] [] [] [] [])) === Right ())
               | e' <- shrinkTypedExpr liveLet ]
   , testProperty "a constructor stack is not stripped a layer" $ once $
       -- @left (right 0)@ recovers as @Either (Either ? Int) ?@ and its argument

@@ -58,6 +58,11 @@ module SPLL.ReservedNames
   , componentNormalName
     -- * Group-name suffixes
   , neuralReadLogitsSuffix
+  , perValuePointSuffix
+  , perValuePriorSuffix
+  , perValueGivenSuffix
+  , perValueSlotSuffix
+  , perValueHelperSuffixes
   , maxProductGroupTag
   , countingGroupTag
   , sumProductGroupTag
@@ -226,6 +231,29 @@ extraReservedSuffixes = ["_prob_deriv"]
 -- @n ++ neuralReadLogitsSuffix@.
 neuralReadLogitsSuffix :: String
 neuralReadLogitsSuffix = "_auto"
+
+-- | The helper definitions a per-value function @f@ (one whose signature marks
+-- a result slot @Enumerated@; task per-value-query-over-enumerated-slot,
+-- "SPLL.PerValue") is compiled through:
+--
+-- * @f__point@ -- @f@'s own definition, answering ordinary point queries; every
+--   other function's reference to @f@ is redirected to it;
+-- * @f__prior@ / @f__given@ -- the fast path's split of @f@ at the draw that
+--   binds the marked slot: the draw's distribution, and the rest of the body
+--   with the drawn value as an extra, deterministic parameter;
+-- * @f__slot@ -- the marked slot alone, read for its finite domain and never
+--   compiled.
+--
+-- A user definition of one of these names beside a per-value @f@ is refused
+-- by 'SPLL.PerValue.validateSignatures'.
+perValuePointSuffix, perValuePriorSuffix, perValueGivenSuffix, perValueSlotSuffix :: String
+perValuePointSuffix = "__point"
+perValuePriorSuffix = "__prior"
+perValueGivenSuffix = "__given"
+perValueSlotSuffix  = "__slot"
+
+perValueHelperSuffixes :: [String]
+perValueHelperSuffixes = [perValuePointSuffix, perValuePriorSuffix, perValueGivenSuffix, perValueSlotSuffix]
 
 -- | The tags 'SPLL.Semiring.semiringSuffix' gives each semiring family; an
 -- extra-semiring compile of @f@ is the group @f_<tag>@.

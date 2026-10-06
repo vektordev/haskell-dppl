@@ -83,7 +83,7 @@ neuralDeclToString (name, rty, Just tag) =
 -- ADTs has to grow a renderer for them here, or the roundtrip will silently
 -- compare against a program with its `data` declarations dropped.
 programToString :: Program -> String
-programToString (Program fnDecls neuralDecls _adts _enc) =
+programToString (Program fnDecls neuralDecls _adts _enc _) =
     unlines (map fnDeclToString fnDecls ++ map neuralDeclToString neuralDecls)
 
 testParse :: StateT Int (Parsec Void String) a -> String -> Either (ParseErrorBundle String Void) a
@@ -357,7 +357,7 @@ prop_columnOneNotContinuation :: Property
 prop_columnOneNotContinuation =
   let src = "f = g\ng y = y + 1.0"
   in case tryParseProgram "" src of
-       Right (Program fns _ _ _) -> counterexample ("expected 2 defs, got " ++ show (length fns)) (length fns === 2)
+       Right (Program fns _ _ _ _) -> counterexample ("expected 2 defs, got " ++ show (length fns)) (length fns === 2)
        Left err -> counterexample (errorBundlePretty err) False
 
 -- Underscore in identifier
@@ -416,7 +416,7 @@ prop_normalMinusFloat =
   conjoin (map check ["main = Normal - 3.0", "main = Normal -3.0"])
   where
     check src = case tryParseProgram "" src of
-      Right (Program [("main", expr)] _ _ _) ->
+      Right (Program [("main", expr)] _ _ _ _) ->
         counterexample ("Expected subtraction in: " ++ src ++ ", got: " ++ show expr) $
           case expr of
             Expr _ (Apply (Expr _ (Var "Normal")) _) -> False
@@ -429,7 +429,7 @@ prop_neuralRealParsesAsContinuous :: Property
 prop_neuralRealParsesAsContinuous =
   let src = "neural f :: (Symbol -> Float) of Real\nmain sym = f sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ [("f", _, tag)] _ _) -> tag === Just MultiContinuous
+       Right (Program _ [("f", _, tag)] _ _ _) -> tag === Just MultiContinuous
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
 
@@ -438,7 +438,7 @@ prop_neuralUnderscoreParsesAsAuto :: Property
 prop_neuralUnderscoreParsesAsAuto =
   let src = "neural f :: (Symbol -> (Bool, Float)) of (_, _)\nmain sym = f sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ [("f", _, tag)] _ _) -> tag === Just (MultiTuple MultiAuto MultiAuto)
+       Right (Program _ [("f", _, tag)] _ _ _) -> tag === Just (MultiTuple MultiAuto MultiAuto)
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
 
@@ -447,7 +447,7 @@ prop_neuralMixedExplicitAndPlaceholders :: Property
 prop_neuralMixedExplicitAndPlaceholders =
   let src = "neural f :: (Symbol -> (Int, Float)) of ([0, 1, 2], Real)\nmain sym = f sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ [("f", _, tag)] _ _) ->
+       Right (Program _ [("f", _, tag)] _ _ _) ->
          tag === Just (MultiTuple (MultiDiscretes [VInt 0, VInt 1, VInt 2]) MultiContinuous)
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
@@ -458,7 +458,7 @@ prop_underscorePrefixedIdentifierIsTypeRef :: Property
 prop_underscorePrefixedIdentifierIsTypeRef =
   let src = "neural f :: (Symbol -> Bool) of _foo\nmain sym = f sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ [("f", _, tag)] _ _) -> tag === Just (MultiTypeRef "_foo")
+       Right (Program _ [("f", _, tag)] _ _ _) -> tag === Just (MultiTypeRef "_foo")
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
 
@@ -469,7 +469,7 @@ prop_neuralWriteLogitsRegistersPartitionPlan :: Property
 prop_neuralWriteLogitsRegistersPartitionPlan =
   let src = "neural writeLogits :: Int of [0, 1, 2]\nmain = 0\n"
   in case tryParseProgram "" src of
-       Right (Program _ neuralDecls _ enc) ->
+       Right (Program _ neuralDecls _ enc _) ->
          counterexample ("Unexpected neurals: " ++ show neuralDecls) (null neuralDecls)
          .&&. (enc === [(TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])])
        Left err -> counterexample (errorBundlePretty err) False
@@ -482,7 +482,7 @@ prop_neuralOfClauseRegistersSugar :: Property
 prop_neuralOfClauseRegistersSugar =
   let src = "neural decA :: (Symbol -> Int) of [0, 1, 2]\nmain sym = decA sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ _ _ enc) -> enc === [(TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])]
+       Right (Program _ _ _ enc _) -> enc === [(TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])]
        Left err -> counterexample (errorBundlePretty err) False
 
 -- "observe base (\v -> pred)" is surface sugar: it desugars to the hand-written

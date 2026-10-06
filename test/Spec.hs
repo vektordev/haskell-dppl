@@ -20,6 +20,7 @@ import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests, slowInternalsTests)
 import TestObservationMask (observationMaskTests)
+import TestPerValue (perValueTests)
 import TestMonomorphize (monomorphizeTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
@@ -64,7 +65,7 @@ prop_TopK = once $ ioProperty $ do
 -- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
 prop_CheckReadmeCodeListing1 :: Property
 prop_CheckReadmeCodeListing1 = ioProperty $ do
-  let twoDice = Program [("main", dice 6 #<+># dice 6)] [] [] []
+  let twoDice = Program [("main", dice 6 #<+># dice 6)] [] [] [] []
   case runGen defaultCompilerConfig twoDice [] of
     Left err -> return $ counterexample err False
     Right gen' -> do
@@ -93,7 +94,7 @@ prop_CheckReadmeCodeListing1 = ioProperty $ do
 -- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
 prop_CheckReadmeCodeListing2 :: Property
 prop_CheckReadmeCodeListing2 = ioProperty $ do
-  let dist = Program [("main", normal #*# constF 2 #+# constF 1)] [] [] []
+  let dist = Program [("main", normal #*# constF 2 #+# constF 1)] [] [] [] []
   case runGen defaultCompilerConfig dist [] of
     Left err -> return $ counterexample err False
     Right gen' -> do 
@@ -120,7 +121,7 @@ prop_TopKNestedPrunesDeeper = once $ ioProperty $ do
   let twoLevel = Program [("main",
         ifThenElse (bernoulli 0.12)
           (ifThenElse (bernoulli 0.12) (constF 1.0) (constF 0.0))
-          (constF 2.0))] [] [] []
+          (constF 2.0))] [] [] [] []
   let topKResult = irDensity (topKConf 0.1) twoLevel (VFloat 1.0) []
   let exactResult = irDensity defaultCompilerConfig twoLevel (VFloat 1.0) []
   case (topKResult, exactResult) of
@@ -139,7 +140,7 @@ prop_TopKCrossFunction = once $ ioProperty $ do
   let crossFunc = Program
         [ ("main",  ifThenElse (bernoulli 0.12) (var "inner") (constF 2.0))
         , ("inner", ifThenElse (bernoulli 0.12) (constF 1.0) (constF 0.0)) ]
-        [] [] []
+        [] [] [] []
   let topKResult = irDensity (topKConf 0.1) crossFunc (VFloat 1.0) []
   let exactResult = irDensity defaultCompilerConfig crossFunc (VFloat 1.0) []
   case (topKResult, exactResult) of
@@ -178,7 +179,7 @@ prop_TopKMonotonicBranches = once $ ioProperty $ do
 -- inner: cond(1)+uniform(1)+const3(1)-1=2; outer: cond(1)+2+const1(1)-1=3.
 prop_BCLeafCountIfElse :: Property
 prop_BCLeafCountIfElse = once $ ioProperty $ do
-  let prog = Program [("main", ifThenElse (bernoulli 0.5) (ifThenElse (bernoulli 0.5) uniform (constF 3.0)) (constF 1.0))] [] [] []
+  let prog = Program [("main", ifThenElse (bernoulli 0.5) (ifThenElse (bernoulli 0.5) uniform (constF 3.0)) (constF 1.0))] [] [] [] []
   let result = irDensity bcConf prog (VFloat 0.5) []
   case result of
     VProbDimBC _ _ bc -> return $ counterexample ("Expected BC=3, got " ++ show bc) (bc == 3.0)
@@ -319,9 +320,9 @@ prop_BCNamedConditionalEqualsInline = once $ ioProperty $ do
       named = Program
         [ ("main",     apply (var "selector") coin)
         , ("selector", "x" #-># ifThenElse (var "x" #># constF 1.5) (constF 1.0) (constF 0.0))
-        ] [] [] []
+        ] [] [] [] []
       inlined = Program
-        [ ("main", ifThenElse (coin #># constF 1.5) (constF 1.0) (constF 0.0)) ] [] [] []
+        [ ("main", ifThenElse (coin #># constF 1.5) (constF 1.0) (constF 0.0)) ] [] [] [] []
   return $ conjoin
     [ case (irDensity bcConf named (VFloat q) [], irDensity bcConf inlined (VFloat q) []) of
         (VProbDimBC pN dN bcN, VProbDimBC pI dI bcI) ->
@@ -343,9 +344,9 @@ prop_BCNamedWrapperEqualsInline = once $ ioProperty $ do
       named = Program
         [ ("main", apply (var "wrap") coin)
         , ("wrap", "x" #-># injF "plus" [var "x", constF 1.0])
-        ] [] [] []
+        ] [] [] [] []
       inlined = Program
-        [ ("main", injF "plus" [coin, constF 1.0]) ] [] [] []
+        [ ("main", injF "plus" [coin, constF 1.0]) ] [] [] [] []
   return $ conjoin
     [ case (irDensity bcConf named (VFloat q) [], irDensity bcConf inlined (VFloat q) []) of
         (VProbDimBC pN dN bcN, VProbDimBC pI dI bcI) ->
@@ -557,6 +558,7 @@ main = do
     , parserTests
     , internalsTests
     , observationMaskTests
+    , perValueTests
     , shrinkerTests
     , neuralGeneratorTests
     , arrowGeneratorTests

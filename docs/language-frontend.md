@@ -1,6 +1,6 @@
 # Surface language and front end
 
-Binding forms, `observe`, reserved names, type-error reporting and monomorphization.
+Binding forms, `observe`, type signatures, reserved names, type-error reporting and monomorphization.
 
 ## Binding forms: `draw` and `define`
 
@@ -59,6 +59,24 @@ which list is which. Mirrors the plan-guided engine's analogous
 `planInvert`/`planInvertBool` fold over (True-worlds, False-worlds) pairs.
 Corpus: `observeTwoSidedIntervalAnd` (the `&&` twin of `observeTwoSidedInterval`)
 and `observeDisjointTails` (`||`, the double-counting canary).
+
+## Type signatures
+
+A top-level definition may carry a signature, `f :: T` (`SPLL.Parser.pSignature`,
+`Program.signatures`). It is optional: a definition without one is typed by
+inference alone. The type grammar is the ordinary one, plus arrows without
+parentheses at the top (`Symbol -> [Symbol] -> (Int, Face)`), tuples of any
+width (right-nested, `(a, b, c)` is `(a, (b, c))`), list types `[t]`, and the
+per-value marker `Enumerated t` (see `per-value-queries.md`). Only `name ::` is
+tentative, so a broken signature is reported where it breaks.
+
+A signature *constrains* inference: RInfer adds `type(f) ~ T` after every
+other constraint, in both the monomorphic and the generalising pass, so a
+definition that disagrees is reported "In the type signature of 'f'". A
+signature naming no definition, two signatures for one name, and more than one
+`Enumerated` slot are refused by `SPLL.PerValue.validateSignatures`. A
+`NotSetYet` in a signature is a hole (a fresh variable); only the compiler's
+own helper signatures use it.
 
 ## Reserved names: `SPLL.ReservedNames` is the one registry
 
