@@ -48,7 +48,7 @@ module SPLL.CodeGenPyTorchBatched
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(TFloat), shapeRank)
 import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
-import SPLL.Lang.Lang (multiValueToValueList)
+import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
 -- 'pyDouble' is shared with the scalar backend for the same reason
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
@@ -57,6 +57,7 @@ import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble, groupCla
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
+import Data.Containers.ListUtils (nubOrd)
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Control.Monad (foldM)
 import Control.Monad.State (State, evalState, get, put)
@@ -346,18 +347,38 @@ generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob in
 -- sake of an optional extra entry point.
 
 -- | The class-level @DOMAIN@ constant, or @[]@ when there is no renderable
--- finite domain.
+-- finite domain, or when the domain is larger than 'denseDomainCap'.
 denseDomainLines :: Maybe MultiValue -> [String]
 -- Deduplicated: a DiscreteValues tag may enumerate the same value by several
 -- routes (tupleDiscreteDistrib's tag lists each tuple 3x), and a repeated slot
 -- would cost kernel work for a column nothing distinct reads -- and inflate V,
--- which is what dense_query's dispatch compares the batch against.
-denseDomainLines dom = case nub <$> (dom >>= (mapM domainVal . multiValueToValueList)) of
+-- which is what dense_query's dispatch compares the batch against. 'nubOrd'
+-- on the rendered literals, not 'nub', so a domain near the cap costs
+-- O(V log V) rather than O(V^2).
+denseDomainLines dom = case nubOrd <$> (dom >>= withinCap >>= (mapM domainVal . multiValueToValueList)) of
   Just vals@(_:_) ->
     [ "# Dense enumeration domain (design heterogeneous-batch-inference, M3): the"
     , "# " ++ show (length vals) ++ " value(s) a query against this function can take."
     , "DOMAIN = [" ++ intercalate ", " vals ++ "]" ]
   _ -> []
+  where
+    -- Sized from the symbolic 'MultiValue' before anything is listed: the
+    -- listing is the cross product of the slots, so a five-slot scene of
+    -- 25-value objects is 25^5 values and listing it is what ran out of
+    -- memory (task batched-compile-ooms-on-wide-product-scene). The count is
+    -- an upper bound on V (duplicates are removed only after listing).
+    withinCap mv = case multiValueCardinality mv of
+      Just n | n <= denseDomainCap -> Just mv
+      _ -> Nothing
+
+-- | The largest domain a group gets a dense @DOMAIN@ constant and
+-- @\<method\>_dense@/@_at@ entry points for. Over it, the group just has no
+-- dense methods, which is never a refusal (see the section comment above).
+-- Dense mode pays off as a @[V]@ vector a caller reuses across batches, so the
+-- cap is generous, but a domain past it would be a source literal of V values
+-- in the emitted class and a @[V]@ kernel batch on every dense call.
+denseDomainCap :: Integer
+denseDomainCap = 65536
 
 -- | Render one domain value as the per-point Python literal @bucketed@ consumes
 -- (it packs the leaves into @[B]@ tensors itself). Deliberately separate from

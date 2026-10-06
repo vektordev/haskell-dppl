@@ -1796,21 +1796,32 @@ test_mixtureNegativeLogNormalScaleCompiles = testCase "mixtureNegativeLogNormalS
 -- program in batched mode while the test tree is built, and the batched
 -- compiler still OOMs on this scene from five slots (docs-repo task
 -- batched-compile-ooms-on-wide-product-scene).
+-- | The pieces of the wide product-scene programs: an @Object@ of 25 values
+-- (@Nil | Obj shape color@), and an @n@-slot @Scene@ of them read by one
+-- network, whose @main@ counts the red objects.
+wideSceneObjDomain, wideScenePrelude, wideSceneIsR :: String
+wideSceneObjDomain = "{Nil | Obj {Cube | Sphere | Cylinder} {Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple}}"
+wideScenePrelude = unlines
+  [ "data Color = Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple"
+  , "data Shape = Cube | Sphere | Cylinder"
+  , "data Object = Nil | Obj shape::Shape, color::Color" ]
+wideSceneIsR = "isR o = if isObj o then (if isRed (color o) then 1 else 0) else 0"
+
+wideProductSceneSrc :: Int -> String
+wideProductSceneSrc n = wideScenePrelude ++ unlines
+  [ "data Scene = Scene " ++ intercalate ", " [ "o" ++ show i ++ "::Object" | i <- [1 .. n] ]
+  , "neural extract :: (Symbol -> Scene) of {Scene" ++ concatMap (const (' ' : wideSceneObjDomain)) [1 .. n] ++ "}"
+  , wideSceneIsR
+  , "main sym = draw sc = extract sym in " ++ intercalate " ++ " [ "isR (o" ++ show i ++ " sc)" | i <- [1 .. n] ] ]
+
 test_wideProductSceneAccessorCompilesFast :: TestTree
 test_wideProductSceneAccessorCompilesFast = testCase "wideProductSceneAccessorCompilesFast" $ do
   let n = 10 :: Int
       slots = [1 .. n]
-      objDomain = "{Nil | Obj {Cube | Sphere | Cylinder} {Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple}}"
-      prelude = unlines
-        [ "data Color = Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple"
-        , "data Shape = Cube | Sphere | Cylinder"
-        , "data Object = Nil | Obj shape::Shape, color::Color" ]
-      isR = "isR o = if isObj o then (if isRed (color o) then 1 else 0) else 0"
-      sceneSrc = prelude ++ unlines
-        [ "data Scene = Scene " ++ intercalate ", " [ "o" ++ show i ++ "::Object" | i <- slots ]
-        , "neural extract :: (Symbol -> Scene) of {Scene" ++ concatMap (const (' ' : objDomain)) slots ++ "}"
-        , isR
-        , "main sym = draw sc = extract sym in " ++ intercalate " ++ " [ "isR (o" ++ show i ++ " sc)" | i <- slots ] ]
+      objDomain = wideSceneObjDomain
+      prelude = wideScenePrelude
+      isR = wideSceneIsR
+      sceneSrc = wideProductSceneSrc n
       perObjSrc = prelude ++ unlines
         [ "neural readObj :: (Symbol -> Object) of " ++ objDomain
         , isR
@@ -1848,6 +1859,27 @@ test_wideProductSceneAccessorCompilesFast = testCase "wideProductSceneAccessorCo
     forceAll xs = foldr (\(p, d) acc -> p `seq` d `seq` acc) xs xs
     probDimOf' (Left e)  = error ("prob query error: " ++ show e)
     probDimOf' (Right v) = probDimOf v
+
+-- | The batched backend on the same ten-slot scene (task
+-- batched-compile-ooms-on-wide-product-scene). The dense-mode @DOMAIN@
+-- constant listed a group's whole value domain, which for a @Scene@-valued
+-- group is 25^10 values, so the compile ran out of memory where scalar takes
+-- 0.1s. Now a domain past 'denseDomainCap' gets no dense methods: the compile
+-- finishes, and no emitted @DOMAIN@ lists a @Scene@.
+test_wideProductSceneBatchedCompilesFast :: TestTree
+test_wideProductSceneBatchedCompilesFast = testCase "wideProductSceneBatchedCompilesFast" $ do
+  prog <- case tryParseProgram "wideProductSceneBatchedCompilesFast" (wideProductSceneSrc 10) of
+    Left err -> assertFailure ("parse error: " ++ show err) >> error "unreachable"
+    Right p  -> return p
+  let conf = defaultCompilerConfig { batched = True }
+      emitted = compile conf prog >>= generateFunctionsBatched True
+  result <- timeout (20 * 1000000) (evaluate (either (const 0) (length . concat) emitted `seq` emitted))
+  case result of
+    Nothing -> assertFailure "the batched compile of the 10-slot scene did not finish within 20s"
+    Just (Left err) -> assertFailure ("the batched compile of the 10-slot scene was refused: " ++ err)
+    Just (Right ls) ->
+      assertBool "an emitted DOMAIN constant lists the Scene domain"
+        (not (any (\l -> "DOMAIN = [" `isInfixOf` l && "Scene(" `isInfixOf` l) (concatMap lines ls)))
 
 test_wideTupleCompilesFast :: TestTree
 test_wideTupleCompilesFast = testCase "wideTupleCompilesFast" $ do
@@ -4837,6 +4869,7 @@ internalsTests = testGroup "Internals"
   , test_mixtureNegativeLogNormalScaleCompiles
   , test_wideTupleCompilesFast
   , test_wideProductSceneAccessorCompilesFast
+  , test_wideProductSceneBatchedCompilesFast
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
   , test_planEnumAccumulatorFoldPolynomial

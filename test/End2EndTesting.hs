@@ -3108,8 +3108,16 @@ loadEnd2EndCases keep = do
 -- Julia and Python coverage is untouched; only the O0 differential is skipped
 -- for it, and only here -- the same program still anchors the fast group's
 -- recursive-ADT/ANY-marginal coverage.
+--
+-- 'wideProductSceneCount' is a ten-slot product scene read by one network
+-- (task batched-compile-ooms-on-wide-product-scene). At -O2 its tail rows
+-- answer in well under a second; at -O0 one query grows about 5x per slot
+-- (0.08s at 2 slots, 6.5s at 5), so ten slots would take hours. The entry
+-- exists for its batched compile and its -O2 answers on the scalar
+-- backends; the -O0 cost is a separate interpreter defect, not the optimizer
+-- changing an answer (task unoptimized-interpreter-exponential-in-scene-slots).
 unoptimizedRecompileExempt :: [String]
-unoptimizedRecompileExempt = ["recursiveAdtMultiCtor"]
+unoptimizedRecompileExempt = ["recursiveAdtMultiCtor", "wideProductSceneCount"]
 
 -- | Programs the -O0 *codegen* groups could not run, for a defect that was
 -- not the optimizer changing an answer but the optimizer being required to

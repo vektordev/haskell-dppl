@@ -81,8 +81,11 @@ construct rather than compiling to something silently wrong. Runtime lib:
 When a group's query domain is statically finite, **dense enumeration
 mode** evaluates the kernel once over the whole domain, giving a `[V]`
 probability vector any query gathers into — strictly additive (ordinary
-methods stay byte-identical; an unrenderable domain just yields no dense
-methods). `topK` pruning is per-element (both `torch.where` arms are
+methods stay byte-identical; an unrenderable domain, or one of more than
+`denseDomainCap` = 65536 values, just yields no dense methods). The size is
+counted from the symbolic `MultiValue` before anything is listed: a
+product-ADT domain is the cross product of its slots, and listing a ten-slot
+scene's 25^10 values is what made the batched compile run out of memory. `topK` pruning is per-element (both `torch.where` arms are
 always evaluated, so pruning only picks which value survives), which
 covers the dense `[V]` axis for free too.
 
