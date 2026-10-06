@@ -28,7 +28,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedEnumBucketingTests, branchCountBackendTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedNestedSelectTests, batchedEnumBucketingTests, branchCountBackendTests)
 import TestKnownIssues (knownIssuesTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
@@ -598,6 +598,7 @@ main = do
     , batchedAdtCdfNaNGuardTests
     , wideNeuralDomainTests
     , deepExpressionSpillTests
+    , batchedNestedSelectTests
     , pythonPreludeTests
     , cliTests
     , batchedEnumBucketingTests
