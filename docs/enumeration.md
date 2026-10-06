@@ -320,7 +320,11 @@ correctness one. The plan engine keeps its small-domain coverage through
 End2End's `PlanEngineMatchesDense` (budget 0 against the default compile at
 every query point of every neural corpus program; `planEngineCorpus` lists the
 programs that must answer there) and through the `*Polynomial` growth tests in
-`TestInternals`, which compile at budget 0. Two of the moved programs,
+`TestInternals`, which compile at budget 0. Its non-neural sibling,
+`BudgetZeroMatchesDefault`, compares budget 0 against the default compile on
+every other corpus program, where budget 0 routes discrete lets through point
+inversion and the set-witness engine; `budgetZeroKnownDivergent` lists the
+tracked exceptions. Two of the moved programs,
 `planEnumRecWeightedCount`/`planEnumRecAlternatingWeightCount`, cost ~13 s each
 densely under the `-O0` interpreter and are `slow` for it (docs task
 `dense-enumeration-cost-on-accumulator-folds`). Known gap: dense enumeration

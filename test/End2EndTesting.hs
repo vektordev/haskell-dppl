@@ -91,10 +91,8 @@ selectPassDifferentialTests = do
 -- Except for 'planEngineCorpus', the programs that reached the plan engine by
 -- default before, which must still answer here.
 --
--- Non-neural programs are left out: budget 0 reaches no plan engine there, and
--- it answers some of them wrongly for a reason of its own (`p(Right ANY)` of
--- `observe` programs is 0 at budget 0; docs task
--- materialization-budget-zero-observe-any-wrong).
+-- Non-neural programs are 'budgetZeroDifferentialTests'' instead: budget 0
+-- reaches no plan engine there, so the name would mislead.
 planEngineDifferentialTests :: IO TestTree
 planEngineDifferentialTests = do
   files <- getAllTestFiles
@@ -111,6 +109,40 @@ planEngineDifferentialTests = do
     | (n, p, tcs) <- entries
     , let planEnv  = compile defaultCompilerConfig{materializationCardinality = 0} p
     , let denseEnv = compile defaultCompilerConfig p ]
+
+-- | The non-neural sibling of 'planEngineDifferentialTests' (task
+-- materialization-budget-zero-observe-any-wrong): @--materializationBudget 0@
+-- is a user-facing flag, and on a non-neural program it declines the dense
+-- enumerable-'Apply' arm, so dispatch falls through to point inversion and the
+-- set-witness engine. Wherever budget 0 answers, it must agree with the default
+-- compile at every interpreter-routed, non-slow query point. A program budget 0
+-- does not answer is skipped, as there. 'budgetZeroKnownDivergent' lists the
+-- programs where the two disagree for a tracked reason.
+budgetZeroDifferentialTests :: IO TestTree
+budgetZeroDifferentialTests = do
+  files <- getAllTestFiles
+  cases <- mapM loadCorpusPair files
+  let entries = [ (takeBaseName pplPath, p, tcs)
+                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
+                , not slow, Interpreter `elem` bs, null (neurals p)
+                , takeBaseName pplPath `notElem` budgetZeroKnownDivergent ]
+  return $ testGroup "BudgetZeroMatchesDefault"
+    [ testProperty n (once $ conjoin (map (planMatchesDense n p zeroEnv defEnv) tcs))
+    | (n, p, tcs) <- entries
+    , let zeroEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
+    , let defEnv  = compile defaultCompilerConfig p ]
+
+-- | Non-neural corpus programs whose budget-0 answer differs from the default
+-- compile's, each for a reason tracked elsewhere.
+budgetZeroKnownDivergent :: [String]
+budgetZeroKnownDivergent =
+  -- Two reasons each. The default compile's `Right` rows report the density
+  -- at dim 0 where budget 0 says dim 1 (task enumerated-sum-over-density-body:
+  -- the default's enumerated sum reports a mass). And at budget 0 the
+  -- set-witness engine reads `v < 2` on the Int `v` as `v <= 2`: `Right 2`
+  -- answers 1.0, `Left ()` impossible, `Right ANY` 1.0 (task
+  -- set-witness-int-comparison-boundary-non-strict).
+  [ "observeContinuousEqualsLetfree", "observeContinuousEqualsLetBound" ]
 
 -- | The plan engine's world measure under 'logSpace' (task
 -- worlds-measure-unification): at budget 0, wherever the linear compile of a

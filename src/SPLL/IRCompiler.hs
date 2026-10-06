@@ -4824,8 +4824,14 @@ intersectSet (WExcept s p) t = let (g1, st) = intersectSet s t
 intersectSet t (WExcept s p) = let (g1, ts) = intersectSet t s
                                    (g2, r)  = exceptPoint p ts
                                in (g1 ++ g2, r)
+-- A point that is the bare marginal wildcard at runtime (the witness recovered
+-- from an ANY slot: @fromRight@ of @Right ANY@) constrains nothing, so the
+-- other point alone survives ('mergeWitnessValue' already picks it); the bare
+-- 'OpEq' answered False there and dropped the world, so
+-- @draw x = .. in if x == 1 then right x else left ()@ at @Right ANY@ was
+-- impossible (task materialization-budget-zero-observe-any-wrong).
 intersectSet (WPoint p1 c1) (WPoint p2 c2) =
-  ([IROp OpEq p1 p2], WPoint (mergeWitnessValue p1 p2) (IROp OpMult c1 c2))
+  ([tolerateAny p1 (tolerateAny p2 (IROp OpEq p1 p2))], WPoint (mergeWitnessValue p1 p2) (IROp OpMult c1 c2))
 intersectSet (WPoint p c) (WInterval lo hi) = pointInInterval p c lo hi
 intersectSet (WInterval lo hi) (WPoint p c) = pointInInterval p c lo hi
 intersectSet (WInterval lo1 hi1) (WInterval lo2 hi2) =

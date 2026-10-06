@@ -28,7 +28,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedEnumBucketingTests, branchCountBackendTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedEnumBucketingTests, branchCountBackendTests)
 import TestKnownIssues (knownIssuesTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
@@ -521,6 +521,7 @@ main = do
   e2e <- end2endTests manifest
   selectDiff <- selectPassDifferentialTests
   planDiff <- planEngineDifferentialTests
+  budgetZeroDiff <- budgetZeroDifferentialTests
   planLog <- planEngineLogSpaceTests
   batchedPy <- batchedPythonTests
   branchCountBackends <- branchCountBackendTests
@@ -590,6 +591,7 @@ main = do
     , e2e
     , selectDiff
     , planDiff
+    , budgetZeroDiff
     , planLog
     , batchedPy
     , batchedRefusalTests
