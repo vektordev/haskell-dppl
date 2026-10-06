@@ -42,6 +42,9 @@ import SPLL.Prelude
 import qualified SPLL.CodeGenPyTorch
 import qualified SPLL.CodeGenJulia
 import Data.List (isInfixOf)
+import Control.Exception (finally)
+import ImpactManifest (openManifest, flushManifest, fullTestsRequested, manifestFile)
+import TestImpactManifest (impactManifestTests)
 
 
 normalPDF :: Double -> Double
@@ -511,7 +514,10 @@ main = do
   -- prints the full test tree including per-test timings.
   hideSuccesses <- lookupEnv "TASTY_HIDE_SUCCESSES"
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
-  e2e <- end2endTests
+  -- The impact-analysis manifest of the corpus sweeps (ImpactManifest):
+  -- opened before the tree is built, written back once it has run.
+  manifest <- fullTestsRequested >>= openManifest manifestFile
+  e2e <- end2endTests manifest
   selectDiff <- selectPassDifferentialTests
   planDiff <- planEngineDifferentialTests
   planLog <- planEngineLogSpaceTests
@@ -527,7 +533,7 @@ main = do
   -- NEST_SLOW_TESTS is set, e.g. `NEST_SLOW_TESTS=1 stack test --ta '-p Slow'`.
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   slow <- if isNothing runSlow then return (testGroup "Slow" []) else do
-    slowE2e <- slowEnd2EndTests
+    slowE2e <- slowEnd2EndTests manifest
     slowBatchedPy <- slowBatchedPythonTests
     -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
     -- programs, each compiled and queried) was a quarter of the default run's
@@ -552,7 +558,10 @@ main = do
   -- module haddock for why (it compiles the whole corpus 8x over and, kept
   -- alive by tasty's TestTree for the rest of this process's life, that was
   -- driving stack test to an OOM kill).
-  defaultMain $ testGroup "Tests"
+  -- The corpus sweeps record their passes in the impact-analysis manifest
+  -- (ImpactManifest); written once the tree has run, whatever its verdict
+  -- (defaultMain exits by throwing ExitCode).
+  flip finally (flushManifest manifest) $ defaultMain $ testGroup "Tests"
     [ specTests
     , parserTests
     , internalsTests
@@ -575,6 +584,7 @@ main = do
     , showcase
     , knownIssues
     , rewriteTests
+    , impactManifestTests
     , e2e
     , selectDiff
     , planDiff

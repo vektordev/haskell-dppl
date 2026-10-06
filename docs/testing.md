@@ -240,7 +240,7 @@ Three tiers, each opt-in by environment variable:
 | tier | how to run | expected | run it |
 |---|---|---|---|
 | default | `stack test` | **green** | after every step; the gate |
-| `Slow` | `NEST_SLOW_TESTS=1 stack test` | **green** | before a merge or a push |
+| `Slow` | `NEST_SLOW_TESTS=1 NEST_FULL_TESTS=1 stack test` | **green** | before a merge or a push |
 | `Aspirational` | `NEST_ASPIRATIONAL_TESTS=1 stack test` | red/flaky, by definition | when working on what it pins |
 
 (`SuperSlow`, `NEST_SUPERSLOW_TESTS=1`, is the sampling-vs-PDF fuzz tier; see
@@ -286,13 +286,76 @@ remaining draws as discards and reports "Gave up" instead of having to be
 abandoned. A one-line note on stderr names any property that hit it. See
 `docs/fuzz-testing.md`, "Two budgets".
 
+## Impact analysis: skipping unchanged checks
+
+The expensive corpus sweeps execute a program only when what the check
+consumes has changed since it last passed (`test/ImpactManifest.hs`; docs-repo
+task `emitted-code-test-impact-analysis`). Each check hashes its inputs into a
+key, and the manifest records the key of each (check, program) slot's last
+pass. A check whose key matches is skipped. It still appears in the tree and
+passes with the QuickCheck label `skipped: unchanged since <commit>`. After
+the run, one line per sweep says how many were skipped and how many executed:
+
+```
+Impact analysis -- End2End.Interpreter: 499 unchanged, 0 run; ...; End2End.Python: 450 unchanged, 4 run
+```
+
+**Covered sweeps and their keys.** Every key also contains the check's
+version constant (`End2EndTesting.*CheckVersion`) and the harness
+fingerprint, which is the source of `End2EndTesting.hs`, `ImpactManifest.hs`,
+`TestCaseParser.hs` and `TestTolerances.hs`. Any edit to those files reruns
+everything.
+
+| sweep | key, besides version and harness |
+|---|---|
+| `End2End.Python` | the exact script `testPython` runs (the emitted module, the mocks, and the row checks with the tolerance spliced in), `pythonLib.py`, and `python3`'s path and version |
+| `End2End.Julia` (per program, inside each shard) | the program's module and row checks as `juliaBatchTestCode` renders them under a fixed module name, `juliaLib.jl`, `julia --version`, and the flags. An all-unchanged shard starts no julia |
+| `End2End.Interpreter`, `Interpreter Unoptimized` | `show` of the compiled `IREnv` (at -O2 or -O0), the parsed program's networks, writeLogits registry and ADTs, the rows, the values `testInterpreter` derives from them, the tolerances, and the interpreter fingerprint |
+| `End2End.Normalization` | the `IREnv`, the same program fields, the seeded draws (`normalizationDraws`), the tolerance, and the interpreter fingerprint |
+
+The **interpreter fingerprint** (M1 of the task) is the source of every
+`src/` module that `IRInterpreter` transitively imports (13 of 39, read off the
+import lines at run time), plus `SPLL/Prelude.hs` (the `run*C` entry points),
+`stack.yaml` and the GHC version. The compiler proper (`IRCompiler`, the
+optimizer, the parser, the typing passes, codegen) is outside it. A compiler
+change reaches an interpreter check through the emitted `IREnv`, which is in
+the key already, so a commit that leaves a program's IR unchanged reruns
+nothing for it.
+
+**What is never skipped.** The compile always runs: the key is computed from
+its output. A compile that fails, or crashes while the key is rendered, has
+no key, so the check executes and reports the failure. A failing check is not
+recorded. A failing Julia shard records none of its programs, because the
+failure cannot be attributed to one of them.
+
+**The manifest** is `.stack-work/nest-impact-manifest`, one per checkout and
+so one per worktree. It is never committed. It maps each slot to its last
+passing key, so it does not grow without bound, and a `-p` run leaves the
+other slots alone. A missing or unreadable manifest means a full run.
+`NEST_FULL_TESTS=1` ignores the manifest, executes every check, and records
+each pass. **Run timings and the pre-merge `Slow` run with
+`NEST_FULL_TESTS=1`** (see below).
+
+**Adding a check, or changing one.** Wrap the property in `cachedProperty`
+(or `cachedBatch` for a shared process) and give it a key that covers
+*everything the check reads*. A value the check consumes but the key leaves
+out lets a pass survive a change that should have invalidated it. When a
+check's logic changes, bump its version constant; the harness hash only
+backstops a forgotten bump. Not yet covered: `SelectPassNoOp`, the plan-engine
+differentials, the writeLogits and `-O0` codegen groups, `BatchedPython`, the
+`Corpus` properties (they draw programs at random, so they have no
+per-program slot) and the `Slow` rewrite sweep.
+
 ## Test suite time
 
 **Every commit message that reports a test result also reports the default
 suite's wall time against the base it was measured from**: not just
 `1484/1484 green` but `1484/1484 green (45s -> 50s)`. Measure both numbers the
-same way, on the same machine, with a warm build: `stack test` end to end, or
-both test binaries run directly and their times added. Say which. A change
+same way, on the same machine, with a warm build and **`NEST_FULL_TESTS=1`**:
+`stack test` end to end, or both test binaries run directly and their times
+added. Say which. Without `NEST_FULL_TESTS` the time depends on how many
+programs the commit changed (the impact analysis above), which is not the
+number the audit tracks. A change
 that moves tests between tiers reports the tier times it affected too. The
 log this produces is how a slowdown gets traced to the commit that caused it.
 The suite has had to be trimmed back repeatedly because nobody saw it grow.

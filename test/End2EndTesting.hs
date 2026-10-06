@@ -42,6 +42,7 @@ import Control.Concurrent.QSem (newQSem, waitQSem, signalQSem)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
 import MockNN (evaluateMockNN, mockInputFor)
+import ImpactManifest
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
@@ -318,7 +319,7 @@ testInterpreter p compiledE (WriteLogitsSlotTestCase name target explicitArgs id
 -- p(res), and the test can stop -- often immediately, since p(res) > 0.5
 -- alone proves it's the mode.
 testInterpreter p compiledE (ArgmaxPTestCase name params res) = ioProperty $ do
-  let mockedParams = shapeNeuralParams p [VTuple (VInt 1) (VTuple par (VInt seed)) | (par, seed) <- zip params [0..]]
+  let mockedParams = argmaxParams p params
   case compiledE of
     Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Right compiled -> case runProbC p compiled mockedParams res of
@@ -339,6 +340,10 @@ testInterpreter p compiledE (ArgmaxPTestCase name params res) = ioProperty $ do
 -- distinct values found so far don't sum to 1.
 argmaxPatience :: Int
 argmaxPatience = 10000
+
+-- | The spiked mock-NN parameters an @argmax_p@ row is evaluated at.
+argmaxParams :: Program -> [IRValue] -> [IRValue]
+argmaxParams p params = shapeNeuralParams p [VTuple (VInt 1) (VTuple par (VInt seed)) | (par, seed) <- zip params [0..]]
 
 argmaxLoop :: RandomGen g => Program -> IREnv -> String -> [IRValue] -> IRValue -> Double -> [IRValue] -> Double -> Int -> Rand g Property
 argmaxLoop p compiled name mockedParams res resP bucket knownMass consecutiveDuplicates
@@ -403,9 +408,7 @@ discreteProbsNormalized p compiledE = case compiledE of
     -- or silently pass. E.g. clevr3_predicate_spatial compares two continuous
     -- neural outputs, which currently yields Bottom and emits no main_prob.
     (Just (genExpr, _), Just (probExpr, _)) -> ioProperty $ do
-      let randomParams :: RandomGen g => Rand g [IRValue]
-          randomParams = normalizationParams p <$> replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
-          randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
+      let (params, randomParamsForSamples) = normalizationDraws p
           gens = map (\args -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
           pSamples = evalRand (sequence gens) (mkStdGen 42)
           uniqueSamples = nub pSamples
@@ -434,15 +437,6 @@ discreteProbsNormalized p compiledE = case compiledE of
                 in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
     _ -> counterexample "main has no probability function (inference unavailable); only generate compiled" False
   where
-    paramCnt = progParameterCount p
-    seedList = [0 .. (paramCnt - 1)]
-    params = normalizationParams p (map (VTuple (VInt 0) . VInt) seedList)
-    -- 500 covers every corpus support: the worst total is 0.99916, the same
-    -- as with 1000 draws, against a 0.01 tolerance;
-    -- at 300 the 26- and 32-value supports (mNistAdd4,
-    -- clevrEqualLargeMetalSphereSplit) start losing mass. The draws are
-    -- seeded, so this is deterministic.
-    sampleCnt = 500
     sufficientlyNormal = 0.99
     prob :: IRValue -> Double
     prob (VProbDim pr _) = pr
@@ -450,6 +444,26 @@ discreteProbsNormalized p compiledE = case compiledE of
     dim :: IRValue -> IRValue
     dim (VProbDim _ d) = VFloat d
     dim v = error ("not a probability result: " ++ show v)
+
+-- | Everything 'discreteProbsNormalized' feeds the interpreter besides the
+-- compiled program: the parameters of the probability queries, and the
+-- seeded parameter draws for the 500 samples. Shared with
+-- 'normalizationKey', so the manifest keys on exactly these values.
+normalizationDraws :: Program -> ([IRValue], [[IRValue]])
+normalizationDraws p = (params, randomParamsForSamples)
+  where
+    paramCnt = progParameterCount p
+    seedList = [0 .. (paramCnt - 1)]
+    params = normalizationParams p (map (VTuple (VInt 0) . VInt) seedList)
+    randomParams :: RandomGen g => Rand g [IRValue]
+    randomParams = normalizationParams p <$> replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
+    randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
+    -- 500 covers every corpus support: the worst total is 0.99916, the same
+    -- as with 1000 draws, against a 0.01 tolerance;
+    -- at 300 the 26- and 32-value supports (mNistAdd4,
+    -- clevrEqualLargeMetalSphereSplit) start losing mass. The draws are
+    -- seeded, so this is deterministic.
+    sampleCnt = 500
 
 -- | The random-envelope parameters 'discreteProbsNormalized' draws, made to fit
 -- a program whose parameters are not all @Symbol@ handles (task
@@ -2934,19 +2948,94 @@ tcName (ProbTestCase n _ _ _)  = n
 tcName (CumulTestCase n _ _ _) = n
 tcName _ = "?"
 
-end2endTests :: IO TestTree
-end2endTests = do
+-- * Impact analysis keys
+--
+-- Each corpus sweep below executes a program only when the hash of what it
+-- consumes differs from the one recorded at its last pass ('ImpactManifest';
+-- docs-repo task emitted-code-test-impact-analysis). A key must cover
+-- everything the check reads: a value the check consumes that is missing from
+-- its key is a pass that survives a change it should not have.
+
+-- | Bump a check's version when its logic changes in a way earlier passes
+-- must not survive. 'harnessFingerprint' (the source of this module) is the
+-- backstop for a forgotten bump.
+interpreterCheckVersion, normalizationCheckVersion, pythonCheckVersion, juliaCheckVersion :: String
+interpreterCheckVersion   = "interpreter-v1"
+normalizationCheckVersion = "normalization-v1"
+pythonCheckVersion        = "python-v1"
+juliaCheckVersion         = "julia-v1"
+
+-- | The parts of the parsed program the @run*C@ entry points read besides the
+-- compiled 'IREnv' (networks, the writeLogits registry, ADT declarations).
+programRuntimeFields :: Program -> String
+programRuntimeFields p = show (neurals p, writeLogitsDecls p, adts p)
+
+-- | What 'testInterpreter' derives from a row through the compiler's own
+-- functions rather than reading it off the row: writeLogits arguments and
+-- slot indices (typed via the program), argmax's shaped mock parameters.
+interpreterRowInputs :: Program -> TestCase -> String
+interpreterRowInputs p tc = case tc of
+  WriteLogitsLengthTestCase _ _ ex _    -> show (writeLogitsArgsFor p ex)
+  WriteLogitsSlotTestCase _ t ex idxOf _ -> show (writeLogitsArgsFor p ex, planIndexOf (endpointPlan p t) idxOf)
+  ArgmaxPTestCase _ params _            -> show (argmaxParams p params)
+  _                                     -> ""
+
+-- | Key of an interpreter-run 'testInterpreter' sweep over one program.
+interpreterKey :: Manifest -> Program -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
+interpreterKey _ _ (Left _) _ = return Nothing
+interpreterKey m p (Right env) tcs = do
+  h <- harnessFingerprint m
+  i <- interpreterFingerprint m
+  return $ Just $ hashKey
+    [ interpreterCheckVersion, h, i, show env, programRuntimeFields p, show tcs
+    , concatMap (interpreterRowInputs p) tcs, show (probTolerance, writeLogitsSlotTolerance) ]
+
+-- | Key of 'discreteProbsNormalized' on one program.
+normalizationKey :: Manifest -> Program -> Either CompilerError IREnv -> IO (Maybe String)
+normalizationKey _ _ (Left _) = return Nothing
+normalizationKey m p (Right env) = do
+  h <- harnessFingerprint m
+  i <- interpreterFingerprint m
+  return $ Just $ hashKey
+    [ normalizationCheckVersion, h, i, show env, programRuntimeFields p
+    , show (normalizationDraws p), show normalizationTolerance ]
+
+-- | Key of 'testPython': the exact script it runs (emitted module, mocks,
+-- row checks with the tolerance spliced in), plus the Python runtime.
+pythonKey :: Manifest -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
+pythonKey _ _ (Left _) _ = return Nothing
+pythonKey m nets (Right env) tcs = do
+  projectDir <- getCurrentDirectory
+  h <- harnessFingerprint m
+  py <- pythonFingerprint m
+  return $ Just $ hashKey [pythonCheckVersion, h, py, pythonTestScript projectDir nets env tcs]
+
+-- | Key of one program's part of a 'testJuliaAll' shard: its module and row
+-- checks as 'juliaBatchTestCode' renders them, under a fixed module name (the
+-- shard's numbering depends on which other programs share it), plus the
+-- Julia runtime and flags.
+juliaKey :: Manifest -> Either CompilerError IREnv -> [TestCase] -> [NetMock] -> IO (Maybe String)
+juliaKey _ (Left _) _ _ = return Nothing
+juliaKey m (Right env) tcs nets = do
+  h <- harnessFingerprint m
+  jl <- juliaFingerprint m
+  let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions env)
+  return $ Just $ hashKey [juliaCheckVersion, h, jl, show juliaTestFlags, juliaBatchTestCode "" [(src, tcs, nets)]]
+
+-- | The corpus sweeps record their passes in @manifest@ ('ImpactManifest').
+end2endTests :: Manifest -> IO TestTree
+end2endTests manifest = do
   compiled <- loadEnd2EndCases (\slow -> not slow)
-  return $ buildEnd2EndTree "End2End" True compiled
+  return $ buildEnd2EndTree manifest "End2End" True compiled
 
 -- | The slow-only twin of end2endTests: same Interpreter/Unoptimized checks,
 -- restricted to `slow`-headered programs. Julia/Python/Normalization are
 -- skipped since these programs are Interpreter-only by design (see their
 -- .tst headers).
-slowEnd2EndTests :: IO TestTree
-slowEnd2EndTests = do
+slowEnd2EndTests :: Manifest -> IO TestTree
+slowEnd2EndTests manifest = do
   compiled <- loadEnd2EndCases id
-  return $ buildEnd2EndTree "End2End (slow)" False compiled
+  return $ buildEnd2EndTree manifest "End2End (slow)" False compiled
 
 -- | Parses and compiles (default -O2, and -O0 to check the optimizer is
 -- harmless) every test/cases/**/*.ppl+.tst pair whose `slow` header (see
@@ -3031,15 +3120,19 @@ unoptimizedCodegenSmoke =
 -- cases. includeBackends controls whether the Normalization/Julia/Python
 -- groups are built (skipped for the slow subset, whose programs are
 -- Interpreter-only by design).
-buildEnd2EndTree :: String -> Bool
+buildEnd2EndTree :: Manifest -> String -> Bool
                   -> [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]
                   -> TestTree
-buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
+buildEnd2EndTree manifest treeName includeBackends compiledCases = testGroup treeName $
     [ testGroup "Interpreter"
-        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- compiledCases, Interpreter `elem` bs ]
+        [ testProperty n (once $ cachedProperty manifest (check "Interpreter") n (interpreterKey manifest p c tcs)
+                                   (conjoin (map (testInterpreter p c) tcs)))
+        | (n, p, c, bs, tcs) <- compiledCases, Interpreter `elem` bs ]
     -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
     , testGroup "Interpreter Unoptimized"
-        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- unoptCases, Interpreter `elem` bs ]
+        [ testProperty n (once $ cachedProperty manifest (check "Interpreter Unoptimized") n (interpreterKey manifest p c tcs)
+                                   (conjoin (map (testInterpreter p c) tcs)))
+        | (n, p, c, bs, tcs) <- unoptCases, Interpreter `elem` bs ]
     ] ++
     ( if not includeBackends then [] else
       let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
@@ -3077,7 +3170,9 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
                            , let tcs' = filter (\x -> isProbTestCase x || isCumulTestCase x) tcs, not (null tcs')]
           neuralP = [(n, p, c) | (n, p, c, bs, _) <- compiledCases, Interpreter `elem` bs, not (null (neurals p))]
       in [ testGroup "Normalization"
-             [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
+             [ testProperty n (once $ cachedProperty manifest (check "Normalization") n (normalizationKey manifest p c)
+                                        (discreteProbsNormalized p c))
+             | (n, p, c) <- neuralP ]
          -- The Julia programs share a batch file (and a julia process) per
          -- shard to amortize startup. One shard for the whole corpus was a
          -- single ~60 s test -- the suite's critical path, on one core --
@@ -3085,15 +3180,19 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
          -- Round-robin shards run as parallel tests instead.
          , testGroup "Julia"
              [ testProperty ("shard " ++ show (i + 1) ++ "/" ++ show juliaShards)
-                 (once $ testJuliaAll [ (c, tcs, nets)
-                                      | (k, (_, c, tcs, nets)) <- zip [0 :: Int ..] (routedQueries Julia)
-                                      , k `mod` juliaShards == i ])
+                 (once $ cachedBatch manifest (check "Julia")
+                           [ (n, juliaKey manifest c tcs nets, (c, tcs, nets))
+                           | (k, (n, c, tcs, nets)) <- zip [0 :: Int ..] (routedQueries Julia)
+                           , k `mod` juliaShards == i ]
+                           testJuliaAll)
              | i <- [0 .. juliaShards - 1] ]
          -- Runs without julia installed: it only reads the emitted text.
          , testProperty "Julia free names are escaped"
              (once $ testJuliaFreeNamesEscaped [ (n, c, networkMocks p) | (n, p, Right c, bs, _) <- compiledCases, Julia `elem` bs ])
          , testGroup "Python"
-             [ testProperty n (once $ testPython nets c tcs) | (n, c, tcs, nets) <- routedQueries Python ]
+             [ testProperty n (once $ cachedProperty manifest (check "Python") n (pythonKey manifest nets c tcs)
+                                        (testPython nets c tcs))
+             | (n, c, tcs, nets) <- routedQueries Python ]
          -- writeLogits rows used to run on the interpreter only, which is how
          -- every text-backend writeLogits but a flat discrete one shipped
          -- crashing (task writelogits-text-backends-broken).
@@ -3111,6 +3210,8 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
          ]
     )
   where
+    -- The manifest slot prefix: the sweep's full group name.
+    check grp = treeName ++ "." ++ grp
     -- Every corpus program recompiled at -O0, shared by all the "Unoptimized"
     -- groups so the extra compile is paid once.
     --

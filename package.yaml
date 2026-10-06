@@ -101,6 +101,9 @@ tests:
     - tasty-hunit
     - tasty-quickcheck
     - temporary
+    # ImpactManifest: the content hash of each check's consumed artifact.
+    - cryptohash-sha256
+    - bytestring
   # The Corpus tasty group, split into its own executable/process so its
   # ~8x-duplicated full-corpus compile isn't held resident (via tasty's own
   # TestTree retention) for the rest of a combined `stack test` run -- see
@@ -122,6 +125,7 @@ tests:
     - TestCaseParser
     - End2EndTesting
     - TestTolerances
+    - ImpactManifest
     ghc-options:
     - -threaded
     - -rtsopts
@@ -137,3 +141,5 @@ tests:
     - tasty-hunit
     - tasty-quickcheck
     - temporary
+    - cryptohash-sha256
+    - bytestring
