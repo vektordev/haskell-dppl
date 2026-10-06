@@ -1774,6 +1774,81 @@ test_mixtureNegativeLogNormalScaleCompiles = testCase "mixtureNegativeLogNormalS
 -- and still milliseconds today, so the budget is generous without being
 -- vacuous; the timeout also keeps a regression from turning into an
 -- unbounded memory hog in the suite.
+-- | Counting red objects over a ten-slot product scene of 25-value objects
+-- (@Nil | Obj Shape Color@, 1 + 3*8) compiles and answers in well under a
+-- second, and agrees with the per-object-read spelling and a closed-form
+-- Poisson-binomial oracle (docs-repo task
+-- enum-tag-accessor-walks-product-domain). At 035ee5b a field accessor's
+-- @DiscreteValues@ tag was found by listing the operand's value list (the
+-- 25^10 product, last field fastest) until the field's 25 values turned up,
+-- so @o1 sc@ alone took ~25^9 steps: this program OOM-ed at 6 GB after 517 s,
+-- and five slots took 154 s. Accessor tags are now read structurally off the
+-- operand's @MultiADT@ ('SPLL.Analysis.structuralTag', 7bca66d). Ten slots
+-- under a 20 s budget is generous without being vacuous.
+--
+-- Only the counts at either end are queried: the scene spelling's
+-- probability query nests one split loop per slot, so its cost grows like
+-- C(10, k) (k = 5 is ~5 s in the interpreter, against 0.2 s for the
+-- per-object spelling; docs-repo task scene-count-query-binomial-in-count).
+-- That is query time, not the compile-time wall pinned here.
+--
+-- Not a corpus entry: the batched-eligibility probe compiles every corpus
+-- program in batched mode while the test tree is built, and the batched
+-- compiler still OOMs on this scene from five slots (docs-repo task
+-- batched-compile-ooms-on-wide-product-scene).
+test_wideProductSceneAccessorCompilesFast :: TestTree
+test_wideProductSceneAccessorCompilesFast = testCase "wideProductSceneAccessorCompilesFast" $ do
+  let n = 10 :: Int
+      slots = [1 .. n]
+      objDomain = "{Nil | Obj {Cube | Sphere | Cylinder} {Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple}}"
+      prelude = unlines
+        [ "data Color = Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple"
+        , "data Shape = Cube | Sphere | Cylinder"
+        , "data Object = Nil | Obj shape::Shape, color::Color" ]
+      isR = "isR o = if isObj o then (if isRed (color o) then 1 else 0) else 0"
+      sceneSrc = prelude ++ unlines
+        [ "data Scene = Scene " ++ intercalate ", " [ "o" ++ show i ++ "::Object" | i <- slots ]
+        , "neural extract :: (Symbol -> Scene) of {Scene" ++ concatMap (const (' ' : objDomain)) slots ++ "}"
+        , isR
+        , "main sym = draw sc = extract sym in " ++ intercalate " ++ " [ "isR (o" ++ show i ++ " sc)" | i <- slots ] ]
+      perObjSrc = prelude ++ unlines
+        [ "neural readObj :: (Symbol -> Object) of " ++ objDomain
+        , isR
+        , "main " ++ unwords [ "s" ++ show i | i <- slots ] ++ " = "
+            ++ intercalate " ++ " [ "isR (readObj s" ++ show i ++ ")" | i <- slots ] ]
+      pObj = [0.8, 0.5, 0.9, 0.3, 0.6, 0.7, 0.4, 1.0, 0.2, 0.55] :: [Double]
+      pRed = [0.25, 0.6, 0.1, 0.5, 0.4, 0.3, 0.75, 0.2, 0.9, 0.45] :: [Double]
+      -- Logit layout per slot: [Nil, Obj, Cube, Sphere, Cylinder, Red, Blue..Purple].
+      objLogits po pr = [1 - po, po, 0.2, 0.3, 0.5, pr] ++ replicate 7 ((1 - pr) / 7)
+      perSlot = zipWith objLogits pObj pRed
+      envelope xs = VTuple (VInt 2) (VList (foldr (ListCont . VFloat) EmptyList xs))
+      oracle = foldl (\dist q -> zipWith (+) (map (* (1 - q)) dist ++ [0]) (0 : map (* q) dist))
+                     [1] (zipWith (*) pObj pRed)
+      counts = [0, 1, n - 1, n]
+      answers src args = do
+        prog <- case tryParseProgram "wideProductSceneAccessorCompilesFast" src of
+          Left err -> assertFailure ("parse error: " ++ show err) >> error "unreachable"
+          Right p  -> return p
+        let compiled = either (\e -> error ("compile error: " ++ show e)) id (compile defaultCompilerConfig prog)
+        result <- timeout (20 * 1000000) (evaluate (forceAll [ probDimOf' (runProbC prog compiled args (VInt k)) | k <- counts ]))
+        maybe (assertFailure ("compiling and querying the " ++ show n ++ "-slot scene count did not finish \
+                              \within 20s -- the accessor-tag wall of task \
+                              \enum-tag-accessor-walks-product-domain is back") >> error "unreachable")
+              return result
+  scene <- answers sceneSrc [envelope (concat perSlot)]
+  perObj <- answers perObjSrc (map envelope perSlot)
+  forM_ (zip3 counts (map (oracle !!) counts) (zip scene perObj)) $ \(k, expected, ((ps, ds), (po, dob))) -> do
+    assertBool ("scene spelling: P(count = " ++ show k ++ ") = " ++ show ps ++ ", oracle " ++ show expected)
+      (abs (ps - expected) < 1e-9)
+    assertBool ("per-object spelling: P(count = " ++ show k ++ ") = " ++ show po ++ ", oracle " ++ show expected)
+      (abs (po - expected) < 1e-9)
+    assertEqual "scene dimension" 0 ds
+    assertEqual "per-object dimension" 0 dob
+  where
+    forceAll xs = foldr (\(p, d) acc -> p `seq` d `seq` acc) xs xs
+    probDimOf' (Left e)  = error ("prob query error: " ++ show e)
+    probDimOf' (Right v) = probDimOf v
+
 test_wideTupleCompilesFast :: TestTree
 test_wideTupleCompilesFast = testCase "wideTupleCompilesFast" $ do
   let n = 8 :: Int
@@ -4712,6 +4787,7 @@ internalsTests = testGroup "Internals"
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
   , test_wideTupleCompilesFast
+  , test_wideProductSceneAccessorCompilesFast
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
   , test_planEnumAccumulatorFoldPolynomial
