@@ -504,8 +504,10 @@ discrete-only lattice for that reason.
 
 Target types are narrower than `Ty`: `Float`, `Bool`, and tuples/`Either`s of
 those (what `autoDeriveMultiValue` can produce a plan for), plus `Int` with an
-explicit `of [0..k-1]` -- and, since milestone M4, the pool ADTs `Hue` (a
-three-way enumeration) and `Pt` (a record of a `Float` and a `Bool`).
+explicit `of [0..k-1]` -- and, since milestone M4, any declared ADT that
+auto-derives: not recursive (directly or mutually), fields of those same
+shapes, plan at most six slots wide (`neuralADTs`). Of the pool that is `Hue`
+(a three-way enumeration) and `Pt` (a record of a `Float` and a `Bool`).
 
 The `Neural generator` group (default suite, beside `Shrinker`) pins the
 machinery the properties depend on being right about: that a neural draw
@@ -570,10 +572,21 @@ nothing at a bare lambda says what its parameter was bound at.
 ## ADTs and recursion (milestone M4)
 
 Mechanism: `api/test/ArbitrarySPLL.md` in the internal-docs repo. In short,
-`Ty` gained `TyADT`, drawn from a fixed **pool** of four declarations covering
-the corpus' ADT shapes (`Hue` an enumeration, `Pt` a single-constructor record,
-`Mix` mixed arity, `Chain` recursive with `depth 3`), and `withADTs` declares
-on each program exactly the ones it uses. Constructors are generated at an ADT
+`Ty` gained `TyADT`, and every program draw first draws a **declaration
+context** (`genADTDecls`, task `fuzz-generate-adt-declarations`): each of the
+fixed pool's four declarations with probability 1/3 (`Hue` an enumeration,
+`Pt` a single-constructor record, `Mix` mixed arity, `Chain` recursive with
+`depth 3` -- the corpus' ADT shapes, kept as a named seed set), plus zero to
+three **generated** declarations. Those vary everything the pool fixes: names
+(one in seven a name a target language claims -- `None`, `T`, `Module`,
+`len`, `end` -- and sometimes a constructor spelled like its own type), one
+to five constructors, nullary-only enumerations through four-field records,
+field types (scalars, tuples/`Either`s/lists of them, other declared types,
+lists of declared types, the type itself in one or several fields), and an
+optional `depth N` on a self-recursive type. Every generated type's first
+constructor holds only already-grounded types, so each has a finite leaf. The
+declarations are checked by the validator before use, and the program
+declares exactly the ones it uses. Constructors are generated at an ADT
 target; field projections and constructor tests are eliminators open at any
 target of a field's type, so ADT nodes reach far more draws than ADT targets
 do -- about half of all draws declare one. A fourth program shape,
@@ -608,13 +621,57 @@ each pinned by the default-suite `ADT and recursion generator` group:
 
 Since M4 the non-`main` declarations shrink too (a helper's body, a recursive
 function's base and step), which is why the `Shrinker` group's size measure is
-now the whole generated program rather than `main`'s core.
+now the whole generated program rather than `main`'s core. Since
+`fuzz-generate-adt-declarations` the ADT declarations shrink as well: a
+constructor nothing builds, tests or reads a field of is dropped, and so is a
+field nothing reads, together with that argument at every application of its
+constructor. A candidate that leaves some type with no finite value is
+refused, and a declaration nothing uses any more disappears. The size measure
+counts one per declared type, constructor and field.
 
-Measured over 200 draws at `fuzzSize = 12`: 46.5% of draws declare an ADT, 10.5%
-have an ADT target, 16% contain a recursive declaration (9% counted, 7%
-geometric). The default and `Slow` tiers stayed green over six `Slow` `Fuzz`
-runs. Twelve `TypedCompileNeverCrashes` runs found no ADT- or
-recursion-specific crash; every message was one of the already-filed families.
+**The generator, recovery and shrinker share one declaration table.** It is
+passed as an implicit parameter (`HasADTs`). Program-level entry points read
+it from the program's own `adts`, and the expression-level exports
+(`genTypedExpr`, `tyOfTypedExpr`, `shrinkTypedExpr`, `typedLeaves`, `genTy`)
+run against the pool, so standalone-expression properties are unchanged.
+
+**Two shapes the generator can build are switched off, because each re-finds
+a filed bug** (the M4 rule for the diverging scalar recursion, above):
+
+- **Mutually recursive pairs** (`generateMutualPairs = False`). A program
+  using one does not finish compiling. `data A = A0 | A1 ab::B; data B = B0 |
+  B1 ba::A` with `main = A0`, or `main = isA1 (head [A0])`, hangs after RType
+  inference (internal-docs `mutually-recursive-adt-hangs-compiler`; the first
+  probe hit it 18 times in 1,500 draws). The pair generator stays and is
+  pinned by `a mutually recursive pair validates, is mutual, and has finite
+  leaves`.
+- **Constructors named `Any` or `Base`** (`knownCollidingNames`). `Any`'s
+  `isAny` test shadows the runtimes' own `isAny`: Python recurses forever and
+  Julia overflows its stack. `Base` redefines Julia's `Base` module, so the
+  module does not load (internal-docs `adt-constructor-name-shadows-runtime`).
+  `prop_Fuzz_BackendsAgree` failed on one of them in 3 of its first 6 runs.
+  A deterministic sweep of every target-language name in the generator's
+  lists, as a constructor, a type and a field, through both backends found
+  these two and nothing else. Afterwards 6 of 6 fresh-seed runs were green.
+
+Measured over 200 draws at `fuzzSize = 12` when M4 landed, with the pool
+only: 46.5% of draws declare an ADT, 10.5% have an ADT target, 16% contain a
+recursive declaration (9% counted, 7% geometric). The default and `Slow`
+tiers stayed green over six `Slow` `Fuzz` runs. Twelve
+`TypedCompileNeverCrashes` runs found no ADT- or recursion-specific crash;
+every message was one of the already-filed families.
+
+With generated declarations (200 draws, 2026-10-06), 40% of draws declare an
+ADT and 20.5% a generated one. Of the declared types, 65% have mixed arity, 20%
+are records, 15% enumerations and 1% unit types. Features per declared type:
+13% self-recursive, 13% a structured field, 12% a `depth`, 12% a
+target-language name, 9% a constructor named like its type, 6.5% an ADT
+field, 5% more than three constructors. Recursion through a list and several
+recursive fields are each about 1%. The coverage property's `adt`, `adt shape`
+and `adt feature` rows report these, with a floor of 10% on generated
+declarations. Over 3,000 probe draws no new crash family appeared: the
+`unionMultiValues` crashes and arrow-comparison crashes that remain are the
+filed `fuzz-neural-plan-bugs` and `function-value-compared-in-probability-mode`.
 
 ## The admission contract (`prop_Fuzz_AdmissionTotality`)
 
