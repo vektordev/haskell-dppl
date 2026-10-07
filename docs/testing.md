@@ -262,7 +262,6 @@ that are already fixed stay `TestInternals` growth tests, as before. The
 known-issues folder holds only open bugs.
 
 The pins today, together about 1.2 s of the default suite:
-`wideConstructorPruneGuardGrowth` (code-size at `-O 0`, 2^N),
 `nestedEqualityChainGrowth` (alloc at `-O2`, about 8x per level),
 `gaussianTrajectoryUnprunedModuleSize` and
 `shortGaussianTrajectoryModuleSize` (code size). The harness's own tests are

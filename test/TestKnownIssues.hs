@@ -497,17 +497,17 @@ checkGrowthAbove name pplPath spec src = do
 performancePinHarnessTests :: TestTree
 performancePinHarnessTests = testGroup "KnownIssuesHarness"
   [ testCase "the allocation cap kills a runaway compile" $ do
-      prog <- wideRecord 12
+      prog <- wideRecord bigRecordWidth
       r <- measureCompile (PointCap 60 50000000) (applyCompileFlags [FlagOptimizer 0] defaultCompilerConfig) prog
       case r of
         PointCapped why -> assertBool why ("allocated" `isInfixOf` why)
-        _ -> assertFailure "expected the 50 MB allocation cap to stop a 12-field -O0 compile"
+        _ -> assertFailure ("expected the 50 MB allocation cap to stop a " ++ show bigRecordWidth ++ "-field -O0 compile")
   , testCase "the time cap kills a runaway compile" $ do
-      prog <- wideRecord 12
+      prog <- wideRecord bigRecordWidth
       r <- measureCompile (PointCap 0.05 100000000000) (applyCompileFlags [FlagOptimizer 0] defaultCompilerConfig) prog
       case r of
         PointCapped why -> assertBool why (" s" `isInfixOf` why)
-        _ -> assertFailure "expected the 0.05 s cap to stop a 12-field -O0 compile"
+        _ -> assertFailure ("expected the 0.05 s cap to stop a " ++ show bigRecordWidth ++ "-field -O0 compile")
   , testCase "a cheap compile is measured" $ do
       prog <- wideRecord 2
       r <- measureCompile defaultPointCap defaultCompilerConfig prog
@@ -544,6 +544,13 @@ performancePinHarnessTests = testGroup "KnownIssuesHarness"
   ]
   where
     summary = fmap (\(bs, slow, ef, tcs) -> (bs, slow, ef, length tcs))
+    -- The capped compiles need a program that is expensive by size alone,
+    -- not by a bug: a 12-field record used to serve (its field prune guard
+    -- was 2^N, task field-constructor-prune-guard-exponential-in-width), and
+    -- fixing that bug left these tests with nothing to kill. A 300-field
+    -- record compiles linearly in about a second at -O0, far past both caps.
+    bigRecordWidth :: Int
+    bigRecordWidth = 300
     wideRecord :: Int -> IO Program
     wideRecord n =
       let fields = intercalate ", " [ "f" ++ show i ++ "::Int" | i <- [1 .. n] ]

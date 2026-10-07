@@ -1778,6 +1778,35 @@ test_nestedEqualityChainAnyArmConstant = testCase "nestedEqualityChainAnyArmCons
         Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
         Right ir -> return (length (show ir))
 
+-- | Task field-constructor-prune-guard-exponential-in-width: a user-ADT
+-- constructor's field equation ORs each field's impossibility flag into an
+-- accumulator that guards the later fields. An inline field's flag already
+-- contains the accumulator, so left unbound the OR held it twice and a record
+-- of N discrete fields copied the first flag 2^N times. Pinned as the -O0 IR
+-- growth from N=6 to N=12 constant Int fields plus one random field: about
+-- 75x before the accumulator was bound, about 2x (linear) after; the bound of
+-- 8x admits cubic growth and fails on the old shape.
+test_wideConstructorPruneGuardLinear :: TestTree
+test_wideConstructorPruneGuardLinear = testCase "wideConstructorPruneGuardLinear" $ do
+  small <- sizeOf 6
+  large <- sizeOf 12
+  let ratio = fromIntegral large / fromIntegral small :: Double
+  assertBool ("-O0 IR grew " ++ show ratio ++ "x from N=6 to N=12 ("
+              ++ show small ++ " -> " ++ show large ++ ")")
+    (ratio < 8)
+  where
+    record n = unlines
+      [ "data R = R " ++ concat [ "f" ++ show i ++ "::Int, " | i <- [1 .. n] ] ++ "g::Int"
+      , ""
+      , "main = R " ++ unwords (map show [1 .. n]) ++ " (if Uniform < 0.5 then 1 else 2)"
+      ]
+    sizeOf :: Int -> IO Int
+    sizeOf n = case tryParseProgram "wideCtor" (record n) of
+      Left err -> assertFailure ("parse error: " ++ show err) >> return 0
+      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
+        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+        Right ir -> return (length (show ir))
+
 -- | Task recursive-list-prob-missed-cse: probability-mode compilation of a
 -- self-recursive list (@main = if Uniform > p then [] else X : main@, the
 -- README's own "Recursive lists" example) must cost work LINEAR in the query
@@ -5163,6 +5192,7 @@ internalsTests = testGroup "Internals"
   , test_branchCountingDoesNotMultiplyIR
   , test_gaussianChainIRNotExponential
   , test_nestedEqualityChainAnyArmConstant
+  , test_wideConstructorPruneGuardLinear
   , test_recursiveListMissedCSE
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles

@@ -3387,7 +3387,19 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params
       fieldRes <- guardedSubInference meta
                     (appTExpr : pruneGuards (rType (getTypeInfo p)) accImposs)
                     (probF meta cumulative p (inlineSample invBody))
-      return ((fieldRes, appTExpr) : acc, orIR accImposs (rImposs fieldRes)))
+      -- Bind the accumulator: an inline field's flag already contains
+      -- 'accImposs' (through its prune guard), so the unbound OR would hold
+      -- it twice and N fields would copy the first flag 2^N times. Binding
+      -- eagerly is safe -- each flag carries its own applicability test, and
+      -- the product evaluates every field's flag anyway.
+      accV <- case orIR accImposs (rImposs fieldRes) of
+        c@(IRConst _) -> return c
+        v@(IRVar _)   -> return v
+        e             -> do
+          accName <- mkVariable "acc_imposs"
+          setVariables [(accName, e)]
+          return (IRVar accName)
+      return ((fieldRes, appTExpr) : acc, accV))
     ([], constFalseIR) (zip inVars params)
   let fieldResults = reverse revFieldResults
   -- The fields are independent, so the whole construction is their product.
