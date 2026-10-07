@@ -1790,6 +1790,18 @@ toIRInferenceSave meta cumulative expr sample = do
   (res, letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
   anySafeShared (semiringOf meta) sample letins res
 
+-- | The marginal operand of the marginal-minus-point split ('mixSubP' of this
+-- and the excepted point's result): 'toIRInferenceSave' at the wildcard sample
+-- 'VAny', without compiling anything. At that sample 'anySafe' answers every
+-- field with its default, so for any non-lambda expression the result is the
+-- constant (one, dim 0, no branches, possible), and compiling the body only
+-- built dead code -- three compiles per level of a nested @==@ chain instead
+-- of two (task anyexcept-any-arm-compiled-instead-of-constant). A 'Lambda'
+-- still goes through 'toIRInferenceSave', which returns a closure there.
+anyMarginal :: CompilerMetadata -> Bool -> Expr -> CompilerMonad PResult
+anyMarginal meta cumulative e@(Expr _ (Lambda _ _)) = toIRInferenceSave meta cumulative e (IRConst VAny)
+anyMarginal meta _ _ = return (detP (srOne (semiringOf meta)))
+
 -- | Does every value of this type necessarily contribute dimension 0 -- i.e.
 -- is it discrete through and through?
 --
@@ -2350,14 +2362,14 @@ toIRInference meta cumulative e sample
   let metaSub = unpruned meta
   case shape of
     Left ex -> do
-      anyRes    <- toIRInferenceSave metaSub cumulative e (IRConst VAny)
+      anyRes    <- anyMarginal metaSub cumulative e
       exceptRes <- toIRInferenceSave metaSub cumulative e ex
       mixSubP sr (rBranches exceptRes) anyRes exceptRes
     Right (cond, isPosAny, nonAnyExpr, exceptExpr) -> do
       let subGuard = if isPosAny then cond else notIR cond
       let nonGuard = notIR subGuard
       nonAnyRes <- guardedSubInference meta [nonGuard] (toIRInference meta cumulative e nonAnyExpr)
-      anyRes    <- toIRInferenceSave metaSub cumulative e (IRConst VAny)
+      anyRes    <- anyMarginal metaSub cumulative e
       exceptRes <- guardedSubInference metaSub [subGuard] (toIRInference metaSub cumulative e exceptExpr)
       subRes <- mixSubP sr (rBranches exceptRes) anyRes exceptRes
       let ifSample a na = if isPosAny then IRIf cond a na else IRIf cond na a
@@ -3499,7 +3511,7 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, chainName=cnAE} (InjF (Nam
   let metaNon = covOperandMeta cumulative invDeriv meta
   let metaSub = unpruned meta
   nonAnyRes <- guardedSubInference metaNon [nonAnyGuard] (probF metaNon cumulative (params !! probIdx) nonAnyExpr)
-  anyRes    <- toIRInferenceSave metaSub cumulative (params !! probIdx) (IRConst $ VAny)
+  anyRes    <- anyMarginal metaSub cumulative (params !! probIdx)
   exceptRes <- guardedSubInference metaSub [subResGuard] (probF metaSub cumulative (params !! probIdx) exceptExpr)
   let ifSample a na = if isPosAny then IRIf (IRVar v1) a na else IRIf (IRVar v1) na a
   -- The ANY arm is the marginal minus the excepted value's mass; its branch count
@@ -5485,7 +5497,7 @@ measureSet meta _ WEmpty = return (impossibleP (semiringOf meta))
 -- other world measure.
 measureSet meta v (WExcept WFull p) = do
   let metaSub = unpruned meta
-  anyRes    <- toIRInferenceSave metaSub False v (IRConst VAny)
+  anyRes    <- anyMarginal metaSub False v
   exceptRes <- toIRInferenceSave metaSub False v p
   mixSubP (semiringOf meta) (rBranches exceptRes) anyRes exceptRes
 measureSet meta v (WExcept s p) = do

@@ -1752,6 +1752,32 @@ test_gaussianChainIRNotExponential = testGroup "gaussianChainIRNotExponential"
                   ++ " (" ++ show small ++ " -> " ++ show large ++ ")")
         (ratio < 8)
 
+-- | Task anyexcept-any-arm-compiled-instead-of-constant: a query of an InjF
+-- whose inverse yields "any value except c" (here @==@) is measured as the
+-- marginal minus the point. The marginal is the constant (1, dim 0) and must
+-- not be compiled: it used to compile its operand a third time at the
+-- wildcard sample, so a nest of @== True@ grew about 8.5x per level at -O0.
+-- After the fix it is about 5x (the remaining factor is task
+-- anyexcept-twin-point-compiled-twice; tighten the bound when that lands).
+-- Pinned as the -O0 IR growth from depth 2 to depth 4: 55.6x before the fix,
+-- 19.9x after; the bound of 30x fails on the old shape.
+test_nestedEqualityChainAnyArmConstant :: TestTree
+test_nestedEqualityChainAnyArmConstant = testCase "nestedEqualityChainAnyArmConstant" $ do
+  small <- sizeOf 2
+  large <- sizeOf 4
+  let ratio = fromIntegral large / fromIntegral small :: Double
+  assertBool ("-O0 IR grew " ++ show ratio ++ "x from d=2 to d=4 ("
+              ++ show small ++ " -> " ++ show large ++ ")")
+    (ratio < 30)
+  where
+    nest d = "main = " ++ iterate (\e -> "(" ++ e ++ " == True)") "(Uniform < 0.5)" !! d
+    sizeOf :: Int -> IO Int
+    sizeOf d = case tryParseProgram "eqChain" (nest d) of
+      Left err -> assertFailure ("parse error: " ++ show err) >> return 0
+      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
+        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+        Right ir -> return (length (show ir))
+
 -- | Task recursive-list-prob-missed-cse: probability-mode compilation of a
 -- self-recursive list (@main = if Uniform > p then [] else X : main@, the
 -- README's own "Recursive lists" example) must cost work LINEAR in the query
@@ -5136,6 +5162,7 @@ internalsTests = testGroup "Internals"
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_gaussianChainIRNotExponential
+  , test_nestedEqualityChainAnyArmConstant
   , test_recursiveListMissedCSE
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
