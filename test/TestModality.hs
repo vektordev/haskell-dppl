@@ -18,6 +18,7 @@ import Test.Tasty.HUnit (testCase, assertBool, assertFailure, (@?=))
 import SPLL.Typing.Modality
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.ModalityInfer (IMod(..), toMod)
 
 -- Handy ground modalities ------------------------------------------------------
 
@@ -45,6 +46,7 @@ modalityTests = testGroup "Modality"
   , smartCtorTests
   , projectionTests
   , combinatorTests
+  , applicationTests
   , motivatingProgramTests
   ]
 
@@ -185,6 +187,58 @@ combinatorTests = testGroup "combinators"
            (subMod arrLo arrHi && not (subMod arrHi arrLo))
   ]
 
+-- The application rule of the serialisable layer: 'applyMod', 'applyOuter' on
+-- a function-valued result, 'joinModality'/'joinTransfer' on arrows, and the
+-- 'toMod' tabulation of an 'IArr' closure (investigation
+-- modality-function-space-test-coverage, finding F2: none of these had a test).
+
+applicationTests :: TestTree
+applicationTests = testGroup "application rule (applyMod / transfers)"
+  [ testCase "a Dirac function choice keeps the conditional result, family included" $
+      applyMod (MArr det toNormal) (MGround densInf) @?= MGround normalG
+  , testCase "a random function choice marginalizes the result and drops the family" $
+      let r = applyMod (MArr densIntFin toNormal) (MGround det)
+      in do r @?= MGround (marginalize densIntFin normalG)
+            assertBool "must not be PNormal" (projectMod r /= PNormal)
+  , testCase "the transfer is looked up by the argument's capability" $
+      mapM_ (\g -> applyMod (MArr det (mkTransfer MGround)) (MGround g) @?= MGround g) reprInputs
+  , testCase "the tabulated transfer cannot carry an argument's family" $
+      -- The documented loss of the finite-map form (design §3-A): the closure
+      -- 'IArr' of ModalityInfer is what keeps the family through application.
+      applyMod (MArr det (mkTransfer MGround)) (MGround normalG)
+        @?= MGround normalG { gFam = FamNone }
+  , testCase "a random choice of a function-valued result marginalizes only its outer" $
+      let psi = mkTransfer (const (MGround normalG))
+          r = applyMod (MArr densIntFin (mkTransfer (const (MArr det psi)))) (MGround det)
+      in case r of
+           MArr rho psi' -> do rho @?= marginalize densIntFin det
+                               psi' @?= psi
+           other -> assertFailure ("expected a function modality, got " ++ prettyMod other)
+  , testCase "applyMod fails loudly on a non-function modality" $ do
+      r <- try (evaluate (applyMod (MGround det) (MGround det)))
+             :: IO (Either ErrorCall Mod)
+      case r of
+        Left _  -> return ()
+        Right _ -> assertFailure "expected applyMod to reject a non-function head"
+  , testCase "joining two functions joins outers and transfers pointwise" $
+      let p1 = mkTransfer (const (MGround normalG))
+          p2 = mkTransfer MGround
+      in case joinModality (MArr det p1) (MArr densIntFin p2) of
+           MArr rho p -> do
+             rho @?= joinGround det densIntFin
+             mapM_ (\g -> runTransfer p (MGround g)
+                            @?= joinModality (runTransfer p1 (MGround g)) (runTransfer p2 (MGround g)))
+                   reprInputs
+           other -> assertFailure ("expected a function modality, got " ++ prettyMod other)
+  , testCase "toMod tabulates an IArr closure so applyMod agrees with it on ground inputs" $
+      let body (IG g) = IG (joinGround g normalG)
+          body _      = IG bottomGround
+          f = toMod (IArr det body)
+      in mapM_ (\g -> applyMod f (MGround g) @?= toMod (body (IG g))) reprInputs
+  ]
+  where
+    toNormal = mkTransfer (const (MGround normalG))
+
 -- The four motivating programs (modality-port-lattice-core §"Motivating
 -- programs"). Expected modalities are hand-authored; this milestone asserts the
 -- data/projection only. Full end-to-end inference is milestones 4 and 6.
@@ -199,9 +253,12 @@ motivatingProgramTests = testGroup "motivating programs (hand-authored modalitie
   , testCase "MProd tuple round-trip result projects PNormal" $
       projectMod (MGround normalG) @?= PNormal
 
-    -- (2) MArr/phi application: g(f(Normal)) wants N(2,2) = PNormal.
+    -- (2) MArr/phi application: g(f(Normal)) wants N(2,2) = PNormal. The
+    -- composite's transfer is hand-authored; what is asserted is that
+    -- 'applyMod' through a Dirac function choice delivers it unchanged.
   , testCase "MArr application result projects PNormal" $
-      projectMod (MGround normalG) @?= PNormal
+      projectMod (applyMod (MArr det (mkTransfer (const (MGround normalG)))) (MGround normalG))
+        @?= PNormal
 
     -- (3) MRec recursive affine accumulation: addNoise 3 wants N(0, sqrt 3) = PNormal.
   , testCase "MRec recursive accumulation result projects PNormal" $
