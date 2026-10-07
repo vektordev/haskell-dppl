@@ -511,6 +511,7 @@ inferE ctx env expr = case expr of
           g = tagFin (icADTs ctx) ti
                 (compareGround (icPlan ctx)
                                (enumerableOperand a) (enumerableOperand b)
+                               (independentOperands env a b)
                                (outerI ma) (outerI mb))
       in done (IG g) (Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])) (aacc ++ bacc)
 
@@ -614,6 +615,18 @@ enumerableOperand e = any isDiscrete (tags (getTypeInfo e))
   where isDiscrete (DiscreteValues mv) = not (multiValueContainsContinuous mv)
         isDiscrete _                   = False
 
+-- | Do two comparison operands read no random local in common? Under SPLL's
+-- eager @draw@ every fresh draw in one operand is independent of every draw in
+-- the other, so a variable bound to a random law in the enclosing scope is the
+-- only way the two can be correlated. Deterministic bindings (a parameter, a
+-- recovered or enumerated variable re-inferred 'Exact') correlate nothing.
+independentOperands :: Env -> Expr -> Expr -> Bool
+independentOperands env a b = not (any randomLocal (Set.toList shared))
+  where shared = Set.intersection (freeVarsOf a) (freeVarsOf b)
+        randomLocal v = case Map.lookup v env of
+          Just m -> gCap (outerI m) /= Exact
+          Nothing -> False
+
 -- | Comparison (@>@\/@<@): the Boolean result is a Bernoulli (finite support).
 -- @plan@ says the enclosing declaration could reach the plan-guided engine
 -- ('hasReadNN'); @enumA@\/@enumB@ say whether the left\/right operand is
@@ -644,6 +657,14 @@ enumerableOperand e = any isDiscrete (tags (getTypeInfo e))
 --     IRCompiler has no equation for them.
 --   * __both sides enumerable__ — the forward-only @|L|x|R|@ grid, which reads
 --     the operands' 'DiscreteValues' tags, hence the flags.
+--   * __one side enumerable, the operands independent__ — a Bernoulli whose
+--     rate is itself random (@Uniform < (if b then 0.9 else 0.1)@): the sum
+--     over the enumerable side's domain of its mass times the other side's
+--     CDF at that value (@enumerated_bound@). Independence is what makes the
+--     sum a product of the two operands' own laws: @indep@
+--     ('independentOperands') says no random local is read by both. A shared
+--     one (@draw t = .. in (Uniform + t) < t@) correlates them, and no
+--     equation measures that (task uniform-below-random-threshold-no-forward).
 --
 -- The @plan@ flag is the fourth, and the one this pass cannot decide: the
 -- plan-guided engine measures a pairwise comparison of two continuous leaves of
@@ -657,8 +678,8 @@ enumerableOperand e = any isDiscrete (tags (getTypeInfo e))
 -- The residue — a genuinely unsupported comparison inside a neural program still
 -- reaching the IRCompiler catch-all — is the follow-up item
 -- @comparison-closed-form-verdict-for-plan-leaves@.
-compareGround :: Bool -> Bool -> Bool -> GroundMod -> GroundMod -> GroundMod
-compareGround plan enumA enumB a b
+compareGround :: Bool -> Bool -> Bool -> Bool -> GroundMod -> GroundMod -> GroundMod
+compareGround plan enumA enumB indep a b
   | gCap a == Exact && gCap b == Exact = groundMod Exact        Finite FamNone
   | closedForm                         = groundMod DensInt      Finite FamNone
   | canSample a && canSample b         = groundMod SampleOnly   Finite FamNone
@@ -679,7 +700,8 @@ compareGround plan enumA enumB a b
                    && (  plan
                       || gCap a == Exact || gCap b == Exact
                       || (gFam a == FamNormal && gFam b == FamNormal)
-                      || (enumA && enumB) )
+                      || (enumA && enumB)
+                      || (indep && (enumA || enumB)) )
 
 -- | Modality of an 'InjF' application. Resolution order:
 --
