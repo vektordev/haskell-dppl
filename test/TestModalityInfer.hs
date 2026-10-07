@@ -332,6 +332,26 @@ modalityInferTests = testGroup "ModalityInfer"
             pTypeAt "main" [0,0]
               "neural readMNist :: (Symbol -> Int) of [0,1,2,3,4,5,6,7,8,9]\n\
               \main a b = readMNist(a) ++ readMNist(b)"
+        -- Task finiteness-single-producer: 'Fin = Finite' means an enumerable
+        -- domain (a DiscreteValues tag) and nothing else. Both operands of
+        -- this @&&@ are Bools, structurally finite, but neither carries a tag
+        -- (an @isLeft@ of a random Either), so no IRCompiler equation can
+        -- enumerate them. Finite-by-type let 'marginalize''s keepD promise a
+        -- density here, and the probability variant was then refused with
+        -- "found no way to convert to IR".
+      , testCase "a combination of untagged finite-typed Bools has no closed density (Bottom)" $
+          assertEqual "" Bottom $ mainPType
+            "main = isLeft (if Uniform < 0.5 then left Normal else right 1.0) && isLeft (if Uniform < 0.3 then left Normal else right 2.0)"
+        -- ... while a random condition needs no finiteness fact at all: the
+        -- if equation weights each arm by p(cond) and its complement and never
+        -- enumerates the condition ('mixtureGround'). The same untagged Bool
+        -- as a condition keeps the mixture tractable.
+      , testCase "an untagged random Bool condition keeps the if tractable (Integrate)" $
+          assertEqual "" Integrate $ mainPType
+            "main = if isLeft (if Uniform < 0.5 then left Normal else right 1.0) then 1.0 else Normal"
+      , testCase "a samplable-only condition leaves the if sample-only (Bottom)" $
+          assertEqual "" Bottom $ mainPType
+            "main = if Uniform + Normal < Uniform then 1.0 else 2.0"
       ]
 
   -- Milestone 6 (task @modality-mrec-msum-validation@): the structured-modality

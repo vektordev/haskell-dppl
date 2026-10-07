@@ -38,6 +38,8 @@ module SPLL.Typing.Modality
   , leqGround, joinGround, meetGround, meetGroundMixture, meetGroundParts
     -- * The universal marginalization combinator (the doc's "▷")
   , marginalize
+    -- * The @if@ mixture combinator
+  , mixtureGround
     -- * Structured modalities
   , Mod(..)
   , Transfer
@@ -67,8 +69,8 @@ import Data.Map.Strict (Map)
 
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
-import SPLL.Lang.Types (Tag(..))
-import SPLL.Lang.Lang (multiValueContainsContinuous)
+import SPLL.Lang.Types (Tag)
+import SPLL.Analysis (enumerableDomain)
 
 -- * The capability lattice -----------------------------------------------------
 
@@ -144,13 +146,14 @@ joinFin _      _      = Infinite
 
 -- | Decision C: finiteness is /derived/ from the existing @DiscreteValues@
 -- annotation (which strictly dominates a bare boolean — it carries the actual
--- enumerated values). A present @DiscreteValues@ tag ⇒ 'Finite'.
+-- enumerated values). 'Finite' means /enumerable domain/
+-- ('SPLL.Analysis.enumerableDomain') and nothing else: a node whose type
+-- merely has finitely many inhabitants, but which carries no tag to loop over,
+-- is 'Infinite', because the one reader of 'Fin' is 'marginalize''s @keepD@,
+-- and every IRCompiler equation that can cash a finite-sum density enumerates
+-- the tag (task finiteness-single-producer).
 finFromTags :: [Tag] -> Fin
-finFromTags ts = if any isDiscrete ts then Finite else Infinite
-  -- A tag with a continuous leaf is a value shape, not a finite support
-  -- (task of-annotation-and-auto-derived-enumeration-divergence).
-  where isDiscrete (DiscreteValues mv) = not (multiValueContainsContinuous mv)
-        isDiscrete _                   = False
+finFromTags ts = maybe Infinite (const Finite) (enumerableDomain ts)
 
 -- * Distribution family (design §6) --------------------------------------------
 
@@ -307,6 +310,34 @@ marginalize a b
     -- Normalize: any of D/I implies S; guarantees a valid lattice element.
     survive | Set.null raw = raw
             | otherwise    = Set.insert CanSample raw
+
+-- | The ground step of a random-condition @if@: the law of
+-- @if c then t else f@ given the condition's law @c@ and the branches'
+-- already-combined law @b@ (the 'meetGroundMixture' of the two arms).
+--
+-- It mirrors the one codegen equation for this shape (IRCompiler's
+-- 'IfThenElse' arm: @p(c) * p(t) + (1 - p(c)) * p(f)@, each arm queried in the
+-- caller's mode), which never enumerates the condition. What it needs of the
+-- condition is its probability of being @True@, a probability-mode query, so
+-- the condition contributes the full analytic set exactly when it projects to
+-- a usable rung ('DensInt'; 'Exact' is the free Dirac case). A merely samplable
+-- condition leaves sampling only. The result is that, met with the branches:
+-- a density survives where the branches have one, an integral where they have
+-- one.
+--
+-- Unlike routing the @if@ through 'marginalize', this asks nothing of the
+-- condition's 'Fin': @keepD@'s "a finite side makes the marginal a finite sum"
+-- is a promise only an enumeration can cash, and this equation does not
+-- enumerate. 'Fin' is the branches' (the support of a mixture is the union of
+-- the branch supports, already 'joinFin''d), and the family is dropped (a
+-- mixture of two Gaussians is not one). Task finiteness-single-producer.
+mixtureGround :: GroundMod -> GroundMod -> GroundMod
+mixtureGround c b
+  | gCap c == Exact = b                 -- a Dirac condition picks one arm: free
+  | otherwise       = GroundMod (meetCap condCap (gCap b)) (gFin b) FamNone
+  where condCap | gCap c == DensInt                       = DensInt
+                | CanSample `Set.member` caps (gCap c)    = SampleOnly
+                | otherwise                               = Opaque
 
 -- * Structured modalities ------------------------------------------------------
 

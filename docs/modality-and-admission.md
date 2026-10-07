@@ -13,6 +13,17 @@ rungs. Read those two modules before changing what an expression is allowed to
 do — notably, `PNormal` and `Integrate` are the same capability rung differing
 only by family, and `Bottom` is a collapse of four distinct levels.
 
+The finiteness axis `Fin` means **enumerable domain** and nothing else:
+`Finite` exactly when the node carries a `DiscreteValues` tag with no
+continuous leaf (`Analysis.enumerableDomain`, the one predicate every
+enumeration equation in IRCompiler also reads). A node whose type merely has
+finitely many inhabitants (an untagged `Bool`) is `Infinite`. `Fin`'s one
+reader is `marginalize`'s `keepD` (a finite side makes the marginal density a
+finite sum), and only an enumeration can cash that promise. A random `if`
+condition does not go through `marginalize`: its rule (`mixtureGround`)
+mirrors the codegen, which weights each arm by `p(cond)` and its complement,
+so it needs the condition analytic but never finite.
+
 ## An `if`'s arms see a gated variable's conditioned law
 
 `ModalityInfer` infers the two arms of an `IfThenElse` under an environment in
