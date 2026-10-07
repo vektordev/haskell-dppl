@@ -22,10 +22,12 @@
 -- exception of any other kind. Crash is the contract violation. A refusal is
 -- not: since @static-refusals-become-absent-variants@ an IR-compiler refusal is
 -- an absent variant with a recorded reason, and an admitted function refusing
--- means the lattice over-promised -- the F2 class in its graceful form. The
--- fuzz property tabulates that share (the precision metric) rather than
--- failing on it; only an admitted variant absent with no recorded reason
--- stays a violation.
+-- means the lattice over-promised -- the F2 class in its graceful form. That
+-- is still a bug, just a different one, so it is its own outcome
+-- ('PromisedAbsent', listed by 'overPromises'): the engine said CanDensity or
+-- CanIntegrate and nothing produces it (task
+-- @admission-oracle-promised-variants-present@). An admitted variant absent
+-- with no recorded reason stays a violation.
 --
 -- Not in scope, deliberately: whether any value is *right*. The @.tst@ files
 -- and @SamplingMatchesPDF@ own correctness; this is crash-freedom and
@@ -38,6 +40,7 @@ module AdmissionOracle
   , admitted
   , admissionCheck
   , violations
+  , overPromises
   , refusals
   , outcomeBucket
   , canonicalValue
@@ -69,6 +72,10 @@ data Outcome
     -- an admitted variant the IR compiler refused, with its recorded reason),
     -- a 'VError' result, or an admitted variant that is absent outright with
     -- no reason (the one refusal that is a violation, see 'violations').
+  | PromisedAbsent String
+    -- ^ The function is admitted, and the IR compiler refused to build this
+    -- inference variant, recording this reason: a lattice over-promise. Not a
+    -- crash and not a query-time refusal; see 'overPromises'.
   | Crash String
     -- ^ A Haskell exception (@error@, a failed pattern match, ...). The
     -- violation this oracle exists for.
@@ -123,6 +130,13 @@ violations (Checked _ cs) = [ c | c <- cs, isViolation (ckOutcome c) ]
         isViolation (Refusal msg) = msg == absentNote
         isViolation _ = False
 
+-- | The admitted inference variants the IR compiler refused to build
+-- ('PromisedAbsent'): the lattice promised a density or an integral that
+-- nothing produces.
+overPromises :: AdmissionReport -> [Check]
+overPromises (NotTyped _) = []
+overPromises (Checked _ cs) = [ c | c@Check{ckOutcome = PromisedAbsent _} <- cs ]
+
 refusals :: AdmissionReport -> [Check]
 refusals (NotTyped _) = []
 refusals (Checked _ cs) = [ c | c@Check{ckOutcome = Refusal msg} <- cs, msg /= absentNote ]
@@ -131,6 +145,7 @@ refusals (Checked _ cs) = [ c | c@Check{ckOutcome = Refusal msg} <- cs, msg /= a
 outcomeBucket :: Outcome -> String
 outcomeBucket Value       = "value"
 outcomeBucket (Refusal _) = "refusal"
+outcomeBucket (PromisedAbsent _) = "promised-absent"
 outcomeBucket (Crash _)   = "crash"
 outcomeBucket (Skipped _) = "skipped"
 
@@ -144,6 +159,7 @@ renderViolation (Check f pt m o) =
     -- The exception's text up to its call stack, which names only the
     -- interpreter's own recursion and buries the message.
     firstLine (Crash msg) = "Crash: " ++ takeWhile (/= '\n') msg
+    firstLine (PromisedAbsent why) = "admitted, but the variant was refused: " ++ takeWhile (/= '\n') why
     firstLine other       = show other
 
 -- | Check the admission contract on one program.
@@ -192,13 +208,13 @@ admissionCheck conf p mainArgs = do
       Just grp
         -- An admitted variant absent WITH a recorded reason is the IR compiler
         -- refusing the shape (task static-refusals-become-absent-variants): the
-        -- graceful form of a lattice over-promise, so the refusal bucket -- the
-        -- query below answers 'Left' naming the reason. Absent with no reason
-        -- would be the variant gate disagreeing with the verdict: a violation.
+        -- graceful form of a lattice over-promise, reported as 'PromisedAbsent'
+        -- below. Absent with no reason would be the variant gate disagreeing
+        -- with the verdict: a violation.
         | admitted pt, not (isJust (probFun grp)), unexplained "prob" grp -> return [Check nm pt ModeProbability (Refusal absentNote)]
         | admitted pt, not (isJust (integFun grp)), unexplained "integ" grp -> return [Check nm pt ModeIntegrate (Refusal absentNote)]
         | not (isJust (genFun grp)) -> return [Check nm pt ModeGenerate (Refusal "refused, and generate is absent too")]
-        | otherwise -> case argsFor tp nm of
+        | otherwise -> (++ promised) <$> case argsFor tp nm of
             Nothing -> return [Check nm pt ModeGenerate (Skipped "no argument value for a parameter")]
             Just as -> do
               sampled <- trySync (evalRandIO (runGenNamedC p env nm as) >>= evaluate . forceShow)
@@ -211,14 +227,25 @@ admissionCheck conf p mainArgs = do
                 Right (VError msg) -> return [Check nm pt ModeGenerate (Skipped ("sample failed at run time: " ++ msg))]
                 Right x
                   | admitted pt -> do
-                      pr <- infer (runProbNamedC p env nm as x)
-                      ig <- infer (runIntegNamedC p env nm as x)
-                      return [ Check nm pt ModeGenerate Value
-                             , Check nm pt ModeProbability pr
-                             , Check nm pt ModeIntegrate ig ]
+                      pr <- infer ModeProbability (runProbNamedC p env nm as x)
+                      ig <- infer ModeIntegrate (runIntegNamedC p env nm as x)
+                      return ([Check nm pt ModeGenerate Value] ++ pr ++ ig)
                   | otherwise -> return [Check nm pt ModeGenerate Value]
+        where
+          -- Existence is checked whether or not an argument can be built.
+          promised = [ Check nm pt m (PromisedAbsent (showRefusal r))
+                     | admitted pt, (m, lbl, present) <- variants, not present
+                     , Just r <- [lookup lbl (refusedVariants grp)] ]
+          refusedModes = map ckMode promised
+          variants = [ (ModeProbability, "prob", isJust (probFun grp))
+                     , (ModeIntegrate, "integ", isJust (integFun grp)) ]
+          -- A refused variant is already reported; querying it would only
+          -- answer 'Left' with the same reason.
+          infer m r
+            | m `elem` refusedModes = return []
+            | otherwise = (\o -> [Check nm pt m o]) <$> evalOutcome r
 
-    infer r = do
+    evalOutcome r = do
       out <- trySync (evaluate (forceShow r))
       case out of
         Left e -> do

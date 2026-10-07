@@ -160,10 +160,11 @@ functions that evaluate, at a point from its own `generate`, to a value or a
 refusal; a `Bottom` one still generates.** `test/AdmissionOracle.hs` checks it
 per function (helpers at canonical arguments), reading the verdicts from
 `Prelude.admissionTyped` -- the program exactly as the variant gate reads it,
-so the verdict is known even when the compile crashes. Three buckets: value,
+so the verdict is known even when the compile crashes. Four buckets: value,
 refusal (a `Left`, a `VError`, or an `IRError` the interpreter raises -- the
 one exception that is not a crash, recognised by its `Error during
-interpretation:` prefix), crash. A crash is the violation.
+interpretation:` prefix), promised-absent (below), crash. A crash is the
+violation.
 
 `prop_Fuzz_AdmissionTotality` (Slow) runs it over the typed generator, with
 `knownAdmissionCrashes` excepting filed crash families by message, each
@@ -178,12 +179,17 @@ builds an interval target only for a scalar result (a cumulative query of a
 list compared lists with `<`), and the `hasAnyExcept` (`==`/constructor-test)
 InjF arm requires exactly one probabilistic operand, with `==` of two random
 enumerables compared on the forward grid instead. An admitted variant the IR
-compiler *refused* (absent, with a
-recorded reason) is in the **refusal** bucket, not a violation: it is the
-lattice over-promising in its graceful form, and the property tabulates that
-share as the lattice's precision metric. Only an admitted variant absent with
-*no* recorded reason is still a violation (the variant gate disagreeing with
-the verdict). The default-suite `Admission oracle` group pins the oracle
+compiler *refused* (absent, with a recorded reason) is **promised-absent**
+(`AdmissionOracle.overPromises`): not a crash, but the lattice over-promising
+in its graceful form, which is a bug of its own (task
+`admission-oracle-promised-variants-present`). The property fails on one
+under the label `LATTICE OVER-PROMISE` unless its reason matches a filed
+family in `knownOverPromises` (keyed by refusal-site message, each naming its
+doc; today all are items of `fuzz-admission-over-promises`). When that landed,
+about half of the admitted inference evaluations were over-promises. An
+admitted variant absent with *no* recorded reason is still a crash-class
+violation (the variant gate disagreeing with the verdict). A whole compile
+answering `Left` after typing succeeded stays in the refusal bucket. The default-suite `Admission oracle` group pins the oracle
 itself, including on the historical mixture-Fin repro. There is no corpus twin: over all 443
 corpus programs the oracle finds nothing, and none of them is `Bottom`, so the
 corpus cannot exercise half the contract (measured when the task landed).

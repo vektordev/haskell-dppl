@@ -71,11 +71,11 @@ import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, anyHol
                          runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
                          irEnvConstructs, inferenceBodies)
 import End2EndTesting (resolveNeuralParams, networkNames)
-import Data.List (sort, nub, intersect, find, isInfixOf)
+import Data.List (sort, nub, intersect, find, isInfixOf, isPrefixOf)
 import PrettyPrint (pPrintProg)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.PType (PType(Bottom))
-import AdmissionOracle (Outcome(..), admissionCheck, AdmissionReport(..), Check(..), Mode(..), admitted, violations, outcomeBucket, renderViolation)
+import AdmissionOracle (Outcome(..), admissionCheck, AdmissionReport(..), Check(..), Mode(..), admitted, violations, overPromises, outcomeBucket, renderViolation)
 import Data.Number.Erf (erf)
 
 import SPLL.Lang.Types
@@ -646,11 +646,13 @@ prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess (fuzzCases 3000) $
 -- what a failure of this property means: a family to file. Since
 -- static-refusals-become-absent-variants the IR compiler's shape refusals
 -- (the catch-all "found no way to convert to IR" among them) are absent
--- variants with a recorded reason and land in the refusal bucket, so the
--- exception list holds only genuine crash families; a new lattice
--- over-promise shows up as a refusal share, not as a failure, and the
--- oracle's default-suite case for the mixture-Fin repro
--- ('admissionOracleTests') still pins that one to a clean Bottom.
+-- variants with a recorded reason, so the crash exception list holds only
+-- genuine crash families. Such an absent variant of an *admitted* function is
+-- a lattice over-promise, a bug of its own: since
+-- admission-oracle-promised-variants-present it is the "promised-absent"
+-- bucket and fails the property under its own label (LATTICE OVER-PROMISE)
+-- unless its refusal reason is a filed family ('knownOverPromises'). Measured
+-- then: about half of the admitted inference evaluations are over-promises.
 prop_Fuzz_AdmissionTotality :: Property
 prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
   forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_AdmissionTotality" 4 $ do
@@ -675,6 +677,7 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
   where
    judge p report =
     let (known, new) = partitionKnownAdmission (violations report)
+        (knownOver, newOver) = partitionKnownOverPromises (overPromises report)
         evals = case report of
           NotTyped _ -> []
           Checked _ cs -> [ outcomeBucket (ckOutcome c) | c <- cs, admitted (ckPType c)
@@ -686,10 +689,14 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
             | otherwise               -> "every function refused"
     in tabulate "admitted inference evaluations" evals
      $ tabulate "known violation family" [ fam | (_, fam) <- known ]
+     $ tabulate "known over-promise family" [ fam | (_, fam) <- knownOver ]
+     $ tabulate "over-promise shape" [ overPromiseShape c | c <- overPromises report ]
      $ label verdict
-     $ counterexample (unlines ("ADMISSION CONTRACT VIOLATED:" : map renderViolation new
-                                ++ ["PROGRAM:", pPrintProg p]))
-     $ null new
+     $ counterexample (unlines (concat
+         [ "ADMISSION CONTRACT VIOLATED:" : map renderViolation new | not (null new) ]
+         ++ concat [ "LATTICE OVER-PROMISE (admitted, variant refused):" : map renderViolation newOver | not (null newOver) ]
+         ++ ["PROGRAM:", pPrintProg p]))
+     $ null new && null newOver
 
 -- | Crash families already filed, matched by a substring of the violation's
 -- message, each with the open doc tracking it. Every entry names a doc; one
@@ -700,10 +707,8 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
 -- @static-refusals-become-absent-variants@ (phase P1 of @pipeline-coherence@)
 -- converts from a compile-killing @error@ into an absent variant. That task
 -- empties this part of the list by construction: after it, those sites are no
--- longer exceptions at all. Note what that does to the oracle, though: an
--- *admitted* function with an absent variant is a violation here (the
--- contract says an admitted function compiles), so P1 has to decide whether
--- that becomes the graceful-refusal bucket instead -- see 'violations'.
+-- longer exceptions at all. An admitted function with such an absent variant
+-- is an over-promise, listed separately ('knownOverPromises').
 knownAdmissionCrashes :: [(String, String)]
 knownAdmissionCrashes =
   -- The refusal sites of static-refusals-become-absent-variants (the IR
@@ -722,6 +727,63 @@ knownAdmissionCrashes =
   -- The nine families of fuzz-admission-oracle-bugs and fuzz-let-witness-bugs
   -- item 4 ("inversions solving for") left this list when they were fixed;
   -- their repros are in the ordinary corpus.
+
+-- | Lattice over-promise families already filed: an admitted function whose
+-- inference variant the IR compiler refuses ('PromisedAbsent'), matched by a
+-- substring of the recorded refusal reason, each with the doc tracking it (task
+-- admission-oracle-promised-variants-present). The same rules as
+-- 'knownAdmissionCrashes': every entry names a doc, and an entry is pruned
+-- when its doc closes.
+--
+-- Populated by running the property (2026-10-08): one entry per refusal site
+-- the fuzz draws reach, each a numbered item of fuzz-admission-over-promises.
+-- That makes the needles as coarse as the sites (the IR catch-all covers many
+-- unrelated shapes), so what fails the property is an over-promise refused at
+-- a site not listed here; the "over-promise shape" tabulation is the finer
+-- view. Over-promises were about half of all admitted inference evaluations
+-- at their introduction, so this list cannot be emptied entry by entry
+-- without a lattice-side fix per family.
+knownOverPromises :: [(String, String)]
+knownOverPromises =
+  [ ("set-valued witness construction failed for the binding of", "fuzz-admission-over-promises")
+  , ("found no way to convert to IR", "fuzz-admission-over-promises")
+  , ("which NeST refused to compile", "fuzz-admission-over-promises")
+  , ("cannot extract Normal params", "fuzz-admission-over-promises")
+  , ("does not resolve to a lambda the compiler can see", "fuzz-admission-over-promises")
+  , ("reached a generate-backed fallback", "fuzz-admission-over-promises")
+  , ("the argument has pType Bottom (no measurable distribution)", "fuzz-admission-over-promises")
+  ]
+
+
+-- | A one-line classification of an over-promise for tabulation: the
+-- recorded reason's first line, cut before anything naming a particular
+-- program (a bound variable, a callee, a chain name), plus, for the IR
+-- catch-all, the refused expression's outermost node.
+overPromiseShape :: Check -> String
+overPromiseShape Check{ckOutcome = PromisedAbsent why} =
+  case breakOnStr ": Expr {" line of
+    Just (pre, rest) -> pre ++ " @ " ++ nodeHead rest
+    Nothing -> foldr cut line [" for the binding of", " calls ", " (it resolved to", " and the callee (", ". Result type"]
+  where
+    line = takeWhile (/= '\n') why
+    cut needle acc = maybe acc fst (breakOnStr needle acc)
+    nodeHead rest = case breakOnStr "node = " rest of
+      Just (_, n)
+        | "InjF " `isPrefixOf` n -> takeWhile (/= '[') (take 40 n)
+        | otherwise -> takeWhile (/= ' ') n
+      Nothing -> "?"
+    breakOnStr needle = go ""
+      where go acc hay | needle `isPrefixOf` hay = Just (reverse acc, drop (length needle) hay)
+                       | null hay = Nothing
+                       | otherwise = go (head hay : acc) (tail hay)
+overPromiseShape c = show (ckOutcome c)
+
+partitionKnownOverPromises :: [Check] -> ([(Check, String)], [Check])
+partitionKnownOverPromises = foldr step ([], [])
+  where
+    step c@Check{ckOutcome = PromisedAbsent why} (ks, ns)
+      | (doc : _) <- [ d | (needle, d) <- knownOverPromises, needle `isInfixOf` why ] = ((c, doc) : ks, ns)
+    step c (ks, ns) = (ks, c : ns)
 
 partitionKnownAdmission :: [Check] -> ([(Check, String)], [Check])
 partitionKnownAdmission = foldr step ([], [])
@@ -2836,17 +2898,25 @@ admissionOracleTests = testGroup "Admission oracle"
           assertBool ("admitted: " ++ show pt) (admitted pt)
           assertBool msg ("Comparison not implemented for type: TArrow" `isInfixOf` msg)
         _ -> assertFailure ("expected a crash on main, got " ++ show (violations rep))
-  , testCase "an admitted function the IR compiler refuses is a refusal, and generate survives" $ do
+  , testCase "an admitted function the IR compiler refuses is an over-promise, and generate survives" $ do
       -- test/cases/known-issues/correlatedGaussianLetSharesLatent: admitted,
       -- and the set-valued witness engine refuses the shared latent. That
       -- crashed the whole compile, generate included, until
       -- static-refusals-become-absent-variants made it an absent variant with
       -- a recorded reason. (This case used item 4's negated log-normal of
-      -- fuzz-admission-oracle-bugs until that compiled.)
+      -- fuzz-admission-oracle-bugs until that compiled.) Not a crash, but
+      -- still a lattice bug, so its own class (task
+      -- admission-oracle-promised-variants-present): the non-vacuity check
+      -- that the property sees an over-promise, under the over-promise label
+      -- and filed in 'knownOverPromises'.
       rep <- oracleOn "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)"
       assertNoViolation rep
-      assertEqual "outcomes" [(ModeGenerate, "value"), (ModeProbability, "refusal"), (ModeIntegrate, "refusal")]
+      assertEqual "outcomes" [(ModeGenerate, "value"), (ModeProbability, "promised-absent"), (ModeIntegrate, "promised-absent")]
         (outcomesOf "main" rep)
+      assertEqual "over-promises" [ModeProbability, ModeIntegrate] (map ckMode (overPromises rep))
+      let (filed, unfiled) = partitionKnownOverPromises (overPromises rep)
+      assertEqual "unfiled over-promises" [] (map renderViolation unfiled)
+      assertEqual "filed under" ["fuzz-admission-over-promises", "fuzz-admission-over-promises"] (map snd filed)
   , testCase "the mixture-Fin repro (a historical F2 instance) honours the contract" $ do
       -- Task modality-mixture-fin-joins-not-meets (haskell-dppl d0ab543): the
       -- lattice used to type this finite-support, admit it, and crash the IR
@@ -2865,7 +2935,7 @@ admissionOracleTests = testGroup "Admission oracle"
       assertEqual "verdict" (Just Bottom) (verdictOf "main" rep)
       assertEqual "outcomes" [(ModeGenerate, "value")] (outcomesOf "main" rep)
   , testCase "every known violation family names a doc" $
-      assertEqual "entries without a doc" [] [ n | (n, d) <- knownAdmissionCrashes, null d ]
+      assertEqual "entries without a doc" [] [ n | (n, d) <- knownAdmissionCrashes ++ knownOverPromises, null d ]
   ]
   where
     oracleOn src = case tryParseProgram "<admission>" src of

@@ -740,6 +740,14 @@ The integrate variant is evaluated too, which no other fuzz property does, and
 one of the new families is only visible there (a `cdf` through a
 projected-away draw, item 5).
 
+Since task `admission-oracle-promised-variants-present` the property also
+fails on a lattice over-promise (an admitted function whose variant the IR
+compiler refused with a recorded reason) unless the reason matches an entry of
+`knownOverPromises`. First measured 2026-10-08 over 1768 draws: 51% of admitted
+inference evaluations were promised-absent, 45% values, 4% query-time
+refusals, across seven refusal sites, all filed as `fuzz-admission-over-promises`.
+The `over-promise shape` table splits them by refusal site and refused node.
+
 ## Backend agreement (`prop_Fuzz_BackendsAgree`)
 
 Task `backend-agreement-fuzzing`. The interpreter is the reference semantics,
