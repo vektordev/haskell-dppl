@@ -1807,6 +1807,37 @@ test_wideConstructorPruneGuardLinear = testCase "wideConstructorPruneGuardLinear
         Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
         Right ir -> return (length (show ir))
 
+-- | Task witness-fold-open-body-copied-per-field: the witnessed-let fold
+-- answers a wildcard witness of a single-use binding with the body compiled
+-- with the binding left random. Unpacked inline, that block was copied into
+-- every result field, and it holds the next binding's fold, so K independent
+-- single-use Normal draws packed into a tuple grew ~8x per binding. Bound once
+-- it is ~3x (the rest is task witness-fold-wildcard-body-compiled-twice;
+-- tighten the bound when that lands). Pinned as the -O0 IR growth from K=2 to
+-- K=4 -- not K=3 to K=6, which the old shape takes minutes to compile, so a
+-- regression would hang instead of failing: 64.7x before the fix, 10.6x
+-- after (main's probability function alone); the bound of 20x fails on the
+-- old shape.
+test_witnessFoldOpenBodyShared :: TestTree
+test_witnessFoldOpenBodyShared = testCase "witnessFoldOpenBodyShared" $ do
+  small <- sizeOf 2
+  large <- sizeOf 4
+  let ratio = fromIntegral large / fromIntegral small :: Double
+  assertBool ("-O0 IR grew " ++ show ratio ++ "x from K=2 to K=4 ("
+              ++ show small ++ " -> " ++ show large ++ ")")
+    (ratio < 20)
+  where
+    indep k = "main = " ++ concat [ "draw x" ++ show i ++ " = Normal in " | i <- [1 .. k] ]
+              ++ foldr1 (\a b -> "(" ++ a ++ ", " ++ b ++ ")") [ "x" ++ show i | i <- [1 .. k] ]
+    sizeOf :: Int -> IO Int
+    sizeOf k = case tryParseProgram "indepTuple" (indep k) of
+      Left err -> assertFailure ("parse error: " ++ show err) >> return 0
+      -- Main's own probability function only: the per-mask variant groups
+      -- switch off past K = 4 and would confound a whole-module total.
+      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
+        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+        Right ir -> return (length (show (probFun (lookupIREnv "main" ir))))
+
 -- | Task recursive-list-prob-missed-cse: probability-mode compilation of a
 -- self-recursive list (@main = if Uniform > p then [] else X : main@, the
 -- README's own "Recursive lists" example) must cost work LINEAR in the query
@@ -5193,6 +5224,7 @@ internalsTests = testGroup "Internals"
   , test_gaussianChainIRNotExponential
   , test_nestedEqualityChainAnyArmConstant
   , test_wideConstructorPruneGuardLinear
+  , test_witnessFoldOpenBodyShared
   , test_recursiveListMissedCSE
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles

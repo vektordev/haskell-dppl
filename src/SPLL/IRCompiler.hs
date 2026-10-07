@@ -3276,9 +3276,23 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
             let openMeta = extendMetaForLambda meta (getTypeInfo l) toInvCN
             r <- lift ((Just <$> runWriterT (toIRInference openMeta cumulative openBody sample))
                          `catchError` (\_ -> return Nothing))
-            return $ case r of
-              Just (openRes, binds) -> unpackResult (generateLetInBlock openMeta (openRes, binds))
-              Nothing -> constResult anyRefusal
+            -- Bound ONCE ('shareResult'), like the body factor above: unpacked
+            -- inline, every field of the result carried its own copy of the
+            -- open body, which holds the next binding's fold and so its own
+            -- four copies -- ~8x per binding on independent single-use lets
+            -- (task witness-fold-open-body-copied-per-field). Its guards are
+            -- exactly the conditions 'whenAny' reads it under ('guardedZero'
+            -- adds 'guard' outside): a wildcard witness, and for a sink an
+            -- unevaluable one. As for the body factor, only a body that itself
+            -- holds a probabilistic let is bound: the copies compound only
+            -- through such nesting, and a leaf block's constant dim and flag
+            -- fold away inline but not through the shared tuple.
+            case r of
+              Just (openRes, binds)
+                | holdsProbabilisticLet openBody ->
+                    shareResult sr "open_body" [guard, if bindingIsSink then readsAnyW else anyW] binds openRes
+                | otherwise -> return (unpackResult (generateLetInBlock openMeta (openRes, binds)))
+              Nothing -> return (constResult anyRefusal)
           let whenAny whenAnySink whenUneval
                 | bindingIsSink = IRIf readsAnyW whenUneval whenAnySink
                 | singleUse     = whenUneval
