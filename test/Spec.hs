@@ -47,6 +47,7 @@ import Data.List (isInfixOf)
 import Control.Exception (finally)
 import ImpactManifest (openManifest, flushManifest, fullTestsRequested, manifestFile)
 import TestImpactManifest (impactManifestTests)
+import CorpusSweep (loadCorpus, timeWholeRun, reportSweeps)
 
 
 normalPDF :: Double -> Double
@@ -519,30 +520,39 @@ main = do
   -- The impact-analysis manifest of the corpus sweeps (ImpactManifest):
   -- opened before the tree is built, written back once it has run.
   manifest <- fullTestsRequested >>= openManifest manifestFile
-  e2e <- end2endTests manifest
-  selectDiff <- selectPassDifferentialTests
-  planDiff <- planEngineDifferentialTests
-  budgetZeroDiff <- budgetZeroDifferentialTests
-  planLog <- planEngineLogSpaceTests
-  batchedPy <- batchedPythonTests
+  -- The corpus, parsed once and shared by every whole-corpus sweep
+  -- (CorpusSweep). Each sweep checks its own tier's environment variable.
+  corpus <- loadCorpus
+  internals <- internalsTests corpus
+  observationMask <- observationMaskTests corpus
+  modalityInfer <- modalityInferTests corpus
+  e2e <- end2endTests corpus manifest
+  selectDiff <- selectPassDifferentialTests corpus
+  planDiff <- planEngineDifferentialTests corpus
+  budgetZeroDiff <- budgetZeroDifferentialTests corpus
+  planLog <- planEngineLogSpaceTests corpus
+  batchedPy <- batchedPythonTests corpus
   branchCountBackends <- branchCountBackendTests
-  detTests <- determinismTests
+  detTests <- determinismTests corpus
   showcase <- showcaseTests
-  writeLogitsRoundtrip <- writeLogitsRoundtripTests
+  writeLogitsRoundtrip <- writeLogitsRoundtripTests corpus
   knownIssues <- knownIssuesTests
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
   -- regressions outside the code they pin. They're skipped unless
   -- NEST_SLOW_TESTS is set, e.g. `NEST_SLOW_TESTS=1 stack test --ta '-p Slow'`.
+  -- The corpus sweeps in it gate themselves on their Slow tier.
+  slowInternals <- slowInternalsTests corpus
+  slowE2e <- slowEnd2EndTests corpus manifest
+  slowBatchedPy <- slowBatchedPythonTests corpus
+  -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
+  -- programs, each compiled and queried) was a quarter of the default run's
+  -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
+  rewriteCorpus <- rewriteCorpusTests corpus
+  backendCoverage <- backendCoverageTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
-  slow <- if isNothing runSlow then return (testGroup "Slow" []) else do
-    slowE2e <- slowEnd2EndTests manifest
-    slowBatchedPy <- slowBatchedPythonTests
-    -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
-    -- programs, each compiled and queried) was a quarter of the default run's
-    -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
-    rewriteCorpus <- rewriteCorpusTests
-    return $ testGroup "Slow" [slowInternalsTests, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests, backendCoverageTests]
+  let slow = testGroup "Slow" $
+        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests, backendCoverage]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it
@@ -563,12 +573,13 @@ main = do
   -- driving stack test to an OOM kill).
   -- The corpus sweeps record their passes in the impact-analysis manifest
   -- (ImpactManifest); written once the tree has run, whatever its verdict
-  -- (defaultMain exits by throwing ExitCode).
-  flip finally (flushManifest manifest) $ defaultMain $ testGroup "Tests"
+  -- (defaultMain exits by throwing ExitCode). The per-sweep cost table
+  -- (CorpusSweep) is printed after it.
+  flip finally (flushManifest manifest >> reportSweeps corpus) $ defaultMain $ timeWholeRun corpus $ testGroup "Tests"
     [ specTests
     , parserTests
-    , internalsTests
-    , observationMaskTests
+    , internals
+    , observationMask
     , perValueTests
     , shrinkerTests
     , neuralGeneratorTests
@@ -581,7 +592,7 @@ main = do
     , rejectionTests
     , monomorphizeTests
     , modalityTests
-    , modalityInferTests
+    , modalityInfer
     , detTests
     , writeLogitsTests
     , writeLogitsRoundtrip

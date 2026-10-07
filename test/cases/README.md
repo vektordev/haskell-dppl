@@ -10,8 +10,7 @@ Pairs are grouped into subfolders by language feature (`distributions/`,
 `data-structures/`, `set-witness/`, `neural/`, ...) rather than flat, so
 finding "the tests for X" doesn't mean grepping several hundred files. A
 `.ppl`/`.tst` pair always lives together in the same folder; the test runner
-(`End2EndTesting.getAllTestFiles`, `TestModalityInfer`'s corpus-wide sweep)
-discovers them by recursing into every folder here, so a base name is unique
+(`CorpusSweep.loadCorpus`, which every corpus sweep draws on) discovers them by recursing into every folder here, so a base name is unique
 across the whole corpus and findable regardless of which folder it is in
 (`TestCaseParser.corpusPplPath`/`corpusTstPath`). Which folder a new pair goes
 into is a judgment call -- put it next to the pair it's most similar to.

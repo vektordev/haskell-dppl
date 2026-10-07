@@ -269,7 +269,7 @@ harnessFingerprint = mHarness
 
 computeHarness :: IO String
 computeHarness = do
-  hs <- mapM fileHash [ "test" </> f | f <- ["End2EndTesting.hs", "ImpactManifest.hs", "TestCaseParser.hs", "TestTolerances.hs"] ]
+  hs <- mapM fileHash [ "test" </> f | f <- ["End2EndTesting.hs", "CorpusSweep.hs", "ImpactManifest.hs", "TestCaseParser.hs", "TestTolerances.hs"] ]
   return (hashKey ("harness" : hs))
 
 -- | Every @src/@ module the interpreter transitively imports (M1 of the task:

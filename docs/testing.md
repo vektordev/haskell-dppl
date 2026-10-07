@@ -72,6 +72,53 @@ current list for whichever binary you run):
   `prop_Fuzz_AdmissionTotality`
 - `test/TestCaseParser.hs` / `ArbitrarySPLL.hs` / `TestTolerances.hs` — the
   `.tst` parser, QuickCheck generators, shared numeric tolerances
+- `test/CorpusSweep.hs` — the registry every whole-corpus check is built
+  through (see "Corpus sweeps" below)
+
+## Corpus sweeps
+
+A check that iterates over the programs of `test/cases/` is a **sweep**, and
+every sweep is built through `CorpusSweep.corpusSweep` (one tasty node per
+program) or `corpusSweepAll` (one node built from the whole selected slice: a
+batch, a few aggregate properties, a single test looping over it), from a
+`SweepSpec`:
+
+```haskell
+SweepSpec { sweepName = "End2End.Python", sweepTier = Default, sweepSlow = SkipSlow
+          , sweepSelect = \e -> routed Python e && hasQueries e
+          , sweepNote = "every p()/cdf() row against the emitted Python" }
+```
+
+A sweep costs one compile or run per corpus program, about 500 of them, so
+adding one is not like adding a unit test. Spelling it as a `SweepSpec` makes
+it one visible line in a diff, and `grep -n 'SweepSpec' test/*.hs` lists them
+all.
+
+- **The corpus is parsed once per binary** (`loadCorpus`, in `Spec.hs` and
+  `SpecCorpus.hs`) and handed to every sweep. A `CorpusEntry` holds the parsed
+  program and the raw `.tst` rows. Compiles and mock-shaped rows are each
+  sweep's own business (`End2EndTesting.shapedCases`).
+- **Tiering.** `sweepTier` (`Default`, `Slow`, `Aspirational`) decides which
+  environment variable the sweep needs. With its tier off it builds an empty
+  group. `sweepSlow` applies the `.tst` `slow` header: `SkipSlow` (the usual
+  policy), `OnlySlow` (the `End2End (slow)` twins) or `IgnoreSlow` (static
+  checks that neither compile nor run the program).
+- **The cost table.** Every test of a sweep runs under a clock. After the run,
+  each binary prints one line per sweep that ran a test: tier, programs
+  selected, tests run, build time (the `IO` that built the tree, e.g.
+  BatchedPython's eligibility compiles) and test time summed over its tests.
+  The last line gives the sweeps' share of the time summed over every test of
+  the binary. Tests run in parallel, so summed times exceed the wall time and
+  include waiting for a core. Compare them between runs on one machine, not
+  with the wall clock. A sweep whose tests share lazily compiled programs
+  (the `Corpus` properties' per-config maps) charges each compile to
+  whichever test forced it first.
+- **The bypass check.** `Internals."no corpus loader is called outside
+  CorpusSweep"` fails if a test module other than `CorpusSweep.hs` (and
+  `TestCaseParser.hs`, which defines `listCorpusPplFiles` and resolves single
+  programs by name with it) calls a corpus loader (`sweepLoaderNames`). A
+  lookup of one program by name (`corpusPplPath`) is not a sweep and is fine
+  anywhere.
 
 ## The `.tst` format
 
@@ -377,8 +424,8 @@ Impact analysis -- End2End.Interpreter: 499 unchanged, 0 run; ...; End2End.Pytho
 
 **Covered sweeps and their keys.** Every key also contains the check's
 version constant (`End2EndTesting.*CheckVersion`) and the harness
-fingerprint, which is the source of `End2EndTesting.hs`, `ImpactManifest.hs`,
-`TestCaseParser.hs` and `TestTolerances.hs`. Any edit to those files reruns
+fingerprint, which is the source of `End2EndTesting.hs`, `CorpusSweep.hs`,
+`ImpactManifest.hs`, `TestCaseParser.hs` and `TestTolerances.hs`. Any edit to those files reruns
 everything.
 
 | sweep | key, besides version and harness |
@@ -447,7 +494,8 @@ that read them: shared lazy results forced by many tasty threads at once is
 the shape that deadlocked the fuzz tier (docs-repo task
 `fuzz-tier-blackhole-deadlock-at-property-start`). Don't introduce
 `unsafeInterleaveIO`/`unsafePerformIO` values that several tests force. When
-the suite slows down, time it per group
+the suite slows down, read the per-sweep cost table ("Corpus sweeps"
+above), time it per group
 (`--ta '-p "$2==\"End2End\""'`) and look for a single test on the
 critical path before cutting coverage.
 

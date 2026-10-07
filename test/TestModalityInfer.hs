@@ -29,7 +29,8 @@ import SPLL.Typing.RInfer (addRTypeInfo)
 import SPLL.Typing.Determinism (knownAnchors)
 import SPLL.Typing.ModalityInfer (perNodeOuterGrounds)
 import SPLL.Typing.Modality (GroundMod(gCap), CapabilitySet(..))
-import TestCaseParser (parseProgram, corpusRoot, listCorpusPplFiles)
+import TestCaseParser (corpusRoot)
+import CorpusSweep
 
 -- | Run the modality pipeline on a source string and return the typed program.
 -- Goes through 'addTypeInfo' (RInfer → FC certificate → ModalityInfer) so the
@@ -65,8 +66,12 @@ pTypeAt fname path src =
   where descend []     e = e
         descend (i:is) e = descend is (getSubExprs e !! i)
 
-modalityInferTests :: TestTree
-modalityInferTests = testGroup "ModalityInfer"
+modalityInferTests :: Corpus -> IO TestTree
+modalityInferTests corpus = modalityInferGroup <$> corpusPartialSetTests corpus
+
+-- | The group, given its one corpus sweep.
+modalityInferGroup :: TestTree -> TestTree
+modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
   [ testGroup "motivating programs (family composes through structured Mod)"
       [ testCase "MProd: tuple round-trip stays PNormal" $
           -- fst/snd recover the per-component family; the affine sum of two
@@ -576,7 +581,7 @@ modalityInferTests = testGroup "ModalityInfer"
   -- dropped: the exclusion list is itself the record of every corpus program
   -- known to legitimately hit this path, so it grows only on a fresh, examined
   -- case, and a new unexplained hit still fails the test.
-  , corpusPartialSetTests
+  , corpusPartialSet
 
   -- Task @modality-arrow-apply-crashes@: the arrow-space probe table of
   -- investigation @modality-function-space-test-coverage@, pinned at the type
@@ -684,21 +689,22 @@ knownPartialSetExceptions =
 -- RType'd and chain-named program). Asserts 'perNodeOuterGrounds' never
 -- reports a 'DensityOnly'/'IntegralOnly' ground for any node in any other
 -- corpus program.
-corpusPartialSetTests :: TestTree
-corpusPartialSetTests = testGroup "corpus-wide partial-set invariant"
-  [ testCase "no corpus .ppl node (outside the known exceptions) lands \
-             \in DensityOnly/IntegralOnly" $ do
-      allFiles <- listCorpusPplFiles
-      let pplFiles = [ f | f <- allFiles, f `notElem` knownPartialSetExceptions ]
-      violations <- concat <$> mapM filePartialSetViolations pplFiles
-      assertBool (partialSetViolationsMessage violations) (null violations)
-  ]
+corpusPartialSetTests :: Corpus -> IO TestTree
+corpusPartialSetTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "ModalityInfer.corpus-wide partial-set invariant", sweepTier = Default, sweepSlow = IgnoreSlow
+  , sweepSelect = \e -> cePpl e `notElem` knownPartialSetExceptions
+  , sweepNote = "no node of any program reaches a DensityOnly/IntegralOnly outer ground" } $ \es ->
+  return $ testGroup "corpus-wide partial-set invariant"
+    [ testCase "no corpus .ppl node (outside the known exceptions) lands \
+               \in DensityOnly/IntegralOnly" $ do
+        violations <- concat <$> mapM (\e -> filePartialSetViolations (cePpl e) (ceProgram e)) es
+        assertBool (partialSetViolationsMessage violations) (null violations)
+    ]
 
 -- | The partial-ground violations ('DensityOnly'/'IntegralOnly' outer grounds)
 -- found in one corpus program, keyed by the offending chain name.
-filePartialSetViolations :: FilePath -> IO [(FilePath, ChainName, CapabilitySet)]
-filePartialSetViolations fp = do
-  p <- parseProgram fp
+filePartialSetViolations :: FilePath -> Program -> IO [(FilePath, ChainName, CapabilitySet)]
+filePartialSetViolations fp p =
   case addRTypeInfo p of
     Left e -> error ("addRTypeInfo failed on " ++ fp ++ ": " ++ e)
     Right rtyped ->

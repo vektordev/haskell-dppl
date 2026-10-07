@@ -3,7 +3,6 @@
 module End2EndTesting where
 
 import System.Directory (getCurrentDirectory, findExecutable)
-import System.FilePath (stripExtension, takeBaseName)
 import System.IO.Temp (withSystemTempFile)
 import System.IO (hPutStr, hClose, hPutStrLn, stderr)
 import System.Environment (lookupEnv)
@@ -43,12 +42,8 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
 import MockNN (evaluateMockNN, mockInputFor)
 import ImpactManifest
-
-getAllTestFiles :: IO [(FilePath, FilePath)]
-getAllTestFiles = do
-  pplFullPath <- listCorpusPplFiles
-  let testCaseFiles = map ((++ ".tst") . (fromJust . stripExtension ".ppl")) pplFullPath
-  return (zip pplFullPath testCaseFiles)
+import CorpusSweep
+import qualified Data.Map as Map
 
 -- | M1 differential test (design pytorch-tensorizer): the IR select pass is a
 -- behavioural no-op under scalar lowering, since the interpreter and scalar
@@ -64,18 +59,24 @@ getAllTestFiles = do
 -- corpus query rows against ~200 eligible programs, that was ~5x more compiles
 -- than the differential needs, and this group's own cost (~25s) came from
 -- exactly that.
-selectPassDifferentialTests :: IO TestTree
-selectPassDifferentialTests = do
-  files <- getAllTestFiles
-  cases <- mapM loadCorpusPair files
-  let entries = [ (takeBaseName pplPath, p, tcs)
-                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
-                , not slow, Interpreter `elem` bs ]
-  return $ testGroup "SelectPassNoOp"
-    [ testProperty n (once $ conjoin (map (selectNoOp p scalarEnv batchedEnv) tcs))
-    | (n, p, tcs) <- entries
-    , let scalarEnv  = compile defaultCompilerConfig p
-    , let batchedEnv = compile defaultCompilerConfig{batched = True} p ]
+selectPassDifferentialTests :: Corpus -> IO TestTree
+selectPassDifferentialTests corpus = corpusSweep corpus SweepSpec
+  { sweepName = "SelectPassNoOp", sweepTier = Default, sweepSlow = SkipSlow
+  , sweepSelect = interpreterRouted
+  , sweepNote = "the IR select pass changes no interpreter answer at any query point" } $ \e ->
+    let p = ceProgram e
+        scalarEnv  = compile defaultCompilerConfig p
+        batchedEnv = compile defaultCompilerConfig{batched = True} p
+    in testProperty (ceName e) (once $ conjoin (map (selectNoOp p scalarEnv batchedEnv) (shapedCases e)))
+
+-- | Interpreter-routed in its @.tst@ header.
+interpreterRouted :: CorpusEntry -> Bool
+interpreterRouted e = Interpreter `elem` ceBackends e
+
+-- | A corpus entry's rows with their neural inputs shaped, as 'loadCorpusPair'
+-- returns them.
+shapedCases :: CorpusEntry -> [TestCase]
+shapedCases e = map (shapeNeuralTestCase (ceProgram e)) (ceCases e)
 
 -- | The plan engine against dense enumeration, at every interpreter-routed,
 -- non-slow query point of a neural corpus program (task
@@ -93,20 +94,20 @@ selectPassDifferentialTests = do
 --
 -- Non-neural programs are 'budgetZeroDifferentialTests'' instead: budget 0
 -- reaches no plan engine there, so the name would mislead.
-planEngineDifferentialTests :: IO TestTree
-planEngineDifferentialTests = do
-  files <- getAllTestFiles
-  cases <- mapM loadCorpusPair files
-  let entries = [ (takeBaseName pplPath, p, tcs)
-                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
-                , not slow, Interpreter `elem` bs, not (null (neurals p)) ]
-      missing = filter (`notElem` [n | (n, _, _) <- entries]) planEngineCorpus
+planEngineDifferentialTests :: Corpus -> IO TestTree
+planEngineDifferentialTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "PlanEngineMatchesDense", sweepTier = Default, sweepSlow = SkipSlow
+  , sweepSelect = \e -> interpreterRouted e && not (null (neurals (ceProgram e)))
+  , sweepNote = "budget 0 (the plan engine) agrees with dense enumeration wherever it answers" } $ \entries -> do
+  let missing = filter (`notElem` map ceName entries) planEngineCorpus
   return $ testGroup "PlanEngineMatchesDense" $
     [ testProperty "the programs that must reach the plan engine are in the corpus" $
         counterexample ("not found: " ++ show missing) (null missing) ]
     ++
-    [ testProperty n (once $ conjoin (map (planMatchesDense n p planEnv denseEnv) tcs))
-    | (n, p, tcs) <- entries
+    [ testProperty n (once $ conjoin (map (planMatchesDense n p planEnv denseEnv) (shapedCases e)))
+    | e <- entries
+    , let n = ceName e
+    , let p = ceProgram e
     , let planEnv  = compile defaultCompilerConfig{materializationCardinality = 0} p
     , let denseEnv = compile defaultCompilerConfig p ]
 
@@ -119,23 +120,22 @@ planEngineDifferentialTests = do
 -- does not answer is skipped, as there. 'budgetZeroKnownDivergent' lists the
 -- programs where the two disagree for a tracked reason, and
 -- 'budgetZeroKnownDivergentRows' the single query rows.
-budgetZeroDifferentialTests :: IO TestTree
-budgetZeroDifferentialTests = do
-  files <- getAllTestFiles
-  cases <- mapM loadCorpusPair files
-  let entries = [ (n, p, filter (not . knownDivergentRow n) tcs)
-                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
-                , let n = takeBaseName pplPath
-                , not slow, Interpreter `elem` bs, null (neurals p)
-                , n `notElem` budgetZeroKnownDivergent ]
-      knownDivergentRow n tc = case tc of
-        ProbTestCase _ sample _ _ -> (n, sample) `elem` budgetZeroKnownDivergentRows
-        _                         -> False
-  return $ testGroup "BudgetZeroMatchesDefault"
-    [ testProperty n (once $ conjoin (map (planMatchesDense n p zeroEnv defEnv) tcs))
-    | (n, p, tcs) <- entries
-    , let zeroEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
-    , let defEnv  = compile defaultCompilerConfig p ]
+budgetZeroDifferentialTests :: Corpus -> IO TestTree
+budgetZeroDifferentialTests corpus = corpusSweep corpus SweepSpec
+  { sweepName = "BudgetZeroMatchesDefault", sweepTier = Default, sweepSlow = SkipSlow
+  , sweepSelect = \e -> interpreterRouted e && null (neurals (ceProgram e))
+                       && ceName e `notElem` budgetZeroKnownDivergent
+  , sweepNote = "--materializationBudget 0 agrees with the default compile wherever it answers" } $ \e ->
+    let n = ceName e
+        p = ceProgram e
+        tcs = filter (not . knownDivergentRow n) (shapedCases e)
+        zeroEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
+        defEnv  = compile defaultCompilerConfig p
+    in testProperty n (once $ conjoin (map (planMatchesDense n p zeroEnv defEnv) tcs))
+  where
+    knownDivergentRow n tc = case tc of
+      ProbTestCase _ sample _ _ -> (n, sample) `elem` budgetZeroKnownDivergentRows
+      _                         -> False
 
 -- | Non-neural corpus programs whose budget-0 answer differs from the default
 -- compile's, each for a reason tracked elsewhere.
@@ -169,19 +169,17 @@ budgetZeroKnownDivergentRows =
 -- neural programs out. A program the plan engine does not answer at budget 0
 -- is skipped, as in 'planEngineDifferentialTests', and so are the programs
 -- listed in 'readLogitsLinearOnly'.
-planEngineLogSpaceTests :: IO TestTree
-planEngineLogSpaceTests = do
-  files <- getAllTestFiles
-  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
-  let entries = [ (takeBaseName pplPath, p, tcs)
-                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
-                , not slow, Interpreter `elem` bs, not (null (neurals p))
-                , takeBaseName pplPath `notElem` readLogitsLinearOnly ]
-  return $ testGroup "PlanEngineLogSpaceMatchesLinear"
-    [ testProperty n (once $ conjoin (map (logMatchesLinear p linEnv logEnv) tcs))
-    | (n, p, tcs) <- entries
-    , let linEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
-    , let logEnv = compile defaultCompilerConfig{materializationCardinality = 0, logSpace = True} p ]
+planEngineLogSpaceTests :: Corpus -> IO TestTree
+planEngineLogSpaceTests corpus = corpusSweep corpus SweepSpec
+  { sweepName = "PlanEngineLogSpaceMatchesLinear", sweepTier = Default, sweepSlow = SkipSlow
+  , sweepSelect = \e -> interpreterRouted e && not (null (neurals (ceProgram e)))
+                       && ceName e `notElem` readLogitsLinearOnly
+  , sweepNote = "the plan engine's log-space answer is exp-equal to its linear one" } $ \e ->
+    -- The rows are unshaped here, as they always were for this group.
+    let p = ceProgram e
+        linEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
+        logEnv = compile defaultCompilerConfig{materializationCardinality = 0, logSpace = True} p
+    in testProperty (ceName e) (once $ conjoin (map (logMatchesLinear p linEnv logEnv) (ceCases e)))
   where
     logMatchesLinear p linEnv logEnv tc = case tc of
       ProbTestCase  name sample params _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
@@ -1200,21 +1198,18 @@ pyImpossCheck name (Just expected) =
 -- programs are eligible, at the cost of loading the corpus twice when both
 -- run (only NEST_SLOW_TESTS=1 does that, and corpus loading itself is cheap --
 -- the expense here is the torch subprocess, not the Haskell side).
-batchedPythonFixtures :: IO ( [(String, Either String (String, [BatchGroup], [NetMock]))]
+batchedPythonFixtures :: [CorpusEntry]
+                      -> IO ( [(String, Either String (String, [BatchGroup], [NetMock]))]
                              , [String]
                              , [(String, String, [BatchGroup], [NetMock])]
                              , [(String, String, [BatchGroup], [NetMock])]
                              , ([(String, String, [BatchGroup], [NetMock])], [String])
                              , [(String, String, [BatchGroup], [NetMock])]
                              , Maybe FilePath )
-batchedPythonFixtures = do
-  files <- getAllTestFiles
-  cases <- mapM loadCorpusPair files
+batchedPythonFixtures corpusEntries' = do
   -- `slow`-headered programs stay out of batched coverage by construction, the
-  -- same way they stay out of the Interpreter groups.
-  let entries = [ (takeBaseName pplPath, p, bs, tcs)
-                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
-                , not slow ]
+  -- same way they stay out of the Interpreter groups (both sweeps' 'SkipSlow').
+  let entries = [ (ceName e, ceProgram e, ceBackends e, shapedCases e) | e <- corpusEntries' ]
       -- The topK differential (M5) recompiles the `batched`-declaring programs
       -- at a cutoff, so it draws from the same declaration, not from a second
       -- eligibility condition of its own.
@@ -1260,9 +1255,11 @@ batchedPythonFixtures = do
 -- ('runBatchedPython'/'runBatchedGradients'/'runBatchedGenerate'/
 -- 'runBatchedDense' False -- each well under 5s). The topK-threshold
 -- differentials live in 'slowBatchedPythonTests' instead -- see there for why.
-batchedPythonTests :: IO TestTree
-batchedPythonTests = do
-  (declared, gained, eligible, denseDeclared, _, _, mpy) <- batchedPythonFixtures
+batchedPythonTests :: Corpus -> IO TestTree
+batchedPythonTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "BatchedPython", sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
+  , sweepNote = "batched/dense eligibility of every program, and the batched value differentials" } $ \entries -> do
+  (declared, gained, eligible, denseDeclared, _, _, mpy) <- batchedPythonFixtures entries
   let refused  = [ (n, msg) | (n, Left msg) <- declared ]
       denseNames = map (\(n, _, _, _) -> n) denseDeclared
       denseRefused = [ n | n <- denseNames
@@ -1296,9 +1293,11 @@ batchedPythonTests = do
 -- itself, so -- same tradeoff as 'test_planEnumRecTopKAndBC' in
 -- TestInternals.hs -- they move to the opt-in Slow group
 -- (NEST_SLOW_TESTS=1) rather than taxing every default run.
-slowBatchedPythonTests :: IO TestTree
-slowBatchedPythonTests = do
-  (_, _, _, _, topkEligible, denseTopK, mpy) <- batchedPythonFixtures
+slowBatchedPythonTests :: Corpus -> IO TestTree
+slowBatchedPythonTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "Slow.BatchedPython (slow)", sweepTier = Slow, sweepSlow = SkipSlow, sweepSelect = const True
+  , sweepNote = "the batched topK differentials, recompiling every batched program per threshold" } $ \entries -> do
+  (_, _, _, _, topkEligible, denseTopK, mpy) <- batchedPythonFixtures entries
   return $ testGroup "BatchedPython (slow)" $ case mpy of
     Nothing ->
       [ testProperty "torch-python-found" $ once $ ioProperty $
@@ -3305,30 +3304,17 @@ juliaKey m (Right env) tcs nets = do
   return $ Just $ hashKey [juliaCheckVersion, h, jl, show juliaTestFlags, juliaBatchTestCode "" [(src, tcs, nets)]]
 
 -- | The corpus sweeps record their passes in @manifest@ ('ImpactManifest').
-end2endTests :: Manifest -> IO TestTree
-end2endTests manifest = do
-  compiled <- loadEnd2EndCases (\slow -> not slow)
-  return $ buildEnd2EndTree manifest "End2End" True compiled
+end2endTests :: Corpus -> Manifest -> IO TestTree
+end2endTests corpus manifest =
+  buildEnd2EndTree corpus manifest "End2End" "End2End" Default SkipSlow True
 
 -- | The slow-only twin of end2endTests: same Interpreter/Unoptimized checks,
 -- restricted to `slow`-headered programs. Julia/Python/Normalization are
 -- skipped since these programs are Interpreter-only by design (see their
 -- .tst headers).
-slowEnd2EndTests :: Manifest -> IO TestTree
-slowEnd2EndTests manifest = do
-  compiled <- loadEnd2EndCases id
-  return $ buildEnd2EndTree manifest "End2End (slow)" False compiled
-
--- | Parses and compiles (default -O2, and -O0 to check the optimizer is
--- harmless) every test/cases/**/*.ppl+.tst pair whose `slow` header (see
--- TestCaseParser) satisfies `keep`.
-loadEnd2EndCases :: (Bool -> Bool)
-                  -> IO [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]
-loadEnd2EndCases keep = do
-  files <- getAllTestFiles
-  cases <- mapM loadCorpusPair files
-  return [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, bs, tcs)
-         | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases, keep slow ]
+slowEnd2EndTests :: Corpus -> Manifest -> IO TestTree
+slowEnd2EndTests corpus manifest =
+  buildEnd2EndTree corpus manifest "Slow.End2End (slow)" "End2End (slow)" Slow OnlySlow False
 
 -- | Programs whose -O0 recompilation is disproportionately expensive relative
 -- to the regression class the "Interpreter Unoptimized" group exists to catch
@@ -3406,104 +3392,108 @@ unoptimizedCodegenSmoke =
   , "maybeFromLeftNested"
   , "adt", "adtMixedFieldTypes", "adtMixedArityCtors", "adtFloatChainDeep" ]
 
--- | Builds the standard End2End test groups from already-loaded/compiled
--- cases. includeBackends controls whether the Normalization/Julia/Python
--- groups are built (skipped for the slow subset, whose programs are
+-- | Builds the standard End2End sweeps over the corpus programs the
+-- 'SlowHeader' policy admits, under the group @treeName@ (whose path in the
+-- tree is @path@). includeBackends controls whether the Normalization/Julia/
+-- Python sweeps are built (skipped for the slow subset, whose programs are
 -- Interpreter-only by design).
-buildEnd2EndTree :: Manifest -> String -> Bool
-                  -> [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]
-                  -> TestTree
-buildEnd2EndTree manifest treeName includeBackends compiledCases = testGroup treeName $
-    [ testGroup "Interpreter"
-        [ testProperty n (once $ cachedProperty manifest (check "Interpreter") n (interpreterKey manifest p c tcs)
-                                   (conjoin (map (testInterpreter p c) tcs)))
-        | (n, p, c, bs, tcs) <- compiledCases, Interpreter `elem` bs ]
-    -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
-    , testGroup "Interpreter Unoptimized"
-        [ testProperty n (once $ cachedProperty manifest (check "Interpreter Unoptimized") n (interpreterKey manifest p c tcs)
-                                   (conjoin (map (testInterpreter p c) tcs)))
-        | (n, p, c, bs, tcs) <- unoptCases, Interpreter `elem` bs ]
-    ] ++
-    ( if not includeBackends then [] else
-      let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
-          -- A query program routes onto every backend it lists, neural or
-          -- not. The @null (neurals p)@ filter that used to stand here
-          -- existed only because neither text backend has a network to call
-          -- at runtime, not because the routing was otherwise unsound (task
-          -- route-neural-programs-to-julia-python-backends dropped it for
-          -- Python, route-neural-programs-to-julia-backend for Julia). Once
-          -- an identity mock is installed for each declared network
-          -- ('testPython', 'juliaBatchTestCode') and the .tst row's own
-          -- mock-NN parameters are pre-resolved to the raw vectors that mock
-          -- would have produced ('resolveNeuralTestCase'), a neural program
-          -- is just another program. The Julia flip was a routing-only
-          -- change: the mock plumbing had been built for both backends at
-          -- once, and adding @julia@ to the five .tst headers that still
-          -- listed @interpreter, python, batched@ was the rest of it. Every
-          -- newly-routed program agreed with the interpreter on the first
-          -- run, mode-0 seeded envelopes included.
-          --
-          -- 'unoptQueries' below still filters neural out, and deliberately:
-          -- it is scoped to 'unoptimizedCodegenSmoke', none of which is
-          -- neural.
-          routedQueries b =
-            [ (n, c, if null (neurals p) then tcs else map (resolveNeuralTestCase p) tcs, networkMocks p)
-            | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, not (null tcs) ]
-          routedWriteLogits b =
-            [ (n, c, map (writeLogitsRow p) wls, networkMocks p)
-            | (n, p, c, bs, tcs) <- compiledCases, b `elem` bs
-            , let wls = filter (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) tcs
-            , not (null wls) ]
-          unoptQueries b = [(n, c, tcs') | (n, p, c, bs, tcs) <- unoptCases, b `elem` bs, null (neurals p)
-                           , n `elem` unoptimizedCodegenSmoke
-                           , n `notElem` unoptimizedCodegenExempt
-                           , let tcs' = filter (\x -> isProbTestCase x || isCumulTestCase x) tcs, not (null tcs')]
-          neuralP = [(n, p, c) | (n, p, c, bs, _) <- compiledCases, Interpreter `elem` bs, not (null (neurals p))]
-      in [ testGroup "Normalization"
-             [ testProperty n (once $ cachedProperty manifest (check "Normalization") n (normalizationKey manifest p c)
-                                        (discreteProbsNormalized p c))
-             | (n, p, c) <- neuralP ]
-         -- The Julia programs share a batch file (and a julia process) per
-         -- shard to amortize startup. One shard for the whole corpus was a
-         -- single ~60 s test -- the suite's critical path, on one core --
-         -- since the batch is dominated by JIT-compiling each module.
-         -- Round-robin shards run as parallel tests instead.
-         , testGroup "Julia"
-             [ testProperty ("shard " ++ show (i + 1) ++ "/" ++ show juliaShards)
-                 (once $ cachedBatch manifest (check "Julia")
-                           [ (n, juliaKey manifest c tcs nets, (c, tcs, nets))
-                           | (k, (n, c, tcs, nets)) <- zip [0 :: Int ..] (routedQueries Julia)
-                           , k `mod` juliaShards == i ]
-                           testJuliaAll)
-             | i <- [0 .. juliaShards - 1] ]
-         -- Runs without julia installed: it only reads the emitted text.
-         , testProperty "Julia free names are escaped"
-             (once $ testJuliaFreeNamesEscaped [ (n, c, networkMocks p) | (n, p, Right c, bs, _) <- compiledCases, Julia `elem` bs ])
-         , testGroup "Python"
-             [ testProperty n (once $ cachedProperty manifest (check "Python") n (pythonKey manifest nets c tcs)
-                                        (testPython nets c tcs))
-             | (n, c, tcs, nets) <- routedQueries Python ]
-         -- writeLogits rows used to run on the interpreter only, which is how
-         -- every text-backend writeLogits but a flat discrete one shipped
-         -- crashing (task writelogits-text-backends-broken).
-         , testGroup "Python WriteLogits"
-             [ testProperty n (once $ testPythonWriteLogits nets c rows) | (n, c, rows, nets) <- routedWriteLogits Python ]
-         , testProperty "Julia WriteLogits"
-             (once $ testJuliaWriteLogitsAll [ (c, rows, nets) | (_, c, rows, nets) <- routedWriteLogits Julia ])
-         -- The same corpus through the text backends at -O0. See
-         -- \'unoptCases\' for why this is not merely a duplicate of the
-         -- optimized groups. None of 'unoptimizedCodegenSmoke' is neural, so
-         -- this stays on the plain (non-mock-resolved) test cases.
-         , testProperty "Julia Unoptimized" (once $ testJuliaAll [(c, tcs, []) | (_, c, tcs) <- unoptQueries Julia])
-         , testGroup "Python Unoptimized"
-             [ testProperty n (once $ testPython [] c tcs) | (n, c, tcs) <- unoptQueries Python ]
-         ]
-    )
+--
+-- Each program is compiled once at -O2 and, where needed, once at -O0; the
+-- compiles are shared by every sweep below ('optEnvs', 'unoptEnvs').
+buildEnd2EndTree :: Corpus -> Manifest -> String -> String -> Tier -> SlowHeader -> Bool -> IO TestTree
+buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
+  interp <- corpusSweep corpus SweepSpec
+    { sweepName = path ++ ".Interpreter", sweepTier = tier, sweepSlow = slowH
+    , sweepSelect = interpreterRouted
+    , sweepNote = "every .tst row against the interpreter, at -O2" } $ \e ->
+      let n = ceName e; p = ceProgram e; c = opt e; tcs = rows e
+      in testProperty n (once $ cachedProperty manifest (check "Interpreter") n (interpreterKey manifest p c tcs)
+                                  (conjoin (map (testInterpreter p c) tcs)))
+  -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
+  interpUnopt <- corpusSweep corpus SweepSpec
+    { sweepName = path ++ ".Interpreter Unoptimized", sweepTier = tier, sweepSlow = slowH
+    , sweepSelect = \e -> interpreterRouted e && recompiledUnopt e
+    , sweepNote = "every .tst row against the interpreter at -O0: the optimizer changes no answer" } $ \e ->
+      let n = ceName e; p = ceProgram e; c = unopt e; tcs = rows e
+      in testProperty n (once $ cachedProperty manifest (check "Interpreter Unoptimized") n (interpreterKey manifest p c tcs)
+                                  (conjoin (map (testInterpreter p c) tcs)))
+  backends <- if not includeBackends then return [] else sequence
+    [ corpusSweep corpus SweepSpec
+        { sweepName = path ++ ".Normalization", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = \e -> interpreterRouted e && neural e
+        , sweepNote = "a neural program's discrete probabilities sum to one at seeded inputs" } $ \e ->
+          let n = ceName e; p = ceProgram e; c = opt e
+          in testProperty n (once $ cachedProperty manifest (check "Normalization") n (normalizationKey manifest p c)
+                                      (discreteProbsNormalized p c))
+    -- The Julia programs share a batch file (and a julia process) per
+    -- shard to amortize startup. One shard for the whole corpus was a
+    -- single ~60 s test -- the suite's critical path, on one core --
+    -- since the batch is dominated by JIT-compiling each module.
+    -- Round-robin shards run as parallel tests instead.
+    , corpusSweepAll corpus SweepSpec
+        { sweepName = path ++ ".Julia", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = \e -> routed Julia e && hasQueries e
+        , sweepNote = "every p()/cdf() row against the emitted Julia, in round-robin shards" } $ \es ->
+          return $ testGroup "Julia"
+            [ testProperty ("shard " ++ show (i + 1) ++ "/" ++ show juliaShards)
+                (once $ cachedBatch manifest (check "Julia")
+                          [ (n, juliaKey manifest c tcs nets, (c, tcs, nets))
+                          | (k, (n, c, tcs, nets)) <- zip [0 :: Int ..] (map routedQuery es)
+                          , k `mod` juliaShards == i ]
+                          testJuliaAll)
+            | i <- [0 .. juliaShards - 1] ]
+    -- Runs without julia installed: it only reads the emitted text.
+    , corpusSweepAll corpus SweepSpec
+        { sweepName = path ++ ".Julia free names are escaped", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = routed Julia
+        , sweepNote = "no free name of an emitted Julia module collides with a Julia builtin" } $ \es ->
+          return $ testProperty "Julia free names are escaped"
+            (once $ testJuliaFreeNamesEscaped [ (ceName e, c, networkMocks (ceProgram e)) | e <- es, Right c <- [opt e] ])
+    , corpusSweep corpus SweepSpec
+        { sweepName = path ++ ".Python", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = \e -> routed Python e && hasQueries e
+        , sweepNote = "every p()/cdf() row against the emitted Python" } $ \e ->
+          let (n, c, tcs, nets) = routedQuery e
+          in testProperty n (once $ cachedProperty manifest (check "Python") n (pythonKey manifest nets c tcs)
+                                      (testPython nets c tcs))
+    -- writeLogits rows used to run on the interpreter only, which is how
+    -- every text-backend writeLogits but a flat discrete one shipped
+    -- crashing (task writelogits-text-backends-broken).
+    , corpusSweep corpus SweepSpec
+        { sweepName = path ++ ".Python WriteLogits", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = \e -> routed Python e && hasWriteLogits e
+        , sweepNote = "every writeLogits row against the emitted Python" } $ \e ->
+          testProperty (ceName e) (once $ testPythonWriteLogits (networkMocks (ceProgram e)) (opt e) (writeLogitsRows e))
+    , corpusSweepAll corpus SweepSpec
+        { sweepName = path ++ ".Julia WriteLogits", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = \e -> routed Julia e && hasWriteLogits e
+        , sweepNote = "every writeLogits row against the emitted Julia, in one batch" } $ \es ->
+          return $ testProperty "Julia WriteLogits"
+            (once $ testJuliaWriteLogitsAll [ (opt e, writeLogitsRows e, networkMocks (ceProgram e)) | e <- es ])
+    -- The same corpus through the text backends at -O0. See 'unoptEnvs' for
+    -- why this is not merely a duplicate of the optimized groups. None of
+    -- 'unoptimizedCodegenSmoke' is neural, so this stays on the plain
+    -- (non-mock-resolved) test cases.
+    , corpusSweepAll corpus SweepSpec
+        { sweepName = path ++ ".Julia Unoptimized", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = unoptSmoke Julia
+        , sweepNote = "the -O0 codegen smoke subset against the emitted Julia" } $ \es ->
+          return $ testProperty "Julia Unoptimized" (once $ testJuliaAll [ (unopt e, queries e, []) | e <- es ])
+    , corpusSweep corpus SweepSpec
+        { sweepName = path ++ ".Python Unoptimized", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = unoptSmoke Python
+        , sweepNote = "the -O0 codegen smoke subset against the emitted Python" } $ \e ->
+          testProperty (ceName e) (once $ testPython [] (unopt e) (queries e))
+    ]
+  return $ testGroup treeName ([interp, interpUnopt] ++ backends)
   where
     -- The manifest slot prefix: the sweep's full group name.
     check grp = treeName ++ "." ++ grp
+    entries = corpusEntries corpus
+    -- Every corpus program compiled at -O2, shared by all the sweeps.
+    optEnvs = Map.fromList [ (ceName e, compile defaultCompilerConfig (ceProgram e)) | e <- entries ]
     -- Every corpus program recompiled at -O0, shared by all the "Unoptimized"
-    -- groups so the extra compile is paid once.
+    -- sweeps so the extra compile is paid once.
     --
     -- The optimizer is meant to be a rewrite, not a correctness pass, and the
     -- text backends are where that claim is testable: a value the optimizer
@@ -3515,6 +3505,44 @@ buildEnd2EndTree manifest treeName includeBackends compiledCases = testGroup tre
     -- reached Julia and every such program died with a MethodError. The
     -- interpreter never saw it (it is dynamically typed and forgiving), so the
     -- pre-existing "Interpreter Unoptimized" group could not catch the class.
-    unoptCases = [ (n, p, compile defaultCompilerConfig{optimizerLevel = 0} p, bs, tcs)
-                 | (n, p, _, bs, tcs) <- compiledCases
-                 , n `notElem` unoptimizedRecompileExempt ]
+    unoptEnvs = Map.fromList [ (ceName e, compile defaultCompilerConfig{optimizerLevel = 0} (ceProgram e)) | e <- entries ]
+    shaped = Map.fromList [ (ceName e, shapedCases e) | e <- entries ]
+    opt e = optEnvs Map.! ceName e
+    unopt e = unoptEnvs Map.! ceName e
+    rows e = shaped Map.! ceName e
+    recompiledUnopt e = ceName e `notElem` unoptimizedRecompileExempt
+    neural e = not (null (neurals (ceProgram e)))
+    routed b e = b `elem` ceBackends e
+    isQuery x = isProbTestCase x || isCumulTestCase x
+    queries e = filter isQuery (rows e)
+    hasQueries e = any isQuery (ceCases e)
+    wlRows e = filter (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) (rows e)
+    hasWriteLogits e = any (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) (ceCases e)
+    writeLogitsRows e = map (writeLogitsRow (ceProgram e)) (wlRows e)
+    -- A query program routes onto every backend it lists, neural or
+    -- not. The @null (neurals p)@ filter that used to stand here
+    -- existed only because neither text backend has a network to call
+    -- at runtime, not because the routing was otherwise unsound (task
+    -- route-neural-programs-to-julia-python-backends dropped it for
+    -- Python, route-neural-programs-to-julia-backend for Julia). Once
+    -- an identity mock is installed for each declared network
+    -- ('testPython', 'juliaBatchTestCode') and the .tst row's own
+    -- mock-NN parameters are pre-resolved to the raw vectors that mock
+    -- would have produced ('resolveNeuralTestCase'), a neural program
+    -- is just another program. The Julia flip was a routing-only
+    -- change: the mock plumbing had been built for both backends at
+    -- once, and adding @julia@ to the five .tst headers that still
+    -- listed @interpreter, python, batched@ was the rest of it. Every
+    -- newly-routed program agreed with the interpreter on the first
+    -- run, mode-0 seeded envelopes included.
+    --
+    -- 'unoptSmoke' below still filters neural out, and deliberately:
+    -- it is scoped to 'unoptimizedCodegenSmoke', none of which is
+    -- neural.
+    routedQuery e =
+      let p = ceProgram e
+      in (ceName e, opt e, if null (neurals p) then queries e else map (resolveNeuralTestCase p) (queries e), networkMocks p)
+    unoptSmoke b e = routed b e && recompiledUnopt e && not (neural e)
+                     && ceName e `elem` unoptimizedCodegenSmoke
+                     && ceName e `notElem` unoptimizedCodegenExempt
+                     && hasQueries e

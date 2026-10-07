@@ -25,8 +25,7 @@ import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Typing.Determinism
 
 import SPLL.Parser (tryParseProgram)
-import TestCaseParser (parseProgram)
-import End2EndTesting (getAllTestFiles)
+import CorpusSweep
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -186,12 +185,15 @@ corpusInvariants progs = testGroup "corpus invariants"
       in assertBool (msg ++ " in " ++ file)
                     (all expect (detsWhere pick p dm))
 
-determinismTests :: IO TestTree
-determinismTests = do
-  files <- getAllTestFiles
-  progs <- mapM (\(ppl, _tst) -> (,) ppl . prepProg <$> parseProgram ppl) files
+determinismTests :: Corpus -> IO TestTree
+determinismTests corpus = do
+  invariants <- corpusSweepAll corpus SweepSpec
+    { sweepName = "Determinism.corpus invariants", sweepTier = Default, sweepSlow = IgnoreSlow
+    , sweepSelect = const True
+    , sweepNote = "anchor leaves are known and randomness leaves never are, in every program" } $ \es ->
+      return (corpusInvariants [ (cePpl e, prepProg (ceProgram e)) | e <- es ])
   return $ testGroup "Determinism"
     [ unitTests
-    , corpusInvariants progs
+    , invariants
     ]
   where prepProg = annotateProg . annotateEnumsProg

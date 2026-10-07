@@ -40,7 +40,11 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet, generateRand)
 import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectationProb, defaultBackends,
-                        parseTestCasesFromString, corpusPplPath, corpusTstPath, listCorpusPplFiles)
+                        parseTestCasesFromString, corpusPplPath, corpusTstPath)
+import CorpusSweep (Corpus, CorpusEntry(..), SweepSpec(..), Tier(..), SlowHeader(..), corpusSweepAll, sweepLoaderNames)
+import System.Directory (listDirectory)
+import System.FilePath ((</>), takeExtension)
+import Data.Char (isAlphaNum)
 import Test.Tasty.QuickCheck (testProperties, testProperty)
 import System.Random (StdGen, mkStdGen)
 import Control.Monad.Random (Rand, evalRand)
@@ -4839,9 +4843,19 @@ letBinderTagTests = testGroup "let binder threads DiscreteValues into the body"
 -- passes only if the verdict is reached without it. The second pins
 -- soundness across the corpus: wherever the shape check says "untagged", the
 -- real pass must agree, or the short circuit would be dropping tags.
-untaggedShortCircuitTests :: TestTree
-untaggedShortCircuitTests = testGroup "enum annotation refutes a recursive fold without forcing its argument"
-  [ testCase "mutually recursive fold: untagged, argument's value set never forced" $ do
+untaggedShortCircuitTests :: Corpus -> IO TestTree
+untaggedShortCircuitTests corpus = do
+  sweep <- corpusSweepAll corpus SweepSpec
+    { sweepName = "Internals.enum annotation refutes a recursive fold without forcing its argument.every corpus node judged untagged by shape carries no DiscreteValues"
+    , sweepTier = Default, sweepSlow = IgnoreSlow, sweepSelect = const True
+    , sweepNote = "definitelyUntagged's shape check never contradicts the real enum annotation" } $ \es ->
+      return (untaggedCorpusCase es)
+  return $ testGroup "enum annotation refutes a recursive fold without forcing its argument"
+    [ untaggedUnitCase, sweep ]
+
+untaggedUnitCase :: TestTree
+untaggedUnitCase =
+    testCase "mutually recursive fold: untagged, argument's value set never forced" $ do
       let rtyped = either (\e -> error ("rtype inference failed: " ++ show e)) id
                      (tryAddRTypeInfo (either (\e -> error ("parse failed: " ++ show e)) id
                                          (tryParseProgram "test" mutualFoldSrc)))
@@ -4855,11 +4869,13 @@ untaggedShortCircuitTests = testGroup "enum annotation refutes a recursive fold 
       case r of
         Left (ErrorCall msg) -> assertFailure ("annotating oddSum ds forced its argument: " ++ msg)
         Right n -> assertEqual "DiscreteValues tags on oddSum ds" 0 n
-  , testCase "every corpus node judged untagged by shape carries no DiscreteValues" $ do
-      paths <- listCorpusPplFiles
-      judged <- forM paths $ \path -> do
-        src <- readFile path
-        case either (Left . show) Right (tryParseProgram path src) >>= tryAddRTypeInfo' of
+
+untaggedCorpusCase :: [CorpusEntry] -> TestTree
+untaggedCorpusCase entries =
+    testCase "every corpus node judged untagged by shape carries no DiscreteValues" $ do
+      judged <- forM entries $ \entry -> do
+        let path = cePpl entry
+        case tryAddRTypeInfo' (ceProgram entry) of
           Left _ -> return 0
           Right rtyped -> do
             let funEnv = functions rtyped
@@ -4872,7 +4888,6 @@ untaggedShortCircuitTests = testGroup "enum annotation refutes a recursive fold 
       -- Non-vacuity: the check has to say "untagged" somewhere for the
       -- implication to mean anything.
       assertBool "definitelyUntagged never answered True over the corpus" (sum judged > 0)
-  ]
   where
     tryAddRTypeInfo' p = either (Left . show) Right (tryAddRTypeInfo p)
 
@@ -4935,10 +4950,14 @@ annotationSpellingTests = testGroup "neural annotation spellings compile identic
 -- @Left@ has none, while the rule gives the Right arm's values -- the same
 -- filtering listing already applies to an ADT field accessor. That is a
 -- refinement, not a disagreement, and is not compared.
-structuralPropagationTests :: TestTree
-structuralPropagationTests = testGroup "structural enum propagation agrees with listing"
+structuralPropagationTests :: Corpus -> IO TestTree
+structuralPropagationTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "Internals.structural enum propagation agrees with listing"
+  , sweepTier = Default, sweepSlow = IgnoreSlow, sweepSelect = const True
+  , sweepNote = "each structural enum rule agrees with listing at every listable corpus node" } $ \es ->
+  return $ testGroup "structural enum propagation agrees with listing"
   [ testCase "every corpus node a structural rule answers" $ do
-      compared <- compareStructuralWithListing (<= structuralListingBound)
+      compared <- compareStructuralWithListing es (<= structuralListingBound)
       -- Non-vacuity: the corpus must exercise the rules.
       assertBool ("structural rules answered only " ++ show compared ++ " corpus nodes") (compared > 100)
   ]
@@ -4948,10 +4967,14 @@ structuralPropagationTests = testGroup "structural enum propagation agrees with 
 -- 20-field @Face@ constructor of drawProductReadPerField20 (2^20 tuples, each
 -- one an interpreter run: ~55 s on its own, the main binary's wall-clock
 -- floor while it ran in the default suite).
-slowStructuralPropagationTests :: TestTree
-slowStructuralPropagationTests = testGroup "structural enum propagation agrees with listing (wide)"
+slowStructuralPropagationTests :: Corpus -> IO TestTree
+slowStructuralPropagationTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "Slow.Internals (slow).structural enum propagation agrees with listing (wide)"
+  , sweepTier = Slow, sweepSlow = IgnoreSlow, sweepSelect = const True
+  , sweepNote = "the structural rules against listing at the corpus nodes above the listing bound" } $ \es ->
+  return $ testGroup "structural enum propagation agrees with listing (wide)"
   [ testCase "every corpus node a structural rule answers, listing above the bound" $ do
-      compared <- compareStructuralWithListing (> structuralListingBound)
+      compared <- compareStructuralWithListing es (> structuralListingBound)
       -- Non-vacuity: if the corpus stops holding a wide node, this half
       -- checks nothing and should be removed rather than pass.
       assertBool "no corpus node lists above the bound" (compared > 0)
@@ -4968,12 +4991,11 @@ structuralListingBound = 65536
 -- | Compare each structural rule against listing ('listedTag') at every
 -- corpus InjF node whose operands are listable and whose listing size passes
 -- the filter, returning the number of nodes compared.
-compareStructuralWithListing :: (Integer -> Bool) -> IO Int
-compareStructuralWithListing sizeOk = do
-  paths <- listCorpusPplFiles
-  compared <- forM paths $ \path -> do
-    src <- readFile path
-    case either (Left . show) Right (tryParseProgram path src) >>= rtypedProgram of
+compareStructuralWithListing :: [CorpusEntry] -> (Integer -> Bool) -> IO Int
+compareStructuralWithListing entries sizeOk = do
+  compared <- forM entries $ \entry -> do
+    let path = cePpl entry
+    case rtypedProgram (ceProgram entry) of
       Left _ -> return 0
       Right rtyped -> do
         let annotated = annotateEnumsProg rtyped
@@ -5163,21 +5185,55 @@ domainScaleTests = testGroup "value-domain analysis scales linearly in the opera
       , [VADT "A" [VSymbol "s"], VADT "A" [VSymbol "t"], VADT "A" [VSymbol "s"], VADT "B" []]
       ] :: [[Value]]
 
-internalsTests :: TestTree
-internalsTests = testGroup "Internals"
+internalsTests :: Corpus -> IO TestTree
+internalsTests corpus = do
+  untagged <- untaggedShortCircuitTests corpus
+  structuralSweep <- structuralPropagationTests corpus
+  return (internalsGroup untagged structuralSweep)
+
+-- | Every whole-corpus loop is a registered sweep (CorpusSweep): no test
+-- module outside CorpusSweep calls a corpus loader. TestCaseParser defines
+-- 'listCorpusPplFiles' and resolves single programs by name with it, so it is
+-- exempt.
+sweepBypassTests :: TestTree
+sweepBypassTests = testCase "no corpus loader is called outside CorpusSweep" $ do
+  let dirs = ["test", "test-corpus"]
+  files <- concat <$> forM dirs (\d -> map (d </>) . filter ((== ".hs") . takeExtension) <$> listDirectory d)
+  offenders <- fmap concat $ forM [ f | f <- files, f `notElem` ["test" </> "CorpusSweep.hs", "test" </> "TestCaseParser.hs"] ] $ \f -> do
+    src <- readFile f
+    return [ f ++ ":" ++ show i ++ ": " ++ name
+           | (i, l) <- zip [1 :: Int ..] (lines src)
+           , let code = codePart l
+           , name <- sweepLoaderNames, name `elem` identifiers code ]
+  assertBool ("corpus loaders called outside CorpusSweep; build the loop as a sweep there:\n" ++ unlines offenders)
+             (null offenders)
+  where
+    codePart l = go l
+      where go ('-' : '-' : _) = ""
+            go (c : cs) = c : go cs
+            go [] = ""
+    identifiers l = case dropWhile (not . identChar) l of
+      "" -> []
+      rest -> let (w, more) = span identChar rest in w : identifiers more
+    identChar c = isAlphaNum c || c == '_' || c == '\''
+
+-- | The group, given its corpus sweeps.
+internalsGroup :: TestTree -> TestTree -> TestTree
+internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , testGroup "tensor builtins" tensorBuiltinTests
   , shapedNeuralInputTests
   , categoricalIndexTests
-  , untaggedShortCircuitTests
+  , untaggedShortCircuit
   , annotationSpellingTests
-  , structuralPropagationTests
+  , structuralPropagation
   , splitByStringTests
   , partialDestructorTests
   , fdeclNamespaceTests
   , classConstraintTests
   , forwardChainingCertTests
   , witnessedBindingTests
+  , sweepBypassTests
   , anyRefusalTests
   , testGroup "writeLogits"
       [ test_writeLogitsTupleGaussianParams
@@ -5274,16 +5330,18 @@ internalsTests = testGroup "Internals"
 -- `stack test` used to take. 'test_planEnumBoolCtorPolynomial' stays in the fast
 -- group -- its depth pair (8/12) was deliberately chosen to fail in about a
 -- minute rather than OOM (see its own comment), and it is cheap (well under 1s).
-slowInternalsTests :: TestTree
-slowInternalsTests = testGroup "Internals (slow)"
-  [ test_planEnumRecTopKAndBC
-  , test_planEnumM4Polynomial
-  , test_planEnumFusedJointStatePolynomial
-  , test_planEnumStructuralGrouped
-  , test_planHelperOnFoldResultMatchesDense
-  , test_planSharedFoldValueMatchesDense
-  , slowStructuralPropagationTests
-  ]
+slowInternalsTests :: Corpus -> IO TestTree
+slowInternalsTests corpus = do
+  wide <- slowStructuralPropagationTests corpus
+  return $ testGroup "Internals (slow)"
+    [ test_planEnumRecTopKAndBC
+    , test_planEnumM4Polynomial
+    , test_planEnumFusedJointStatePolynomial
+    , test_planEnumStructuralGrouped
+    , test_planHelperOnFoldResultMatchesDense
+    , test_planSharedFoldValueMatchesDense
+    , wide
+    ]
 
 -- ===========================================================================
 -- Tensor builtins: the general-rank interpreter semantics (ir-tensor-values)

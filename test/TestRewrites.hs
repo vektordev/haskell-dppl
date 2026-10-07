@@ -33,7 +33,6 @@ import Control.Monad.Random.Lazy (evalRandIO)
 import Data.List (intercalate, isInfixOf, nub)
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
-import System.FilePath (takeBaseName)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, testCaseInfo, assertBool, assertFailure, (@?=))
@@ -43,8 +42,8 @@ import SPLL.Lang.Lang (freeVarsExpr)
 import SPLL.IntermediateRepresentation (IRValue, defaultCompilerConfig, pattern VProbDim)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, runProbC, runGenC)
-import TestCaseParser (parseTestCases, TestCase(..), Backend(..))
-import End2EndTesting (getAllTestFiles)
+import TestCaseParser (TestCase(..), Backend(..))
+import CorpusSweep
 import TestTolerances (probTolerance, samplingTolerance)
 import Rewrites
 
@@ -445,15 +444,11 @@ rewriteTests = testGroup "RewriteInvariance" [unitTests, probeTests]
 
 -- | One test per corpus program: every family at every site, compared at the
 -- program's own probability query points (both possible and impossible rows).
-rewriteCorpusTests :: IO TestTree
-rewriteCorpusTests = do
-  files <- getAllTestFiles
-  cases <- forM files $ \(ppl, tst) -> do
-    (backends, slow, _, tcs) <- parseTestCases tst
-    src <- readFile ppl
-    return (takeBaseName ppl, parseSrc ppl src, backends, slow, tcs)
-  let usable = [ (n, p, qs) | (n, p, backends, slow, tcs) <- cases
-               , Interpreter `elem` backends, not slow, null (neurals p)
-               , let qs = [(s, params) | ProbTestCase _ s params _ <- tcs], not (null qs) ]
-  return $ testGroup "RewriteInvarianceCorpus"
-    [ testCaseInfo n (sweep n p qs >>= report n) | (n, p, qs) <- usable ]
+rewriteCorpusTests :: Corpus -> IO TestTree
+rewriteCorpusTests corpus = corpusSweep corpus SweepSpec
+  { sweepName = "Slow.RewriteInvarianceCorpus", sweepTier = Slow, sweepSlow = SkipSlow
+  , sweepSelect = \e -> Interpreter `elem` ceBackends e && null (neurals (ceProgram e)) && not (null (queries e))
+  , sweepNote = "every rewrite family at every site agrees with the original at its p() rows" } $ \e ->
+    testCaseInfo (ceName e) (sweep (ceName e) (ceProgram e) (queries e) >>= report (ceName e))
+  where
+    queries e = [(s, params) | ProbTestCase _ s params _ <- ceCases e]

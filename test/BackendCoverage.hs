@@ -36,7 +36,6 @@ import Control.Exception (SomeException, try, evaluate)
 import Control.Monad (forM)
 import Data.Either (rights)
 import Data.List (sort, nub, (\\), intercalate)
-import System.FilePath (takeBaseName, replaceExtension)
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 import Test.QuickCheck (arbitrary, resize, vectorOf)
@@ -48,7 +47,7 @@ import Test.Tasty.HUnit (testCase, assertFailure)
 import SPLL.Prelude (compile)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig)
 import BackendAgreement (AgreementCase(..), irEnvConstructs, inferenceBodies)
-import TestCaseParser (listCorpusPplFiles, parseTestCases, parseProgram)
+import CorpusSweep
 import TestFuzz (prepareAgreementCase, genAgreementProgram, agreementFuzzSize)
 
 -- | Corpus constructs the agreement property does not reach, each with why.
@@ -75,10 +74,14 @@ coverageDraws = 1000
 coverageSeed :: Int
 coverageSeed = 20261006
 
-backendCoverageTests :: TestTree
-backendCoverageTests = testGroup "BackendAgreementCoverage"
+backendCoverageTests :: Corpus -> IO TestTree
+backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
+  { sweepName = "Slow.BackendAgreementCoverage", sweepTier = Slow, sweepSlow = SkipSlow
+  , sweepSelect = const True
+  , sweepNote = "the constructs the corpus compiles to and the agreement fuzzer never compares are listed" } $ \es ->
+  return $ testGroup "BackendAgreementCoverage"
   [ testCase "corpus constructs the agreement fuzzer misses are exactly fuzzCoverageExceptions" $ do
-      corpus <- corpusConstructs
+      corpus <- corpusConstructs es
       fuzz <- fuzzConstructs
       let fuzzSet = nub (concat fuzz)
           used = sort (nub (concatMap snd corpus))
@@ -100,19 +103,16 @@ backendCoverageTests = testGroup "BackendAgreementCoverage"
         ++ (if null stale then [] else "Listed, but now covered by the fuzzer (remove them):" : map ("  " ++) stale)
   ]
 
--- | Per non-slow corpus program, the constructs of its inference bodies.
+-- | Per corpus program of the sweep (non-slow), the constructs of its inference bodies.
 -- A program that does not compile in time is skipped: the corpus's own
 -- groups are what report that.
-corpusConstructs :: IO [(String, [String])]
-corpusConstructs = do
-  files <- listCorpusPplFiles
-  fmap concat $ forM files $ \ppl -> do
-    (_, slow, _, _) <- parseTestCases (replaceExtension ppl ".tst")
-    if slow then return [] else do
-      p <- parseProgram ppl
+corpusConstructs :: [CorpusEntry] -> IO [(String, [String])]
+corpusConstructs entries =
+  fmap concat $ forM entries $ \e -> do
+      let p = ceProgram e
       r <- timeout (30 * 1000 * 1000) $ try (evaluate (forceList (either (const []) (irEnvConstructs inferenceBodies) (compile defaultCompilerConfig p))))
       return $ case r of
-        Just (Right cs) -> [(takeBaseName ppl, cs)]
+        Just (Right cs) -> [(ceName e, cs)]
         Just (Left (_ :: SomeException)) -> []
         Nothing -> []
   where

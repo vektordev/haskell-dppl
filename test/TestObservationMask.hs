@@ -19,7 +19,8 @@ import SPLL.Parser (tryParseProgram)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
-import TestCaseParser (corpusPplPath, listCorpusPplFiles)
+import TestCaseParser (corpusPplPath)
+import CorpusSweep
 import SPLL.MaskVariants (variantGroupName)
 import qualified SPLL.CodeGenPyTorch
 
@@ -29,7 +30,6 @@ import Control.Monad.Random (evalRand)
 import Data.List (find, sort, isInfixOf, isPrefixOf, intercalate)
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Set as Set
-import System.FilePath (takeBaseName, replaceExtension)
 import System.Random (mkStdGen)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertFailure, assertEqual, assertBool)
@@ -371,21 +371,15 @@ data VariantProgram = VariantProgram
 
 -- | Every ordinary corpus program (no @slow@ header) whose compile has a mask
 -- dispatcher. The sweeps below are over exactly these.
-corpusWithVariants :: IO [VariantProgram]
-corpusWithVariants = do
-  paths <- listCorpusPplFiles
-  fmap concat $ forM paths $ \path -> do
-    tst <- readFile (replaceExtension path "tst")
-    if "slow" `elem` map (filter (/= '\r')) (lines tst) then return [] else do
-      src <- readFile path
-      case tryParseProgram path src of
-        Left _ -> return []
-        Right prog -> case (compile defaultCompilerConfig prog, marginalReport defaultCompilerConfig prog) of
-          (Right env@(IREnv groups _ _), Right report) ->
-            let bases = Set.fromList [ b | g <- groups, Just b <- [maskVariantOf g] ]
-                fns = [ (fmName r, fmEnumerated r) | r <- report, fmName r `Set.member` bases ]
-            in return [ VariantProgram (takeBaseName path) prog env fns | not (null fns) ]
-          _ -> return []
+corpusWithVariants :: [CorpusEntry] -> IO [VariantProgram]
+corpusWithVariants entries =
+  return [ VariantProgram (ceName e) prog env fns
+         | e <- entries
+         , let prog = ceProgram e
+         , (Right env@(IREnv groups _ _), Right report) <- [(compile defaultCompilerConfig prog, marginalReport defaultCompilerConfig prog)]
+         , let bases = Set.fromList [ b | g <- groups, Just b <- [maskVariantOf g] ]
+               fns = [ (fmName r, fmEnumerated r) | r <- report, fmName r `Set.member` bases ]
+         , not (null fns) ]
 
 -- | A query value with the slot at this accessor path replaced. 'Nothing' when
 -- the value does not have the path's shape (a different Either arm, an empty
@@ -464,8 +458,13 @@ knownMaskCrashes =
 knownPrefix :: String
 knownPrefix = "KNOWN CRASH "
 
-variantTests :: TestTree
-variantTests = testGroup "per-mask variants and the dispatcher"
+variantTests :: Corpus -> IO TestTree
+variantTests corpus = do
+  corpusChecks <- variantCorpusTests corpus
+  return $ testGroup "per-mask variants and the dispatcher" (variantUnitTests ++ corpusChecks)
+
+variantUnitTests :: [TestTree]
+variantUnitTests =
   [ testCase "W's Python has the dispatcher and the two admitted variants" $ do
       prog <- corpusPplPath "letWitnessedSharedLatent" >>= readFile >>= parseOrFail
       py <- pythonOf defaultCompilerConfig prog
@@ -537,12 +536,26 @@ variantTests = testGroup "per-mask variants and the dispatcher"
           forM_ xs $ \x -> assertBool ("every slot marginal is 0.5, got " ++ show xs) (abs (x - 0.5) < 1e-12)
         other -> assertFailure ("writeLogits through the dispatcher: " ++ show other)
 
-  , testCase "the all-concrete body is the unmasked compile, byte for byte" $ do
+  ]
+  where
+    pythonOf conf prog = case compile conf prog of
+      Left err -> assertFailure err
+      Right env -> return (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))
+
+-- | The variant sweeps over the corpus, each a single test over every program
+-- 'corpusWithVariants' keeps.
+variantCorpusTests :: Corpus -> IO [TestTree]
+variantCorpusTests corpus = sequence
+  [ corpusSweepAll corpus SweepSpec
+      { sweepName = "ObservationMask.per-mask variants and the dispatcher.the all-concrete body is the unmasked compile, byte for byte"
+      , sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
+      , sweepNote = "a dispatcher's all-concrete arm is the compile without variants" } $ \es ->
+    return $ testCase "the all-concrete body is the unmasked compile, byte for byte" $ do
       -- Before the optimizer: the dispatcher's else-arm, under the parameter
       -- lambdas and the query-type guard, is the body a compile without
       -- variants produces; every other group, and every other variant of a
       -- dispatching group, is identical outright.
-      vps <- corpusWithVariants
+      vps <- corpusWithVariants es
       assertBool "the corpus has programs with variants" (length vps >= 30)
       forM_ vps $ \vp -> do
         let unopt c = either (\e -> error (vpName vp ++ ": " ++ e)) id (compileUnoptimized c (vpProg vp))
@@ -560,8 +573,12 @@ variantTests = testGroup "per-mask variants and the dispatcher"
           assertEqual (vpName vp ++ "." ++ groupName g ++ " prob") (fmap (show . fst) (probFun g0)) (undispatched probFun)
           assertEqual (vpName vp ++ "." ++ groupName g ++ " integ") (fmap (show . fst) (integFun g0)) (undispatched integFun)
 
-  , testCase "totality per mask: every masked forward sample answers or refuses" $ do
-      vps <- corpusWithVariants
+  , corpusSweepAll corpus SweepSpec
+      { sweepName = "ObservationMask.per-mask variants and the dispatcher.totality per mask: every masked forward sample answers or refuses"
+      , sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
+      , sweepNote = "every masked forward sample answers or refuses, never crashes" } $ \es ->
+    return $ testCase "totality per mask: every masked forward sample answers or refuses" $ do
+      vps <- corpusWithVariants es
       checked <- fmap sum $ forM vps $ \vp ->
         fmap sum $ forM [ f | f@(n, _) <- vpFns vp, nullary (vpProg vp) n ] $ \(fname, slots) -> do
           samples <- forwardSamples vp fname
@@ -576,8 +593,12 @@ variantTests = testGroup "per-mask variants and the dispatcher"
                   Right _ -> return 1
       assertBool ("too few masked queries checked: " ++ show checked) (checked >= 300)
 
-  , testCase "marginalisation consistency: a finite slot summed over its domain is its ANY" $ do
-      vps <- corpusWithVariants
+  , corpusSweepAll corpus SweepSpec
+      { sweepName = "ObservationMask.per-mask variants and the dispatcher.marginalisation consistency: a finite slot summed over its domain is its ANY"
+      , sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
+      , sweepNote = "a finite slot summed over its domain is its ANY query" } $ \es ->
+    return $ testCase "marginalisation consistency: a finite slot summed over its domain is its ANY" $ do
+      vps <- corpusWithVariants es
       checked <- fmap sum $ forM vps $ \vp ->
         fmap sum $ forM [ f | f@(n, _) <- vpFns vp, nullary (vpProg vp) n ] $ \(fname, slots) -> do
           domains <- slotDomains vp fname slots
@@ -608,10 +629,6 @@ variantTests = testGroup "per-mask variants and the dispatcher"
                     _ -> return 0
       assertBool ("too few slot marginals checked: " ++ show checked) (checked >= 30)
   ]
-  where
-    pythonOf conf prog = case compile conf prog of
-      Left err -> assertFailure err
-      Right env -> return (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))
 
 -- | The enumerated slots of a function whose leaf has a finite domain, and the
 -- domain, read off the leaf's 'RType'.
@@ -642,12 +659,14 @@ allConcreteArm other = other
 
 -- ---------------------------------------------------------------------------
 
-observationMaskTests :: TestTree
-observationMaskTests = testGroup "ObservationMask"
-  [ treeWalkTests
-  , classTests
-  , corpusSelfContainedTests
-  , maskTableTests
-  , pruneTests
-  , variantTests
-  ]
+observationMaskTests :: Corpus -> IO TestTree
+observationMaskTests corpus = do
+  variants <- variantTests corpus
+  return $ testGroup "ObservationMask"
+    [ treeWalkTests
+    , classTests
+    , corpusSelfContainedTests
+    , maskTableTests
+    , pruneTests
+    , variants
+    ]

@@ -31,7 +31,6 @@ import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 import Control.Monad (forM_, replicateM)
 import Control.Monad.Random (evalRand)
 import System.Random (mkStdGen)
-import System.FilePath (takeBaseName)
 import Data.Foldable (toList)
 import Data.List (find, isInfixOf, nub, sort)
 import Data.Maybe (isJust)
@@ -45,9 +44,10 @@ import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(..))
 import IRInterpreter (generateDet)
 import MockNN (evaluateMockNN)
-import TestCaseParser (parseTestCases, parseProgram, TestCase(..), Backend(..))
+import TestCaseParser (TestCase(..), Backend(..))
 import TestTolerances (probTolerance)
-import End2EndTesting (getAllTestFiles, writeLogitsArgsFor, endpointPlan, shapeNeuralParams, envelopesShapeable)
+import CorpusSweep
+import End2EndTesting (writeLogitsArgsFor, endpointPlan, shapeNeuralParams, envelopesShapeable)
 
 ------------------------------------------------------------------------
 -- Internal helpers
@@ -882,16 +882,6 @@ writeLogitsTests = testGroup "WriteLogits"
 --    dependent-slot program would need excluding here, since writeLogits
 --    deliberately marginalises cross-slot correlations, design § 3.7).
 
--- Corpus pool: every interpreter-routed corpus program with its test cases.
-loadRoundtripPool :: IO [(String, Program, [TestCase])]
-loadRoundtripPool = do
-  files <- getAllTestFiles
-  pool <- mapM (\(ppl, tst) -> do
-    prog <- parseProgram ppl
-    (backends, slow, _ef, tcs) <- parseTestCases tst
-    return (takeBaseName ppl, prog, backends, slow, tcs)) files
-  return [(n, p, tcs) | (n, p, backends, slow, tcs) <- pool, Interpreter `elem` backends, not slow]
-
 -- `main sym = nn sym` (after normalization: a ReadNN directly on the lambda
 -- parameter). Only for these does main's output distribution equal the
 -- read-logits network's own, making writeLogits the vector-level identity.
@@ -912,20 +902,31 @@ writeLogitsGenerated p target = case compile defaultCompilerConfig p of
   Right (IREnv groups _ _) -> maybe False (isJust . writeLogitsFun) (find ((== target) . groupName) groups)
   Left _                   -> False
 
-writeLogitsRoundtripTests :: IO TestTree
-writeLogitsRoundtripTests = do
-  pool <- loadRoundtripPool
-  return $ testGroup "WriteLogitsRoundtrip"
-    [ testGroup "LogitIdentity"
-        [ logitIdentityCase n p | (n, p, _) <- pool, isReadLogitsPassthrough p, envelopesShapeable p, writeLogitsGenerated p "main" ]
-    , testGroup "DensityAgreement"
-        [ densityAgreementCase n p target args
-        | (n, p, tcs) <- pool
-        , (target, args) <- nub [ (t, a) | tc <- tcs, Just (t, a) <- [writeLogitsInvocation tc] ]
+-- | Both sweeps draw on every interpreter-routed, non-slow corpus program,
+-- with its unshaped test cases.
+writeLogitsRoundtripTests :: Corpus -> IO TestTree
+writeLogitsRoundtripTests corpus = do
+  identity <- corpusSweep corpus SweepSpec
+    { sweepName = "WriteLogitsRoundtrip.LogitIdentity", sweepTier = Default, sweepSlow = SkipSlow
+    , sweepSelect = \e -> let p = ceProgram e in
+        interpreterRouted e && isReadLogitsPassthrough p && envelopesShapeable p && writeLogitsGenerated p "main"
+    , sweepNote = "logits -> distribution -> logits is the identity on a passthrough main" } $ \e ->
+      logitIdentityCase (ceName e) (ceProgram e)
+  density <- corpusSweepAll corpus SweepSpec
+    { sweepName = "WriteLogitsRoundtrip.DensityAgreement", sweepTier = Default, sweepSlow = SkipSlow
+    , sweepSelect = \e -> interpreterRouted e && not (null (invocations e))
+    , sweepNote = "a written logit vector, read back, gives the endpoint's own (prob, dim)" } $ \es ->
+      return $ testGroup "DensityAgreement"
+        [ densityAgreementCase (ceName e) p target args
+        | e <- es
+        , let p = ceProgram e
+        , (target, args) <- invocations e
         , writeLogitsGenerated p target
         ]
-    ]
+  return $ testGroup "WriteLogitsRoundtrip" [identity, density]
   where
+    interpreterRouted e = Interpreter `elem` ceBackends e
+    invocations e = nub [ (t, a) | tc <- ceCases e, Just (t, a) <- [writeLogitsInvocation tc] ]
     writeLogitsInvocation (WriteLogitsLengthTestCase _ t a _)  = Just (t, a)
     writeLogitsInvocation (WriteLogitsSlotTestCase _ t a _ _)  = Just (t, a)
     writeLogitsInvocation _                                 = Nothing

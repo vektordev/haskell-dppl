@@ -12,13 +12,16 @@ module Main (main) where
 import Test.Tasty (defaultMain)
 import System.Environment (lookupEnv, setEnv)
 import Data.Maybe (isNothing)
-import TestCorpus (corpusTests, loadCorpusCases, loadCorpusCdfCases)
+import Control.Exception (finally)
+import TestCorpus (corpusTests)
+import CorpusSweep (loadCorpus, timeWholeRun, reportSweeps)
 
 main :: IO ()
 main = do
   -- Mirrors Spec.hs's own default: quiet-on-success unless overridden.
   hideSuccesses <- lookupEnv "TASTY_HIDE_SUCCESSES"
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
-  corpusPool <- loadCorpusCases
-  corpusCdfPool <- loadCorpusCdfCases
-  defaultMain (corpusTests corpusPool corpusCdfPool)
+  corpus <- loadCorpus
+  tree <- corpusTests corpus
+  -- The per-sweep cost table (CorpusSweep), printed once the tree has run.
+  flip finally (reportSweeps corpus) $ defaultMain (timeWholeRun corpus tree)

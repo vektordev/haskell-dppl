@@ -104,6 +104,8 @@ tests:
     # ImpactManifest: the content hash of each check's consumed artifact.
     - cryptohash-sha256
     - bytestring
+    # CorpusSweep: the clock wrapper's IsTest instance re-tags testOptions.
+    - tagged
   # The Corpus tasty group, split into its own executable/process so its
   # ~8x-duplicated full-corpus compile isn't held resident (via tasty's own
   # TestTree retention) for the rest of a combined `stack test` run -- see
@@ -121,6 +123,7 @@ tests:
     # This lists exactly TestCorpus's own transitive test-local dependencies.
     other-modules:
     - TestCorpus
+    - CorpusSweep
     - TestSupport
     - TestCaseParser
     - End2EndTesting
@@ -143,3 +146,5 @@ tests:
     - temporary
     - cryptohash-sha256
     - bytestring
+    # CorpusSweep: the clock wrapper's IsTest instance re-tags testOptions.
+    - tagged

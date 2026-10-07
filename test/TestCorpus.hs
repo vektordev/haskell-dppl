@@ -36,14 +36,11 @@
 module TestCorpus
   ( corpusTests
   , CorpusProbCase
-  , loadCorpusCases
-  , loadCorpusCdfCases
   ) where
 
 import Test.QuickCheck hiding (verbose)
 import Test.Tasty (TestTree, testGroup, localOption)
 import Test.Tasty.QuickCheck (testProperty, QuickCheckMaxRatio(..))
-import System.FilePath (takeBaseName)
 import Data.Maybe (fromMaybe)
 import Data.List (nubBy)
 import Data.Function (on)
@@ -55,8 +52,8 @@ import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.Validator
 import SPLL.Prelude
-import End2EndTesting (getAllTestFiles)
-import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Expectation(..), Backend(..))
+import CorpusSweep
+import TestCaseParser (TestCase(..), Expectation(..), Backend(..))
 import TestTolerances (probTolerance, samplingTolerance)
 import TestSupport (topKConf, bcConf, reasonablyClose)
 
@@ -68,33 +65,27 @@ import TestSupport (topKConf, bcConf, reasonablyClose)
 -- only End2EndTesting knows how to construct.
 type CorpusProbCase = (String, (Program, IRValue, [IRValue], (IRValue, IRValue)))
 
-loadCorpusCases :: IO [CorpusProbCase]
-loadCorpusCases = do
-  files <- getAllTestFiles
-  pairs <- mapM (\(ppl, tst) -> do
-    prog <- parseProgram ppl
-    (backends, _slow, _ef, tcs) <- parseTestCases tst
-    return (takeBaseName ppl, prog, backends, tcs)) files
-  let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
-  -- 'Impossible' rows (task tst-dim-unasserted-at-zero-probability) carry no
-  -- dim, so they are excluded from this pool rather than plumbed through as a
-  -- placeholder: every metamorphic property below that draws on 'expected'
-  -- already treats an actual-zero probability as carrying no dim information
-  -- (its own "a === 0 .||. d === outDim" checks), so those rows contributed
-  -- nothing to this pool's properties even when they were included.
-  return [(n, (p, queryPoint, params, (prob, dim))) | (n, p, tcs) <- usable, ProbTestCase _ queryPoint params (Possible prob dim _) <- tcs]
+-- | The slice every Corpus sweep selects.
+corpusPoolEntry :: CorpusEntry -> Bool
+corpusPoolEntry e = Interpreter `elem` ceBackends e && null (neurals (ceProgram e))
 
--- | The cdf(...) rows of the same corpus slice, for the invariants that hold
+-- | The p(...) rows of a slice.
+--
+-- 'Impossible' rows (task tst-dim-unasserted-at-zero-probability) carry no
+-- dim, so they are excluded from this pool rather than plumbed through as a
+-- placeholder: every metamorphic property below that draws on 'expected'
+-- already treats an actual-zero probability as carrying no dim information
+-- (its own "a === 0 .||. d === outDim" checks), so those rows contributed
+-- nothing to this pool's properties even when they were included.
+probCasesOf :: [CorpusEntry] -> [CorpusProbCase]
+probCasesOf es = [ (ceName e, (ceProgram e, queryPoint, params, (prob, dim)))
+                 | e <- es, ProbTestCase _ queryPoint params (Possible prob dim _) <- ceCases e ]
+
+-- | The cdf(...) rows of the same slice, for the invariants that hold
 -- of a CDF as much as of a point probability ('TopKNeverInflatesCdf').
-loadCorpusCdfCases :: IO [CorpusProbCase]
-loadCorpusCdfCases = do
-  files <- getAllTestFiles
-  pairs <- mapM (\(ppl, tst) -> do
-    prog <- parseProgram ppl
-    (backends, _slow, _ef, tcs) <- parseTestCases tst
-    return (takeBaseName ppl, prog, backends, tcs)) files
-  let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
-  return [(n, (p, queryPoint, params, (prob, dim))) | (n, p, tcs) <- usable, CumulTestCase _ queryPoint params (Possible prob dim _) <- tcs]
+cdfCasesOf :: [CorpusEntry] -> [CorpusProbCase]
+cdfCasesOf es = [ (ceName e, (ceProgram e, queryPoint, params, (prob, dim)))
+                | e <- es, CumulTestCase _ queryPoint params (Possible prob dim _) <- ceCases e ]
 
 -- | A .tst probability expectation is always a (prob, dim) pair of floats;
 -- anything else means the corpus parser handed us a malformed row, which is a
@@ -121,9 +112,12 @@ expectedProbDim other = error ("malformed probability expectation in .tst corpus
 -- both heavy-tailed lognormal products and log-domain programs whose inverse
 -- overflows. Convergence is instead encoded in the corpus itself as an upper-tail
 -- cdf(x)=(1.0, 0.0) line per program.
-corpusTests :: [CorpusProbCase] -> [CorpusProbCase] -> TestTree
-corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
-  [ testProperty "ValidPrograms" (forAllNamed (\_ tc -> checkValidPrograms tc))
+corpusTests :: Corpus -> IO TestTree
+corpusTests corpus = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corpus") $ sequence
+  [ corpusProperty SweepSpec
+      { sweepName = "Corpus.ValidPrograms", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "every program the interpreter runs passes validateProgram" } $ \probPool _ ->
+      testProperty "ValidPrograms" (forAllNamedIn probPool (\_ tc -> checkValidPrograms tc))
   -- dim 0 means the expectation refers to an atom, not a density: match drawn
   -- samples against it with a near-exact window (wide enough for float noise like
   -- 0.1+0.2, narrow enough to separate deliberately-close .tst atoms) instead of
@@ -133,17 +127,38 @@ corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "
   -- pass. The hit probability of a window estimate scales with density * eps^dim,
   -- so reliable multivariate estimates need prohibitively many samples; those
   -- cases are value-checked exactly by End2End.Interpreter instead.
-  , testProperty "SamplingMatchesPDF" $ once $ conjoin
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.SamplingMatchesPDF", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "the empirical frequency of forward samples estimates the .tst density" } $ \probPool _ ->
+      testProperty "SamplingMatchesPDF" $ once $ conjoin
       [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool
       , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1
       , densityLivesOnSamples inp outDim ]
-  , testProperty "TopKInterprets" (forAllNamed (checkTopKInterprets topK005Envs))
-  , testProperty "ProbWithBranchCounting" (forAllNamed (checkProbTestCasesWithBC bcEnvs))
-  , testProperty "MarginalAnyIsOne" (forAllNamed (checkProbAny defaultEnvs))
-  , testProperty "TopKZeroThreshMatchesExact" (forAllNamed (checkTopKZeroMatchesExact topK0Envs defaultEnvs))
-  , testProperty "TopKNeverInflates" (forAllNamed (checkTopKNeverInflates topK01Envs defaultEnvs))
-  , testProperty "TopKNeverInflatesCdf" (forAllNamedIn cdfPool (checkTopKNeverInflatesCdf topK01Envs defaultEnvs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.TopKInterprets", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "a topK 0.05 compile still answers every p() row" } $ \probPool _ ->
+      testProperty "TopKInterprets" (forAllNamedIn probPool (checkTopKInterprets topK005Envs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.ProbWithBranchCounting", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "branch counting leaves (prob, dim) unchanged" } $ \probPool _ ->
+      testProperty "ProbWithBranchCounting" (forAllNamedIn probPool (checkProbTestCasesWithBC bcEnvs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.MarginalAnyIsOne", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "P(ANY) = 1" } $ \probPool _ ->
+      testProperty "MarginalAnyIsOne" (forAllNamedIn probPool (checkProbAny defaultEnvs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.TopKZeroThreshMatchesExact", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "topK at threshold 0 is exact inference" } $ \probPool _ ->
+      testProperty "TopKZeroThreshMatchesExact" (forAllNamedIn probPool (checkTopKZeroMatchesExact topK0Envs defaultEnvs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.TopKNeverInflates", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "topK pruning never raises a p() row" } $ \probPool _ ->
+      testProperty "TopKNeverInflates" (forAllNamedIn probPool (checkTopKNeverInflates topK01Envs defaultEnvs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.TopKNeverInflatesCdf", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "topK pruning never raises a cdf() row" } $ \_ cdfPool ->
+      testProperty "TopKNeverInflatesCdf" (forAllNamedIn cdfPool (checkTopKNeverInflatesCdf topK01Envs defaultEnvs))
   -- task log-space-probability-computation: compiling with logSpace=True makes
   -- p()/cdf() return a log-probability instead of a linear one, so exp(actual)
   -- must reproduce the same corpus expectation as the linear compile. Over the
@@ -152,8 +167,11 @@ corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "
   -- semiring since task worlds-measure-unification. (The pool holds no neural
   -- program, so the plan engine's worlds are checked by End2End's
   -- PlanEngineLogSpaceMatchesLinear instead.)
-  , testProperty "LogSpaceMatchesLinear"
-      (forAllNamed (checkLogSpaceMatchesLinear logEnvs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.LogSpaceMatchesLinear", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "exp of the log-space answer is the .tst expectation" } $ \probPool _ ->
+      testProperty "LogSpaceMatchesLinear"
+      (forAllNamedIn probPool (checkLogSpaceMatchesLinear logEnvs))
   -- task topk-logspace-unsound: logSpace combined with topK used to discard all
   -- probability mass (accProb/TOP_K_CUTOFF arithmetic was hardcoded linear, so
   -- every branch compared a log-probability against a linear threshold and was
@@ -161,8 +179,11 @@ corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "
   -- against the corresponding LINEAR topK compile at the same threshold, not
   -- against the (topK-off) .tst expectations, since topK is a real pruning
   -- optimisation whose own linear-mode result is the correct oracle here.
-  , testProperty "TopKLogSpaceMatchesLinear"
-      (forAllNamed (checkTopKLogSpaceMatchesLinear topK005LogEnvs topK005Envs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.TopKLogSpaceMatchesLinear", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "log-space topK agrees with linear topK" } $ \probPool _ ->
+      testProperty "TopKLogSpaceMatchesLinear"
+      (forAllNamedIn probPool (checkTopKLogSpaceMatchesLinear topK005LogEnvs topK005Envs))
   -- task multi-path-recovery-unmaterialized-crash: the IROptimizer must not be
   -- load-bearing for whether a compiled probability function is even runnable.
   -- That ticket's second witness (`let x = Uniform in (x, x+x)`) crashed with
@@ -173,14 +194,23 @@ corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "
   -- codegen defect. Comparing the two levels on the same corpus points closes
   -- that blind spot: the optimizer is a rewrite, so agreement is exact, not
   -- approximate.
-  , testProperty "UnoptimizedMatchesOptimized"
-      (forAllNamed (checkUnoptimizedMatchesOptimized unoptEnvs defaultEnvs))
+  , corpusProperty SweepSpec
+      { sweepName = "Corpus.UnoptimizedMatchesOptimized", sweepTier = Default, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "-O0 answers exactly what -O2 answers" } $ \probPool _ ->
+      testProperty "UnoptimizedMatchesOptimized"
+      (forAllNamedIn probPool (checkUnoptimizedMatchesOptimized unoptEnvs defaultEnvs))
   ]
   where
+    -- Each property is its own sweep over the same slice, and sees that
+    -- slice's p() and cdf() rows.
+    corpusProperty spec prop = corpusSweepAll corpus spec $ \es ->
+      return (prop (probCasesOf es) (cdfCasesOf es))
+    -- The slice the sweeps above select ('SkipSlow', 'corpusPoolEntry').
+    poolEntries = [ e | e <- corpusEntries corpus, not (ceSlow e), corpusPoolEntry e ]
     -- Compile each corpus program once per config, shared by every invariant and
     -- every .tst line drawn from that program (compile depends only on the pair,
     -- never on the queried sample/params).
-    progs = uniqueCorpusPrograms (probPool ++ cdfPool)
+    progs = uniqueCorpusPrograms (probCasesOf poolEntries ++ cdfCasesOf poolEntries)
     defaultEnvs = compileCorpusPrograms defaultCompilerConfig progs
     topK005Envs = compileCorpusPrograms (topKConf 0.05) progs
     topK0Envs   = compileCorpusPrograms (topKConf 0.0) progs
@@ -192,7 +222,6 @@ corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "
     -- Enumerate the whole (filtered) pool deterministically so any failing corpus
     -- case surfaces on every run, rather than only when a random draw selects it.
     forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f n tc) | (n, tc) <- pool]
-    forAllNamed = forAllNamedIn probPool
     samplingEps outDim = if outDim == VFloat 0 then 1e-9 else 0.05
 
 checkValidPrograms :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
