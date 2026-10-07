@@ -564,8 +564,18 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
           genFun = presentVariant genE,
           normalFun = presentVariant normalE,
           refusedVariants = refusedVariant "gen" genE ++ refusedVariant "prob" probE
-                            ++ refusedVariant "integ" integE ++ refusedVariant "normal" normalE,
+                            ++ refusedVariant "integ" integE ++ refusedVariant "normal" normalE
+                            ++ comparisonRefusal "prob" noProb ++ comparisonRefusal "integ" noInteg,
           groupDoc="Function group " ++ name}
+        -- A variant absent because its pType is intractable is otherwise absent
+        -- without a reason. When the intractability starts at a comparison
+        -- with no closed form for its operands, say so (task
+        -- uniform-below-random-threshold-no-forward: @draw x = Uniform in
+        -- (x < 0.5, Uniform < x)@ compiled with exit 0 and no word on why
+        -- the probability function was missing).
+        comparisonRefusal lbl suppressed
+          | suppressed || admittedPT pt = []
+          | otherwise = [ (lbl, VariantRefusal why cn) | Just (why, cn) <- [comparisonWithoutClosedForm binding] ]
         -- Generate per-component normal functions for tuple outputs
         tupleNormalFuns = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
         -- One extra 'IRFunGroup' per 'extraSemirings' entry (task
@@ -756,6 +766,52 @@ isEnumerable :: [Tag] -> Bool
 isEnumerable = any isDiscrete
   where isDiscrete (DiscreteValues mv) = not (multiValueContainsContinuous mv)
         isDiscrete _                   = False
+
+-- | The first comparison (@<@\/@>@) in an expression that modality inference
+-- left intractable although both its operands are tractable -- the node where
+-- 'SPLL.Typing.ModalityInfer.compareGround' found no closed form for the pair
+-- -- with a diagnostic and its chain name.
+comparisonWithoutClosedForm :: Expr -> Maybe (String, ChainName)
+comparisonWithoutClosedForm e@(Expr ti f) = case f of
+  InjF (Named op) [a, b]
+    | op `elem` ["lt", "gt"], pType ti == Bottom, tractable a, tractable b ->
+        Just (why op, chainName ti)
+  _ -> listToMaybe (mapMaybe comparisonWithoutClosedForm (getSubExprs e))
+  where
+    tractable x = pType (getTypeInfo x) `elem` [Deterministic, Integrate, PNormal, PLogNormal]
+    why op = "the comparison `" ++ (if op == "lt" then "<" else ">") ++ "`"
+          ++ maybe "" ((" at " ++) . spanPretty) (srcPos ti)
+          ++ " has no closed form for its two random operands. NeST measures a comparison"
+          ++ " when one side is deterministic, both sides are Gaussian, both sides are"
+          ++ " enumerable, or one side is enumerable and the two read no random variable"
+          ++ " in common"
+
+-- | The operands of a comparison against a random enumerable bound, when the
+-- 'toIRInference' equation of that name applies: @Just (enumIsLeft, enumSide,
+-- cdfSide)@. Both sides are random (a Deterministic one has its own
+-- equation); exactly one carries an enumerable 'DiscreteValues' domain within
+-- the materialization budget (two are the enumerate-both grid's); the other
+-- has a CDF; and no random local is read by both, so the joint law is the
+-- product of the two operands' own laws. A local fixed by an enclosing
+-- enumeration or witness ('recoveredVars') is a value, not a law, and
+-- correlates nothing. The ModalityInfer counterpart is 'compareGround'.
+enumeratedBoundShape :: CompilerMetadata -> Expr -> Expr -> Maybe (Bool, Expr, Expr)
+enumeratedBoundShape meta l r
+  | det l || det r = Nothing
+  | not (null sharedRandom) = Nothing
+  | enumOk l, not (enumerable r), measurable r = Just (True, l, r)
+  | enumOk r, not (enumerable l), measurable l = Just (False, r, l)
+  | otherwise = Nothing
+  where
+    det e = pType (getTypeInfo e) == Deterministic
+    enumerable e = isEnumerable (tags (getTypeInfo e))
+    enumOk e = enumerable e && enumerationWithinMaterializationBudget meta (tags (getTypeInfo e))
+    measurable e = pType (getTypeInfo e) `elem` [Integrate, PNormal, PLogNormal]
+    sharedRandom = [ v | v <- Set.toList (Set.intersection (freeVarsExpr l) (freeVarsExpr r))
+                       , isLocal v, v `notElem` recoveredVars meta ]
+    isLocal v = case lookup v (typeEnv meta) of
+      Just (t, False) -> not (isTArrowType t)
+      _ -> False
 
 -- | True when `Apply l v` should be compiled by enumerating the argument's discrete
 -- support (marginalising over a random draw). This requires:
@@ -2609,6 +2665,39 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     returnExpr <- complementWhen (semiringOf meta) (notIR sample) (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
     return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
+-- A comparison against a random but enumerable bound (task
+-- uniform-below-random-threshold-no-forward): a Bernoulli whose rate is
+-- itself random, @Uniform < (if b then 0.9 else 0.1)@ once DrawSinking has
+-- moved @draw b@ into the threshold. Neither side is Deterministic, so the
+-- two equations above do not apply, and the other side has no
+-- 'DiscreteValues' domain, so the enumerate-both grid does not either. The
+-- operands are independent ('enumeratedBoundShape'), so
+--
+--   p(cmp = sample) = sum over v in dom(E) of P(E = v) * p(cmp against v = sample)
+--
+-- where the inner factor is exactly the fixed-bound equation's: the other
+-- side's CDF at @v@, complemented when the outcome asks for its upper tail.
+-- ModalityInfer's 'compareGround' admits this shape under the same
+-- conditions, and this equation must not outrun it.
+toIRInference meta False (Expr _ (InjF (Named cmp) [left, right])) sample
+  | cmp `elem` ["gt", "lt"]
+  , Just (enumLeft, enumE, cdfE) <- enumeratedBoundShape meta left right = do
+    let sr = semiringOf meta
+    let enumList = head [x | DiscreteValues x <- tags (getTypeInfo enumE)]
+    -- The CDF side lies below the bound when it is the left operand of @<@
+    -- or the right operand of @>@; the True outcome is then its CDF, and
+    -- the False outcome the complement (and the other way round otherwise).
+    let cdfBelow = (cmp == "lt") /= enumLeft
+    bnd <- mkVariable "enumerated_bound"
+    mTbl <- materializeOperandTable meta enumE
+    (returnExpr, binds) <- lift $ runWriterT $ do
+      pE <- operandProb meta mTbl enumE (IRVar bnd)
+      integ <- toIRInference (unpruned meta) True cdfE (IRVar bnd)  -- complemented below, see 'unpruned'
+      pCmp <- complementWhen sr (if cdfBelow then notIR sample else sample) (unP (rProb integ))
+      return (srTimes sr pE pCmp)
+    let (outerBinds, body') = hoistInvariantBindings bnd (buildLetIns binds returnExpr)
+    setVariables outerBinds
+    opaqueMass sr (enumSumNode sr bnd enumList body') const0
 -- mult(0, y) = 0 for every y, whatever y's own distribution or shape (task
 -- mult-inversion-unguarded-at-zero, symptom 1): this is a genuine point mass,
 -- compiled exactly like a literal 'Constant' of the same value (the clause a
