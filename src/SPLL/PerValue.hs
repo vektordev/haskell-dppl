@@ -60,7 +60,7 @@ import SPLL.Lang.Lang (substituteVar, freeVarsExpr, autoDeriveMultiValue, multiV
 import SPLL.Typing.RType (RType(..))
 import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (perValuePointSuffix, perValuePriorSuffix, perValueGivenSuffix, perValueSlotSuffix,
-                           perValueHelperSuffixes, queryParamName, accProbParamName, probSuffix)
+                           perValueHelperSuffixes, queryParamName, accProbParamName, topKCutoffParamName, probSuffix)
 import SPLL.Semiring (Semiring(..), mkSemiring, orIR)
 import SPLL.Analysis (annotateEnumsProg)
 
@@ -384,8 +384,8 @@ perValueBody conf pl vals =
   where
     f = pvName pl
     topK = isJust (topKThreshold conf)
-    accLambda = if topK then IRLambda accProbParamName else id
-    accArg = [ IRVar accProbParamName | topK ]
+    accLambda = if topK then IRLambda accProbParamName . IRLambda topKCutoffParamName else id
+    accArg = [ IRVar n | topK, n <- [accProbParamName, topKCutoffParamName] ]
     params = map IRVar (pvParams pl)
     sample = IRVar queryParamName
     guarded

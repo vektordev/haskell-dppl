@@ -396,9 +396,9 @@ domainVal _ = Nothing
 
 -- | @\<method\>_dense@ / @\<method\>_at@ for one inference method, when its
 -- signature admits the domain as a batch: the parameters must be exactly the
--- query value, optionally followed by topK's accumulated probability (which is
--- shared across the batch and broadcasts). A method taking a further per-point
--- argument -- a neural symbol -- is excluded: its dense result would be
+-- query value, optionally followed by topK's accumulated probability and
+-- cutoff (which are shared across the batch and broadcast). A method taking a
+-- further per-point argument -- a neural symbol -- is excluded: its dense result would be
 -- @[B, V]@, which amortises over nothing.
 denseMethods :: SEnv -> [(String, String)] -> String -> Maybe IRFunDecl -> [String]
 denseMethods _ _ _ Nothing = []
@@ -420,7 +420,8 @@ denseMethods env lut methodName (Just fd)
   | otherwise = []
   where
     denseArgs ["sample"] = True
-    denseArgs ["sample", "acc_prob"] = True
+    denseArgs ["sample", "acc_prob", "top_k_cutoff"] = True
+    denseArgs ["sample", "top_k_cutoff"] = True
     denseArgs _ = False
 
 -- | The parameter names 'generateMethod' will emit for a method, without

@@ -82,7 +82,7 @@ own helper signatures use it.
 
 Every name the pipeline claims for itself lives in `SPLL.ReservedNames`: the
 surface keywords, the distribution primitives, the binders generated code
-declares (`sample`, `acc_prob`, `TOP_K_CUTOFF`, `ACC_PROB_INIT`), the temporary
+declares (`sample`, `acc_prob`, `top_k_cutoff`, `TOP_K_CUTOFF`, `ACC_PROB_INIT`), the temporary
 prefixes (`l_`, `cse_`, a leading `_`), chain names (`ast<n>`), the parser's
 own desugaring binders (`p_d<n>`, `p_ob<n>`, and CalleeNormalize's
 `p_eta<n>` for an eta-expanded alias), the per-function variant

@@ -774,6 +774,17 @@ fuzzConfig CfgTopK0    = defaultCompilerConfig { topKThreshold = Just 0.0 }
 fuzzConfig CfgTopK01   = defaultCompilerConfig { topKThreshold = Just 0.1 }
 fuzzConfig CfgBranches = defaultCompilerConfig { countBranches = True }
 
+-- | The config whose compile serves @c@. The topK cutoff is a runtime
+-- parameter (task runtime-parametric-topk-threshold), so both topK configs
+-- share one compile and 'rethreshold' picks the cutoff.
+compileKey :: FuzzConfig -> FuzzConfig
+compileKey CfgTopK0 = CfgTopK01
+compileKey c        = c
+
+rethreshold :: FuzzConfig -> IREnv -> IREnv
+rethreshold CfgTopK0 = withTopKCutoff 0.0
+rethreshold _        = id
+
 -- | What one case gives every invariant: the program, its compile under each
 -- requested config ('Nothing' for one not requested or that did not compile),
 -- and one point drawn from the exact compile ('Nothing' when there is no exact
@@ -904,8 +915,8 @@ runInvariantCase name factor invs p = do
       let budget = factor * perCaseBudgetMicros
       result <- timeout budget $ do
         let cfgs = [ c | c <- [minBound .. maxBound], any ((c `elem`) . invConfigs) invs ]
-        envs <- mapM (\c -> (,) c <$> compileSafe (fuzzConfig c) p) cfgs
-        let envOf c = lookup c envs >>= id
+        compiled <- mapM (\k -> (,) k <$> compileSafe (fuzzConfig k) p) (nub (map compileKey cfgs))
+        let envOf c = rethreshold c <$> (lookup (compileKey c) compiled >>= id)
         sample <- case envOf CfgExact of
           Nothing -> return Nothing
           Just e -> do
@@ -981,9 +992,9 @@ prop_Fuzz_SharedDrawInvariants =
   invariantsProperty "prop_Fuzz_SharedDrawInvariants" 1
     [marginalAnyIsOne, probabilityNeverNegative] 40
 
--- | The cross-config invariants, in @Aspirational@: four compiles per draw
--- (default, topK 0, topK 0.1, branch counting), so twice the per-case budget
--- of a two-compile property.
+-- | The cross-config invariants, in @Aspirational@: three compiles per draw
+-- (default, topK -- shared by thresholds 0 and 0.1, see 'compileKey' -- and
+-- branch counting), at twice the per-case budget of a two-compile property.
 prop_Fuzz_SharedDrawConfigInvariants :: Property
 prop_Fuzz_SharedDrawConfigInvariants =
   invariantsProperty "prop_Fuzz_SharedDrawConfigInvariants" 2

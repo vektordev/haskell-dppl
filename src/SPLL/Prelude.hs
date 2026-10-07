@@ -73,6 +73,7 @@ module SPLL.Prelude
   , runGenNamedC
   , runProbNamedC
   , runIntegNamedC
+  , withTopKCutoff
   , runWriteLogitsC
   , runWriteLogitsRandC
   , printIfVerbose
@@ -121,7 +122,7 @@ import PrettyPrint (pPrintProg, pPrintIREnv)
 import Text.Pretty.Simple (pShow)
 import qualified Data.Text.Lazy as TL
 import Data.Char (toUpper)
-import Data.Maybe (isJust, isNothing, fromMaybe)
+import Data.Maybe (isNothing, fromMaybe, maybeToList)
 import Data.List (find, intercalate)
 
 -- | Build an AST node with a blank annotation. All the smart constructors
@@ -636,12 +637,34 @@ runProbNamedC p compiled name args x =
       -- 1.0 here silently discarded all probability mass under logSpace, since
       -- the compiled cutoff comparisons expect a log-space accumulator
       -- (task topk-logspace-unsound).
-      where args' = if compiledWithTopK compiled then x : accProbInit compiled : args else x : args
+      -- The runtime cutoff follows it, read from the env's TOP_K_CUTOFF (the
+      -- compiled-in default, or whatever 'withTopKCutoff' set).
+      where args' = case topKCutoff compiled of
+              Just cutoff -> x : accProbInit compiled : cutoff : args
+              Nothing     -> x : args
 
 -- The IRCompiler emits the TOP_K_CUTOFF constant iff topKThreshold was set,
--- so a compiled IREnv carries its own marker for the extra acc_prob parameter.
-compiledWithTopK :: IREnv -> Bool
-compiledWithTopK (IREnv _ _ consts) = isJust (lookup topKCutoffName consts)
+-- so a compiled IREnv carries its own marker for the extra acc_prob and
+-- top_k_cutoff parameters, and the cutoff value to pass for the latter.
+topKCutoff :: IREnv -> Maybe IRValue
+topKCutoff (IREnv _ _ consts) = lookup topKCutoffName consts
+
+-- | Re-threshold a topK compile without recompiling it (task
+-- runtime-parametric-topk-threshold): every pruning guard compares against
+-- the runtime @top_k_cutoff@ parameter, so replacing the TOP_K_CUTOFF default
+-- the run* entry points pass for it is all a new threshold takes. The
+-- threshold is linear, as in 'topKThreshold'; it is moved into the compile's
+-- space here (@log t@ under logSpace, recognised by ACC_PROB_INIT being the
+-- log semiring's one, 0). Calling it on a compile without topK is a caller
+-- bug -- that compile has no guards to re-threshold -- and is an error.
+withTopKCutoff :: Double -> IREnv -> IREnv
+withTopKCutoff thresh env@(IREnv funcs adtDecls consts) = case topKCutoff env of
+  Nothing -> error "withTopKCutoff: the IREnv was compiled without topKThreshold, so it has no cutoff to set"
+  Just _  -> IREnv funcs adtDecls [ if n == topKCutoffName then (n, VFloat cutoff) else (n, v) | (n, v) <- consts ]
+  where
+    cutoff = case accProbInit env of
+      VFloat one | one == 0 -> log thresh
+      _                     -> thresh
 
 -- The IRCompiler emits ACC_PROB_INIT alongside TOP_K_CUTOFF, in the same
 -- space (linear 1.0 / log-space 0.0), so the caller never has to know
@@ -655,7 +678,9 @@ runIntegC p compiled = runIntegNamedC p compiled "main"
 runIntegNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegNamedC p compiled name args sample =
   case integFun (lookupIREnv name compiled) of
-    Just (integ, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sample:args)) integ
+    -- A topK-compiled integrate function takes the runtime cutoff right
+    -- after the sample (no acc_prob: its root seeds its own).
+    Just (integ, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sample : maybeToList (topKCutoff compiled) ++ args)) integ
     Nothing -> Left (missingVariant "integrate" "integ" (lookupIREnv name compiled))
 
 -- | Modality inference decides per definition which of the three variants are

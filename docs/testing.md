@@ -34,10 +34,10 @@ current list for whichever binary you run):
   `-O0` vs the default `-O2` — the optimizer is a rewrite, so the two levels
   must agree exactly on every corpus query point; a `.tst` expectation alone
   would not have caught a dangling chain-name reference that constant
-  folding happened to delete). Four of its eight compiled-config variants
-  differ only in `topKThreshold` (or `topKThreshold` + `logSpace`) — see the
-  filed follow-up task `runtime-parametric-topk-threshold` in
-  `NeST_internal_docs/tasks/` for folding those into fewer compiles.
+  folding happened to delete). It compiles the corpus under six configs.
+  The topK thresholds 0, 0.05 and 0.1 share one compile, re-thresholded with
+  `withTopKCutoff`, because the cutoff is a runtime parameter. topK +
+  `logSpace` keeps its own compile.
 - `test/TestParser.hs` / `TestInternals.hs` — parser and internal-function
   unit tests
 - `test/TestRejection.hs` — unhappy-path: invalid or ill-typed programs must

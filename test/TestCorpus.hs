@@ -5,10 +5,10 @@
 -- This lives in its own module -- and, via @haskell-dppl-test-corpus@ in
 -- @package.yaml@, its own test-suite executable/OS process -- because
 -- 'corpusTests' compiles the ENTIRE corpus (~300+ programs) once per
--- 'SPLL.IntermediateRepresentation.CompilerConfig', and needs eight
--- different configs (default, three topK thresholds, branch-counting,
--- log-space, topK+log-space, and unoptimized) to check its invariants
--- against each other. Each of those eight compiles is a full
+-- 'SPLL.IntermediateRepresentation.CompilerConfig', and needs six
+-- different configs (default, topK, branch-counting, log-space,
+-- topK+log-space, and unoptimized) to check its invariants against each
+-- other. Each of those compiles is a full
 -- @Map String (Either CompilerError IREnv)@ over the whole corpus, kept
 -- alive for as long as any 'testProperty' built from it might still run.
 --
@@ -25,14 +25,11 @@
 -- after the rest of the suite runs in a separate process, the same way
 -- manually batching @stack test --ta '-p ...'@ runs did as a workaround.
 --
--- See also the filed follow-up task
--- @runtime-parametric-topk-threshold@ (in @NeST_internal_docs/tasks/@):
--- four of these eight configs differ only in 'topKThreshold' (or
--- 'topKThreshold' plus 'logSpace'), which is baked into the compiled
--- artifact at IR-compile time purely because IRCompiler needs to know the
--- cutoff to decide which branches to elide. Making the cutoff a runtime
--- parameter instead would collapse those four full-corpus compiles into
--- (up to) one, independent of this process-splitting fix.
+-- (Until task runtime-parametric-topk-threshold there were eight: three topK
+-- thresholds were three full-corpus compiles. The topK cutoff is now a runtime
+-- parameter of the compiled functions, so the 0, 0.05 and 0.1 thresholds share
+-- one compile re-thresholded by 'withTopKCutoff'. topK+log-space keeps its
+-- own compile, because log space is a compile-time semiring choice.)
 module TestCorpus
   ( corpusTests
   , CorpusProbCase
@@ -212,9 +209,13 @@ corpusTests corpus = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corp
     -- never on the queried sample/params).
     progs = uniqueCorpusPrograms (probCasesOf poolEntries ++ cdfCasesOf poolEntries)
     defaultEnvs = compileCorpusPrograms defaultCompilerConfig progs
+    -- One topK compile answers every threshold: the cutoff is a runtime
+    -- parameter, so 'withTopKCutoff' re-thresholds the shared compile instead
+    -- of recompiling the corpus per threshold (task runtime-parametric-topk-threshold).
     topK005Envs = compileCorpusPrograms (topKConf 0.05) progs
-    topK0Envs   = compileCorpusPrograms (topKConf 0.0) progs
-    topK01Envs  = compileCorpusPrograms (topKConf 0.1) progs
+    topK0Envs   = rethreshold 0.0 topK005Envs
+    topK01Envs  = rethreshold 0.1 topK005Envs
+    rethreshold t = Map.map (fmap (withTopKCutoff t))
     bcEnvs      = compileCorpusPrograms bcConf progs
     logEnvs     = compileCorpusPrograms (defaultCompilerConfig {logSpace = True}) progs
     topK005LogEnvs = compileCorpusPrograms (topKConf 0.05) {logSpace = True} progs

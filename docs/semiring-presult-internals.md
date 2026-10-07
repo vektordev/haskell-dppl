@@ -190,10 +190,23 @@ intended trade: bytes for a halved loop.
 `topKThreshold :: Maybe Double` in `CompilerConfig` enables
 probability-based branch pruning. The compiler threads an `accProb` (the
 probability of reaching the current point) through inference; each
-`IfThenElse` arm in probability mode is guarded on its *accumulated* path
-probability (`accProb * p_cond`) against `TOP_K_CUTOFF`, and an arm below
-the cutoff is dropped. The same threshold filters enumerable `InjF`
-branches by `accProb * p_left`.
+`IfThenElse` arm is guarded on its *accumulated* path probability
+(`accProb * p_cond`) against the cutoff, and an arm below the cutoff is
+dropped. The same threshold filters enumerable `InjF` branches by
+`accProb * p_left`.
+
+The cutoff is a **runtime parameter**, not a compile-time constant: under
+topK every `_prob` function takes `(sample, acc_prob, top_k_cutoff, ...)` and
+every `_integ` function `(sample, top_k_cutoff, ...)`, and calls between
+definitions forward it. Every guard is emitted and decided at run time, so
+one compile answers any threshold. The threshold given to `topKThreshold` only
+becomes the emitted `TOP_K_CUTOFF` constant, the default a caller passes.
+`SPLL.Prelude`'s `run*` entry points pass the env's `TOP_K_CUTOFF`, and
+`withTopKCutoff t` re-thresholds a compiled `IREnv` without recompiling it.
+Like `acc_prob` (seeded with `ACC_PROB_INIT`), the cutoff is in the
+semiring's space: a log-space compile takes `log t`. There is no
+static-threshold mode that removes pruned branches at compile time (task
+runtime-parametric-topk-threshold).
 
 Pruning is **lossy** — a dropped branch's mass is simply gone. Hence the
 one-sided invariants: topK never *inflates* a probability
@@ -242,11 +255,11 @@ rejected: it is the O(2^d) double compile the `IfThenElse` case retreated from,
 and it would not have helped the subtraction sites anyway.
 
 Separately, an `_integ` function takes no `acc_prob` parameter, so a
-cumulative-mode call into another definition passes only the sample
-(`inferenceCall`); passing the accumulator there applied the callee's result
-tuple to a second argument, and every topK CDF query through a call crashed
-with "Expression is not a closure" until `TopKNeverInflatesCdf` reached
-`varAlias`.
+cumulative-mode call into another definition passes only the sample and the
+cutoff (`inferenceCall`); passing the accumulator there applied the callee's
+result tuple to an extra argument, and every topK CDF query through a call
+crashed with "Expression is not a closure" until `TopKNeverInflatesCdf`
+reached `varAlias`.
 
 ## Query-Type Guard
 

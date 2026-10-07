@@ -5668,7 +5668,7 @@ test_recursiveListBranchPruning = testCase "recursiveListBranchPruning" $ do
 -- registry means adding a representative here.
 reservedExamples :: [String]
 reservedExamples =
-  [ "sample", "acc_prob", "TOP_K_CUTOFF", "ACC_PROB_INIT"
+  [ "sample", "acc_prob", "TOP_K_CUTOFF", "top_k_cutoff", "ACC_PROB_INIT"
   , "l_tmp", "cse_0", "_r0", "ast12", "p_d0", "p_ob3", "p_eta1"
   , "x_gen", "x_prob", "x_integ", "x_writeLogits", "x_normal", "x_prob_deriv"
   ]

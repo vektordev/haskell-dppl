@@ -46,6 +46,7 @@ module SPLL.ReservedNames
   , queryParamName
   , accProbParamName
   , topKCutoffName
+  , topKCutoffParamName
   , accProbInitName
     -- * Per-function variant suffixes
   , genSuffix
@@ -132,9 +133,19 @@ queryParamName = "sample"
 accProbParamName :: String
 accProbParamName = "acc_prob"
 
--- | The topK cutoff constant ('SPLL.IntermediateRepresentation.IREnv' consts).
+-- | The topK cutoff constant ('SPLL.IntermediateRepresentation.IREnv' consts):
+-- the compiled-in /default/ cutoff a caller passes as 'topKCutoffParamName'
+-- when it has no threshold of its own (task runtime-parametric-topk-threshold).
 topKCutoffName :: String
 topKCutoffName = "TOP_K_CUTOFF"
+
+-- | The runtime topK cutoff parameter a topK compile adds to every
+-- probability function (after 'accProbParamName') and every integrate
+-- function (after the query). Every pruning guard compares against it, so one
+-- compiled artifact answers queries at any threshold chosen at call time. It
+-- is in the semiring's space, like 'accProbParamName': @log t@ under logSpace.
+topKCutoffParamName :: String
+topKCutoffParamName = "top_k_cutoff"
 
 -- | The initial accumulated probability a topK compile passes at the root.
 accProbInitName :: String
@@ -145,7 +156,8 @@ reservedExactNames :: [(String, String)]
 reservedExactNames =
   [ (queryParamName,   "it is the query parameter of every compiled probability and integrate function")
   , (accProbParamName, "it is the accumulated-probability parameter of a topK-pruned probability function")
-  , (topKCutoffName,   "it is the constant holding the topK pruning threshold")
+  , (topKCutoffName,   "it is the constant holding the default topK pruning threshold")
+  , (topKCutoffParamName, "it is the runtime topK cutoff parameter of a topK-pruned probability or integrate function")
   , (accProbInitName,  "it is the constant holding a topK compile's initial accumulated probability")
   ]
 

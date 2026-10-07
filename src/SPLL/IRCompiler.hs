@@ -27,7 +27,7 @@ module SPLL.IRCompiler (
   symbolCdfMessage
 )where
 
-import SPLL.ReservedNames (distributionPrimitiveNames, queryParamName, accProbParamName, topKCutoffName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
+import SPLL.ReservedNames (distributionPrimitiveNames, queryParamName, accProbParamName, topKCutoffName, topKCutoffParamName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -170,7 +170,7 @@ semiringOf meta = mkSemiring (semiringFamily meta) (logSpace (compilerConfig met
 -- Pruning is switched off by seeding the accumulated path probability with the
 -- semiring's infinity rather than by a flag: every guard in this module (the
 -- 'IfThenElse' arms, the enumerable-'InjF' term filter, the materialised
--- table's per-cell test) compares @accProb ⊗ p@ against @TOP_K_CUTOFF@, and
+-- table's per-cell test) compares @accProb ⊗ p@ against the cutoff, and
 -- @∞ ⊗ p = ∞@ fails every "below cutoff" test in both the linear (@∞ · p@) and
 -- the log (@∞ + log p@) semiring. Being a value rather than a flag is what lets
 -- it cross a function-call boundary unchanged: a callee's @_prob@ takes its
@@ -196,11 +196,18 @@ unpruned meta = meta { accProb = IRConst (VFloat (1 / 0)) }
 -- "Expression is not a closure" on every topK CDF query through a call.) A
 -- callee integral pruned from its own root rather than the caller's is pruned
 -- less, never more, so the lower-bound reading of topK is unaffected.
+--
+-- Under 'topKThreshold' both variants also take the runtime cutoff
+-- ('topKCutoffParamName', after @acc_prob@ for a @_prob@ and after the sample
+-- for an @_integ@), forwarded unchanged so the whole call tree prunes at the
+-- threshold the root was called with (task runtime-parametric-topk-threshold).
 inferenceCall :: CompilerMetadata -> Bool -> IRExpr -> IRExpr -> IRExpr
 inferenceCall meta cumulative callee sample =
   case topKThreshold (compilerConfig meta) of
-    Just _ | not cumulative -> IRApply (IRApply callee sample) (accProb meta)
-    _                       -> IRApply callee sample
+    Just _ | not cumulative -> IRApply (IRApply (IRApply callee sample) (accProb meta)) cutoff
+           | otherwise      -> IRApply (IRApply callee sample) cutoff
+    Nothing                 -> IRApply callee sample
+  where cutoff = IRVar topKCutoffParamName
 
 -- | Whether an inverse's derivative is a literal positive constant, so that in
 -- cumulative mode 'scaleCoV' will pass the operand's CDF through unflipped.
@@ -530,7 +537,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         -- 'refusedVariants' (task static-refusals-become-absent-variants).
         integE =
           if not noInteg && admittedPT pt then
-            Just (appendDoc guardNote . toIntegDecl name . IRLambda queryParamName . guardQuery "cdf"
+            Just (appendDoc guardNote . toIntegDecl name . IRLambda queryParamName . cutoffLambda . guardQuery "cdf"
                     <$> runCompile (meta progTypeEnv) (toIRInferenceSave (meta progTypeEnv) True binding (IRVar queryParamName)))
           else Nothing
         probE =
@@ -538,7 +545,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
               let metaBase = meta progTypeEnv
                   compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar queryParamName))
               in Just (appendDoc guardNote . toProbDecl name <$> case topKThreshold conf of
-                   Just _ -> IRLambda queryParamName . IRLambda accProbParamName . guardQuery "p" <$> compileBody (metaBase { accProb = IRVar accProbParamName })
+                   Just _ -> IRLambda queryParamName . IRLambda accProbParamName . cutoffLambda . guardQuery "p" <$> compileBody (metaBase { accProb = IRVar accProbParamName })
                    Nothing -> IRLambda queryParamName . guardQuery "p" <$> compileBody metaBase)
             else Nothing
         genE =
@@ -622,15 +629,23 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
   -- threshold. The comparison operators themselves (OpLessThan/OpGreaterThan)
   -- stay unchanged either way -- log is a monotone increasing transform, so
   -- ordering against the cutoff is preserved without touching the comparisons.
+  -- TOP_K_CUTOFF is only the default for the runtime 'topKCutoffParamName'
+  -- parameter; nothing in the compiled functions reads it, so a caller may pass
+  -- any other cutoff (in the same space) without recompiling.
   -- ACC_PROB_INIT mirrors TOP_K_CUTOFF's marker-const idiom: the value a
   -- caller must seed the extra acc_prob parameter with at the query root
-  -- (linear 1.0, or log-space 0.0). It's read back by 'SPLL.Prelude.runProbNamedC'.
+  -- (linear 1.0, or log-space 0.0). Both are read back by 'SPLL.Prelude.runProbNamedC'.
   (case topKThreshold conf of
     Just thresh -> [(topKCutoffName, VFloat (if logSpace conf then log thresh else thresh)),
                      (accProbInitName, VFloat (if logSpace conf then 0.0 else 1.0))]
     Nothing     -> [])
 
   where
+    -- Under topK every probability and integrate function takes the cutoff as
+    -- a runtime parameter, so one compile answers any threshold (task
+    -- runtime-parametric-topk-threshold); the TOP_K_CUTOFF const above is only
+    -- the default a caller passes.
+    cutoffLambda = if isJust (topKThreshold conf) then IRLambda topKCutoffParamName else id
     -- The four rungs a probability and an integrate function are compiled for.
     admittedPT pt' = pt' == Deterministic || pt' == Integrate || pt' == PNormal || pt' == PLogNormal
     presentVariant :: Maybe (Either VariantRefusal IRFunDecl) -> Maybe IRFunDecl
@@ -1164,7 +1179,7 @@ bindLambdaParam scope lambdaCn x =
 --     sums do not. Not diagnosed further; see task
 --     and-chain-exponential-over-random-operands.)
 --
--- TOPK. The cutoff is `accProb * pLeft > TOP_K_CUTOFF`, where accProb is the
+-- TOPK. The cutoff is `accProb * pLeft > top_k_cutoff`, where accProb is the
 -- globally accumulated path probability. A context-free table could not see it
 -- -- except that accProb is only ever modified at an 'IfThenElse', so every
 -- level of an enum chain shares the one accProb IRExpr, and the cells are bound
@@ -1341,7 +1356,7 @@ convolveTables meta dom buckets = do
     -- written once per cell rather than once per pair.
     term lc rc = case topKThreshold (compilerConfig meta) of
       Nothing -> srTimes sr lc rc
-      Just _  -> IRIf (IROp OpGreaterThan (srTimes sr (accProb meta) lc) (IRVar topKCutoffName))
+      Just _  -> IRIf (IROp OpGreaterThan (srTimes sr (accProb meta) lc) (IRVar topKCutoffParamName))
                       (srTimes sr lc rc)
                       (srZero sr)
 
@@ -2613,9 +2628,9 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
           setVariables [(accFalseV, srTimes sr (accProb meta) (IRVar var_condF_p))]
           prunedV <- mkVariable "pruned"
           let prunedExpr = IRIf
-                (IROp OpLessThan (IRVar accTrueV) (IRVar topKCutoffName))
+                (IROp OpLessThan (IRVar accTrueV) (IRVar topKCutoffParamName))
                 (packResult mul2Zeroed)
-                (IRIf (IROp OpLessThan (IRVar accFalseV) (IRVar topKCutoffName))
+                (IRIf (IROp OpLessThan (IRVar accFalseV) (IRVar topKCutoffParamName))
                   (packResult mul1Zeroed)
                   (packResult addRes))
           setVariables [(prunedV, prunedExpr)]
@@ -3775,14 +3790,14 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     -- accProb * pLeft is a semiring product (srTimes): under logSpace both
     -- operands are log-probabilities, so a hardcoded OpMult here silently
     -- pruned every branch (task topk-logspace-unsound). The comparison against
-    -- TOP_K_CUTOFF stays OpGreaterThan either way -- log is monotone, and
-    -- TOP_K_CUTOFF is seeded in the matching space at its definition site.
+    -- the cutoff stays OpGreaterThan either way -- log is monotone, and the
+    -- runtime cutoff parameter is passed in the matching space.
     let cutoffOk = case topKThreshold (compilerConfig meta) of
           Nothing -> possible
           Just _  -> IROp OpAnd possible
                        (IROp OpGreaterThan
                           (srTimes sr (accProb meta) pLeft)
-                          (IRVar topKCutoffName))
+                          (IRVar topKCutoffParamName))
     let returnExpr   = IRIf cutoffOk (wrapR (srTimes sr pLeft pRight)) (srZero sr)
     let branchesExpr = IRIf cutoffOk (IRConst (VFloat 1)) (IRConst (VFloat 0))
     return (mkPResult (sealP returnExpr) const0 branchesExpr (notIR cutoffOk))

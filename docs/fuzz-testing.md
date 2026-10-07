@@ -27,14 +27,15 @@ reports this honestly instead of it being invisible inside an inflated
 success count.
 
 The five inference invariants share draws (`invariantsProperty`): one draw is
-compiled once per config its invariants read (default, topK 0, topK 0.1,
-branch counting) and every invariant runs against those compiles, each with
+compiled once per config its invariants read (default, topK, branch
+counting; topK 0 and 0.1 share one compile, since the cutoff is a runtime
+parameter) and every invariant runs against those compiles, each with
 its own `Holds`/`Vacuous`/`Broken` verdict. A failure names the invariant, and
 shrinking is pinned to the first failure the draw showed (an invariant or a
 hang), so the shrunk program still breaks that same invariant. They are two
 properties, split by tier: `prop_Fuzz_SharedDrawInvariants` (P(ANY)=1, never
 negative; one compile, `Slow`) and `prop_Fuzz_SharedDrawConfigInvariants` (the
-topK and branch-counting comparisons; four compiles, `Aspirational`, because
+topK and branch-counting comparisons; three compiles, `Aspirational`, because
 its topK compiles exceed the per-case budget on most seeds). Merge them once
 that is fixed.
 

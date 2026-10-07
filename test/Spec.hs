@@ -28,7 +28,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedNestedSelectTests, normalTailPrecisionTests, batchedEnumBucketingTests, branchCountBackendTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedNestedSelectTests, normalTailPrecisionTests, batchedEnumBucketingTests, branchCountBackendTests, topKRuntimeCutoffTests)
 import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
 import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
@@ -492,8 +492,8 @@ prop_LogSpaceJuliaRendersInfinity = once $ ioProperty $ do
   return $ counterexample ("emitted Julia:\n" ++ src)
     (not ("Infinity" `isInfixOf` src) && "-Inf" `isInfixOf` src)
 
--- The interpreter must resolve IRVar "TOP_K_CUTOFF" via the constant in IREnv:
--- a topK compile with threshold=0.001 on testDice should agree with exact inference
+-- The run* entry points must pass the IREnv's TOP_K_CUTOFF constant as the
+-- runtime top_k_cutoff parameter: a topK compile with threshold=0.001 on testDice should agree with exact inference
 -- (all branches kept since 1/6 >> 0.001).
 prop_TopKConstantResolvedByInterpreter :: Property
 prop_TopKConstantResolvedByInterpreter = once $ ioProperty $ do
@@ -610,6 +610,7 @@ main = do
     , batchedPy
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests
+    , topKRuntimeCutoffTests
     , wideNeuralDomainTests
     , deepExpressionSpillTests
     , batchedNestedSelectTests

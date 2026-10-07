@@ -2437,9 +2437,14 @@ batchedDriver accArg eligible = unlines $
     groupCall name (BatchGroup isCumul paramExprs _ samples expP expD) =
       let method = if isCumul then "integrate" else "forward"
           -- A topK-compiled prob function takes an accumulated-probability
-          -- parameter right after the sample (see 'compiledWithTopK'); seed it
-          -- with 1.0 at the query root, exactly as the interpreter driver does.
-          accStr = if accArg && not isCumul then ", 1.0" else ""
+          -- parameter right after the sample, then the runtime cutoff (see
+          -- 'SPLL.Prelude.topKCutoff'); an integrate function takes only the
+          -- cutoff. Seed the accumulator with 1.0 at the query root and pass
+          -- the compiled-in default cutoff, exactly as the interpreter driver does.
+          accStr
+            | not accArg = ""
+            | isCumul    = ", _ns['TOP_K_CUTOFF']"
+            | otherwise  = ", 1.0, _ns['TOP_K_CUTOFF']"
           paramStr = concatMap (", " ++) paramExprs
           (bucketCheck, call) = case batchSamples samples of
             Just (SoA xs) ->
@@ -2594,12 +2599,16 @@ denseDriver accArg entries = unlines $
   , "            dv = _leaf(d, i)"
   , "            if abs(dv - exp_d[i]) > TOL:"
   , "                failures.append(name + '.' + method + ' pt ' + str(i) + ': dim ' + str(dv) + ' != ' + str(exp_d[i]))"
-  -- A topK-compiled prob function takes the accumulated probability right after
-  -- the sample; seed it with 1.0 at the query root, as every other driver does.
-  -- It is a scalar, so it broadcasts over the domain batch as well as over the
+  -- A topK-compiled prob function takes the accumulated probability and the
+  -- runtime cutoff right after the sample (an integrate function only the
+  -- cutoff); seed the former with 1.0 at the query root, as every other driver
+  -- does, and pass the compiled-in default TOP_K_CUTOFF for the latter. Both
+  -- are scalars, so they broadcast over the domain batch as well as over the
   -- query batch -- which is exactly why dense mode needs no topK plumbing.
-  , "ACC = " ++ (if accArg then "(1.0,)" else "()")
+  , "TOPK = " ++ (if accArg then "True" else "False")
+  , "CUT = None"
   , "def _dense(name, method, main, samples, exp_p, exp_d, packed=None):"
+  , "    ACC = (((1.0, CUT) if method == 'forward' else (CUT,)) if TOPK else ())"
   , "    dom = type(main).DOMAIN"
   , "    vec = getattr(main, method + '_dense')(*ACC)"
   , "    n = vec[0].shape[0] if (torch.is_tensor(vec[0]) and vec[0].dim() > 0) else 1"
@@ -2631,7 +2640,8 @@ denseDriver accArg entries = unlines $
       , "    exec(" ++ show src ++ ", _ns)"
       ] ++
       [ "    _ns[" ++ show (netMockName nm) ++ "] = " ++ batchedMockExpr nm | nm <- netNames ] ++
-      [ "    _main = _ns['main']" ] ++
+      [ "    _main = _ns['main']"
+      , "    CUT = _ns.get('TOP_K_CUTOFF')" ] ++
       concatMap (groupCall name src) groups ++
       [ "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
@@ -2678,7 +2688,7 @@ topKDiffThresholds = [0.3, 0.6]
 -- would be wrong wherever pruning bites.
 --
 -- Restricted to prob queries: the integrate path takes no @acc_prob@ parameter
--- and topK does not apply to it. Input is the @batched@-declaring corpus
+-- (only the cutoff), and its pruning is seeded from its own root. Input is the @batched@-declaring corpus
 -- entries, the same declaration 'batchedPythonTests' filters on — a program
 -- whose fragment eligibility is asserted there is silently dropped here if it
 -- fails to compile at a cutoff, which is why the non-vacuity assertion below
@@ -2700,10 +2710,16 @@ topKEntries entries = (map fst built, nub [n | ((n, _, _, _), True) <- built])
       , not (null qtcs)
       , let netNames = networkMocks p
       , Right env0 <- [compile defaultCompilerConfig p]
+      -- One topK compile per mode, re-thresholded per threshold: the cutoff
+      -- is a runtime parameter (task runtime-parametric-topk-threshold), so
+      -- only the emitted default TOP_K_CUTOFF differs between thresholds.
+      , firstThresh : _ <- [topKDiffThresholds]
+      , let confK = defaultCompilerConfig{topKThreshold = Just firstThresh}
+      , Right envK0    <- [compile confK{batched = True}  p]
+      , Right envKint0 <- [compile confK{batched = False} p]
       , thresh <- topKDiffThresholds
-      , let confK = defaultCompilerConfig{topKThreshold = Just thresh}
-      , Right envK    <- [compile confK{batched = True}  p]
-      , Right envKint <- [compile confK{batched = False} p]
+      , let envK    = withTopKCutoff thresh envK0
+      , let envKint = withTopKCutoff thresh envKint0
       , Right srcLines <- [generateFunctionsBatched True envK]
       , Just groups  <- [batchGroups (not (null netNames)) qtcs]
       , Just groups' <- [mapM (retarget p envKint) groups]
@@ -3546,3 +3562,97 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
                      && ceName e `elem` unoptimizedCodegenSmoke
                      && ceName e `notElem` unoptimizedCodegenExempt
                      && hasQueries e
+
+-- ===========================================================================
+-- Runtime topK cutoff (task runtime-parametric-topk-threshold)
+-- ===========================================================================
+
+-- | The topK cutoff is a runtime parameter of every compiled probability and
+-- integrate function, so ONE topK compile answers every threshold. Pinned three
+-- ways on fixtures where the threshold bites (pruning flips the answer between
+-- 0 and 0.1): the interpreter on a re-thresholded compile ('withTopKCutoff')
+-- reproduces a dedicated compile at that threshold exactly, in linear and log
+-- space; and the emitted Python and Julia, compiled once, answer each cutoff
+-- passed at call time as the dedicated compile does.
+topKRuntimeCutoffTests :: TestTree
+topKRuntimeCutoffTests = testGroup "topK runtime cutoff"
+  [ testProperty "a re-thresholded compile matches a dedicated compile (interpreter)" $ once $
+      conjoin [ rethresholdAgrees logS src t q
+              | (_, src) <- fixtures, logS <- [False, True], t <- cutoffs, q <- queries ]
+  , testProperty "the fixtures are not vacuous: thresholds 0 and 0.1 disagree" $ once $
+      conjoin [ counterexample (name ++ ": " ++ show (at 0.0) ++ " == " ++ show (at 0.1)) (show (at 0.0) /= show (at 0.1))
+              | (name, src) <- fixtures
+              , let at t = dedicated False src t (False, VFloat 1.0) ]
+  , testProperty "emitted Python takes the cutoff at call time" $ once $ ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorchProperty "topK runtime cutoff (Python)"
+        Just py -> do
+          cwd <- getCurrentDirectory
+          conjoin <$> mapM (pythonFixture py cwd) fixtures
+  , testProperty "emitted Julia takes the cutoff at call time" $ once $ ioProperty $ do
+      projectDir <- getCurrentDirectory
+      conjoin <$> mapM (juliaFixture projectDir) fixtures
+  ]
+  where
+    -- A pruned mass arm at the root, and the same arm behind a call, so the
+    -- cutoff has to be forwarded through 'inferenceCall' too.
+    fixtures =
+      [ ("root", "main = if Uniform < 0.05 then 1.0 else Uniform")
+      , ("call", "f x = if Uniform < 0.05 then x else Uniform\nmain = f 1.0") ]
+    cutoffs = [0.0, 0.03, 0.1, 0.5]
+    -- (cumulative?, sample)
+    queries = [ (c, VFloat x) | c <- [False, True], x <- [1.0, 0.5] ]
+    parse src = either (error . show) id (tryParseProgram "" src)
+    conf logS t = defaultCompilerConfig { topKThreshold = Just t, logSpace = logS }
+    run p env (cumul, x) = either (error . show) id
+      ((if cumul then runIntegC else runProbC) p env [] x)
+    dedicated logS src t q =
+      let p = parse src in run p (either (error . show) id (compile (conf logS t) p)) q
+    -- compiled once at a threshold matching none of 'cutoffs'
+    shared logS src = either (error . show) id (compile (conf logS 0.07) (parse src))
+    rethresholdAgrees logS src t q =
+      let got = run (parse src) (withTopKCutoff t (shared logS src)) q
+          want = dedicated logS src t q
+      in counterexample (src ++ " logSpace=" ++ show logS ++ " t=" ++ show t ++ " " ++ show q
+                         ++ ": " ++ show got ++ " /= " ++ show want) (show got == show want)
+    expected src = [ (t, q, pd (dedicated False src t q)) | t <- cutoffs, q <- queries ]
+    pd v = case v of
+      VProbDim p d -> (p, d)
+      other        -> error ("unexpected result " ++ show other)
+    compare1 name out src = case map (map read . words) (lines out) :: [[Double]] of
+      rows | length rows == length (expected src) ->
+        conjoin [ counterexample (name ++ " t=" ++ show t ++ " " ++ show q ++ ": got " ++ show [gp, gd]
+                                  ++ ", want " ++ show (p, d))
+                    (abs (gp - p) <= probTolerance && abs (gd - d) <= probTolerance)
+                | ((t, q, (p, d)), [gp, gd]) <- zip (expected src) rows ]
+      _ -> counterexample (name ++ ": unexpected output\n" ++ out) False
+    pythonFixture py cwd (name, src) = do
+      let env = shared False src
+          code = unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
+          call t (cumul, x) = if cumul
+            then "main.integrate(" ++ pyVal x ++ ", " ++ pyVal (VFloat t) ++ ")"
+            else "main.forward(" ++ pyVal x ++ ", ACC_PROB_INIT, " ++ pyVal (VFloat t) ++ ")"
+          script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ code ++ "\n"
+            ++ unlines [ "r = " ++ call t q ++ "\nprint(float(r[0]), float(r[1][0]))" | (t, q, _) <- expected src ]
+      (ec, out, err) <- withSystemTempFile "topk_cutoff.py" $ \tmpPath h -> do
+        hPutStr h script >> hClose h
+        readProcessWithExitCode py [tmpPath] ""
+      return $ case ec of
+        ExitSuccess -> compare1 ("python " ++ name) out src
+        ExitFailure _ -> counterexample ("python " ++ name ++ " failed:\n" ++ out ++ err) False
+    juliaFixture projectDir (name, src) = do
+      let env = shared False src
+          code = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions env)
+          call t (cumul, x) = if cumul
+            then "P.main_integ(" ++ juliaVal x ++ ", " ++ juliaVal (VFloat t) ++ ")"
+            else "P.main_prob(" ++ juliaVal x ++ ", P.ACC_PROB_INIT, " ++ juliaVal (VFloat t) ++ ")"
+          script = "include(\"" ++ projectDir ++ "/juliaLib.jl\")\nusing .JuliaSPPLLib\n"
+            ++ "module P\nusing ..JuliaSPPLLib\n" ++ code ++ "\nend\n"
+            ++ unlines [ "r = " ++ call t q ++ "\nprintln(Float64(r[1]), \" \", Float64(r[2][1]))" | (t, q, _) <- expected src ]
+      (ec, out, err) <- withSystemTempFile "topk_cutoff.jl" $ \tmpPath h -> do
+        hPutStr h script >> hClose h
+        readProcessWithExitCode "julia" (juliaTestFlags ++ [tmpPath]) ""
+      return $ case ec of
+        ExitSuccess -> compare1 ("julia " ++ name) out src
+        ExitFailure _ -> counterexample ("julia " ++ name ++ " failed:\n" ++ out ++ err) False
