@@ -30,6 +30,9 @@ Pipeline (each step is a subcommand; ``all`` runs them in order):
             per second of cost first, then a reverse-delete pass dropping cover
             units the rest already subsume). Units outside the cover are
             demotion candidates. Writes ``report.csv`` and ``report.md``.
+  estimate  Optional: time the uninstrumented main binary with and without
+            the candidates (``--top-cost N`` for the N most expensive), as a
+            rough wall-time figure for whoever decides the moves.
 
 Nothing is moved automatically: the report is for a human to decide from.
 
@@ -45,6 +48,7 @@ A full run on a 4-core machine takes roughly an hour, most of it in ``run``.
 
 import argparse
 import concurrent.futures as cf
+import csv
 import json
 import os
 import re
@@ -516,23 +520,31 @@ def cmd_analyze(a):
         once = (once | s_) & ~multi
     unique = {n: (s_ & once).bit_count() for n, s_ in sets.items()}
 
+    # The Corpus-binary properties draw their programs at random, so ticks
+    # only they cover are covered by chance on any one run.
+    steady = 0
+    for n in cover:
+        if not n.startswith("corpusbin:"):
+            steady |= sets[n]
+    by_chance = {n: (sets[n] & ~steady).bit_count() for n in cand}
+
     total_cost = sum(units[n]["cost"] for n in units)
     cand_cost = sum(units[n]["cost"] for n in cand)
     py_cov = sum((universe >> offsets[k] & ((1 << width[k]) - 1)).bit_count()
                  for k in width if k.startswith("py:"))
 
     with open(os.path.join(a.out, "report.csv"), "w") as f:
-        f.write("unit,kind,tests,cost_s,in_cover,ticks,unique_ticks,run_exit,subsumed_by\n")
+        f.write("unit,kind,tests,cost_s,in_cover,ticks,unique_ticks,random_only_ticks,run_exit,subsumed_by\n")
         for n in sorted(units, key=lambda n: -units[n]["cost"]):
             u = units[n]
             s = sets.get(n, 0)
             sub = ""
             if n in sets and n not in cover_set:
                 sub = "; ".join("%s(%d)" % (m, g) for m, g in subsumers(s, cover, sets))
-            f.write('"%s",%s,%d,%.3f,%s,%d,%d,%s,"%s"\n' % (
+            f.write('"%s",%s,%d,%.3f,%s,%d,%d,%d,%s,"%s"\n' % (
                 n.replace('"', '""'), n.split(":")[0], len(u["tests"]), u["cost"],
                 "fixed" if n in fixed else ("yes" if n in cover_set else "no"),
-                s.bit_count(), unique.get(n, 0),
+                s.bit_count(), unique.get(n, 0), by_chance.get(n, 0),
                 results[n]["exit"] if n in results else "missing", sub.replace('"', '""')))
 
     by_kind = defaultdict(lambda: [0, 0.0])
@@ -572,6 +584,11 @@ def cmd_analyze(a):
       "demoting any subset of the candidates loses no tick.")
     for k, (c, s) in sorted(by_kind.items()):
         w("  - %s: %d units, %.1f s" % (k, c, s))
+    chancy = [n for n in cand if by_chance[n]]
+    w("- %d of the candidates (%.1f s) have ticks that only a Corpus-binary property covers "
+      "(`random_only_ticks` in the CSV, `rnd` below). Those properties draw programs at "
+      "random, so that part of the cover holds by chance on any one run."
+      % (len(chancy), sum(units[n]["cost"] for n in chancy)))
     w("")
     w("Summed test time is not wall time: the suite runs tests in parallel, so demoting "
       "X s of summed time saves roughly X / (cores in use) of wall time, less where the "
@@ -592,6 +609,10 @@ def cmd_analyze(a):
     w("- **Randomness.** The Corpus-binary properties and the fuzz groups draw programs at "
       "random, so their tick sets vary from run to run; a unit covered only by such a unit "
       "is covered by chance.")
+    w("- **Demoting a program shrinks the random pools.** The Corpus-binary properties and "
+      "some sweeps draw from every program without a `slow` header, so a demoted program "
+      "also leaves those pools. Their tick sets were measured with the full pool; re-run "
+      "the analysis after a large demotion.")
     w("- **Greedy, not optimal.** Weighted set cover is NP-hard; the cover is greedy "
       "(new ticks per second) followed by a reverse-delete pass. A different cover can "
       "make a different set of candidates.")
@@ -603,12 +624,12 @@ def cmd_analyze(a):
     w("`subsumed by` lists up to four cover units that together cover the candidate's "
       "ticks, with the number of the candidate's ticks each contributes.")
     w("")
-    w("| unit | tests | cost s | ticks | subsumed by |")
-    w("|---|---:|---:|---:|---|")
+    w("| unit | tests | cost s | ticks | rnd | subsumed by |")
+    w("|---|---:|---:|---:|---:|---|")
     for n in cand[: a.top]:
         sub = ", ".join("`%s` (%d)" % (m, g) for m, g in subsumers(sets[n], cover, sets))
-        w("| `%s` | %d | %.2f | %d | %s |" % (n, len(units[n]["tests"]), units[n]["cost"],
-                                            sets[n].bit_count(), sub))
+        w("| `%s` | %d | %.2f | %d | %d | %s |" % (n, len(units[n]["tests"]), units[n]["cost"],
+                                                 sets[n].bit_count(), by_chance[n], sub))
     if len(cand) > a.top:
         w("")
         w("%d more in `report.csv`." % (len(cand) - a.top))
@@ -638,6 +659,67 @@ def cmd_analyze(a):
         % (len(cover), len(cand), cand_cost, total_cost, a.out))
 
 
+def cmd_estimate(a):
+    """Wall time of the uninstrumented main binary with and without the candidates.
+
+    The candidates are left out with a tasty pattern on the test names, which
+    is what a `.tst` slow header would do for a corpus unit. Only the main
+    binary is timed: no candidate lives in the Corpus binary today. A rough
+    figure for the human deciding the moves, not a measurement of a commit.
+    """
+    units = json.load(open(os.path.join(a.out, "units.json")))["units"]
+    rows = [r for r in csv.DictReader(open(os.path.join(a.out, "report.csv")))
+            if r["in_cover"] == "no"]
+    if a.top_cost:
+        rows = sorted(rows, key=lambda r: -float(r["cost_s"]))[: a.top_cost]
+    tests = [t for r in rows for t in units[r["unit"]]["tests"]
+             if units[r["unit"]]["binary"] == MAIN_SUITE]
+    # One argument may not exceed 128 KiB, too little to list every test by
+    # name. Most candidate tests end in their program's name, so match those
+    # by last component, list the rest by name, and guard the few
+    # non-candidate tests whose last component happens to be such a name.
+    cand = set(tests)
+    progs = {r["unit"].split(":", 1)[1] for r in rows if r["kind"] == "corpus"}
+    every = [t for u in units.values() if u["binary"] == MAIN_SUITE for t in u["tests"]]
+    by_last = lambda t: t.rsplit(".", 1)[-1]
+    extras = sorted(t for t in cand if by_last(t) not in progs)
+    guards = sorted(t for t in every if t not in cand and by_last(t) in progs)
+    conds = []
+    if progs:
+        conds.append("((" + " || ".join("$NF == " + awk_str(n) for n in sorted(progs)) + ")"
+                     + "".join(" && $0 != " + awk_str(t) for t in guards) + ")")
+    conds += ["$0 == " + awk_str(t) for t in extras]
+    pattern = "!(" + " || ".join(conds) + ")" if conds else "$0 != \"\""
+    exe = binary(a.repo, MAIN_SUITE, work_dir=None)
+    stack(["build", "--test", "--no-run-tests"], a.repo, check=True)
+    # TestCLI runs the exe from PATH, as `stack test` arranges.
+    env = dict(os.environ, NEST_FULL_TESTS="1",
+               PATH=os.path.dirname(binary(a.repo, EXE, work_dir=None)) + os.pathsep
+               + os.environ["PATH"])
+    for v in ("NEST_SLOW_TESTS", "NEST_ASPIRATIONAL_TESTS", "NEST_SUPERSLOW_TESTS"):
+        env.pop(v, None)
+
+    def timed(args):
+        t0 = time.time()
+        r = subprocess.run([exe] + args, cwd=a.repo, env=env, capture_output=True, text=True)
+        m = re.search(r"All (\d+) tests passed|(\d+) out of (\d+) tests failed", r.stdout)
+        return time.time() - t0, m.group(0) if m else "exit %d" % r.returncode
+
+    log("excluding %d candidate units (%d tests, %.1f s summed)"
+        % (len(rows), len(tests), sum(float(r["cost_s"]) for r in rows)))
+    listed = subprocess.run([exe, "-l", "-p", pattern], cwd=a.repo, env=env,
+                            capture_output=True, text=True, check=True).stdout.split("\n")
+    left = sum(1 for t in listed if t.strip())
+    if left != len(every) - len(cand):
+        sys.exit("the exclusion pattern selects %d tests, expected %d"
+                 % (left, len(every) - len(cand)))
+    for i in range(a.repeat):
+        full = timed([])
+        cut = timed(["-p", pattern])
+        log("round %d: full %.0f s (%s); without candidates %.0f s (%s)"
+            % (i + 1, full[0], full[1], cut[0], cut[1]))
+
+
 # --------------------------------------------------------------------------
 
 
@@ -660,6 +742,9 @@ def main():
         r.add_argument("--top", type=int, default=60, help="candidates listed in report.md")
         if name == "all":
             r.add_argument("--log", help="as for timings")
+    e = sub.add_parser("estimate", help="time the main binary with and without the candidates")
+    e.add_argument("--top-cost", type=int, default=0, help="only the N most expensive candidates")
+    e.add_argument("--repeat", type=int, default=1)
     an = sub.add_parser("analyze")
     an.add_argument("--top", type=int, default=60, help="candidates listed in report.md")
     a = p.parse_args()
@@ -674,7 +759,7 @@ def main():
         cmd_analyze(a)
     else:
         {"build": cmd_build, "timings": cmd_timings, "units": cmd_units,
-         "run": cmd_run, "analyze": cmd_analyze}[a.cmd](a)
+         "run": cmd_run, "analyze": cmd_analyze, "estimate": cmd_estimate}[a.cmd](a)
 
 
 if __name__ == "__main__":

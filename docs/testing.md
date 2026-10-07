@@ -516,6 +516,7 @@ demotion candidates. It writes `report.csv` and `report.md` under
 ```bash
 scripts/coverage-tiering/coverage_tiering.py all -j 4   # build, timings, units, run, analyze
 scripts/coverage-tiering/coverage_tiering.py analyze    # redo the report from existing runs
+scripts/coverage-tiering/coverage_tiering.py estimate   # main binary's wall time without the candidates
 ```
 
 The `timings` step runs the uninstrumented suite with `NEST_FULL_TESTS=1`, so
