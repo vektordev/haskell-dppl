@@ -160,7 +160,7 @@ stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
 | `neural.md` | neural declarations, input types (`Tensor`), `of` annotations, the categorical sampler, sharing one network call per argument, readLogits/writeLogits |
 | `batched-mode-pytorch-tensorizer.md` | batched backend, dense mode, refusals |
 | `backends.md` | runtime libraries under torch, float literals, Python nesting spill, safe unary math |
-| `testing.md` | suite layout, corpus sweeps (the registry and its cost table), `.tst` format and expectations, the known-issues corpus and its performance pins (growth over a templated family, code size), rewrite invariance, tiers, impact analysis (skipping unchanged checks), suite time, benchmarks |
+| `testing.md` | suite layout, corpus sweeps (the registry and its cost table), `.tst` format and expectations, the known-issues corpus and its performance pins (growth over a templated family, code size), rewrite invariance, tiers, impact analysis (skipping unchanged checks), suite time, coverage-informed tiering, benchmarks |
 | `fuzz-testing.md` | generators, shrinking, coverage, budgets, the admission-totality and backend-agreement properties |
 
 Design, task and investigation documents live in the separate

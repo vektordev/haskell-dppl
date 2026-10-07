@@ -499,6 +499,35 @@ above), time it per group
 (`--ta '-p "$2==\"End2End\""'`) and look for a single test on the
 critical path before cutting coverage.
 
+### Coverage-informed tiering
+
+Before demoting a test to `Slow` for its cost, ask what the default suite
+would lose. `scripts/coverage-tiering/coverage_tiering.py` answers that
+offline (docs-repo task `coverage-informed-test-tiering`). It builds an HPC
+build into `.stack-work-coverage`, partitions the default tier into units
+(one per corpus program across every corpus sweep, one per non-corpus test
+group two levels deep, one per `Corpus` property), runs the instrumented
+binary once per unit with its own `HPCTIXFILE`, and runs a greedy weighted
+set cover over the units' tick sets with their summed test times as cost.
+Units outside the cover execute nothing the cover does not, so they are
+demotion candidates. It writes `report.csv` and `report.md` under
+`.stack-work-coverage/tiering/`. A human decides the moves.
+
+```bash
+scripts/coverage-tiering/coverage_tiering.py all -j 4   # build, timings, units, run, analyze
+scripts/coverage-tiering/coverage_tiering.py analyze    # redo the report from existing runs
+```
+
+The `timings` step runs the uninstrumented suite with `NEST_FULL_TESTS=1`, so
+run it on an idle machine. The `run` step is resumable and takes about an
+hour on 4 cores: each unit process spends ~15 s building the tree before it
+runs anything. `haskell-dppl-exe` subprocesses are covered through a shim on
+`PATH`. Python subprocesses run under `pytrace.py`, which records the lines of
+`pythonLib.py`/`pythonLibBatched.py` they execute. Julia is not covered, so
+units holding Julia checks are always kept. The report states the other
+caveats. Tick coverage is not value coverage, and coverage moves with the
+code, so re-run it when the suite has grown materially.
+
 ## Benchmarks
 
 `benchmarks/` holds compiler-performance stress programs
