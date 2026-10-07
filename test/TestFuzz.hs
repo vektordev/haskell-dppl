@@ -99,7 +99,7 @@ import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
                       genHelperProgram, typedLeaves,
                       genNeuralProgram, genNeuralTwinProgram, neuralTwin,
                       typedMainCoreExpr, typedMainCoreTy, hasNeural,
-                      RecShape(..), recShapeOfProgram, genRecursiveProgram,
+                      RecShape(..), recShapeOfProgram, boundaryConstsOfProgram, divisionOfProgram, genRecursiveProgram,
                       withADTs, adtPool, adtPoolNames, mentionsVar, recursionSafe,
                       unguardedProjections, genADTDecls, adtShapes, adtDeclSize, adtLeaf,
                       genMutualADTPair)
@@ -1126,6 +1126,8 @@ data DrawSummary = DrawSummary
   , dsADTLabel       :: String
   , dsADTShapes      :: [(String, [String])]
   , dsRecShape       :: RecShape
+  , dsBoundaryConsts :: [String]
+  , dsDivision       :: String
   } deriving (Show, Eq)
 
 summarizeDraw :: Program -> IO DrawSummary
@@ -1149,6 +1151,8 @@ summarizeDraw p = do
     <*> guardAxis crashedAxis (adtLabel p)
     <*> guardAxis [] (adtShapes (adts p))
     <*> guardAxis NoRec (recShapeOfProgram p)
+    <*> guardAxis [crashedAxis] (boundaryConstsOfProgram p)
+    <*> guardAxis crashedAxis (divisionOfProgram p)
 
 -- | The modality pass's verdict on @main@, as a label. This is the axis that
 -- catches a collapse into a single inference regime, which the outcome split
@@ -1279,6 +1283,10 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ tabulate "adt shape"        (map fst (dsADTShapes s))
       $ tabulate "adt feature"      (concatMap snd (dsADTShapes s))
       $ tabulate "recursion"        [show (dsRecShape s)]
+      -- Task fuzz-boundary-value-leaves: the constants constant folding and
+      -- the zero-operand inverse branches special-case, and division.
+      $ tabulate "boundary constant" (dsBoundaryConsts s)
+      $ tabulate "division"         [dsDivision s]
       -- Cross-tabulated, and only over the neural draws. At one draw in five
       -- the neural surface's own outcome split is invisible in the aggregate
       -- "outcome" row above, and that split is the thing M3 is actually about:
@@ -1345,6 +1353,12 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       -- when the task landed (see docs/fuzz-testing.md).
       $ cover 10 (any (notElem "pool" . snd) (dsADTShapes s)) "declares a generated ADT"
       $ cover 5  (dsRecShape s /= NoRec)        "contains a recursive declaration"
+      -- Task fuzz-boundary-value-leaves, observe-first floors again. The
+      -- Float row is the one that matters (the Int @1@ is mostly generator
+      -- scaffolding, a recursion's @n - 1@); a division was in 11.5% of draws
+      -- on the 200-draw run that landed it.
+      $ cover 15 (any (isInfixOf "Float") (dsBoundaryConsts s)) "contains a Float boundary constant"
+      $ cover 4  (dsDivision s /= "none")       "divides"
       $ property True
 
 -- ---------------------------------------------------------------------------

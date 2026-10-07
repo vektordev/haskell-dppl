@@ -61,6 +61,10 @@ module ArbitrarySPLL (
 , uniquifyBindersFrom
 , InjFSig(..)
 , injFCatalog
+, boundaryConstsOfProgram
+, divisionOfProgram
+, boundaryFloats
+, boundaryInts
 , injFCatalogFor
 , injFExcluded
 , InjFExclusion(..)
@@ -729,10 +733,10 @@ genTypedLeaf :: HasADTs => Ty -> Gen Expr
 genTypedLeaf TyFloat = oneof
   [ pure normal
   , pure uniform
-  , constF <$> choose (-10, 10)
+  , constF <$> genFloatConst
   ]
 genTypedLeaf TyInt = oneof
-  [ constI <$> choose (-10, 10)
+  [ constI <$> genIntConst
   , dice <$> choose (2, 6)
   ]
 genTypedLeaf TyBool = oneof
@@ -755,6 +759,66 @@ genTypedLeaf (TyList a) = (`cons` nul) <$> genTypedLeaf a
 -- lower 'adtRanks' rank, so a leaf stays finite ('leafCtors').
 genTypedLeaf (TyADT n) = oneof
   [ injF c <$> mapM (genTypedLeaf . snd) fs | (c, fs) <- leafCtors n ]
+
+-- | A numeric constant for a leaf: half the time one of the boundary values
+-- 'boundaryFloats', half the time uniform in @(-10, 10)@ (task
+-- fuzz-boundary-value-leaves).
+--
+-- A uniform 'Double' is exactly @0.0@ with probability ~0, and the special
+-- cases worth fuzzing sit precisely there: the optimizer's constant folding
+-- ('IROptimizer.softForceArithmetic' and friends) matches a literal @0@ and
+-- @1@, and the inverses of @mult@ and @recip@ branch on a zero operand.
+--
+-- Non-finite values and high-exponent finite ones are deliberately absent.
+-- @Infinity@ and @NaN@ have no source spelling (only an overflowing literal
+-- such as @1e400@ reaches one), and on the value-level invariants they, and
+-- magnitudes like @1e300@ that overflow under @exp@ or cancel catastrophically
+-- under @+@, fail by IEEE design rather than by compiler bug; see the task
+-- document for the decision.
+genFloatConst :: Gen Double
+genFloatConst = oneof [ elements boundaryFloats, choose (-10, 10) ]
+
+-- | The Int twin of 'genFloatConst'.
+genIntConst :: Gen Int
+genIntConst = oneof [ elements boundaryInts, choose (-10, 10) ]
+
+-- | The constants 'genFloatConst' favours: the identities and absorbing
+-- element of the arithmetic the optimizer folds, and the sign flip.
+boundaryFloats :: [Double]
+boundaryFloats = [0, 1, -1]
+
+boundaryInts :: [Int]
+boundaryInts = [0, 1, -1]
+
+-- | Which boundary constants a draw contains anywhere, as labels for
+-- @prop_Fuzz_GeneratorCoverage@'s @boundary constant@ row: @"Float 0.0"@,
+-- @"Int -1"@ and so on, each at most once, or @["none"]@.
+boundaryConstsOfProgram :: Program -> [String]
+boundaryConstsOfProgram p = case nub (concatMap (concatMap boundaryLabel . universeOf . snd) (functions p)) of
+  [] -> ["none"]
+  ls -> ls
+  where
+    boundaryLabel e = case node e of
+      Constant (VFloat f) | f `elem` boundaryFloats -> ["Float " ++ show f]
+      Constant (VInt i)   | i `elem` boundaryInts   -> ["Int " ++ show i]
+      _ -> []
+
+-- | How a draw divides, for the coverage property's @division@ row: not at
+-- all, only by non-literal divisors, or by a literal zero somewhere.
+divisionOfProgram :: Program -> String
+divisionOfProgram p
+  | any zeroDivisor recips = "by a literal zero"
+  | null recips            = "none"
+  | otherwise              = "by a non-literal or nonzero divisor"
+  where
+    recips = [ a | (_, e) <- functions p, n <- universeOf e
+                 , InjF (Named "recip") [a] <- [node n] ]
+    zeroDivisor a = case node a of
+      Constant (VFloat 0) -> True
+      _                   -> False
+
+universeOf :: Expr -> [Expr]
+universeOf e = e : concatMap universeOf (getSubExprs e)
 
 -- | The binder of a closed function leaf. Any name does: 'uniquifyBinders'
 -- renames every binder in the finished expression anyway, and a leaf is by
@@ -814,9 +878,17 @@ genTypedRec env ty n =
       -- The subtraction sugars stay explicit alongside the catalog: @a - b@ is
       -- @plus a (neg b)@, a *composite* shape the catalog cannot name, and the
       -- realized nesting is the point of having it.
+      -- Division likewise: @a / b@ is @mult a (recip b)@, and @recip@ is out
+      -- of the catalog for its @b /= 0@ guard ('injFUnconditional'). It is
+      -- generated here regardless, at the weight of one catalog entry, so the
+      -- @recip@ inverse family is fuzzed at all (task
+      -- fuzz-boundary-value-leaves); with 'boundaryFloats' a literal zero
+      -- divisor is a common draw, and what the compiler does with one is
+      -- exactly what is under test.
       TyFloat ->
         catalogProds TyFloat ++
-        [ (#-#) <$> gen TyFloat half <*> gen TyFloat half ]
+        [ (#-#) <$> gen TyFloat half <*> gen TyFloat half
+        , (#/#) <$> gen TyFloat half <*> gen TyFloat half ]
       TyInt ->
         catalogProds TyInt ++
         [ (#<->#) <$> gen TyInt half <*> gen TyInt half ]
@@ -2276,6 +2348,13 @@ tyOfTypedInjF env "tail"  [x]    = tyOfTypedExprIn env x >>= \t -> case t of
   _        -> Nothing
 tyOfTypedInjF env "left"  [x]    = (`TyEither` TyAny) <$> tyOfTypedExprIn env x
 tyOfTypedInjF env "right" [x]    = TyEither TyAny <$> tyOfTypedExprIn env x
+-- @recip@, the half of @a / b@ the catalog does not own ('genTypedRec''s
+-- division production). Without it every draw containing a division would be
+-- unrecognised, and so unshrinkable.
+tyOfTypedInjF env "recip" [x]    = tyOfTypedExprIn env x >>= \t -> case t of
+  TyFloat -> Just TyFloat
+  TyAny   -> Just TyFloat
+  _       -> Nothing
 -- The structural predicates. Their result is 'TyBool' whatever they test, but
 -- they are *not* catalog entries -- the catalog is the scalar fragment, and
 -- these take a container. Recovering them here rather than letting them fall

@@ -104,6 +104,9 @@ knownIssueTest baseName = testCaseInfo baseName $ do
     Just ef@ExpectCodeSizeAbove{} -> do
       prog <- parseProgram pplPath
       checkCodeSizeAbove baseName prog ef
+    Just (ExpectHang flags cap) -> do
+      prog <- parseProgram pplPath
+      checkHang baseName prog flags cap
     Just ef -> do
       prog <- parseProgram pplPath
       checkExpectFailure baseName prog backends ef tcs
@@ -114,6 +117,8 @@ checkExpectFailure name _ _ ExpectGrowthAbove{} _ =
   assertFailure (name ++ ": internal: a growth pin is checked from its template, not a parsed program")
 checkExpectFailure name _ _ ExpectCodeSizeAbove{} _ =
   assertFailure (name ++ ": internal: a code-size pin is checked by checkCodeSizeAbove")
+checkExpectFailure name _ _ ExpectHang{} _ =
+  assertFailure (name ++ ": internal: a hang pin is checked by checkHang")
 checkExpectFailure name prog _ ExpectCrash _ =
   assertCrashes name (compile defaultCompilerConfig prog) Nothing
 checkExpectFailure name prog _ (ExpectDiagnostic needle) _ =
@@ -371,6 +376,20 @@ checkCodeSizeAbove name prog (ExpectCodeSizeAbove bound flags cap) = do
 checkCodeSizeAbove name _ ef =
   assertFailure (name ++ ": internal: not a code-size pin: " ++ show ef)
 
+-- | A hang pin: the compile must still run into its cap. Finishing means the
+-- bug may be fixed; throwing means it changed shape (a crash is a different
+-- pin), and both fail.
+checkHang :: String -> Program -> [CompileFlag] -> PointCap -> IO String
+checkHang name prog flags cap = do
+  r <- measureCompile cap (applyCompileFlags flags defaultCompilerConfig) prog
+  case r of
+    PointCapped why -> return ("still runs into the cap (" ++ why ++ ")")
+    PointDone _ -> assertFailure (name ++ ": the compile now finishes within the cap -- this known \
+                                  \issue may be fixed; if so, move it out of known-issues and add \
+                                  \a regression guard")
+    PointFailed why -> assertFailure (name ++ ": expected the compile to hang, but it failed \
+                                      \instead (the bug changed shape?): " ++ why)
+
 -- | Everything one capped compile measured.
 data Measurement = Measurement
   { mCodeBytes :: Integer   -- ^ UTF-8 bytes of the emitted Python module
@@ -529,6 +548,10 @@ performancePinHarnessTests = testGroup "KnownIssuesHarness"
       assertEqual "parsed"
         (Right (defaultBackends, False, Just (ExpectCodeSizeAbove 40000 [FlagPruneAnyChecks] defaultPointCap), 0))
         (summary (parseTestCasesFromString "h.tst" "expect-failure: code-size above 40 KB\nflags: --pruneAnyChecks\n"))
+  , testCase "hang header" $
+      assertEqual "parsed"
+        (Right (defaultBackends, False, Just (ExpectHang [FlagOptimizer 0] (PointCap 2 500000000)), 0))
+        (summary (parseTestCasesFromString "h.tst" "expect-failure: hang\nflags: -O 0\ncap: 2 s, 500 MB\n"))
   , testCase "malformed performance pins are parse errors" $
       mapM_ (\(what, src) -> case parseTestCasesFromString "h.tst" src of
                 Left _ -> return ()
@@ -537,6 +560,7 @@ performancePinHarnessTests = testGroup "KnownIssuesHarness"
         , ("decreasing knob", "expect-failure: growth above linear\nknob: N = 4, 2\n")
         , ("single knob value", "expect-failure: growth above linear\nknob: N = 4\n")
         , ("knob on code-size", "expect-failure: code-size above 1 KB\nknob: N = 1, 2\n")
+        , ("knob on hang", "expect-failure: hang\nknob: N = 1, 2\n")
         , ("unknown flag", "expect-failure: code-size above 1 KB\nflags: --noIntegrat\n")
         , ("two metric lines", "expect-failure: growth above linear\nknob: N = 1, 2\nmetric: alloc\nmetric: ir-size\n")
         , ("missing unit", "expect-failure: code-size above 40\n")

@@ -331,6 +331,36 @@ reason — and checks that no draw ever names a function the compiler does not
 define. Adding a predefined function changes that partition and fails the
 group until someone has decided which bucket it belongs in.
 
+## Boundary constants and division (task `fuzz-boundary-value-leaves`)
+
+A numeric leaf's constant is drawn half the time from `{0, 1, -1}`
+(`boundaryFloats`, `boundaryInts`) and half the time uniformly from
+`(-10, 10)`. A uniform `Double` is exactly `0.0` with probability ~0, but the
+optimizer's constant folding special-cases a literal `0` and `1`, and the
+`mult` and `recip` inverses branch on a zero operand. Before this change those
+branches were effectively never reached.
+
+`genTypedRec` also generates `a / b` at the weight of one catalog entry.
+`recip` stays out of the catalog for its `a /= 0` guard (see above). The
+division production adds it back on purpose, because what the compiler does
+with a zero divisor is exactly what is under test. A literal zero divisor is
+now a draw (0.5% of draws at scale 1), and the shrinker can reach one, so a
+counterexample that minimizes to `x / 0.0` may be the division-by-zero
+semantics gap (`zero-divisor-probability-disagrees-with-generate`) rather than
+the bug that was first found. `tyOfTypedExpr` recovers `recip` by hand, since
+the catalog does not cover it.
+
+The coverage property tabulates both: a `boundary constant` row (which ones a
+draw contains; the Int `1` is mostly recursion scaffolding) and a `division`
+row, with cover floors "contains a Float boundary constant" (15%, measured
+40%) and "divides" (4%, measured 12%).
+
+Non-finite and extreme-magnitude constants are deliberately not leaves. They
+fail the value-level invariants by IEEE design (`exp 1e300` overflows,
+cancellation at `1e300`, an absolute `probTolerance`), so they belong in a
+crash-only property instead (`fuzz-extreme-magnitude-leaves`). Hand-probing
+them found `nan-constant-hangs-enum-annotation-fixpoint`.
+
 ## The depth knob (`NEST_FUZZ_SCALE`)
 
 Structural size and case count are the two dials that decide how much program

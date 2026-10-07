@@ -381,6 +381,11 @@ data ExpectFailure
   -- | The emitted Python module is still larger than this many bytes when
   -- compiled under these flags, within this per-compile cap.
   | ExpectCodeSizeAbove Integer [CompileFlag] PointCap
+  -- | The compile does not terminate: under these flags it still runs into
+  -- this per-compile cap (time or allocation) rather than finishing or
+  -- throwing. A compile that finishes is "may be fixed"; one that throws has
+  -- changed shape, and fails too.
+  | ExpectHang [CompileFlag] PointCap
   deriving (Show, Eq)
 
 -- | One CLI compile flag, spelled exactly as on the command line, that a
@@ -460,6 +465,7 @@ pExpectFailureHeader = do
     , ExpectBroken <$ symbol "broken" <* pNewline
     , pGrowthPin
     , pCodeSizePin
+    , pHangPin
     ]
 
 -- | A follow-on line of a performance pin, read straight after its
@@ -508,6 +514,21 @@ pCodeSizePin = do
   flags <- atMostOne "flags:" [] [ f | PerfFlags f <- perf ]
   cap <- atMostOne "cap:" defaultPointCap [ c | PerfCap c <- perf ]
   return (ExpectCodeSizeAbove bytes flags cap)
+
+-- | @expect-failure: hang@, followed by optional @flags:@ and @cap:@ lines.
+-- The cap is the pin's whole cost on every run, so a hang pin should state a
+-- small one rather than inherit 'defaultPointCap''s ten seconds.
+pHangPin :: MonadParser m => m ExpectFailure
+pHangPin = do
+  symbol "hang"
+  pNewline
+  perf <- many (try pPerfLine)
+  if not (null [ () | PerfKnob _ _ <- perf ] && null [ () | PerfMetric _ <- perf ])
+    then fail "a `hang` pin takes no `knob:` or `metric:` line (it compiles one program)"
+    else return ()
+  flags <- atMostOne "flags:" [] [ f | PerfFlags f <- perf ]
+  cap <- atMostOne "cap:" defaultPointCap [ c | PerfCap c <- perf ]
+  return (ExpectHang flags cap)
 
 atMostOne :: MonadParser m => String -> a -> [a] -> m a
 atMostOne _ dflt [] = return dflt

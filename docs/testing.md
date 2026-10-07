@@ -205,6 +205,7 @@ expect-failure: wrong-result                   -- compiles and runs; the p()/cdf
 expect-failure: broken                         -- mechanism unpinned; the p()/cdf() rows below state the idealized value instead
 expect-failure: growth above polynomial 2      -- a performance wall: a templated family still grows faster than this
 expect-failure: code-size above 60 KB          -- the emitted Python is still larger than this
+expect-failure: hang                           -- the compile still runs into its cap instead of finishing
 ```
 
 `crash`/`diagnostic` are checked against an exception thrown while *forcing*
@@ -262,6 +263,9 @@ cap: 10 s, 8000 MB                             -- optional per-compile cap (thes
 
 expect-failure: code-size above 60 KB          -- B, KB = 1000 B, MB = 10^6 B
 flags: --pruneAnyChecks                        -- optional, as above; cap: too
+
+expect-failure: hang                           -- flags: and cap: optional, as above
+cap: 2 s, 500 MB                               -- state a small one: the cap is the pin's cost on every run
 ```
 
 The follow-on lines come straight after the `expect-failure:` line, in any
@@ -297,6 +301,11 @@ default `-O2`.
 
 **Code size.** The program compiles and its emitted Python must still exceed
 the bound. A fix that shrinks it below the bound fails the pin.
+
+**Hang.** The compile must still run into its cap. A compile that finishes
+fails the pin as "may be fixed", and so does one that throws, because the bug
+has then changed shape. A non-terminating loop that allocates hits a small
+allocation cap in well under a second.
 
 **The cap.** Every compile runs under a `timeout` and a per-thread allocation
 limit (`enableAllocationLimit`), so a runaway compile is killed and recorded

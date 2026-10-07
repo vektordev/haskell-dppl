@@ -36,6 +36,7 @@ expect-failure: broken                             -- mechanism unpinned; the p(
 expect-failure: refused "some substring"           -- compiles; some variant is absent with a refusal reason containing this
 expect-failure: growth above polynomial 2          -- performance wall over a templated family (see below)
 expect-failure: code-size above 60 KB              -- the emitted Python is still larger than this
+expect-failure: hang                               -- the compile still runs into its cap (optional flags:/cap: lines)
 ```
 
 `crash`/`diagnostic` are checked against an *uncaught exception* thrown while
