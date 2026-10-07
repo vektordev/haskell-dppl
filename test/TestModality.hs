@@ -40,6 +40,7 @@ modalityTests :: TestTree
 modalityTests = testGroup "Modality"
   [ latticeTests
   , margTests
+  , mixtureTests
   , familyTests
   , smartCtorTests
   , projectionTests
@@ -80,6 +81,29 @@ margTests = testGroup "marginalize"
       gFam (marginalize normalG densInf) @?= FamNone
   , testCase "marg drops family even in the Dirac short-circuit (shiftSem is M4)" $
       gFam (marginalize det normalG) @?= FamNone
+  ]
+
+-- The if mixture combinator (task finiteness-single-producer) -----------------
+
+mixtureTests :: TestTree
+mixtureTests = testGroup "mixtureGround"
+  [ testCase "a Dirac condition is free and keeps the family" $
+      mixtureGround det normalG @?= normalG
+  , testCase "an analytic condition of infinite support keeps the branches' density" $
+      -- No Fin is read from the condition: the equation never enumerates it.
+      mixtureGround (GroundMod DensInt Infinite FamNone) normalG
+        @?= GroundMod DensInt Infinite FamNone
+  , testCase "the support finiteness is the branches'" $
+      gFin (mixtureGround (GroundMod DensInt Infinite FamNone) densIntFin) @?= Finite
+  , testCase "a sample-only condition leaves sampling only" $
+      mixtureGround (GroundMod SampleOnly Finite FamNone) densIntFin
+        @?= GroundMod SampleOnly Finite FamNone
+  , testCase "a degenerate {S,I} condition has no usable P(cond): sampling only" $
+      mixtureGround (GroundMod IntegralOnly Infinite FamNone) densIntFin
+        @?= GroundMod SampleOnly Finite FamNone
+  , testCase "deterministic branches under a random condition are analytic, not Dirac" $
+      mixtureGround (GroundMod DensInt Infinite FamNone) det
+        @?= GroundMod DensInt Finite FamNone
   ]
 
 -- The orthogonal family axis ---------------------------------------------------

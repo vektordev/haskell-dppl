@@ -4,6 +4,7 @@ module SPLL.Analysis (
   annotateEnumsProg,
   definitelyUntagged,
   annotateConditionalProg,
+  enumerableDomain,
   materializationDomain,
   withinMaterializationBudget,
   structuralTag,
@@ -484,6 +485,29 @@ stripLambdas :: Expr -> Expr
 stripLambdas (Expr _ (Lambda _ b)) = stripLambdas b
 stripLambdas e = e
 
+-- ===== Enumerable domain =====
+
+-- | The node's enumerable domain: its 'DiscreteValues' tag, when it has one
+-- and no leaf of it is continuous. The single producer of the "enumerable
+-- domain" fact (task finiteness-single-producer). Every enumeration equation
+-- in 'SPLL.IRCompiler' ('isEnumerable', 'isEnumerableApplication', the
+-- enumerate-both grids, @sampleDom@), 'SPLL.Typing.ModalityInfer''s
+-- comparison rule, and the modality lattice's @Fin = Finite@
+-- ('SPLL.Typing.Modality.finFromTags') all ask this, and nothing else.
+--
+-- A tag with a continuous leaf is a value shape, not an enumerable domain
+-- (task of-annotation-and-auto-derived-enumeration-divergence): walking its
+-- discrete residue would silently drop the continuous mass. Analysis keeps at
+-- most one 'DiscreteValues' tag per node ('getValuesFromExpr').
+--
+-- This answers "is there something to loop over", not "is it affordable to
+-- materialize": 'materializationDomain' adds the budget, and the stricter
+-- non-emptiness test 'multiValueIsFinite' its callers need for the values.
+enumerableDomain :: [Tag] -> Maybe MultiValue
+enumerableDomain tgs = case [mv | DiscreteValues mv <- tgs] of
+  (mv:_) | not (multiValueContainsContinuous mv) -> Just mv
+  _ -> Nothing
+
 -- ===== Cardinality guard for marginal materialization =====
 -- (task materialization-cardinality-guard, design materialized-marginals-semiring)
 
@@ -513,8 +537,8 @@ stripLambdas e = e
 -- is small enough to tabulate" and "the unrolling is affordable" are one
 -- question, not two. A change to either side has to be made on both.
 materializationDomain :: Int -> [Tag] -> Maybe [Value]
-materializationDomain bound tgs = case [mv | DiscreteValues mv <- tgs] of
-  (mv:_) | multiValueIsFinite mv
+materializationDomain bound tgs = case enumerableDomain tgs of
+  Just mv | multiValueIsFinite mv
          , let vals = multiValueToValueList mv
          , withinMaterializationBudget bound (length vals) -> Just vals
   _ -> Nothing

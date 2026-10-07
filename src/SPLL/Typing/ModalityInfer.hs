@@ -10,7 +10,9 @@
 -- the adapted port of the @nest_typing@ prototype's @Modality.Infer@:
 --
 --   * the universal marginalization rule ('marginalize' / 'applyOuterI') is the
---     one combinator behind application, @if@, and generic binary ops;
+--     combinator behind application and generic binary ops; a random @if@
+--     condition has its own rule ('mixtureGround' / 'mixOuterI'), which reads
+--     no support finiteness;
 --   * a syntactic lambda is a /known/ closure (outer @rho = det@) whose transfer
 --     is obtained by partial evaluation of the body — so application is resolved
 --     by β-reduction at the call site, which is what preserves the distribution
@@ -48,13 +50,12 @@ import Data.Map.Strict (Map)
 import qualified Data.Set as Set
 import SPLL.ReservedNames (uniformName, normalName)
 import Data.Graph (SCC(..), stronglyConnComp)
-import Data.List (find)
 
 import SPLL.Lang.Types
-  ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
-  , Tag(..)
-  , dataName, constructors )
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, multiValueContainsContinuous, isStaticZero)
+  ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl )
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isStaticZero)
+import SPLL.Analysis (enumerableDomain)
+import Data.Maybe (isJust)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
@@ -158,6 +159,21 @@ applyOuterI rho (IRec s e)  = IRec (marginalize rho s) (applyOuterI rho e)
 -- the result is no longer a deterministic function of the observation.
 applyOuterI rho (IWit m)    = applyOuterI rho m
 
+-- | A random-condition @if@ over the structure: 'mixtureGround' at every
+-- ground (mirrors 'applyOuterI', whose 'marginalize' step this replaces for
+-- @if@; see 'mixtureGround' for why the two differ). A Dirac condition is
+-- free and keeps the family, exactly as in 'applyOuterI'.
+mixOuterI :: GroundMod -> IMod -> IMod
+mixOuterI c m | gCap c == Exact = m
+mixOuterI c (IG g)       = IG (mixtureGround c g)
+mixOuterI c (IProd a b)  = IProd (mixOuterI c a) (mixOuterI c b)
+mixOuterI c (IArr r p)   = IArr (mixtureGround c r) p
+mixOuterI c (ISum t a b) = ISum (mixtureGround c t) (mixOuterI c a) (mixOuterI c b)
+mixOuterI c (IRec s e)   = IRec (mixtureGround c s) (mixOuterI c e)
+-- As in 'applyOuterI': mixing over a random condition is no longer a
+-- deterministic function of the observation.
+mixOuterI c (IWit m)     = mixOuterI c m
+
 -- | The application rule @Mod(f e) = rho ▷ phi(e)@. For a syntactic function the
 -- transfer is the body closure (β-reduction). A non-function head is applied
 -- opaquely through its outer ground (a safe, never-failing fallback for the
@@ -255,48 +271,28 @@ toMod (IWit m)    = toMod m   -- the serialisable form carries only the standalo
 -- Ground leaves
 -- ---------------------------------------------------------------------------
 
--- | Decision C: a node tagged with @DiscreteValues@ has finite support, so its
--- ground modality is 'Finite' regardless of how the combination rule arrived at
--- its capability. Applied to the enumerable leaves and results (ReadNN of a
--- categorical net, integer @plusI@/equality, …) where it turns the
--- marginalization floor from @{S,I}@ (no closed density) into @{S,D,I}@ (a finite
--- mixture has a density).
+-- | Decision C: a node with an enumerable domain ('SPLL.Analysis.enumerableDomain',
+-- read through 'finFromTags') has finite support, so its ground modality is
+-- 'Finite' regardless of how the combination rule arrived at its capability.
+-- Applied to the enumerable leaves and results (ReadNN of a categorical net,
+-- integer @plusI@/equality, …) where it turns the marginalization floor from
+-- @{S,I}@ (no closed density) into @{S,D,I}@ (a finite mixture has a density).
 --
--- A node whose /type/ is structurally finite (Bool, enum-like ADTs, and
--- tuples/Eithers of such) has finite support even without a @DiscreteValues@
--- tag — finiteness is a property of the type itself, and not every finite
--- node is tagged (a tag carrying a continuous leaf is a value shape, not a
--- finite support). This is what admits the plan-guided lazy-enumeration shapes
--- (design plan-guided-lazy-enumeration): a neural ADT output is a finite
--- mixture whose density exists, even when nobody intends to materialize its
--- support.
-tagFin :: [ADTDecl] -> TypeInfo -> GroundMod -> GroundMod
-tagFin adtsDecl ti g
+-- Only the tag counts. A node whose /type/ is structurally finite but which
+-- carries no tag has nothing an IRCompiler equation could enumerate, so a
+-- 'Finite' there would let 'marginalize''s @keepD@ promise a density no
+-- equation builds (task finiteness-single-producer). The shape that once
+-- needed finite-by-type, a random Bool condition of an @if@, is the
+-- 'mixtureGround' rule's, which reads no 'Fin'.
+tagFin :: TypeInfo -> GroundMod -> GroundMod
+tagFin ti g
   | finFromTags (tags ti) == Finite = g { gFin = Finite }
-  | finiteRType adtsDecl (rType ti)     = g { gFin = Finite }
   | otherwise                       = g
 
-tagFinMod :: [ADTDecl] -> TypeInfo -> IMod -> IMod
-tagFinMod adtsDecl ti (IG g)   = IG (tagFin adtsDecl ti g)
-tagFinMod adtsDecl ti (IWit m) = IWit (tagFinMod adtsDecl ti m)
-tagFinMod _    _  m        = m
-
--- | Structural finiteness of a type: does it have finitely many inhabitants?
--- Recursive ADTs are conservatively infinite (their depth-unrolled neural
--- plans are finite, but the type itself is not; milestone 2 revisits this
--- alongside recursive predicates).
-finiteRType :: [ADTDecl] -> RType -> Bool
-finiteRType adtsDecl = go []
-  where
-    go _ TBool            = True
-    go seen (Tuple a b)   = go seen a && go seen b
-    go seen (TEither a b) = go seen a && go seen b
-    go seen (TADT name)
-      | name `elem` seen = False
-      | otherwise = case find ((== name) . dataName) adtsDecl of
-          Just decl -> all (all (go (name : seen) . snd) . snd) (constructors decl)
-          Nothing   -> False
-    go _ _ = False
+tagFinMod :: TypeInfo -> IMod -> IMod
+tagFinMod ti (IG g)   = IG (tagFin ti g)
+tagFinMod ti (IWit m) = IWit (tagFinMod ti m)
+tagFinMod _  m        = m
 
 -- | A scalar distribution family ('FamNormal'/'FamLogNormal') only attaches to a
 -- bare 'TFloat' value. A field constructor that builds a container/sum (e.g.
@@ -390,7 +386,7 @@ inferE ctx env expr = case expr of
   -- was an opaque Symbol, and @mu Normal@ answered a silently wrong density.
   Expr ti (ReadNN name s) ->
     let (sm, s', sa) = inferE ctx env s
-        given = tagFin (icADTs ctx) ti (if rType ti == TFloat then gNormal else gIntegrate)
+        given = tagFin ti (if rType ti == TFloat then gNormal else gIntegrate)
         g | inputIsPoint sm = given
           | otherwise       = groundMod SampleOnly Infinite FamNone
     in done (IG g) (Expr (setPType ti (projectGround g)) (ReadNN name s')) sa
@@ -438,7 +434,7 @@ inferE ctx env expr = case expr of
         mods = [ md  | (md,_,_) <- rs ]
         es'  = [ e  | (_,e,_) <- rs ]
         acc  = concat [ a | (_,_,a) <- rs ]
-        m    = gateScalarFamily (rType ti) (tagFinMod (icADTs ctx) ti (injFMod (icADTs ctx) fname mods))
+        m    = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname mods))
     in done m (Expr (setPType ti (projectI m)) (InjF name es')) acc
 
   -- The arms are inferred under an environment in which every random variable
@@ -450,7 +446,7 @@ inferE ctx env expr = case expr of
         armEnv       = conditionEnv env c
         (mt, t', ta) = inferE ctx armEnv t
         (mf, f', fa) = inferE ctx armEnv f
-        m = applyOuterI (outerI mc) (meetI mt mf)
+        m = mixOuterI (outerI mc) (meetI mt mf)
     in done m (Expr (setPType ti (projectI m)) (IfThenElse c' t' f')) (ca ++ ta ++ fa)
 
   Expr ti (Lambda x body) ->
@@ -508,7 +504,7 @@ inferE ctx env expr = case expr of
     compareNode ti fname a b =
       let (ma, a', aacc) = inferE ctx env a
           (mb, b', bacc) = inferE ctx env b
-          g = tagFin (icADTs ctx) ti
+          g = tagFin ti
                 (compareGround (icPlan ctx)
                                (enumerableOperand a) (enumerableOperand b)
                                (independentOperands env a b)
@@ -603,17 +599,13 @@ freeVarsOf (Expr _ (Var v))       = Set.singleton v
 freeVarsOf (Expr _ (Lambda x b))  = Set.delete x (freeVarsOf b)
 freeVarsOf (Expr _ f)             = foldr (Set.union . freeVarsOf) Set.empty f
 
--- | Mirror of @IRCompiler.isEnumerable@: does this operand carry a
--- 'DiscreteValues' domain the enumerate-both grid can actually loop over?
---
--- Deliberately a different test from 'finFromTags' / 'gFin', which also answer
--- 'Finite' for structural type finiteness and for a domain with a continuous
--- leaf in it. The grid can loop neither, so keying 'compareGround' off 'gFin'
--- would re-open the same over-promise this function exists to close.
+-- | Does this operand carry a domain the enumerate-both grid can loop over
+-- ('SPLL.Analysis.enumerableDomain', the predicate @IRCompiler.isEnumerable@
+-- also reads)? The same fact as @gFin == Finite@ on the operand's own tags,
+-- asked of the operand directly because the operand's ground 'Fin' may have
+-- come from a combination rule rather than its tag.
 enumerableOperand :: Expr -> Bool
-enumerableOperand e = any isDiscrete (tags (getTypeInfo e))
-  where isDiscrete (DiscreteValues mv) = not (multiValueContainsContinuous mv)
-        isDiscrete _                   = False
+enumerableOperand = isJust . enumerableDomain . tags . getTypeInfo
 
 -- | Do two comparison operands read no random local in common? Under SPLL's
 -- eager @draw@ every fresh draw in one operand is independent of every draw in

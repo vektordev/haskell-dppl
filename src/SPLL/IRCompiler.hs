@@ -35,7 +35,7 @@ import SPLL.Typing.RType
 import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
 import PredefinedFunctions
-import SPLL.Analysis (materializationDomain, withinMaterializationBudget)
+import SPLL.Analysis (enumerableDomain, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (isRight, partitionEithers)
@@ -521,7 +521,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         -- against it; the domains it enumerates internally are tensor reductions,
         -- a separate axis this deliberately does not touch.
         sampleDom = listToMaybe $ filter multiValueIsFinite $
-          [mv | DiscreteValues mv <- tags (getTypeInfo (stripLambdas binding))]
+          maybeToList (enumerableDomain (tags (getTypeInfo (stripLambdas binding))))
           ++ [mv | Right mv <- [autoDeriveMultiValue progADTs returnRType]]
         -- Each variant is attempted ('Just') or not ('Nothing': intractable by
         -- its pType, or suppressed by a --noX flag); an attempt answers 'Left'
@@ -757,15 +757,10 @@ getGlobalTypeEnv p = funcEnv ++ implicitFuncEnv ++ neuralEnv
         implicitFuncEnv = map (\(name, rt) -> (name, (rt, False))) (implicitFunctionsRTypeProg p)
         neuralEnv = map (\(name, rt, _) -> (name, (rt, False))) (neurals p)
 
--- | True if any tag on the expression marks it as enumerable (carries DiscreteValues).
--- A MultiValue with a continuous (Real) leaf is refused: it has no finite enumeration,
--- and walking its discrete residue would silently drop the continuous probability mass.
--- (The enum-annotation pass already declines to produce such tags; this guards any
--- other producer.)
+-- | Does the node carry an enumerable domain ('SPLL.Analysis.enumerableDomain',
+-- the one producer of that fact)?
 isEnumerable :: [Tag] -> Bool
-isEnumerable = any isDiscrete
-  where isDiscrete (DiscreteValues mv) = not (multiValueContainsContinuous mv)
-        isDiscrete _                   = False
+isEnumerable = isJust . enumerableDomain
 
 -- | The first comparison (@<@\/@>@) in an expression that modality inference
 -- left intractable although both its operands are tractable -- the node where

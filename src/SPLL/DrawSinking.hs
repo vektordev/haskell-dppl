@@ -57,7 +57,8 @@ module SPLL.DrawSinking
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Set as Set
 
-import SPLL.Lang.Lang (freeVarsExpr, getSubExprs, getTypeInfo, multiValueContainsContinuous, setSubExprs)
+import SPLL.Analysis (enumerableDomain)
+import SPLL.Lang.Lang (freeVarsExpr, getSubExprs, getTypeInfo, setSubExprs)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType (TADT, TArrow))
 
@@ -89,7 +90,7 @@ sinkIn adtDecls taken e = case e of
 -- they test. Anything that reads a variable or a network may be random.
 isEnumerableValue :: Expr -> Bool
 isEnumerableValue v =
-     not (null [() | DiscreteValues mv <- tags (getTypeInfo v), not (multiValueContainsContinuous mv)])
+     isJust (enumerableDomain (tags (getTypeInfo v)))
   && mayBeRandom v
 
 -- | Syntactically, may this expression be random? Anything reading a variable
@@ -219,8 +220,7 @@ splitProductDraw adtDecls taken x v letTi b = do
     if not (any sinks bindings) then Nothing else
       return (if argIsAtomic then withFields else bindAs letTi argName arg withFields)
   where
-    hasEnumerableTag ti =
-      not (null [() | DiscreteValues mv <- tags ti, not (multiValueContainsContinuous mv)])
+    hasEnumerableTag ti = isJust (enumerableDomain (tags ti))
 
 -- | @draw n = rhs in body@, built with the same span as the binding it came
 -- from and the arrow type the later stages expect of a binding's lambda.

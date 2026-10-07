@@ -2649,6 +2649,14 @@ admissionOracleTests = testGroup "Admission oracle"
       rep <- oracleOn "main = (if Uniform < 0.5 then 1.0 else Uniform) + Normal"
       assertNoViolation rep
       assertEqual "outcomes" [(ModeGenerate, "value")] (outcomesOf "main" rep)
+  , testCase "finite-by-type is not an enumerable domain: a clean Bottom, not an over-promise" $ do
+      -- Task finiteness-single-producer: two untagged random Bools combined
+      -- were 'Finite' by their type, keepD admitted a density, and the IR
+      -- compiler refused both inference variants (the refusal bucket).
+      rep <- oracleOn "main = isLeft (if Uniform < 0.5 then left Normal else right 1.0) && isLeft (if Uniform < 0.3 then left Normal else right 2.0)"
+      assertNoViolation rep
+      assertEqual "verdict" (Just Bottom) (verdictOf "main" rep)
+      assertEqual "outcomes" [(ModeGenerate, "value")] (outcomesOf "main" rep)
   , testCase "every known violation family names a doc" $
       assertEqual "entries without a doc" [] [ n | (n, d) <- knownAdmissionCrashes, null d ]
   ]

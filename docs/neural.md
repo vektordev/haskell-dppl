@@ -79,8 +79,9 @@ two spellings took different engines.
 
 A tag may carry a **continuous leaf**: it is then the node's value *shape*,
 not an enumeration. Every consumer that loops over a tag refuses one
-(`IRCompiler.isEnumerable`, `Modality.finFromTags`, DrawSinking, the budget
-gate's `enumeratedCount`), and listing finds no values in it. Accessors read
+(`Analysis.enumerableDomain`, which `IRCompiler.isEnumerable`,
+`Modality.finFromTags` and DrawSinking read, and the budget gate's
+`enumeratedCount`), and listing finds no values in it. Accessors read
 through it, so `fst p` off an `(Int, Float) of ([0,1,2], Real)` read is an
 ordinary enumerable `[0,1,2]` (`plan-enumeration/ofRealBesideDiscreteSlot*`).
 It used to drop the whole tag. The read itself has no dense path while its
