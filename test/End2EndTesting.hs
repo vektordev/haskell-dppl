@@ -1166,8 +1166,8 @@ pyImpossCheck name (Just expected) =
 --
 -- The batched backend emits @torch@ ops, so a torch-enabled Python interpreter
 -- is required. It is looked up via @NEST_TORCH_PYTHON@, then a conventional
--- venv path, then @python3@; if none imports torch the value differential is
--- skipped with a visible note (so a torch-less CI stays green). Torch import is
+-- venv path, then @python3@; if none imports torch the value differential
+-- fails ('noTorch'), unless @NEST_SKIP_TORCH=1@ opts out of it. Torch import is
 -- slow, so every eligible program runs in one shared interpreter process.
 --
 -- Which programs participate is a first-class @.tst@ routing declaration: the
@@ -1277,9 +1277,8 @@ batchedPythonTests = do
     , testProperty "dense-domain-boundary" (once (denseBoundaryProp eligible))
     ] ++ case mpy of
       Nothing ->
-        [ testProperty "skipped-no-torch" $ once $ ioProperty $ do
-            hPutStrLn stderr "BatchedPython: value differential skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
-            return True ]
+        [ testProperty "torch-python-found" $ once $ ioProperty $
+            noTorchProperty "BatchedPython value differential" ]
       Just py ->
         [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
         , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
@@ -1301,7 +1300,9 @@ slowBatchedPythonTests :: IO TestTree
 slowBatchedPythonTests = do
   (_, _, _, _, topkEligible, denseTopK, mpy) <- batchedPythonFixtures
   return $ testGroup "BatchedPython (slow)" $ case mpy of
-    Nothing -> []
+    Nothing ->
+      [ testProperty "torch-python-found" $ once $ ioProperty $
+          noTorchProperty "BatchedPython (slow) topK differentials" ]
     Just py ->
       [ testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
       , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
@@ -1514,9 +1515,7 @@ batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
       once $ ioProperty $ do
         mpy <- findTorchPython
         case mpy of
-          Nothing -> do
-            hPutStrLn stderr "batched ADT-cdf NaN guard: runtime check skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
-            return (property True)
+          Nothing -> noTorchProperty "batched ADT-cdf NaN guard"
           Just py -> do
             res <- compiledAdtCdfCoin
             case res of
@@ -1630,9 +1629,7 @@ wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sample
     batchedCase domain = ioProperty $ do
       mpy <- findTorchPython
       case mpy of
-        Nothing -> do
-          hPutStrLn stderr "wide neural domain: batched case skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
-          return (property True)
+        Nothing -> noTorchProperty "wide neural domain: batched case"
         Just py -> case compiled True domain >>= generateFunctionsBatched True of
           Left err -> return (counterexample err False)
           Right srcLines -> do
@@ -2023,9 +2020,7 @@ batchedEnumBucketingTests = testGroup "batched enum bucketing"
       once $ ioProperty $ do
         mpy <- findTorchPython
         case mpy of
-          Nothing -> do
-            hPutStrLn stderr "batched enum bucketing: runtime check skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
-            return (property True)
+          Nothing -> noTorchProperty "batched enum bucketing"
           Just py -> do
             prog <- corpusPplPath "clevrSceneEnumAttrs" >>= parseProgram
             case compile defaultCompilerConfig{batched = True} prog >>= generateFunctionsBatched True of
@@ -2343,6 +2338,29 @@ findTorchPython = do
       return $ case res of
         Right (ExitSuccess, _, _) -> True
         _ -> False
+
+-- | What a torch-dependent check does when 'findTorchPython' found nothing:
+-- @Nothing@ means skip (only when @NEST_SKIP_TORCH=1@ asks for it, noted on
+-- stderr), @Just msg@ is the failure to report. A missing torch used to be a
+-- silent pass, and a garbage-collected venv then hid a real BatchedPython
+-- failure behind "green" for days; skipping torch is now an explicit choice.
+noTorch :: String -> IO (Maybe String)
+noTorch what = do
+  skip  <- lookupEnv "NEST_SKIP_TORCH"
+  envPy <- lookupEnv "NEST_TORCH_PYTHON"
+  if skip == Just "1"
+    then do
+      hPutStrLn stderr (what ++ ": skipped -- NEST_SKIP_TORCH=1.")
+      return Nothing
+    else return $ Just $ what ++ ": no torch-enabled python found. "
+      ++ maybe "NEST_TORCH_PYTHON is unset; set it to a python that can import torch"
+               (\p -> "NEST_TORCH_PYTHON=" ++ p ++ " cannot import torch (a nix GC may have removed its base python)")
+               envPy
+      ++ ", or set NEST_SKIP_TORCH=1 to skip torch-dependent checks deliberately."
+
+-- | 'noTorch' as a property.
+noTorchProperty :: String -> IO Property
+noTorchProperty what = maybe (property True) (`counterexample` False) <$> noTorch what
 
 -- | Run every eligible program's batched code in one shared torch process and
 -- assert every batched query point matches its expected value.

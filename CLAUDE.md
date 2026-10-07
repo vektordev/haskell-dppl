@@ -67,6 +67,9 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   `NEST_ASPIRATIONAL_TESTS=1` holds tests known to be red. A test your change
   broke is a regression and does not go into Aspirational. A fix that makes
   an aspirational test pass moves it back to Slow in the same commit.
+  Torch-dependent tests (BatchedPython, PythonPrelude) **fail** when no
+  torch-enabled python is found (`NEST_TORCH_PYTHON`); `NEST_SKIP_TORCH=1`
+  skips them deliberately, and a run with it set is not a green run.
   Details: `docs/testing.md`.
 - **Report suite time in commits.** A commit message that reports a test
   result also reports the default suite's wall time against its base,

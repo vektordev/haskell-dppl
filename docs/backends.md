@@ -37,7 +37,8 @@ rather than by this suite (task `python-codegen-silent-precision-traps`):
 value, gradient and dtype for both runtimes, and **fails on any new public
 `pythonLib` function** that is not classified in the probe's tables — adding
 one means deciding whether a tensor can reach it. All but that classification
-check need a torch-enabled python and skip without one, like `BatchedPython`.
+check need a torch-enabled python and fail without one, like `BatchedPython`
+(`NEST_SKIP_TORCH=1` skips them).
 
 ## The normal CDF is `erfc(-x / sqrt 2) / 2`
 

@@ -19,7 +19,7 @@ module TestPythonPrelude (pythonPreludeTests) where
 
 import System.Directory (getCurrentDirectory)
 import System.Exit (ExitCode(..))
-import System.IO (hPutStr, hClose, hPutStrLn, stderr)
+import System.IO (hPutStr, hClose)
 import System.IO.Temp (withSystemTempFile)
 import System.Process (readProcessWithExitCode)
 import Test.Tasty (TestTree, testGroup)
@@ -29,7 +29,7 @@ import SPLL.IntermediateRepresentation (CompilerConfig(..), defaultCompilerConfi
 import SPLL.Prelude (compile)
 import SPLL.Parser (tryParseProgram)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
-import End2EndTesting (findTorchPython)
+import End2EndTesting (findTorchPython, noTorch)
 
 pythonPreludeTests :: TestTree
 pythonPreludeTests = testGroup "PythonPrelude (python-codegen-silent-precision-traps)"
@@ -45,7 +45,7 @@ pythonPreludeTests = testGroup "PythonPrelude (python-codegen-silent-precision-t
 
 withTorch :: String -> (FilePath -> IO ()) -> IO ()
 withTorch what k = findTorchPython >>= \case
-  Nothing -> hPutStrLn stderr ("PythonPrelude: " ++ what ++ " skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON).")
+  Nothing -> noTorch ("PythonPrelude: " ++ what) >>= mapM_ assertFailure
   Just py -> k py
 
 probe :: FilePath -> String -> IO ()

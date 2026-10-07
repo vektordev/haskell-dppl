@@ -1,0 +1,5 @@
+-- Task batched-generate-destructured-draw-double-sample: the random draw sits in
+-- a let inside one arm of the destructured choice. Batched codegen splits a
+-- tuple-valued select per component and used to copy that arm's let (and the
+-- condition) into each component, drawing them independently.
+main = draw (a, b) = (if Uniform < 0.5 then (draw x = Uniform < 0.3 in (x, x)) else (False, False)) in if a == b then True else False
