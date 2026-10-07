@@ -26,6 +26,18 @@ rather than `property True`, so QuickCheck's own discard-ratio accounting
 reports this honestly instead of it being invisible inside an inflated
 success count.
 
+The five inference invariants share draws (`invariantsProperty`): one draw is
+compiled once per config its invariants read (default, topK 0, topK 0.1,
+branch counting) and every invariant runs against those compiles, each with
+its own `Holds`/`Vacuous`/`Broken` verdict. A failure names the invariant, and
+shrinking is pinned to the first failure the draw showed (an invariant or a
+hang), so the shrunk program still breaks that same invariant. They are two
+properties, split by tier: `prop_Fuzz_SharedDrawInvariants` (P(ANY)=1, never
+negative; one compile, `Slow`) and `prop_Fuzz_SharedDrawConfigInvariants` (the
+topK and branch-counting comparisons; four compiles, `Aspirational`, because
+its topK compiles exceed the per-case budget on most seeds). Merge them once
+that is fixed.
+
 **The `Fuzz` group is currently red**, and legitimately so. Widening the typed
 generator to structured types (design `typed-program-generator-expansion`
 milestone M1) turned up three distinct compiler bugs, tracked as

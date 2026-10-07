@@ -198,7 +198,8 @@ branches by `accProb * p_left`.
 Pruning is **lossy** — a dropped branch's mass is simply gone. Hence the
 one-sided invariants: topK never *inflates* a probability
 (`Corpus.TopKNeverInflates`, its CDF twin `Corpus.TopKNeverInflatesCdf`, and
-the fuzz property `prop_Fuzz_TopKNeverInflates`), and only threshold 0 is
+the fuzz invariant `TopKNeverInflates` in
+`prop_Fuzz_SharedDrawConfigInvariants`), and only threshold 0 is
 exact (`Corpus.TopKZeroThreshMatchesExact`).
 
 "Never inflates" holds only at equal dimension. Pruning removes alternatives

@@ -31,8 +31,9 @@
 -- theirs -- conflating the two would make a topK/branch-counting regression
 -- indistinguishable from an unrelated crash in an unsupported IR shape).
 --
--- Slow: each well-typed property compiles its drawn program under 2-3
--- CompilerConfigs, so this module lives in the opt-in Slow test group
+-- Slow: the well-typed invariant properties compile each drawn program, up
+-- to four times (once per CompilerConfig the invariants read; see
+-- 'invariantsProperty'), so this module lives in the opt-in Slow test group
 -- (NEST_SLOW_TESTS=1) rather than the default `stack test` run.
 --
 -- A further property, 'fuzzSamplingMatchesPDF' (exported via
@@ -223,12 +224,12 @@ irProb p compiled sample
 -- oracle. Crash-freedom of the compile/sample/probability path is
 -- 'prop_Fuzz_TypedCompileNeverCrashes'' subject: it draws from the same
 -- generator at the same size and calls 'runProbC' on its own sample, so the
--- bug is already reported, loudly and in one place. These four properties are
+-- bug is already reported, loudly and in one place. The invariants are
 -- about what the inference engines *compute* on programs that got that far --
 -- which is why they already use 'compileSafe', whose whole job is to swallow
 -- a compile-time crash for exactly this reason. Failing here as well would
--- redden five properties for one bug while hiding the invariant each exists
--- to check behind it, which is the masking the twin oracle's guard was
+-- redden every invariant for one bug while hiding the one each exists to
+-- check behind it, which is the masking the twin oracle's guard was
 -- introduced to undo.
 forcedProbAt :: Show a => Program -> IREnv -> (IRValue -> a) -> IO (Maybe (IRValue, a))
 forcedProbAt p genEnv k = do
@@ -741,102 +742,252 @@ prop_Fuzz_TypedProgramsValidate = withMaxSuccess (fuzzCases 200) $ forAllShrink 
     Right _ -> property True
     Left err -> counterexample ("well-typed generated program failed validation: " ++ err) False
 
+-- ---------------------------------------------------------------------------
+-- The inference invariants, checked on shared draws.
+--
+-- Five invariants are checked over 'genTypedProgram': P(ANY) = 1, probability
+-- never negative, topK at threshold 0 reproducing exact inference, topK never
+-- inflating, and branch counting not changing the probability. Each used to be
+-- its own property with its own draw, compiling the default config every time:
+-- 8 compiles over 5 draws. Now one property draws a program, compiles it once
+-- per 'FuzzConfig' its invariants need, and runs every invariant against that
+-- one compile (task fuzz-shared-draw-multi-config-compile).
+--
+-- Two properties rather than one, split by tier. The three cross-config
+-- invariants are aspirational: their topK compiles hit the per-case budget on
+-- most seeds (see 'aspirationalFuzzNames'), and in one shared case a hang
+-- there would take the two default-config invariants down with it and redden
+-- @Slow@. The split costs one extra default compile per pair of draws. Once
+-- the topK compiles are fixed, the two lists merge into one property.
+--
+-- Each invariant stays addressable: a failure's counterexample names the
+-- invariant, every case tabulates each invariant's verdict, and shrinking is
+-- pinned to the invariant the drawn program broke first ('invariantsProperty').
+
+-- | A compiler configuration an invariant reads.
+data FuzzConfig = CfgExact | CfgTopK0 | CfgTopK01 | CfgBranches
+  deriving (Show, Eq, Enum, Bounded)
+
+fuzzConfig :: FuzzConfig -> CompilerConfig
+fuzzConfig CfgExact    = defaultCompilerConfig
+fuzzConfig CfgTopK0    = defaultCompilerConfig { topKThreshold = Just 0.0 }
+fuzzConfig CfgTopK01   = defaultCompilerConfig { topKThreshold = Just 0.1 }
+fuzzConfig CfgBranches = defaultCompilerConfig { countBranches = True }
+
+-- | What one case gives every invariant: the program, its compile under each
+-- requested config ('Nothing' for one not requested or that did not compile),
+-- and one point drawn from the exact compile ('Nothing' when there is no exact
+-- compile or the draw failed or raised).
+data InvariantCase = InvariantCase
+  { icProgram :: Program
+  , icEnv     :: FuzzConfig -> Maybe IREnv
+  , icSample  :: Maybe IRValue
+  }
+
+-- | An invariant's verdict on one case. 'Vacuous' is "nothing to check here"
+-- (no probability function, a draw that raised, ...), the per-invariant form
+-- of 'discardVacuous'.
+data Verdict = Holds | Vacuous | Broken String
+  deriving Show
+
+data Invariant = Invariant
+  { invName    :: String
+  , invConfigs :: [FuzzConfig]
+  , invCheck   :: InvariantCase -> IO Verdict
+  }
+
+-- | Force @x@ inside the per-case budget, then judge it. An exception while
+-- forcing is 'Vacuous', on the reasoning in 'forcedProbAt'.
+judgeForced :: Show a => a -> (a -> Verdict) -> IO Verdict
+judgeForced x judge = do
+  r <- trySync (evaluate (forceShow x))
+  return $ either (const Vacuous) judge r
+
+holdsIf :: Bool -> String -> Verdict
+holdsIf ok msg = if ok then Holds else Broken msg
+
+-- | The probability of a sample under two configs, for the invariants that
+-- compare one against the other.
+probPairAt :: FuzzConfig -> FuzzConfig -> InvariantCase -> Maybe (IRValue, Maybe IRValue, Maybe IRValue)
+probPairAt a b c = do
+  s <- icSample c
+  ea <- icEnv c a
+  eb <- icEnv c b
+  return (s, irProb (icProgram c) ea s, irProb (icProgram c) eb s)
+
 -- | P(ANY) = 1 for every well-typed generated program that has a probability
 -- function at all (some scalar shapes -- e.g. an If condition built from a
 -- non-invertible comparison chain -- are legitimately generate-only, and
 -- some currently hit unsupported IR shapes, caught by
--- 'prop_Fuzz_TypedCompileNeverCrashes' instead -- both are discarded here).
-prop_Fuzz_MarginalAnyIsOne :: Property
-prop_Fuzz_MarginalAnyIsOne = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_MarginalAnyIsOne" $ do
-  compiled <- compileSafe defaultCompilerConfig p
-  -- Deep-forced here, inside the budget, and under the same
-  -- discard-on-exception policy as 'forcedProbAt' -- see its haddock for both
-  -- halves of the reasoning. Scrutinising the 'Maybe' alone would force
-  -- 'runProbC' only to WHNF, leaving the rest of the result -- and any crash
-  -- hiding in it -- to be forced by the QuickCheck driver after the per-case
-  -- 'timeout' has returned.
-  forced <- trySync (evaluate (forceShow (compiled >>= \irEnv -> irProb p irEnv VAny)))
-  return $ case forced of
-    Left _ -> discardVacuous
-    Right Nothing -> discardVacuous
-    Right (Just result) -> case probDim result of
-      Just (pr, _) -> counterexample ("P(ANY) = " ++ show pr ++ ", expected ~1") (abs (pr - 1) < 1e-6)
-      Nothing -> counterexample ("unexpected result shape: " ++ show result) False
+-- 'prop_Fuzz_TypedCompileNeverCrashes' instead -- both are vacuous here).
+marginalAnyIsOne :: Invariant
+marginalAnyIsOne = Invariant "MarginalAnyIsOne" [CfgExact] $ \c ->
+  judgeForced (icEnv c CfgExact >>= \e -> irProb (icProgram c) e VAny) $ \r -> case r of
+    Nothing -> Vacuous
+    Just result -> case probDim result of
+      Just (pr, _) -> holdsIf (abs (pr - 1) < 1e-6) ("P(ANY) = " ++ show pr ++ ", expected ~1")
+      Nothing -> Broken ("unexpected result shape: " ++ show result)
 
 -- | A probability/density value must never be negative, at a sample point
 -- drawn from the program itself (a real distribution assigns non-negative
 -- mass/density everywhere; a negative result means the change-of-variables
 -- or mixture-combination arithmetic somewhere in IRCompiler has a sign bug).
-prop_Fuzz_ProbabilityNeverNegative :: Property
-prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_ProbabilityNeverNegative" $ do
-  compiled <- compileSafe defaultCompilerConfig p
-  case compiled of
-    Nothing -> return discardVacuous
-    Just irEnv -> do
-      drawn <- forcedProbAt p irEnv (irProb p irEnv)
-      return $ case drawn of
-        Nothing -> discardVacuous
-        Just (_, Nothing) -> discardVacuous
-        Just (sample, Just result) -> case probDim result of
-          Just (pr, _) -> counterexample ("P(" ++ show sample ++ ") = " ++ show pr ++ ", expected >= 0") (pr >= -1e-9)
-          Nothing -> counterexample ("unexpected result shape: " ++ show result) False
+probabilityNeverNegative :: Invariant
+probabilityNeverNegative = Invariant "ProbabilityNeverNegative" [CfgExact] $ \c ->
+  judgeForced (icSample c >>= \s -> icEnv c CfgExact >>= \e -> Just (s, irProb (icProgram c) e s)) $ \r -> case r of
+    Just (sample, Just result) -> case probDim result of
+      Just (pr, _) -> holdsIf (pr >= -1e-9) ("P(" ++ show sample ++ ") = " ++ show pr ++ ", expected >= 0")
+      Nothing -> Broken ("unexpected result shape: " ++ show result)
+    _ -> Vacuous
 
 -- | topK with threshold 0 prunes nothing, so it must reproduce exact
 -- inference exactly, at a sample point drawn from the program itself.
-prop_Fuzz_TopKZeroMatchesExact :: Property
-prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_TopKZeroMatchesExact" $ do
-  exact <- compileSafe defaultCompilerConfig p
-  topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.0 }) p
-  case (exact, topK) of
-    (Just exactEnv, Just topKEnv) -> do
-      drawn <- forcedProbAt p exactEnv (\s -> (irProb p exactEnv s, irProb p topKEnv s))
-      return $ case drawn of
-        Just (_, (Just exactR, Just topKR)) -> case (probDim exactR, probDim topKR) of
-          (Just (pe, de), Just (pt, dt)) ->
-            counterexample ("exact=" ++ show (pe, de) ++ " topK0=" ++ show (pt, dt))
-              (abs (pe - pt) < 1e-6 && abs (de - dt) < 1e-6)
-          _ -> counterexample "unexpected result shapes" False
-        _ -> discardVacuous  -- one side lacks a prob function, or the draw raised
-    _ -> return discardVacuous
+topKZeroMatchesExact :: Invariant
+topKZeroMatchesExact = Invariant "TopKZeroMatchesExact" [CfgExact, CfgTopK0] $ \c ->
+  judgeForced (probPairAt CfgExact CfgTopK0 c) $ \r -> case r of
+    Just (_, Just exactR, Just topKR) -> case (probDim exactR, probDim topKR) of
+      (Just (pe, de), Just (pt, dt)) ->
+        holdsIf (abs (pe - pt) < 1e-6 && abs (de - dt) < 1e-6)
+                ("exact=" ++ show (pe, de) ++ " topK0=" ++ show (pt, dt))
+      _ -> Broken "unexpected result shapes"
+    _ -> Vacuous  -- one side lacks a prob function, or the draw raised
 
 -- | Pruning can only zero out branches, never inflate probability above the
 -- exact value, at a sample point drawn from the program itself.
-prop_Fuzz_TopKNeverInflates :: Property
-prop_Fuzz_TopKNeverInflates = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_TopKNeverInflates" $ do
-  exact <- compileSafe defaultCompilerConfig p
-  topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.1 }) p
-  case (exact, topK) of
-    (Just exactEnv, Just topKEnv) -> do
-      drawn <- forcedProbAt p exactEnv (\s -> (irProb p exactEnv s, irProb p topKEnv s))
-      return $ case drawn of
-        Just (_, (Just exactR, Just topKR)) -> case (probDim exactR, probDim topKR) of
-          -- Same rule as Spec's corpus 'topKNeverInflates': values compare
-          -- only at equal dim; pruning drops mixture alternatives and the
-          -- lowest dim wins, so an unequal pruned dim must be the higher one
-          -- (a pruned point mass leaving a sibling density behind).
-          (Just (pe, de), Just (pt, dt))
-            | dt == de  -> counterexample (show pt ++ " > " ++ show pe ++ " at dim " ++ show de) (pt <= pe + 1e-9)
-            | otherwise -> counterexample ("pruned dim " ++ show dt ++ " below exact dim " ++ show de) (dt > de)
-          _ -> counterexample "unexpected result shapes" False
-        _ -> discardVacuous
-    _ -> return discardVacuous
+topKNeverInflates :: Invariant
+topKNeverInflates = Invariant "TopKNeverInflates" [CfgExact, CfgTopK01] $ \c ->
+  judgeForced (probPairAt CfgExact CfgTopK01 c) $ \r -> case r of
+    Just (_, Just exactR, Just topKR) -> case (probDim exactR, probDim topKR) of
+      -- Same rule as the corpus 'checkTopKNeverInflates': values compare only
+      -- at equal dim; pruning drops mixture alternatives and the lowest dim
+      -- wins, so an unequal pruned dim must be the higher one (a pruned point
+      -- mass leaving a sibling density behind).
+      (Just (pe, de), Just (pt, dt))
+        | dt == de  -> holdsIf (pt <= pe + 1e-9) (show pt ++ " > " ++ show pe ++ " at dim " ++ show de)
+        | otherwise -> holdsIf (dt > de) ("pruned dim " ++ show dt ++ " below exact dim " ++ show de)
+      _ -> Broken "unexpected result shapes"
+    _ -> Vacuous
 
 -- | Enabling branch counting must not alter the probability value, only add
 -- a third result component, at a sample point drawn from the program itself.
-prop_Fuzz_BranchCountingDoesNotChangeProbability :: Property
-prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_BranchCountingDoesNotChangeProbability" $ do
-  def <- compileSafe defaultCompilerConfig p
-  bc <- compileSafe (defaultCompilerConfig { countBranches = True }) p
-  case (def, bc) of
-    (Just defEnv, Just bcEnv) -> do
-      drawn <- forcedProbAt p defEnv (\s -> (irProb p defEnv s, irProb p bcEnv s))
-      return $ case drawn of
-        Just (_, (Just defR, Just bcR)) -> case (probDim defR, probDim bcR) of
-          (Just (pd, _), Just (pb, _)) ->
-            counterexample ("default=" ++ show pd ++ " bc=" ++ show pb) (abs (pd - pb) < 1e-9)
-          _ -> counterexample "unexpected result shapes" False
+branchCountingDoesNotChangeProbability :: Invariant
+branchCountingDoesNotChangeProbability = Invariant "BranchCountingDoesNotChangeProbability" [CfgExact, CfgBranches] $ \c ->
+  judgeForced (probPairAt CfgExact CfgBranches c) $ \r -> case r of
+    Just (_, Just defR, Just bcR) -> case (probDim defR, probDim bcR) of
+      (Just (pd, _), Just (pb, _)) -> holdsIf (abs (pd - pb) < 1e-9) ("default=" ++ show pd ++ " bc=" ++ show pb)
+      _ -> Broken "unexpected result shapes"
+    _ -> Vacuous
+
+-- | The outcome of one case: out of property budget (discard), out of
+-- per-case budget (a hang), or each invariant's verdict.
+data CaseOutcome = OutOfBudget | TimedOut Int | Ran [(String, Verdict)]
+
+-- | What a case can fail with. Shrinking is pinned to one of these.
+data CaseFailure = Breaks String | Hangs
+  deriving (Show, Eq)
+
+caseFailures :: CaseOutcome -> [CaseFailure]
+caseFailures OutOfBudget  = []
+caseFailures (TimedOut _) = [Hangs]
+caseFailures (Ran vs)     = [ Breaks n | (n, Broken _) <- vs ]
+
+-- | Compile @p@ once per config the invariants need, draw one sample from the
+-- exact compile, and run every invariant, all inside the per-case budget
+-- (scaled by @factor@, as 'withinBudgetScaled') and charged to @name@'s
+-- property budget.
+runInvariantCase :: String -> Int -> [Invariant] -> Program -> IO CaseOutcome
+runInvariantCase name factor invs p = do
+  hasBudget <- claimBudget propertyBudgetMicros name
+  if not hasBudget
+    then noteExhaustion name propertyBudgetMicros >> return OutOfBudget
+    else do
+      let budget = factor * perCaseBudgetMicros
+      result <- timeout budget $ do
+        let cfgs = [ c | c <- [minBound .. maxBound], any ((c `elem`) . invConfigs) invs ]
+        envs <- mapM (\c -> (,) c <$> compileSafe (fuzzConfig c) p) cfgs
+        let envOf c = lookup c envs >>= id
+        sample <- case envOf CfgExact of
+          Nothing -> return Nothing
+          Just e -> do
+            drawn <- trySync (drawSample p e >>= evaluate . forceShow)
+            return $ case drawn of
+              Right s | not (isRuntimeFailure s) -> Just s
+              _ -> Nothing
+        let ic = InvariantCase p envOf sample
+        verdicts <- mapM (\inv -> (,) (invName inv) <$> invCheck inv ic) invs
+        evaluate (forceShow verdicts)
+      return (maybe (TimedOut budget) Ran result)
+
+-- | Draw programs and check @invs@ on each, with @n@ (scaled) successes. A
+-- case where every invariant was vacuous is discarded.
+--
+-- A failing draw is shrunk against the *first* failure it showed (an
+-- invariant, or a hang): a shrink candidate counts as failing only if it
+-- breaks that same invariant. Otherwise shrinking could walk from one
+-- invariant's failure to another's, and the minimal program would no longer
+-- witness the bug the draw found. The outer 'forAllBlind' does not shrink;
+-- 'shrinking' does, seeded with the drawn program, whose known failure is
+-- reported without re-running it (the sample point is random, so a re-run
+-- might not reproduce it).
+invariantsProperty :: String -> Int -> [Invariant] -> Int -> Property
+invariantsProperty = invariantsPropertyOn (resize fuzzSize genTypedProgram)
+
+-- | 'invariantsProperty' over a given generator, so the default suite can pin
+-- the shrink-against-one-invariant rule on cheap fake invariants.
+invariantsPropertyOn :: Gen Program -> String -> Int -> [Invariant] -> Int -> Property
+invariantsPropertyOn gen name factor invs n =
+  -- 'idempotentIOProperty', not 'ioProperty': the latter strips the
+  -- 'shrinking' tree this returns. The IO runs once per draw either way.
+  withMaxSuccess (fuzzCases n) $ forAllBlind gen $ \p -> idempotentIOProperty $ do
+    o <- runInvariantCase name factor invs p
+    return $ case caseFailures o of
+      [] -> case o of
+        Ran vs | not (all (isVacuous . snd) vs) ->
+          tabulate "invariant verdicts" [ n' ++ ": " ++ verdictKind v | (n', v) <- vs ] (property True)
         _ -> discardVacuous
-    _ -> return discardVacuous
+      fs@(target : _) ->
+        counterexample ("the drawn program failed " ++ show fs ++ "; shrinking against " ++ show target) $
+          shrinking (\(_, q) -> [ (Nothing, q') | q' <- shrinkTypedProgram q ]) (Just o, p) $ \(known, q) ->
+            case known of
+              Just o' -> reportFailure target o' q
+              Nothing -> ioProperty $ do
+                o' <- runInvariantCase name factor invs q
+                return $ if target `elem` caseFailures o' then reportFailure target o' q else property True
+  where
+    isVacuous Vacuous = True
+    isVacuous _ = False
+    verdictKind Holds = "holds"
+    verdictKind Vacuous = "vacuous"
+    verdictKind (Broken _) = "broken"
+
+-- | A failing case, labelled with the invariant it is being shrunk against.
+reportFailure :: CaseFailure -> CaseOutcome -> Program -> Property
+reportFailure target o q =
+  counterexample (describe target) $
+  counterexample ("all failures on this program: " ++ show (caseFailures o)) $
+  counterexample ("PROGRAM:\n" ++ pPrintProg q) False
+  where
+    describe Hangs = case o of
+      TimedOut b -> "hang: did not terminate within " ++ show b ++ "us"
+      _          -> "hang"
+    describe (Breaks n) = "invariant " ++ n ++ " broken: "
+      ++ case o of
+           Ran vs | Just (Broken msg) <- lookup n vs -> msg
+           _ -> "?"
+
+-- | The default-config invariants, in @Slow@.
+prop_Fuzz_SharedDrawInvariants :: Property
+prop_Fuzz_SharedDrawInvariants =
+  invariantsProperty "prop_Fuzz_SharedDrawInvariants" 1
+    [marginalAnyIsOne, probabilityNeverNegative] 40
+
+-- | The cross-config invariants, in @Aspirational@: four compiles per draw
+-- (default, topK 0, topK 0.1, branch counting), so twice the per-case budget
+-- of a two-compile property.
+prop_Fuzz_SharedDrawConfigInvariants :: Property
+prop_Fuzz_SharedDrawConfigInvariants =
+  invariantsProperty "prop_Fuzz_SharedDrawConfigInvariants" 2
+    [topKZeroMatchesExact, topKNeverInflates, branchCountingDoesNotChangeProbability] 40
 
 -- | The mixture combination rules, checked on pairs of independently generated
 -- programs of the SAME type (design inference-result-side-channels; the rules
@@ -1547,12 +1698,15 @@ aspirationalFuzzNames =
   , ("prop_Fuzz_ProbNeverGenerateBacked",
      "3/3 runs: gives up on its discard rate within the wall-clock budget, \
      \or is falsified")
-  , ("prop_Fuzz_TopKZeroMatchesExact",
-     "1/3 runs, falsified by a head-of-list program (same shape as the next two)")
-  , ("prop_Fuzz_TopKNeverInflates",
-     "1/3 runs, same program as prop_Fuzz_TopKZeroMatchesExact")
-  , ("prop_Fuzz_BranchCountingDoesNotChangeProbability",
-     "1/3 runs, same program as prop_Fuzz_TopKZeroMatchesExact")
+  -- The next entry replaced three per-invariant properties (TopKZeroMatchesExact,
+  -- TopKNeverInflates, BranchCountingDoesNotChangeProbability; task
+  -- fuzz-shared-draw-multi-config-compile). Re-measured 2026-10-07 at 72288f0
+  -- before the merge, seeds 7919/15838/23757/31676/39595/47514: at least one of
+  -- the three failed in 4/6 runs, every time with "did not terminate within
+  -- 5000000us"; the two default-config invariants passed in all six.
+  , ("prop_Fuzz_SharedDrawConfigInvariants",
+     "4/6 runs (old per-invariant form): a topK-configured compile exceeds the \
+     \per-case budget")
   ]
 
 isAspirationalFuzz :: String -> Bool
@@ -2275,6 +2429,34 @@ shrinkerTests = testGroup "Shrinker"
       shrinkPreservesTy shrinkUnderPolymorphicParent
   , testProperty "a shrink is re-typed when it changes the parent's recovery rule" $ once $
       shrinkPreservesTy shrinkChangesParentRule
+  , testProperty "a shared-draw failure names its invariant and shrinks against that one" $ once $ ioProperty $ do
+      -- Two fake invariants that need no compile. Every draw breaks both, and
+      -- the first listed is the one shrinking is pinned to, so every run must
+      -- end on a program that still breaks it. A shrink that kept only the
+      -- second broken (a big program with its Normal gone) is exactly what an
+      -- unpinned shrink would take. Not every draw has a shrink keeping its
+      -- Normal (@head(Cons(Normal, []))@ has none), so the runs only need
+      -- some draw to shrink past the second invariant altogether -- which
+      -- also shows a pinned shrink does make progress.
+      let holdsOnMain f = maybe False f . mainBody . icProgram
+          gaussian = Invariant "fake-gaussian-leaf" [] $ \c ->
+            return (if holdsOnMain containsNormal c then Broken "has a Normal leaf" else Holds)
+          big = Invariant "fake-big" [] $ \c ->
+            return (if holdsOnMain ((> 3) . typedExprSize) c then Broken "is big" else Holds)
+          gen = resize fuzzSize genTypedProgram `suchThat` \p ->
+            maybe False (\b -> containsNormal b && typedExprSize b > 3) (mainBody p)
+          onlyGaussian = "all failures on this program: " ++ show [Breaks "fake-gaussian-leaf"]
+      rs <- replicateM 20 $ quickCheckWithResult stdArgs { chatty = False }
+              (invariantsPropertyOn gen "shrinker-test-shared-draw" 1 [gaussian, big] 100)
+      let finals = [ (failingTestCase r, numShrinks r) | r@Failure{} <- rs ]
+      return $
+        counterexample (unlines (concatMap fst finals)) $
+             length finals === length rs
+        .&&. conjoin [ counterexample "a run's final program does not name the first invariant" $
+                         "invariant fake-gaussian-leaf broken: has a Normal leaf" `elem` ls
+                     | (ls, _) <- finals ]
+        .&&. counterexample "no run shrank to a program breaking only the first invariant"
+               (any (\(ls, k) -> k > 0 && onlyGaussian `elem` ls) finals)
   , localOption (QuickCheckMaxRatio 30) $
     testProperty "minimization keeps the failing feature and never grows" $
       -- The guard below ("this draw contains a Normal") is satisfied by about

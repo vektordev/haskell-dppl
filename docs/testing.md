@@ -390,12 +390,13 @@ depth by the default suite's polynomial-growth tests. A full `Slow` run takes
 about 4 minutes on 4 cores.
 
 **`Aspirational` holds what we want to guarantee but cannot yet**: tests that
-fail or flake at HEAD. Today that is five `Fuzz` properties
+fail or flake at HEAD. Today that is three `Fuzz` properties
 (`TestFuzz.aspirationalFuzzNames`, each entry with the evidence that put it
 there). Measured 2026-10-01 over three seeds, `TypedCompileNeverCrashes` and
-`ProbNeverGenerateBacked` failed every time. The other three
-(`TopKZeroMatchesExact`, `TopKNeverInflates`,
-`BranchCountingDoesNotChangeProbability`) failed once, on one shared program.
+`ProbNeverGenerateBacked` failed every time. `SharedDrawConfigInvariants`
+(topK at 0 and 0.1, branch counting) replaced three per-invariant properties
+that, re-measured 2026-10-07 over six seeds, timed out in a topK compile in
+four runs.
 Rules:
 
 - Moving a test **into** `Aspirational` is how a known-red test stops making
