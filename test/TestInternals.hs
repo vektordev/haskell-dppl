@@ -4990,6 +4990,37 @@ noGenerateNeuralSamplerTests = testGroup "--noGenerate drops the neural read-log
       Left err -> assertFailure ("Parse failed: " ++ show err)
       Right prog -> either (\e -> assertFailure ("compile refused: " ++ show e)) return (compile conf prog)
 
+-- Task all-functions-flags-empty-main-class: -G -I -P on a main that only
+-- calls a neural declaration leaves Main's group with no methods at all (no
+-- writeLogits/normal_params either), and the scalar Python backend printed
+-- `class Main(Module):` over blank lines -- an IndentationError on import.
+-- The emitted module must parse under every one of those programs.
+allVariantsOffEmptyClassTests :: TestTree
+allVariantsOffEmptyClassTests = testGroup "-G -I -P emits a parseable Python module"
+  [ testCase ("parses: " ++ name) $ do
+      py <- case either (Left . show) Right (tryParseProgram "<test>" src) >>= compile allOff of
+        Left e -> assertFailure ("compile refused: " ++ e) >> return ""
+        Right env -> return (unlines (SPLL.CodeGenPyTorch.generateFunctions True env))
+      assertBool "Main's class should still be emitted" ("class Main(Module):" `isInfixOf` py)
+      (code, _, err) <- readProcessWithExitCode "python3" ["-c", "import ast, sys; ast.parse(sys.stdin.read())"] py
+      case code of
+        ExitSuccess -> return ()
+        ExitFailure _ -> assertFailure ("emitted Python does not parse:\n" ++ err ++ "\n" ++ py)
+  | (name, src) <-
+      [ ("main calls one neural declaration", "neural n :: (Symbol -> Int) of [0, 1, 2]\nmain s = n s\n")
+      , ("main draws from two neural declarations", unlines
+          [ "neural camNN   :: (Symbol -> Int) of [0, 1, 2]"
+          , "neural depthNN :: (Symbol -> Int) of [0, 1, 2]"
+          , "main img depth ="
+          , "  draw v = camNN img in"
+          , "  draw w = depthNN depth in"
+          , "  if v == w then right v else left ()" ])
+      , ("non-neural main keeps its other methods", "main = Normal\n")
+      ]
+  ]
+  where
+    allOff = defaultCompilerConfig { noGenerate = True, noIntegrate = True, noProbability = True }
+
 -- | Value-domain analysis at vocabulary scale (task
 -- agreement-compile-time-quadratic-in-domain). Tagging @a == b@ over two
 -- V-value operands used to evaluate all V^2 operand pairs, and every
@@ -5101,6 +5132,7 @@ internalsTests = testGroup "Internals"
   , valueSetTests
   , domainScaleTests
   , noGenerateNeuralSamplerTests
+  , allVariantsOffEmptyClassTests
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_gaussianChainIRNotExponential
