@@ -2271,6 +2271,12 @@ hasOwnInferenceHandler _    _                        = False
 -- selects, at run time, between that and the point mass at @point@ (an
 -- equality indicator, or a step for a cdf). A scale that is a nonzero
 -- constant by construction keeps its ordinary leaf and emits no guard.
+--
+-- The ordinary leaf reads the scale through @if sigma == 0 then 1 else
+-- sigma@. Where the scale is zero that leaf is not selected, so its value is
+-- unchanged, but the batched backend's eager @torch.where@ still
+-- differentiates it, and a division by the zero scale there made the sample
+-- gradient NaN.
 degenerateScaleGuard :: CompilerMetadata -> Bool -> RType -> IRExpr -> IRExpr -> IRExpr
                      -> (IRExpr -> PResult) -> CompilerMonad PResult
 degenerateScaleGuard meta cumulative rt point sigma sample build
@@ -2282,7 +2288,8 @@ degenerateScaleGuard meta cumulative rt point sigma sample build
           dirac | cumulative = mass (compareValueExpr sr rt point sample)
                 | otherwise  = indicatorP sr (equalityGuard rt point sample)
           isZero = IROp OpEq (IRVar v) (IRConst (VFloat 0))
-      return (zipResult (IRIf isZero) dirac (build (IRVar v)))
+          safeScale = IRIf isZero (IRConst (VFloat 1)) (IRVar v)
+      return (zipResult (IRIf isZero) dirac (build safeScale))
 
 -- | False only for a scale that is nonzero whatever the program's inputs: a
 -- nonzero literal, and products, absolute values, negations and Gaussian-sum
