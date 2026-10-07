@@ -349,7 +349,14 @@ generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLog
   commentLines = map ("# " ++) (lines doc)
   initLine = "class " ++ clsName name ++ "(Module):"
   globalVarDecls = map (\(mv, varName)-> varName ++ " = " ++ pyMultiVal mv) globalVars
-  funcs = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e ++ [""] ++ n
+  -- A group left with no methods (e.g. -G -I -P on a main that only calls a
+  -- neural declaration, which has no writeLogits/normal_params either) would
+  -- otherwise print a class header over blank lines, an IndentationError. A
+  -- `pass` body keeps the module importable and the instance line valid, as
+  -- in the batched backend (task all-functions-flags-empty-main-class).
+  funcs
+    | all null [i, p, g, e, n] && null globalVars = ["pass"]
+    | otherwise = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e ++ [""] ++ n
   replaceCallsDecl (expr, d) = (irMap (replaceCalls lut) expr, d)
   in commentLines ++ initLine:indentOnce globalVarDecls ++ indentOnce funcs
 
