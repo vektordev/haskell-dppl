@@ -15,13 +15,22 @@ import Data.Maybe (isNothing)
 import Control.Exception (finally)
 import TestCorpus (corpusTests)
 import CorpusSweep (loadCorpus, timeWholeRun, reportSweeps)
+import ImpactManifest (openManifest, flushManifest, fullTestsRequested)
 
 main :: IO ()
 main = do
   -- Mirrors Spec.hs's own default: quiet-on-success unless overridden.
   hideSuccesses <- lookupEnv "TASTY_HIDE_SUCCESSES"
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
+  -- The impact-analysis manifest (ImpactManifest) of this binary's keyed
+  -- sweeps. It is its own file, not the main binary's: the two processes may
+  -- run at once, and each writes its manifest back whole.
+  manifest <- fullTestsRequested >>= openManifest corpusManifestFile
   corpus <- loadCorpus
-  tree <- corpusTests corpus
+  tree <- corpusTests corpus manifest
   -- The per-sweep cost table (CorpusSweep), printed once the tree has run.
-  flip finally (reportSweeps corpus) $ defaultMain (timeWholeRun corpus tree)
+  flip finally (flushManifest manifest >> reportSweeps corpus) $ defaultMain (timeWholeRun corpus tree)
+
+-- | Beside 'ImpactManifest.manifestFile', under @.stack-work@.
+corpusManifestFile :: FilePath
+corpusManifestFile = ".stack-work/nest-impact-manifest-corpus"

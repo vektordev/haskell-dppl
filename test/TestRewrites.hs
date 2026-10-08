@@ -1,4 +1,4 @@
-{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE PatternSynonyms, ScopedTypeVariables #-}
 -- | The rewrite-invariance net (task
 -- rewrite-invariance-net-draw-apply-helper-alias; milestone M0 of design
 -- law-carrying-modality, M2 of transformation-differential-testing).
@@ -30,7 +30,7 @@ import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, bracket_, evaluate, throwIO, try)
 import Control.Monad (forM, replicateM)
 import Control.Monad.Random.Lazy (evalRandIO)
-import Data.List (intercalate, isInfixOf, nub)
+import Data.List (intercalate, isInfixOf, isPrefixOf, nub)
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import System.Timeout (timeout)
@@ -39,13 +39,15 @@ import Test.Tasty.HUnit (testCase, testCaseInfo, assertBool, assertFailure, (@?=
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (freeVarsExpr)
-import SPLL.IntermediateRepresentation (IRValue, defaultCompilerConfig, pattern VProbDim)
+import SPLL.IntermediateRepresentation (IREnv, IRValue, defaultCompilerConfig, pattern VProbDim)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, runProbC, runGenC)
 import TestCaseParser (TestCase(..), Backend(..))
 import CorpusSweep
 import TestTolerances (probTolerance, samplingTolerance)
 import Rewrites
+import ImpactManifest
+import End2EndTesting (programRuntimeFields)
 
 -- ---------------------------------------------------------------------------
 -- Promotion and known divergences
@@ -142,25 +144,42 @@ data Outcome = Answered [(Double, Double)] | Refused String
 -- a 'Left', a missing probability function, a crash or a timeout -- is
 -- 'Refused' with its message; the whole run is one outcome.
 runQueries :: Program -> [Query] -> IO Outcome
-runQueries p qs = do
-  r <- timeout (20 * 1000000) (try (evaluate (forceOutcome (answer p qs))))
+runQueries p qs = compileTimed p >>= \c -> runCompiled p c qs
+
+-- | A program's default compile, evaluated as far as refusing or not, under a
+-- 20 s timeout. 'Left' is the message 'runQueries' reports for a refusal, a
+-- crash or a timeout. The environment itself stays lazy, as the queries
+-- force it: forcing all of it could crash on a part no query reads.
+compileTimed :: Program -> IO (Either String IREnv)
+compileTimed p = do
+  r <- timeout (20 * 1000000) (try (evaluate (compile defaultCompilerConfig p)))
+  return $ case r of
+    Nothing -> Left "timeout (20s)"
+    Just (Left ex) -> Left ("crash: " ++ firstLine (show (ex :: SomeException)))
+    Just (Right (Left err)) -> Left ("refused: " ++ shorten (takeWhile (/= '\n') err))
+    Just (Right (Right env)) -> Right env
+
+-- | Answer every query on a compile from 'compileTimed', under a 20 s timeout.
+runCompiled :: Program -> Either String IREnv -> [Query] -> IO Outcome
+runCompiled _ (Left why) _ = return (Refused why)
+runCompiled p (Right env) qs = do
+  r <- timeout (20 * 1000000) (try (evaluate (forceOutcome (answer p env qs))))
   return $ case r of
     Nothing -> Refused "timeout (20s)"
     Just (Left ex) -> Refused ("crash: " ++ firstLine (show (ex :: SomeException)))
     Just (Right o) -> o
-  where
-    firstLine = shorten . takeWhile (/= '\n')
+
+firstLine :: String -> String
+firstLine = shorten . takeWhile (/= '\n')
 
 -- | Crash messages can carry a whole annotated AST; a log line needs the
 -- diagnostic, not the dump.
 shorten :: String -> String
 shorten m = if length m > 160 then take 160 m ++ "..." else m
 
-answer :: Program -> [Query] -> Outcome
-answer p qs = case compile defaultCompilerConfig p of
-  Left err -> Refused ("refused: " ++ shorten (takeWhile (/= '\n') err))
-  Right env -> either (Refused . ("refused: " ++) . shorten . takeWhile (/= '\n')) Answered
-                 (mapM (\(s, params) -> runProbC p env params s >>= probDim) qs)
+answer :: Program -> IREnv -> [Query] -> Outcome
+answer p env qs = either (Refused . ("refused: " ++) . shorten . takeWhile (/= '\n')) Answered
+                    (mapM (\(s, params) -> runProbC p env params s >>= probDim) qs)
   where
     probDim (VProbDim pr d) = Right (pr, d)
     probDim v = Left ("not a probability result: " ++ show v)
@@ -202,7 +221,13 @@ isHard _ = False
 -- | Judge one (original, rewritten) pair of the program named @prog@.
 judge :: String -> Family -> String -> Outcome -> Program -> [Query] -> IO Verdict
 judge prog fam site origOut rewritten qs = do
-  out <- runQueries rewritten qs
+  c <- compileTimed rewritten
+  judgeCompiled prog fam site origOut rewritten c qs
+
+-- | 'judge' on the rewritten program's compile from 'compileTimed'.
+judgeCompiled :: String -> Family -> String -> Outcome -> Program -> Either String IREnv -> [Query] -> IO Verdict
+judgeCompiled prog fam site origOut rewritten compiled qs = do
+  out <- runCompiled rewritten compiled qs
   case (origOut, out) of
     (Answered as, Answered bs)
       | and (zipWith agrees as bs) -> return Agree
@@ -214,17 +239,17 @@ judge prog fam site origOut rewritten qs = do
       | refusalIsHard fam -> return (HardRefusal (site ++ ": " ++ why))
       | otherwise -> return (LoggedRefusal (site ++ ": " ++ why))
     (Refused _, Refused _) -> return BothRefuse
-    (Refused _, Answered bs) -> samplingCheck rewritten (zip qs bs)
+    (Refused _, Answered bs) -> case compiled of
+      Right env -> samplingCheck rewritten env (zip qs bs)
+      Left err -> return (SampleUnchecked err)
 
 -- | The refused -> answers transition: there is no second derivation, so the
 -- answering program is checked against its own forward sampler, at every
 -- query point where a window estimate is meaningful (a scalar or a tuple of
 -- scalars, with dim 0 or dim equal to the continuous coordinate count, and at
 -- most 1 -- a higher-dimensional estimate needs prohibitively many draws).
-samplingCheck :: Program -> [(Query, (Double, Double))] -> IO Verdict
-samplingCheck p rows = case compile defaultCompilerConfig p of
-  Left err -> return (SampleUnchecked err)
-  Right env -> do
+samplingCheck :: Program -> IREnv -> [(Query, (Double, Double))] -> IO Verdict
+samplingCheck p env rows = do
     results <- forM rows $ \((s, params), (pr, d)) ->
       if not (estimable s d) then return Nothing
       else Just <$> estimateAgrees (runGenC p env params) s pr d (2000 :: Int) (3 :: Int)
@@ -263,9 +288,23 @@ within _ _ _ = False
 -- | Every variant of every family of one program, judged.
 sweep :: String -> Program -> [Query] -> IO [(Family, Verdict)]
 sweep prog p qs = do
-  origOut <- runQueries p qs
-  concurrently [ (,) (variantFamily v) <$> judge prog (variantFamily v) (variantSite v) origOut (variantProgram v) qs
-               | fam <- allFamilies, v <- variants fam p ]
+  (orig, vs) <- compileSweep p
+  sweepCompiled prog p qs orig vs
+
+-- | The default compile ('compileTimed') of a program and of every variant of
+-- every family of it, the variants concurrently.
+compileSweep :: Program -> IO (Either String IREnv, [(Variant, Either String IREnv)])
+compileSweep p = do
+  orig <- compileTimed p
+  vs <- concurrently [ (,) v <$> compileTimed (variantProgram v) | fam <- allFamilies, v <- variants fam p ]
+  return (orig, vs)
+
+-- | 'sweep' on the compiles from 'compileSweep'.
+sweepCompiled :: String -> Program -> [Query] -> Either String IREnv -> [(Variant, Either String IREnv)] -> IO [(Family, Verdict)]
+sweepCompiled prog p qs orig vs = do
+  origOut <- runCompiled p orig qs
+  concurrently [ (,) (variantFamily v) <$> judgeCompiled prog (variantFamily v) (variantSite v) origOut (variantProgram v) c qs
+               | (v, c) <- vs ]
 
 -- | Run the actions concurrently, at most one per capability, and return
 -- their results in order (rethrowing the first exception). A program's
@@ -444,11 +483,58 @@ rewriteTests = testGroup "RewriteInvariance" [unitTests, probeTests]
 
 -- | One test per corpus program: every family at every site, compared at the
 -- program's own probability query points (both possible and impossible rows).
-rewriteCorpusTests :: Corpus -> IO TestTree
-rewriteCorpusTests corpus = corpusSweep corpus SweepSpec
+--
+-- The program and its variants are always compiled; their queries run only
+-- when 'rewriteKey' differs from the one recorded at the program's last pass
+-- ('ImpactManifest').
+rewriteCorpusTests :: Corpus -> Manifest -> IO TestTree
+rewriteCorpusTests corpus manifest = corpusSweep corpus SweepSpec
   { sweepName = "Slow.RewriteInvarianceCorpus", sweepTier = Slow, sweepSlow = SkipSlow
   , sweepSelect = \e -> Interpreter `elem` ceBackends e && null (neurals (ceProgram e)) && not (null (queries e))
   , sweepNote = "every rewrite family at every site agrees with the original at its p() rows" } $ \e ->
-    testCaseInfo (ceName e) (sweep (ceName e) (ceProgram e) (queries e) >>= report (ceName e))
+    testCaseInfo (ceName e) $ do
+      let n = ceName e; p = ceProgram e; qs = queries e
+      (orig, vs) <- compileSweep p
+      r <- cachedAction manifest "Slow.RewriteInvarianceCorpus" n (rewriteKey manifest p qs orig vs)
+             (sweepCompiled n p qs orig vs >>= report n)
+      return (either ("skipped: unchanged since " ++) id r)
   where
     queries e = [(s, params) | ProbTestCase _ s params _ <- ceCases e]
+
+-- | Bump when the rewrite oracle's logic changes.
+rewriteCheckVersion :: String
+rewriteCheckVersion = "rewrite-invariance-v1"
+
+-- | Key of one program's rewrite sweep: the query rows, and for the original
+-- and every variant (by family and site) its runtime fields and its compile
+-- as shown, a refusal's message included, with the interpreter fingerprint.
+-- This module's and "Rewrites"' sources join the harness. A crash is keyed by
+-- its message, as it is deterministic. A compile that timed out, or whose
+-- environment crashes or runs out of time while shown, leaves the program
+-- without a key, so the sweep runs.
+rewriteKey :: Manifest -> Program -> [Query] -> Either String IREnv -> [(Variant, Either String IREnv)] -> IO (Maybe String)
+rewriteKey m p qs orig vs
+  | any timedOut (orig : map snd vs) = return Nothing
+  | otherwise = do
+      shown <- mapM renderTimed (orig : map snd vs)
+      case sequence shown of
+        Nothing -> return Nothing
+        Just (o : cs) -> do
+          h <- harnessFingerprint m
+          src <- sourcesFingerprint m ["test/TestRewrites.hs", "test/Rewrites.hs"]
+          i <- interpreterFingerprint m
+          return $ Just $ hashKey $
+            [rewriteCheckVersion, h, src, i, show qs, programRuntimeFields p, o]
+            ++ concat [ [familyName (variantFamily v), variantSite v, programRuntimeFields (variantProgram v), c]
+                      | ((v, _), c) <- zip vs cs ]
+        Just [] -> return Nothing
+  where
+    timedOut c = case c of
+      Left why -> "timeout" `isPrefixOf` why
+      Right _ -> False
+    renderTimed c = do
+      r <- timeout (20 * 1000000) (try (evaluate (let str = show c in length str `seq` str)))
+      return $ case r of
+        Just (Right str) -> Just str
+        Just (Left (_ :: SomeException)) -> Nothing
+        Nothing -> Nothing

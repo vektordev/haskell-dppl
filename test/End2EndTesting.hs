@@ -59,15 +59,18 @@ import qualified Data.Map as Map
 -- corpus query rows against ~200 eligible programs, that was ~5x more compiles
 -- than the differential needs, and this group's own cost (~25s) came from
 -- exactly that.
-selectPassDifferentialTests :: Corpus -> IO TestTree
-selectPassDifferentialTests corpus = corpusSweep corpus SweepSpec
+selectPassDifferentialTests :: Corpus -> Manifest -> IO TestTree
+selectPassDifferentialTests corpus manifest = corpusSweep corpus SweepSpec
   { sweepName = "SelectPassNoOp", sweepTier = Default, sweepSlow = SkipSlow
   , sweepSelect = interpreterRouted
   , sweepNote = "the IR select pass changes no interpreter answer at any query point" } $ \e ->
     let p = ceProgram e
+        tcs = shapedCases e
         scalarEnv  = compile defaultCompilerConfig p
         batchedEnv = compile defaultCompilerConfig{batched = True} p
-    in testProperty (ceName e) (once $ conjoin (map (selectNoOp p scalarEnv batchedEnv) (shapedCases e)))
+    in testProperty (ceName e) (once $ cachedProperty manifest "SelectPassNoOp" (ceName e)
+                                  (differentialKey manifest selectPassCheckVersion p [scalarEnv, batchedEnv] tcs)
+                                  (conjoin (map (selectNoOp p scalarEnv batchedEnv) tcs)))
 
 -- | Interpreter-routed in its @.tst@ header.
 interpreterRouted :: CorpusEntry -> Bool
@@ -94,8 +97,8 @@ shapedCases e = map (shapeNeuralTestCase (ceProgram e)) (ceCases e)
 --
 -- Non-neural programs are 'budgetZeroDifferentialTests'' instead: budget 0
 -- reaches no plan engine there, so the name would mislead.
-planEngineDifferentialTests :: Corpus -> IO TestTree
-planEngineDifferentialTests corpus = corpusSweepAll corpus SweepSpec
+planEngineDifferentialTests :: Corpus -> Manifest -> IO TestTree
+planEngineDifferentialTests corpus manifest = corpusSweepAll corpus SweepSpec
   { sweepName = "PlanEngineMatchesDense", sweepTier = Default, sweepSlow = SkipSlow
   , sweepSelect = \e -> interpreterRouted e && not (null (neurals (ceProgram e)))
   , sweepNote = "budget 0 (the plan engine) agrees with dense enumeration wherever it answers" } $ \entries -> do
@@ -104,10 +107,13 @@ planEngineDifferentialTests corpus = corpusSweepAll corpus SweepSpec
     [ testProperty "the programs that must reach the plan engine are in the corpus" $
         counterexample ("not found: " ++ show missing) (null missing) ]
     ++
-    [ testProperty n (once $ conjoin (map (planMatchesDense n p planEnv denseEnv) (shapedCases e)))
+    [ testProperty n (once $ cachedProperty manifest "PlanEngineMatchesDense" n
+                               (differentialKey manifest planEngineCheckVersion p [planEnv, denseEnv] tcs)
+                               (conjoin (map (planMatchesDense n p planEnv denseEnv) tcs)))
     | e <- entries
     , let n = ceName e
     , let p = ceProgram e
+    , let tcs = shapedCases e
     , let planEnv  = compile defaultCompilerConfig{materializationCardinality = 0} p
     , let denseEnv = compile defaultCompilerConfig p ]
 
@@ -120,8 +126,8 @@ planEngineDifferentialTests corpus = corpusSweepAll corpus SweepSpec
 -- does not answer is skipped, as there. 'budgetZeroKnownDivergent' lists the
 -- programs where the two disagree for a tracked reason, and
 -- 'budgetZeroKnownDivergentRows' the single query rows.
-budgetZeroDifferentialTests :: Corpus -> IO TestTree
-budgetZeroDifferentialTests corpus = corpusSweep corpus SweepSpec
+budgetZeroDifferentialTests :: Corpus -> Manifest -> IO TestTree
+budgetZeroDifferentialTests corpus manifest = corpusSweep corpus SweepSpec
   { sweepName = "BudgetZeroMatchesDefault", sweepTier = Default, sweepSlow = SkipSlow
   , sweepSelect = \e -> interpreterRouted e && null (neurals (ceProgram e))
                        && ceName e `notElem` budgetZeroKnownDivergent
@@ -131,7 +137,9 @@ budgetZeroDifferentialTests corpus = corpusSweep corpus SweepSpec
         tcs = filter (not . knownDivergentRow n) (shapedCases e)
         zeroEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
         defEnv  = compile defaultCompilerConfig p
-    in testProperty n (once $ conjoin (map (planMatchesDense n p zeroEnv defEnv) tcs))
+    in testProperty n (once $ cachedProperty manifest "BudgetZeroMatchesDefault" n
+                                (differentialKey manifest budgetZeroCheckVersion p [zeroEnv, defEnv] tcs)
+                                (conjoin (map (planMatchesDense n p zeroEnv defEnv) tcs)))
   where
     knownDivergentRow n tc = case tc of
       ProbTestCase _ sample _ _ -> (n, sample) `elem` budgetZeroKnownDivergentRows
@@ -169,8 +177,8 @@ budgetZeroKnownDivergentRows =
 -- neural programs out. A program the plan engine does not answer at budget 0
 -- is skipped, as in 'planEngineDifferentialTests', and so are the programs
 -- listed in 'readLogitsLinearOnly'.
-planEngineLogSpaceTests :: Corpus -> IO TestTree
-planEngineLogSpaceTests corpus = corpusSweep corpus SweepSpec
+planEngineLogSpaceTests :: Corpus -> Manifest -> IO TestTree
+planEngineLogSpaceTests corpus manifest = corpusSweep corpus SweepSpec
   { sweepName = "PlanEngineLogSpaceMatchesLinear", sweepTier = Default, sweepSlow = SkipSlow
   , sweepSelect = \e -> interpreterRouted e && not (null (neurals (ceProgram e)))
                        && ceName e `notElem` readLogitsLinearOnly
@@ -179,7 +187,9 @@ planEngineLogSpaceTests corpus = corpusSweep corpus SweepSpec
     let p = ceProgram e
         linEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
         logEnv = compile defaultCompilerConfig{materializationCardinality = 0, logSpace = True} p
-    in testProperty (ceName e) (once $ conjoin (map (logMatchesLinear p linEnv logEnv) (ceCases e)))
+    in testProperty (ceName e) (once $ cachedProperty manifest "PlanEngineLogSpaceMatchesLinear" (ceName e)
+                                  (differentialKey manifest planLogSpaceCheckVersion p [linEnv, logEnv] (ceCases e))
+                                  (conjoin (map (logMatchesLinear p linEnv logEnv) (ceCases e))))
   where
     logMatchesLinear p linEnv logEnv tc = case tc of
       ProbTestCase  name sample params _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
@@ -740,7 +750,7 @@ data NetMock = NetMock
   { netMockName  :: String
   , netMockInput :: RType
   , netMockWidth :: Int
-  }
+  } deriving (Show)
 
 -- | A program's declared networks, in declaration order -- what the
 -- Julia/Python harnesses install mocks for.
@@ -979,12 +989,26 @@ testPythonWriteLogits netNames compiledE rows = ioProperty $ case compiledE of
   Left err -> return $ counterexample err False
   Right compiled -> do
     projectDir <- getCurrentDirectory
-    let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
-        script = "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n"
+    code <- withSystemTempFile "spll_writelogits.py" $ \tmpPath tmpHandle -> do
+      hPutStr tmpHandle (pythonWriteLogitsScript projectDir netNames compiled rows)
+      hClose tmpHandle
+      (_, _, _, handle) <- createProcess (proc "python3" [tmpPath])
+      waitForProcess handle
+    return $ case code of
+      ExitSuccess -> property True
+      ExitFailure _ -> counterexample ("Python writeLogits test " ++ wlName (head rows) ++ " failed. See Python error message") False
+
+-- | The script 'testPythonWriteLogits' runs: the emitted module, one identity
+-- mock per network, and the row checks.
+pythonWriteLogitsScript :: FilePath -> [NetMock] -> IREnv -> [WriteLogitsRow] -> String
+pythonWriteLogitsScript projectDir netNames compiled rows = script
+  where
+    src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
+    script = "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n"
           ++ concatMap pyMockDef netNames
           ++ unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src))
           ++ "\n" ++ concatMap row rows
-        row r =
+    row r =
           "_wl = list(" ++ wlTarget r ++ ".writeLogits(" ++ intercalate ", " (map pyVal (wlArgs r)) ++ "))\n"
           ++ case wlCheck r of
                WLLength n ->
@@ -993,14 +1017,6 @@ testPythonWriteLogits netNames compiledE rows = ioProperty $ case compiledE of
                WLSlot i e ->
                  "if not (" ++ show i ++ " < len(_wl) and abs(_wl[" ++ show i ++ "] - " ++ pyVal (VFloat e) ++ ") < " ++ show writeLogitsSlotTolerance ++ "):\n\
                  \  raise ValueError(\"writeLogits slot " ++ show i ++ " wrong: \" + str(_wl) + \" in test case " ++ wlName r ++ "\")\n"
-    code <- withSystemTempFile "spll_writelogits.py" $ \tmpPath tmpHandle -> do
-      hPutStr tmpHandle script
-      hClose tmpHandle
-      (_, _, _, handle) <- createProcess (proc "python3" [tmpPath])
-      waitForProcess handle
-    return $ case code of
-      ExitSuccess -> property True
-      ExitFailure _ -> counterexample ("Python writeLogits test " ++ wlName (head rows) ++ " failed. See Python error message") False
 
 -- | The Julia twin of 'testPythonWriteLogits', every program in one julia
 -- process (one module each), like 'testJuliaAll'.
@@ -1009,12 +1025,27 @@ testJuliaWriteLogitsAll programs = ioProperty $ case [err | (Left err, _, _) <- 
   (err:_) -> return $ counterexample err False
   [] -> do
     projectDir <- getCurrentDirectory
-    let body = concatMap (\(idx, (c, rows, nets)) ->
+    let script = "include(\"" ++ projectDir ++ "/juliaLib.jl\")\nusing .JuliaSPPLLib\n"
+                 ++ juliaWriteLogitsBody [ (c, rows, nets) | (Right c, rows, nets) <- programs ]
+    code <- withSystemTempFile "julia_writelogits.jl" $ \tmpPath tmpHandle -> do
+      hPutStr tmpHandle script
+      hClose tmpHandle
+      (_, _, _, handle) <- createProcess (proc "julia" [tmpPath])
+      waitForProcess handle
+    return $ case code of
+      ExitSuccess -> property True
+      ExitFailure _ -> counterexample "Julia writeLogits batch failed. See Julia error message above." False
+
+-- | The modules and row checks 'testJuliaWriteLogitsAll' runs, one module
+-- per program, without the runtime's @include@ line.
+juliaWriteLogitsBody :: [(IREnv, [WriteLogitsRow], [NetMock])] -> String
+juliaWriteLogitsBody programs = concatMap (\(idx, (c, rows, nets)) ->
           let m = "WLProg" ++ show (idx :: Int)
           in "module " ++ m ++ "\nusing ..JuliaSPPLLib\n"
              ++ juliaMockDefs nets
              ++ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions c) ++ "\nend\n"
-             ++ concatMap (row m) rows) (zip [0 ..] [ (c, rows, nets) | (Right c, rows, nets) <- programs ])
+             ++ concatMap (row m) rows) (zip [0 ..] programs)
+  where
         row m r =
           "_wl = collect(" ++ m ++ "." ++ wlTarget r ++ "_writeLogits(" ++ intercalate ", " (map (juliaVal . qualifyConstructors m) (wlArgs r)) ++ "))\n"
           ++ case wlCheck r of
@@ -1024,15 +1055,6 @@ testJuliaWriteLogitsAll programs = ioProperty $ case [err | (Left err, _, _) <- 
                WLSlot i e ->
                  "if !(" ++ show i ++ " < length(_wl) && abs(_wl[" ++ show (i + 1) ++ "] - " ++ juliaVal (VFloat e) ++ ") < " ++ show writeLogitsSlotTolerance ++ ")\n\
                  \  error(\"writeLogits slot " ++ show i ++ " wrong: \" * string(_wl) * \" in test case " ++ wlName r ++ "\")\nend\n"
-        script = "include(\"" ++ projectDir ++ "/juliaLib.jl\")\nusing .JuliaSPPLLib\n" ++ body
-    code <- withSystemTempFile "julia_writelogits.jl" $ \tmpPath tmpHandle -> do
-      hPutStr tmpHandle script
-      hClose tmpHandle
-      (_, _, _, handle) <- createProcess (proc "julia" [tmpPath])
-      waitForProcess handle
-    return $ case code of
-      ExitSuccess -> property True
-      ExitFailure _ -> counterexample "Julia writeLogits batch failed. See Julia error message above." False
 
 juliaBatchTestCode :: FilePath -> [(String, [TestCase], [NetMock])] -> String
 juliaBatchTestCode projectDir allCases =
@@ -1255,11 +1277,12 @@ batchedPythonFixtures corpusEntries' = do
 -- ('runBatchedPython'/'runBatchedGradients'/'runBatchedGenerate'/
 -- 'runBatchedDense' False -- each well under 5s). The topK-threshold
 -- differentials live in 'slowBatchedPythonTests' instead -- see there for why.
-batchedPythonTests :: Corpus -> IO TestTree
-batchedPythonTests corpus = corpusSweepAll corpus SweepSpec
+batchedPythonTests :: Corpus -> Manifest -> IO TestTree
+batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
   { sweepName = "BatchedPython", sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
   , sweepNote = "batched/dense eligibility of every program, and the batched value differentials" } $ \entries -> do
   (declared, gained, eligible, denseDeclared, _, _, mpy) <- batchedPythonFixtures entries
+  mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
   let refused  = [ (n, msg) | (n, Left msg) <- declared ]
       denseNames = map (\(n, _, _, _) -> n) denseDeclared
       denseRefused = [ n | n <- denseNames
@@ -1272,15 +1295,25 @@ batchedPythonTests corpus = corpusSweepAll corpus SweepSpec
     , testProperty "declared-dense-eligible" (once (declaredDenseProp (length denseNames) denseRefused))
     , testProperty "dense-eligibility-gain-note" (once (denseGainNoteProp denseGained))
     , testProperty "dense-domain-boundary" (once (denseBoundaryProp eligible))
-    ] ++ case mpy of
+    ] ++ case mtorch of
       Nothing ->
         [ testProperty "torch-python-found" $ once $ ioProperty $
             noTorchProperty "BatchedPython value differential" ]
-      Just py ->
-        [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
-        , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
-        , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible))
-        , testProperty "dense-matches-expected" (once (runBatchedDense False py denseDeclared)) ]
+      Just (py, torch) ->
+        [ testProperty "batched-vs-expected" (once (cachedTorch torch "batched-vs-expected" eligible (runBatchedPython py)))
+        , testProperty "gradients-nan-free" (once (cachedTorch torch "gradients-nan-free" eligible (runBatchedGradients py)))
+        , testProperty "generate-density-matches-expected"
+            (once (cachedTorch torch "generate-density-matches-expected" eligible (runBatchedGenerate py)))
+        , testProperty "dense-matches-expected" (once (cachedTorch torch "dense-matches-expected" denseDeclared (runBatchedDense False py))) ]
+  where
+    -- Each value differential runs every program in one torch process, so it
+    -- is a batch: only the programs whose key changed are run, and an
+    -- all-unchanged differential starts no python. An empty selection runs
+    -- as it is, so the differential's own "nothing eligible" failure stands.
+    cachedTorch torch name entries run
+      | null entries = run entries
+      | otherwise = cachedBatch manifest ("BatchedPython." ++ name)
+                      [ (n, batchedKey manifest torch name x, x) | x@(n, _, _, _) <- entries ] run
 
 -- | The topK-threshold half of the M5 differential ('topk-is-per-element',
 -- 'dense-inherits-topk'): each recompiles every batched-declaring program at
@@ -2134,7 +2167,7 @@ data BatchGroup = BatchGroup
   , bgSamples    :: [IRValue]
   , bgExpProb    :: [Double]
   , bgExpDim     :: [Double]
-  }
+  } deriving (Show)
 
 -- | Split a program's prob/cumulative test cases into batchable groups, or
 -- 'Nothing' if any sample is not structure-of-arrays batchable (a non
@@ -3262,6 +3295,17 @@ normalizationCheckVersion = "normalization-v1"
 pythonCheckVersion        = "python-v1"
 juliaCheckVersion         = "julia-v1"
 
+selectPassCheckVersion, planEngineCheckVersion, budgetZeroCheckVersion, planLogSpaceCheckVersion :: String
+selectPassCheckVersion    = "select-pass-v1"
+planEngineCheckVersion    = "plan-engine-v1"
+budgetZeroCheckVersion    = "budget-zero-v1"
+planLogSpaceCheckVersion  = "plan-log-space-v1"
+
+pythonWriteLogitsCheckVersion, juliaWriteLogitsCheckVersion, batchedCheckVersion :: String
+pythonWriteLogitsCheckVersion = "python-writelogits-v1"
+juliaWriteLogitsCheckVersion  = "julia-writelogits-v1"
+batchedCheckVersion           = "batched-v1"
+
 -- | The parts of the parsed program the @run*C@ entry points read besides the
 -- compiled 'IREnv' (networks, the writeLogits registry, ADT declarations).
 programRuntimeFields :: Program -> String
@@ -3286,6 +3330,47 @@ interpreterKey m p (Right env) tcs = do
   return $ Just $ hashKey
     [ interpreterCheckVersion, h, i, show env, programRuntimeFields p, show tcs
     , concatMap (interpreterRowInputs p) tcs, show (probTolerance, writeLogitsSlotTolerance) ]
+
+-- | Key of an interpreter differential over several compiles of one program
+-- (SelectPassNoOp, the plan-engine and budget-0 differentials): every compile
+-- as shown, a refusal included (it is the compiler's answer, and the
+-- differentials skip or compare it), plus the program's runtime fields, the
+-- rows, the tolerance and the interpreter. A compile that crashes while shown
+-- has no key, so the check executes.
+differentialKey :: Manifest -> String -> Program -> [Either CompilerError IREnv] -> [TestCase] -> IO (Maybe String)
+differentialKey m version p envs tcs = do
+  h <- harnessFingerprint m
+  i <- interpreterFingerprint m
+  return $ Just $ hashKey
+    ([version, h, i, programRuntimeFields p, show tcs, show probTolerance] ++ map show envs)
+
+-- | Key of 'testPythonWriteLogits': the exact script it runs, plus the
+-- Python runtime.
+pythonWriteLogitsKey :: Manifest -> [NetMock] -> Either CompilerError IREnv -> [WriteLogitsRow] -> IO (Maybe String)
+pythonWriteLogitsKey _ _ (Left _) _ = return Nothing
+pythonWriteLogitsKey m nets (Right env) rows = do
+  projectDir <- getCurrentDirectory
+  h <- harnessFingerprint m
+  py <- pythonFingerprint m
+  return $ Just $ hashKey [pythonWriteLogitsCheckVersion, h, py, pythonWriteLogitsScript projectDir nets env rows]
+
+-- | Key of one program's part of 'testJuliaWriteLogitsAll': its module and
+-- row checks as 'juliaWriteLogitsBody' renders them alone (the module number
+-- depends on the batch), plus the Julia runtime.
+juliaWriteLogitsKey :: Manifest -> Either CompilerError IREnv -> [WriteLogitsRow] -> [NetMock] -> IO (Maybe String)
+juliaWriteLogitsKey _ (Left _) _ _ = return Nothing
+juliaWriteLogitsKey m (Right env) rows nets = do
+  h <- harnessFingerprint m
+  jl <- juliaFingerprint m
+  return $ Just $ hashKey [juliaWriteLogitsCheckVersion, h, jl, juliaWriteLogitsBody [(env, rows, nets)]]
+
+-- | Key of one program's part of a batched-backend differential (@check@
+-- names which): everything the driver renders for it (name, batched source,
+-- query groups, network mocks) and the torch runtime ('torchFingerprint').
+batchedKey :: Manifest -> String -> String -> (String, String, [BatchGroup], [NetMock]) -> IO (Maybe String)
+batchedKey m torch check (n, src, gs, nets) = do
+  h <- harnessFingerprint m
+  return $ Just $ hashKey [batchedCheckVersion, check, h, torch, n, src, show gs, show nets]
 
 -- | Key of 'discreteProbsNormalized' on one program.
 normalizationKey :: Manifest -> Program -> Either CompilerError IREnv -> IO (Maybe String)
@@ -3479,13 +3564,18 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
         { sweepName = path ++ ".Python WriteLogits", sweepTier = tier, sweepSlow = slowH
         , sweepSelect = \e -> routed Python e && hasWriteLogits e
         , sweepNote = "every writeLogits row against the emitted Python" } $ \e ->
-          testProperty (ceName e) (once $ testPythonWriteLogits (networkMocks (ceProgram e)) (opt e) (writeLogitsRows e))
+          let n = ceName e; nets = networkMocks (ceProgram e); c = opt e; wl = writeLogitsRows e
+          in testProperty n (once $ cachedProperty manifest (check "Python WriteLogits") n (pythonWriteLogitsKey manifest nets c wl)
+                                      (testPythonWriteLogits nets c wl))
     , corpusSweepAll corpus SweepSpec
         { sweepName = path ++ ".Julia WriteLogits", sweepTier = tier, sweepSlow = slowH
         , sweepSelect = \e -> routed Julia e && hasWriteLogits e
         , sweepNote = "every writeLogits row against the emitted Julia, in one batch" } $ \es ->
           return $ testProperty "Julia WriteLogits"
-            (once $ testJuliaWriteLogitsAll [ (opt e, writeLogitsRows e, networkMocks (ceProgram e)) | e <- es ])
+            (once $ cachedBatch manifest (check "Julia WriteLogits")
+                      [ (ceName e, juliaWriteLogitsKey manifest c wl nets, (c, wl, nets))
+                      | e <- es, let c = opt e, let wl = writeLogitsRows e, let nets = networkMocks (ceProgram e) ]
+                      testJuliaWriteLogitsAll)
     -- The same corpus through the text backends at -O0. See 'unoptEnvs' for
     -- why this is not merely a duplicate of the optimized groups. None of
     -- 'unoptimizedCodegenSmoke' is neural, so this stays on the plain
@@ -3494,12 +3584,17 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
         { sweepName = path ++ ".Julia Unoptimized", sweepTier = tier, sweepSlow = slowH
         , sweepSelect = unoptSmoke Julia
         , sweepNote = "the -O0 codegen smoke subset against the emitted Julia" } $ \es ->
-          return $ testProperty "Julia Unoptimized" (once $ testJuliaAll [ (unopt e, queries e, []) | e <- es ])
+          return $ testProperty "Julia Unoptimized"
+            (once $ cachedBatch manifest (check "Julia Unoptimized")
+                      [ (ceName e, juliaKey manifest (unopt e) (queries e) [], (unopt e, queries e, [])) | e <- es ]
+                      testJuliaAll)
     , corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Python Unoptimized", sweepTier = tier, sweepSlow = slowH
         , sweepSelect = unoptSmoke Python
         , sweepNote = "the -O0 codegen smoke subset against the emitted Python" } $ \e ->
-          testProperty (ceName e) (once $ testPython [] (unopt e) (queries e))
+          let n = ceName e
+          in testProperty n (once $ cachedProperty manifest (check "Python Unoptimized") n (pythonKey manifest [] (unopt e) (queries e))
+                                      (testPython [] (unopt e) (queries e)))
     ]
   return $ testGroup treeName ([interp, interpUnopt] ++ backends)
   where

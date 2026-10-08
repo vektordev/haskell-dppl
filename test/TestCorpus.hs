@@ -60,6 +60,8 @@ import CorpusSweep
 import TestCaseParser (TestCase(..), Expectation(..), Backend(..))
 import TestTolerances (probTolerance, samplingTolerance)
 import TestSupport (topKConf, bcConf, reasonablyClose)
+import ImpactManifest
+import End2EndTesting (programRuntimeFields)
 
 -- The expected-value tables that used to live here have moved into the
 -- test/cases/**/*.ppl + *.tst corpus (see the End2End groups). The metamorphic
@@ -116,8 +118,10 @@ expectedProbDim other = error ("malformed probability expectation in .tst corpus
 -- both heavy-tailed lognormal products and log-domain programs whose inverse
 -- overflows. Convergence is instead encoded in the corpus itself as an upper-tail
 -- cdf(x)=(1.0, 0.0) line per program.
-corpusTests :: Corpus -> IO TestTree
-corpusTests corpus = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corpus") $ sequence
+-- | The sweeps keyed by impact analysis record their passes in @manifest@
+-- (today 'Corpus.LogSpaceMatchesLinear', see 'logSpaceKey').
+corpusTests :: Corpus -> Manifest -> IO TestTree
+corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corpus") $ sequence
   [ corpusProperty SweepSpec
       { sweepName = "Corpus.ValidPrograms", sweepTier = Default, sweepSlow = SkipSlow
       , sweepSelect = corpusPoolEntry, sweepNote = "every program the interpreter runs passes validateProgram" } $ \probPool _ ->
@@ -171,11 +175,23 @@ corpusTests corpus = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corp
   -- semiring since task worlds-measure-unification. (The pool holds no neural
   -- program, so the plan engine's worlds are checked by End2End's
   -- PlanEngineLogSpaceMatchesLinear instead.)
-  , corpusProperty SweepSpec
+  --
+  -- One test per program rather than one property over the pool, so each
+  -- program has a slot in the impact-analysis manifest: a program whose
+  -- log-space compile and rows are unchanged since it last passed is skipped
+  -- (docs-repo task impact-analysis-remaining-sweeps).
+  , corpusSweepAll corpus SweepSpec
       { sweepName = "Corpus.LogSpaceMatchesLinear", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "exp of the log-space answer is the .tst expectation" } $ \probPool _ ->
-      testProperty "LogSpaceMatchesLinear"
-      (forAllNamedIn probPool (checkLogSpaceMatchesLinear logEnvs))
+      , sweepSelect = corpusPoolEntry, sweepNote = "exp of the log-space answer is the .tst expectation" } $ \es ->
+      return $ testGroup "LogSpaceMatchesLinear"
+        [ testProperty n $ once $ cachedProperty manifest "Corpus.LogSpaceMatchesLinear" n
+            (logSpaceKey manifest p (lookupCompiled logEnvs n) rows)
+            (conjoin [ counterexample ("corpus case: " ++ n) (checkLogSpaceMatchesLinear logEnvs n tc) | tc <- rows ])
+        | e <- es
+        , let n = ceName e
+        , let p = ceProgram e
+        , let rows = map snd (probCasesOf [e])
+        , not (null rows) ]
   -- task topk-logspace-unsound: logSpace combined with topK used to discard all
   -- probability mass (accProb/TOP_K_CUTOFF arithmetic was hardcoded linear, so
   -- every branch compared a log-probability against a linear threshold and was
@@ -234,6 +250,25 @@ corpusTests corpus = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corp
     -- case surfaces on every run, rather than only when a random draw selects it.
     forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f n tc) | (n, tc) <- pool]
     samplingEps outDim = if outDim == VFloat 0 then 1e-9 else 0.05
+
+-- | Bump when 'checkLogSpaceMatchesLinear' changes.
+logSpaceCheckVersion :: String
+logSpaceCheckVersion = "corpus-log-space-v1"
+
+-- | Key of 'Corpus.LogSpaceMatchesLinear' on one program: its log-space
+-- compile, its runtime fields, its p() rows (query point, parameters,
+-- expectation) and the tolerance, with the interpreter fingerprint; this
+-- module's source joins the harness. A refused compile has no key, so the
+-- check runs (and fails, as it always did).
+logSpaceKey :: Manifest -> Program -> Either CompilerError IREnv -> [(Program, IRValue, [IRValue], (IRValue, IRValue))] -> IO (Maybe String)
+logSpaceKey _ _ (Left _) _ = return Nothing
+logSpaceKey m p (Right env) rows = do
+  h <- harnessFingerprint m
+  src <- sourcesFingerprint m ["test/TestCorpus.hs"]
+  i <- interpreterFingerprint m
+  return $ Just $ hashKey
+    [ logSpaceCheckVersion, h, src, i, show env, programRuntimeFields p
+    , show [ (inp, params, expected) | (_, inp, params, expected) <- rows ], show probTolerance ]
 
 checkValidPrograms :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkValidPrograms (p, _, _, _) = case validateProgram p of

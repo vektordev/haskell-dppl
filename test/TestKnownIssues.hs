@@ -57,7 +57,8 @@ import TestCaseParser
   )
 import ScalingCheck (Point(..), Verdict(..), climb, expandTemplate)
 import TestTolerances (probTolerance)
-import End2EndTesting (networkMocks, pythonTestScript, resolveNeuralTestCase, shapeNeuralTestCase)
+import End2EndTesting (networkMocks, pythonTestScript, resolveNeuralTestCase, shapeNeuralTestCase, programRuntimeFields)
+import ImpactManifest
 
 knownIssuesDir :: FilePath
 knownIssuesDir = corpusRoot </> "known-issues"
@@ -73,15 +74,17 @@ knownIssueBaseNames = do
       entries <- listDirectory knownIssuesDir
       return [ takeBaseName e | e <- entries, ".ppl" `isExtensionOf` e ]
 
-knownIssuesTests :: IO TestTree
-knownIssuesTests = do
+-- | The @broken@ and @wrong-result@ pins record their passes in @manifest@
+-- ('ImpactManifest'; see 'knownIssueKey').
+knownIssuesTests :: Manifest -> IO TestTree
+knownIssuesTests manifest = do
   names <- knownIssueBaseNames
   -- A `slow`-headered pin runs only under NEST_SLOW_TESTS, like the slow
   -- programs of the ordinary corpus. The header is read here, while the tree
   -- is built, so a skipped pin is absent rather than a passing no-op.
   runSlow <- maybe False (const True) <$> lookupEnv "NEST_SLOW_TESTS"
   kept <- filterM (\n -> (runSlow ||) . not <$> isSlow n) names
-  return $ testGroup "KnownIssues" (map knownIssueTest kept)
+  return $ testGroup "KnownIssues" (map (knownIssueTest manifest) kept)
   where
     isSlow n = do
       let tstPath = knownIssuesDir </> (n ++ ".tst")
@@ -89,8 +92,8 @@ knownIssuesTests = do
       (_, slow, _, _) <- either error return (parseTestCasesFromString tstPath src)
       length src `seq` return slow
 
-knownIssueTest :: String -> TestTree
-knownIssueTest baseName = testCaseInfo baseName $ do
+knownIssueTest :: Manifest -> String -> TestTree
+knownIssueTest manifest baseName = testCaseInfo baseName $ do
   let pplPath = knownIssuesDir </> (baseName ++ ".ppl")
       tstPath = knownIssuesDir </> (baseName ++ ".tst")
   tstSrc <- readFile tstPath
@@ -107,10 +110,53 @@ knownIssueTest baseName = testCaseInfo baseName $ do
     Just (ExpectHang flags cap) -> do
       prog <- parseProgram pplPath
       checkHang baseName prog flags cap
+    -- The pins that run a compiled program (on the interpreter, or through
+    -- the emitted Python) are skipped while what they run is unchanged. The
+    -- rest are checks on the compile itself, which the manifest never skips.
+    Just ef | executesProgram ef -> do
+      prog <- parseProgram pplPath
+      r <- cachedAction manifest "KnownIssues" baseName (knownIssueKey manifest prog backends ef tcs)
+                        (checkExpectFailure baseName prog backends ef tcs)
+      return (either ("skipped: unchanged since " ++) (const "") r)
     Just ef -> do
       prog <- parseProgram pplPath
       checkExpectFailure baseName prog backends ef tcs
       return ""
+  where
+    executesProgram ef = case ef of
+      ExpectBroken      -> True
+      ExpectWrongResult -> True
+      _                 -> False
+
+-- | Bump when the @broken@/@wrong-result@ checks' logic changes.
+knownIssueCheckVersion :: String
+knownIssueCheckVersion = "known-issue-v1"
+
+-- | Key of a @broken@ or @wrong-result@ pin: the @expect-failure@ header and
+-- the backends it is checked on, the compiled 'IREnv' with the program's
+-- runtime fields and its rows (the interpreter half, with the interpreter
+-- fingerprint), and on Python the exact script each row runs with the Python
+-- runtime. This module's source joins the harness. A refused compile is keyed
+-- by its message; one that crashes has no key, so the pin runs, which costs
+-- only that compile again.
+knownIssueKey :: Manifest -> Program -> [Backend] -> ExpectFailure -> [TestCase] -> IO (Maybe String)
+knownIssueKey m prog backends ef tcs = do
+  h <- harnessFingerprint m
+  src <- sourcesFingerprint m ["test/TestKnownIssues.hs"]
+  i <- interpreterFingerprint m
+  let compiled = compile defaultCompilerConfig prog
+      checked = filter (`elem` checkableBackends) backends
+  pyPart <- case compiled of
+    Right env | Python `elem` checked -> do
+      projectDir <- getCurrentDirectory
+      py <- pythonFingerprint m
+      return (py : [ pythonTestScript projectDir (networkMocks prog) env
+                       [resolveNeuralTestCase prog (shapeNeuralTestCase prog tc)]
+                   | tc <- queryRows tcs ])
+    _ -> return []
+  return $ Just $ hashKey
+    ([knownIssueCheckVersion, h, src, i, show ef, show checked, show compiled, programRuntimeFields prog, show tcs
+     , show probTolerance] ++ pyPart)
 
 checkExpectFailure :: String -> Program -> [Backend] -> ExpectFailure -> [TestCase] -> IO ()
 checkExpectFailure name _ _ ExpectGrowthAbove{} _ =

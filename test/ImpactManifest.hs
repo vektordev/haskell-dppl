@@ -30,8 +30,11 @@
 -- from the fingerprints here: 'harnessFingerprint' (the harness sources, the
 -- backstop for a change to a check's logic), 'interpreterFingerprint' (M1: the
 -- source of every module in the interpreter's import closure),
--- 'pythonFingerprint' and 'juliaFingerprint' (the runtime library file and the
--- language version).
+-- 'pythonFingerprint', 'juliaFingerprint' and 'torchFingerprint' (the runtime
+-- library file and the language version), and 'sourcesFingerprint' (the
+-- module of a sweep defined outside the harness). A check is a QuickCheck
+-- property ('cachedProperty'), a batch sharing one process ('cachedBatch'), or
+-- an HUnit action ('cachedAction').
 module ImpactManifest
   ( Manifest
   , openManifest
@@ -41,13 +44,16 @@ module ImpactManifest
   , fullTestsRequested
   , cachedProperty
   , cachedBatch
+  , cachedAction
   , manifestStats
   , hashKey
   , harnessFingerprint
+  , sourcesFingerprint
   , interpreterFingerprint
   , interpreterClosure
   , pythonFingerprint
   , juliaFingerprint
+  , torchFingerprint
   ) where
 
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -81,6 +87,7 @@ data Manifest = Manifest
   , mNew    :: MVar (Map.Map String (String, String))   -- ^ slots passed this run
   , mStats  :: MVar (Map.Map String (Int, Int))     -- ^ check -> (executed, skipped)
   , mHarness, mInterpreter, mPython, mJulia :: IO String  -- ^ fingerprints, each computed once
+  , mSources :: MVar (Map.Map [FilePath] String)     -- ^ 'sourcesFingerprint', per file list
   }
 
 -- | Where the default manifest lives, relative to the package root (the test
@@ -114,9 +121,11 @@ openManifest file full = do
   interp <- once' computeInterpreter
   py <- once' computePython
   jl <- once' computeJulia
+  sources <- newMVar Map.empty
   return Manifest { mFile = file, mFull = full, mCommit = commit, mOld = old
                   , mNew = newVar, mStats = statsVar
-                  , mHarness = harness, mInterpreter = interp, mPython = py, mJulia = jl }
+                  , mHarness = harness, mInterpreter = interp, mPython = py, mJulia = jl
+                  , mSources = sources }
   where
     parseRow row = case splitTabs row of
       [slot, key, commit] | not (null slot), length key == 64 -> Just (slot, (key, commit))
@@ -233,6 +242,23 @@ cachedBatch m check items runBatch = ioProperty $ do
              (mapM_ (\(prog, k, _) -> maybe (return ()) (recordPass m check prog) k) todo)))
          (runBatch [ x | (_, _, x) <- todo ])
 
+-- | One check on one program whose test is an action rather than a QuickCheck
+-- property (an HUnit assertion, which fails by throwing). On a hit the action
+-- is not run and the answer is @Left commit@ (the commit the key passed at);
+-- on a miss it runs, and its key is recorded once it returns without throwing.
+cachedAction :: Manifest -> String -> String -> IO (Maybe String) -> IO a -> IO (Either String a)
+cachedAction m check prog mkKey act = do
+  mk <- forceKey mkKey
+  case mk of
+    Just key | Just commit <- lookupPass m check prog key -> do
+      bump m check 0 1
+      return (Left commit)
+    _ -> do
+      bump m check 1 0
+      r <- act
+      maybe (return ()) (recordPass m check prog) mk
+      return (Right r)
+
 -- | SHA-256 (hex) of the parts, NUL-separated so part boundaries are
 -- unambiguous.
 hashKey :: [String] -> String
@@ -271,6 +297,18 @@ computeHarness :: IO String
 computeHarness = do
   hs <- mapM fileHash [ "test" </> f | f <- ["End2EndTesting.hs", "CorpusSweep.hs", "ImpactManifest.hs", "TestCaseParser.hs", "TestTolerances.hs"] ]
   return (hashKey ("harness" : hs))
+
+-- | The source of further test modules a check's logic lives in, beyond the
+-- harness ('harnessFingerprint'): a sweep defined outside "End2EndTesting"
+-- ("TestCorpus", "TestKnownIssues", "TestRewrites") adds its own module, so an
+-- edit to it reruns that sweep and nothing else. Hashed once per list.
+sourcesFingerprint :: Manifest -> [FilePath] -> IO String
+sourcesFingerprint m files = modifyMVar (mSources m) $ \cache -> case Map.lookup files cache of
+  Just v -> return (cache, v)
+  Nothing -> do
+    hs <- mapM fileHash files
+    let !v = hashKey ("sources" : hs)
+    return (Map.insert files v cache, v)
 
 -- | Every @src/@ module the interpreter transitively imports (M1 of the task:
 -- any change to them invalidates every interpreter-run check), plus
@@ -330,6 +368,15 @@ computeJulia = do
   lib <- fileHash "juliaLib.jl"
   ver <- versionOf "julia" ["--version"]
   return (hashKey ["julia", lib, ver])
+
+-- | @pythonLibBatched.py@ and the torch-enabled python at @py@ (its path, the
+-- Python version and torch's), for the batched-backend checks. Computed by the
+-- caller once per tree build, since the python is found there.
+torchFingerprint :: FilePath -> IO String
+torchFingerprint py = do
+  lib <- fileHash "pythonLibBatched.py"
+  ver <- versionOf py ["-c", "import sys, torch; print(sys.executable, sys.version, torch.__version__)"]
+  return (hashKey ["torch", lib, ver])
 
 -- | A tool's version output; an absent tool gets a fixed marker (its checks
 -- fail anyway, and are not recorded).
