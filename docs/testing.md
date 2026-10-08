@@ -436,7 +436,8 @@ Impact analysis -- End2End.Interpreter: 499 unchanged, 0 run; ...; End2End.Pytho
 version constant (`End2EndTesting.*CheckVersion`) and the harness
 fingerprint, which is the source of `End2EndTesting.hs`, `CorpusSweep.hs`,
 `ImpactManifest.hs`, `TestCaseParser.hs` and `TestTolerances.hs`. Any edit to those files reruns
-everything.
+everything. A sweep defined in another module adds that module's source to
+its own key (`sourcesFingerprint`), so editing it reruns that sweep only.
 
 | sweep | key, besides version and harness |
 |---|---|
@@ -444,6 +445,14 @@ everything.
 | `End2End.Julia` (per program, inside each shard) | the program's module and row checks as `juliaBatchTestCode` renders them under a fixed module name, `juliaLib.jl`, `julia --version`, and the flags. An all-unchanged shard starts no julia |
 | `End2End.Interpreter`, `Interpreter Unoptimized` | `show` of the compiled `IREnv` (at -O2 or -O0), the parsed program's networks, writeLogits registry and ADTs, the rows, the values `testInterpreter` derives from them, the tolerances, and the interpreter fingerprint |
 | `End2End.Normalization` | the `IREnv`, the same program fields, the seeded draws (`normalizationDraws`), the tolerance, and the interpreter fingerprint |
+| `End2End.Python Unoptimized`, `End2End.Julia Unoptimized` | as `End2End.Python` and `End2End.Julia`, on the -O0 compile |
+| `End2End.Python WriteLogits` | the exact script `testPythonWriteLogits` runs (the emitted module, the mocks, the row checks), `pythonLib.py`, and `python3`'s path and version |
+| `End2End.Julia WriteLogits` (per program, inside the batch) | the program's module and row checks as `juliaWriteLogitsBody` renders them alone, `juliaLib.jl` and `julia --version` |
+| `SelectPassNoOp`, `PlanEngineMatchesDense`, `BudgetZeroMatchesDefault`, `PlanEngineLogSpaceMatchesLinear` | `show` of both compiles the differential compares (scalar and select-passed; budget 0 and dense; budget 0 and default; budget-0 linear and log space), a refusal included, the program fields, the rows, the tolerance, and the interpreter fingerprint (`differentialKey`) |
+| `BatchedPython.<differential>` (per program, inside each of the four torch batches) | the program's name, batched source, query groups and network mocks as the driver renders them, and the torch fingerprint: `pythonLibBatched.py`, and the torch python's path, Python version and torch version. An all-unchanged differential starts no python |
+| `KnownIssues` (`broken` and `wrong-result` pins) | the `expect-failure` header, the backends checked, the `IREnv` with the program fields and rows, the interpreter fingerprint, and on Python each row's exact script and the Python runtime; `TestKnownIssues.hs` joins the harness |
+| `Corpus.LogSpaceMatchesLinear` (one test per program) | the program's log-space `IREnv`, its fields, its p() rows and the tolerance, and the interpreter fingerprint; `TestCorpus.hs` joins the harness |
+| `Slow.RewriteInvarianceCorpus` | the rows, and for the original and every variant (family and site) its program fields and its compile, a refusal's message included, and the interpreter fingerprint; `TestRewrites.hs` and `Rewrites.hs` join the harness. A variant whose compile timed out or crashed leaves the program unkeyed |
 
 The **interpreter fingerprint** (M1 of the task) is the source of every
 `src/` module that `IRInterpreter` transitively imports (13 of 39, read off the
@@ -461,7 +470,9 @@ recorded. A failing Julia shard records none of its programs, because the
 failure cannot be attributed to one of them.
 
 **The manifest** is `.stack-work/nest-impact-manifest`, one per checkout and
-so one per worktree. It is never committed. It maps each slot to its last
+so one per worktree. The corpus binary keeps its own,
+`.stack-work/nest-impact-manifest-corpus`, since the two processes may run at
+once and each writes its manifest back whole. It is never committed. It maps each slot to its last
 passing key, so it does not grow without bound, and a `-p` run leaves the
 other slots alone. A missing or unreadable manifest means a full run.
 `NEST_FULL_TESTS=1` ignores the manifest, executes every check, and records
@@ -469,14 +480,21 @@ each pass. **Run timings and the pre-merge `Slow` run with
 `NEST_FULL_TESTS=1`** (see below).
 
 **Adding a check, or changing one.** Wrap the property in `cachedProperty`
-(or `cachedBatch` for a shared process) and give it a key that covers
+(or `cachedBatch` for a shared process, or `cachedAction` for an HUnit
+assertion) and give it a key that covers
 *everything the check reads*. A value the check consumes but the key leaves
 out lets a pass survive a change that should have invalidated it. When a
 check's logic changes, bump its version constant; the harness hash only
-backstops a forgotten bump. Not yet covered: `SelectPassNoOp`, the plan-engine
-differentials, the writeLogits and `-O0` codegen groups, `BatchedPython`, the
-`Corpus` properties (they draw programs at random, so they have no
-per-program slot) and the `Slow` rewrite sweep.
+backstops a forgotten bump.
+
+**Not covered, deliberately.** Checks whose verdict is the compile itself have
+nothing to skip: the `KnownIssues` crash, diagnostic, refused, no-code,
+code-size, hang and growth pins, `BatchedPython`'s eligibility properties,
+and `Julia free names are escaped`. Their key could only be the compiler's
+source, which every compiler commit changes. The other `Corpus` properties
+are one property over the whole pool, so they have no per-program slot until
+each is split per program, as `Corpus.LogSpaceMatchesLinear` was. The `Slow`
+batched topK differentials are not covered either.
 
 ## Test suite time
 

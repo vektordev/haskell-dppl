@@ -527,16 +527,16 @@ main = do
   observationMask <- observationMaskTests corpus
   modalityInfer <- modalityInferTests corpus
   e2e <- end2endTests corpus manifest
-  selectDiff <- selectPassDifferentialTests corpus
-  planDiff <- planEngineDifferentialTests corpus
-  budgetZeroDiff <- budgetZeroDifferentialTests corpus
-  planLog <- planEngineLogSpaceTests corpus
-  batchedPy <- batchedPythonTests corpus
+  selectDiff <- selectPassDifferentialTests corpus manifest
+  planDiff <- planEngineDifferentialTests corpus manifest
+  budgetZeroDiff <- budgetZeroDifferentialTests corpus manifest
+  planLog <- planEngineLogSpaceTests corpus manifest
+  batchedPy <- batchedPythonTests corpus manifest
   branchCountBackends <- branchCountBackendTests
   detTests <- determinismTests corpus
   showcase <- showcaseTests
   writeLogitsRoundtrip <- writeLogitsRoundtripTests corpus
-  knownIssues <- knownIssuesTests
+  knownIssues <- knownIssuesTests manifest
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
   -- regressions outside the code they pin. They're skipped unless
@@ -548,7 +548,7 @@ main = do
   -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
   -- programs, each compiled and queried) was a quarter of the default run's
   -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
-  rewriteCorpus <- rewriteCorpusTests corpus
+  rewriteCorpus <- rewriteCorpusTests corpus manifest
   backendCoverage <- backendCoverageTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
