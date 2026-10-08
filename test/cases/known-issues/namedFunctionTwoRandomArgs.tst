@@ -7,4 +7,5 @@
 -- there rather than dropping the x field, and the set-witness engine refuses a
 -- tagged invocation (cps-list-witness-construction-failure, G0).
 -- Idealized: p((0.0, 0.0)) = phi(0)^2 = (0.15915494, 2).
+slow
 expect-failure: refused "tagged invocation"

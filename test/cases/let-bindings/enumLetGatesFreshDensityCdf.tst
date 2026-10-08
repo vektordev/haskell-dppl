@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched
 cdf(0.0)=(0.25067, 0.0)
 cdf(3.0)=(0.74933, 0.0)

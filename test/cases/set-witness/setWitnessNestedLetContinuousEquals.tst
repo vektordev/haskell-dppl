@@ -5,6 +5,7 @@
 -- the sentinel was carried through y = x + 1.0's inverse. y == 1.0 iff
 -- x == 0.0, so p(0) is N(0) (unit Jacobian); the complement costs the
 -- intervals nothing.
+slow
 p(0)=(0.3989422804014327, 1.0)
 p(1)=(0.15865525393145707, 0.0)
 p(2)=(0.8413447460685429, 0.0)

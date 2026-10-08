@@ -12,4 +12,5 @@
 -- (forward chaining has no if clauses, and the set-witness engine has no Cons
 -- case: task cps-list-witness-construction-failure, G2; follow-up
 -- witness-through-deterministic-if-over-lists).
+slow
 expect-failure: refused "set-valued witness construction failed"

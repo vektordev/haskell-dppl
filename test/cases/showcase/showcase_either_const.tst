@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched
 p(Left 1)=(1.0, 0.0, False)
 p(Right 1) is impossible

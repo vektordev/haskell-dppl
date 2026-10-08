@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched
 p((True, True))=(0.45, 0.0)
 p((True, False))=(0.05, 0.0)

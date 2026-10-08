@@ -6,6 +6,7 @@
 -- OpApprox for a float, OpEq otherwise. Formerly the known-issues pin
 -- polymorphicParameterComparedAsFloat; docs task
 -- polymorphic-parameter-compared-as-float.
+slow
 backends: interpreter, julia, python, batched
 p((True, True), True)=(1.0, 0.0)
 p((True, False), True)=(0.0, 0.0)

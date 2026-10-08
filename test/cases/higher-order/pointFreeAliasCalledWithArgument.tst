@@ -3,5 +3,6 @@
 -- the alias's arrow-typed body is the Var `coin`, not a lambda; it now resolves the
 -- alias to coin's lambda (ForwardChaining.resolveTopLevelLambda). Docs task
 -- point-free-alias-called-with-argument-crashes-forward-chaining.
+slow
 p(True, 0.3)=(0.3, 0.0)
 p(False, 0.3)=(0.7, 0.0)

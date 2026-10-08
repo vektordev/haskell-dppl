@@ -6,6 +6,7 @@
 -- `Nil` term (task batched-backend-refuses-neural-adt-constants).
 -- Logit layout: [Nil, Obj, Red, Blue]. Point A: P(match=1) = 0.8*0.25 = 0.2
 -- and 0.5*0.6 = 0.3, so p(0) = 0.8*0.7, p(1) = 0.8*0.3 + 0.2*0.7, p(2) = 0.2*0.3.
+slow
 backends: interpreter, julia, python, batched
 p(0, (2, [0.2, 0.8, 0.25, 0.75]), (2, [0.5, 0.5, 0.6, 0.4]))=(0.56, 0.0)
 p(1, (2, [0.2, 0.8, 0.25, 0.75]), (2, [0.5, 0.5, 0.6, 0.4]))=(0.38, 0.0)

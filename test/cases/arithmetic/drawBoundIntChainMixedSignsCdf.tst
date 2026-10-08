@@ -3,6 +3,7 @@
 -- the inverse from the observation through that step, not its own factor:
 -- the outer step (3) rounds down, the inner (-2) up
 -- (task cdf-through-discrete-inverse-wrong).
+slow
 cdf(-13)=(0.0, 0.0)
 cdf(-12)=(0.5, 0.0)
 cdf(-8)=(0.5, 0.0)

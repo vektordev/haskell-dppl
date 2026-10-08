@@ -5,6 +5,7 @@
 -- former OpApprox-for-everything failed the Bool row in the interpreter.
 -- Sibling of polymorphicParameterCompared (docs task
 -- polymorphic-parameter-compared-as-float).
+slow
 backends: interpreter, julia, python, batched
 p(0.3, 0.30000000000000004)=(1.0, 0.0)
 p(0.3, 0.31)=(0.0, 0.0)

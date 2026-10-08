@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched
 p(0)=(0.28, 0.0)
 p(1)=(0.54, 0.0)

@@ -4,6 +4,7 @@
 -- fusing them -- generate() then only ever produced (0,0) and (1,1), silently.
 -- The mixed points below are what a fused condition makes unreachable; Corpus
 -- SamplingMatchesPDF is what compares them against generate().
+slow
 backends: interpreter, julia, python, batched, dense
 p((0, 0))=(0.25, 0.0, False)
 p((0, 1))=(0.25, 0.0, False)

@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched
 p((2.0, 1.0))=(1.0, 0.0)
 cdf((3.0, 3.0))=(1.0, 0.0)

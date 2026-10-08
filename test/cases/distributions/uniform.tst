@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched
 p(0.5)=(1.0,1.0,False)
 p(-0.5) is impossible

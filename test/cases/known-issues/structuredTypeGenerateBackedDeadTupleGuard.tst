@@ -7,6 +7,7 @@
 -- (1.0, 0). As of the doc's 2026-09-16 correction the raw-error half of this
 -- was already fixed elsewhere -- what remains is a graceful-but-wrong
 -- refusal, hence `broken` rather than `diagnostic`/`crash`.
+slow
 expect-failure: broken
 p(True)=(0.0, 0.0)
 p(False)=(1.0, 0.0)

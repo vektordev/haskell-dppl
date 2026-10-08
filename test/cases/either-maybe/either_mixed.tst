@@ -1,3 +1,4 @@
+slow
 backends: interpreter
 -- Mixed Either (discrete Left arm, continuous Right arm). encode is refused for a
 -- continuous arm inside an Either/ADT (the arm-conditional Gaussian params are not yet

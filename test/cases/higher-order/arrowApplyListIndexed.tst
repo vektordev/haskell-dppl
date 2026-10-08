@@ -1,5 +1,6 @@
 -- Row 5: the callee is taken out of a list literal. Same N(1, 1) as the
 -- control; used to fail forward chaining's "should resolve to a lambda".
+slow
 backends: interpreter, julia, python, batched
 p(0.5)=(0.3520653, 1.0, False)
 p(1.0)=(0.3989423, 1.0, False)

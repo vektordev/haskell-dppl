@@ -9,6 +9,7 @@
 -- removing a point from a continuous set leaves its mass whole (a mass minus
 -- a density is the mass), so p(2) = 1.0 at dim 0. p(0)/p(1) is the likelihood
 -- ratio N(0)/N(1) the review wanted to see.
+slow
 p(0)=(0.3989422804014327, 1.0)
 p(1)=(0.24197072451914337, 1.0)
 p(2)=(1.0, 0.0)

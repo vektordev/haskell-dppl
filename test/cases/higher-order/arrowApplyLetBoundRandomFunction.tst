@@ -5,6 +5,7 @@
 -- shape task arrow-lifted-mixture-for-function-values exists for: the
 -- mixture is lifted pointwise by IRCompiler's IfThenElse equation instead of
 -- being resolved away syntactically before annotation.
+slow
 backends: interpreter, julia, python
 p(4.0)=(0.5, 0.0, False)
 p(6.0)=(0.5, 0.0, False)

@@ -1,3 +1,4 @@
+slow
 backends: python
 expect-failure: broken
 p(Nil)=(0.7, 0.0)

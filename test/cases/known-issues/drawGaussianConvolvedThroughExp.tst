@@ -14,6 +14,7 @@
 -- draw-bound to a neural Gaussian reading); the neural form is pinned
 -- separately as neuralLeafConvolvedThroughExpDrawBound. Docs-repo task:
 -- draw-bound-gaussian-convolved-through-injf-crashes.
+slow
 expect-failure: broken
 p(1.0)=(0.282095, 1.0)
 p(2.0)=(0.125084, 1.0)

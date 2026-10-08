@@ -5,4 +5,5 @@
 -- refusal was silent (exit 0, no reason). Idealized:
 -- p((True, True)) = integral_0^0.5 x dx = 0.125,
 -- p((False, True)) = integral_0.5^1 x dx = 0.375.
+slow
 expect-failure: refused "has no closed form for its two random operands"

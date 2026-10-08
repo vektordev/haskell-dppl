@@ -1,3 +1,4 @@
+slow
 backends: python
 expect-failure: broken
 p((True, [True, True, True, True, True, True, True, True, True, True, True]))=(0.17433922005000008, 0.0)

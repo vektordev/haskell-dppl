@@ -5,6 +5,7 @@
 -- and 0.7. Found by the rewrite-invariance net's helper extraction (task
 -- rewrite-invariance-net-draw-apply-helper-alias), which names a helper's
 -- parameters after the caller's variables.
+slow
 p(1)=(0.3, 0.0)
 p(0)=(0.7, 0.0)
 p(2) is impossible

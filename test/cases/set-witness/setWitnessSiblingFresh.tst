@@ -2,6 +2,7 @@
 -- then the sibling's own density (dims add). Used to answer phi(-0.5) at
 -- dim 1 for the first row, the sibling silently omitted.
 -- p((-0.5, 0.3)) = phi(-0.5) * phi(0.3)
+slow
 p((-0.5, 0.3))=(0.1342734258740318, 2.0)
 p((0.0, 0.0))=(0.5, 0.0)
 p((0.5, 0.3)) is impossible

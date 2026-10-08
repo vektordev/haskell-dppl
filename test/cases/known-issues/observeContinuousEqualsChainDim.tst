@@ -1,3 +1,4 @@
+slow
 expect-failure: broken
 backends: interpreter, python
 p(Right 0)=(0.3989422804014327, 1.0)
