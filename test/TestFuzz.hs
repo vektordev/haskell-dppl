@@ -1834,6 +1834,14 @@ minimizeBy p e = case filter p (shrinkTypedExpr e) of
   (e' : _) -> minimizeBy p e'
   []       -> e
 
+-- | 'minimizeBy' at program level: QuickCheck's greedy loop over
+-- 'shrinkTypedProgram', which is what a property pinned to the failure @p@
+-- shrinks along.
+minimizeProgramBy :: (Program -> Bool) -> Program -> Program
+minimizeProgramBy p q = case filter p (shrinkTypedProgram q) of
+  (q' : _) -> minimizeProgramBy p q'
+  []       -> q
+
 mainBody :: Program -> Maybe Expr
 mainBody p = lookup "main" (functions p)
 
@@ -2634,17 +2642,31 @@ shrinkerTests = testGroup "Shrinker"
       -- the first listed is the one shrinking is pinned to, so every run must
       -- end on a program that still breaks it. A shrink that kept only the
       -- second broken (a big program with its Normal gone) is exactly what an
-      -- unpinned shrink would take. Not every draw has a shrink keeping its
-      -- Normal (@head(Cons(Normal, []))@ has none), so the runs only need
-      -- some draw to shrink past the second invariant altogether -- which
-      -- also shows a pinned shrink does make progress.
+      -- unpinned shrink would take.
+      --
+      -- Not every draw has a shrink keeping its Normal below the size bound
+      -- (@head(Cons(Normal, []))@ and @fst(TCons(Normal, 0))@ have none), and
+      -- an earlier version asked only that *some* of 20 random draws got
+      -- there, which no draw did about once in 60 runs (task
+      -- shared-draw-shrink-test-statistical-flake). The draws are now filtered
+      -- on the greedy program-level minimization under "main has a Normal"
+      -- reaching the bound: 'shrinking' takes the first candidate that still
+      -- fails the target, so a pinned shrink of such a draw provably walks the
+      -- same path and ends breaking only the first invariant. That makes the
+      -- last clause hold for *every* run, deterministically, while the draws
+      -- stay random for the first two.
       let holdsOnMain f = maybe False f . mainBody . icProgram
+          bigBound = 3
+          hasNormal = maybe False containsNormal . mainBody
           gaussian = Invariant "fake-gaussian-leaf" [] $ \c ->
             return (if holdsOnMain containsNormal c then Broken "has a Normal leaf" else Holds)
           big = Invariant "fake-big" [] $ \c ->
-            return (if holdsOnMain ((> 3) . typedExprSize) c then Broken "is big" else Holds)
+            return (if holdsOnMain ((> bigBound) . typedExprSize) c then Broken "is big" else Holds)
+          shrinksSmall p = maybe False ((<= bigBound) . typedExprSize)
+                             (mainBody (minimizeProgramBy hasNormal p))
           gen = resize fuzzSize genTypedProgram `suchThat` \p ->
-            maybe False (\b -> containsNormal b && typedExprSize b > 3) (mainBody p)
+            maybe False (\b -> containsNormal b && typedExprSize b > bigBound) (mainBody p)
+            && shrinksSmall p
           onlyGaussian = "all failures on this program: " ++ show [Breaks "fake-gaussian-leaf"]
       rs <- replicateM 20 $ quickCheckWithResult stdArgs { chatty = False }
               (invariantsPropertyOn gen "shrinker-test-shared-draw" 1 [gaussian, big] 100)
@@ -2655,8 +2677,9 @@ shrinkerTests = testGroup "Shrinker"
         .&&. conjoin [ counterexample "a run's final program does not name the first invariant" $
                          "invariant fake-gaussian-leaf broken: has a Normal leaf" `elem` ls
                      | (ls, _) <- finals ]
-        .&&. counterexample "no run shrank to a program breaking only the first invariant"
-               (any (\(ls, k) -> k > 0 && onlyGaussian `elem` ls) finals)
+        .&&. conjoin [ counterexample "a run did not shrink to a program breaking only the first invariant" $
+                         k > 0 && onlyGaussian `elem` ls
+                     | (ls, k) <- finals ]
   , localOption (QuickCheckMaxRatio 30) $
     testProperty "minimization keeps the failing feature and never grows" $
       -- The guard below ("this draw contains a Normal") is satisfied by about
