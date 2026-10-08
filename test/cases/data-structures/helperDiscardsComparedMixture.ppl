@@ -1,0 +1,6 @@
+helper h0 = fst (0, h0 == (-3.1281161611976938))
+main = helper (snd (if False then fst (((False, 2), Normal), (False, 0)) else ((False, 0), 0.0)))
+-- Task fuzz-unconsumed-vanyexcept-reaches-codegen, the shrunk program of
+-- Slow prop_Fuzz_BackendsAgree --quickcheck-replay=107592: the same shape as
+-- fstDiscardsComparedDraw, witnessed through a named function's parameter.
+-- Python and Julia refused it ("unconsumed VAnyExcept placeholder").

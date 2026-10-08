@@ -3031,6 +3031,31 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
       let (invExprP0, invExprGuard0)
             | cumulative = (invCumValue chain, invCumGuard chain)
             | otherwise  = (invValue chain, invGuard chain)
+      -- A CUMULATIVE query transports a bound through each step, and an '=='
+      -- or constructor-test step has none to transport. Observed True, the
+      -- bound @<= True@ holds for either outcome, so it constrains nothing --
+      -- yet the step recovered the compared point, and @right (v2 == 0)@ at
+      -- cdf(Right True) answered P(v2 = 0) rather than 1. Observed False, it
+      -- recovers the set "any value but this one" ('VAnyExcept'), neither a
+      -- bound nor a point: the interpreter compared it as a point, and no text
+      -- backend can render it, so 'anyExceptCodegenRefusal' refused the whole
+      -- module, the probability function's queries included (task
+      -- fuzz-unconsumed-vanyexcept-reaches-codegen, second seed). Either
+      -- polarity is wrong, so the cumulative variant is refused. A step handed
+      -- a wildcard the chain made up never shows the sentinel here: forward
+      -- chaining replaces it by the wildcard ('injectedWildcards').
+      --
+      -- A point query's '==' arm is refused at run time by forward chaining
+      -- ('SPLL.Typing.ForwardChaining.toPointValueExpr'); a constructor
+      -- test's keeps the sentinel, which the bound value's own inference
+      -- answers in some shapes (a single-constructor value observed False is
+      -- impossible, tupleCtorTestOfSharedDraw at @(False, ANY)@; task
+      -- point-inversion-vanyexcept-witness-crashes).
+      when (cumulative && hasAnyExceptExpr invExprP0) $
+        refuse lChainName ("cannot compute a cumulative distribution through binding '"
+          ++ (case l of Expr _ (Lambda n _) -> n; _ -> boundVar)
+          ++ "': it is recovered through an == or constructor test, which transports no bound"
+          ++ " (task fuzz-unconsumed-vanyexcept-reaches-codegen)")
       invExprP        <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
       invExprCoV      <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
       invExprGuard    <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0

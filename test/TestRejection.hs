@@ -23,7 +23,7 @@ import Control.Monad.Random (evalRand, mkStdGen)
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, runGen, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
+import SPLL.IntermediateRepresentation (CompilerConfig(..), defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
 import SPLL.IRCompiler (requireNoGenerateBacked, symbolCdfMessage)
 import TestSupport (expectVariantRefused)
 import Data.Maybe (isJust)
@@ -61,6 +61,8 @@ rejectionTests = testGroup "Rejection"
   , generateBackedProjectionTests
   , refusedVariantTests
   , vAnyExceptCodegenTests
+  , injectedWildcardArithmeticTests
+  , eqSetWitnessTests
   , intractableComparisonTests
   , noGenerateSuppressedGeneratorTests
   , setWitnessNestedLetTests
@@ -1068,13 +1070,65 @@ generateBackedProjectionTests = testGroup "GenerateBackedProjection"
 -- construct instead (task vanyexcept-unrenderable-in-text-backends).
 -- ----------------------------------------------------------------------------
 
--- Three lines, no neural network: an == observation on a constructor field
--- (reached through head/col) inverts to VAnyExcept on its False branch.
+-- Three lines, no neural network: a constructor test of a field (reached
+-- through head/col) inverts to VAnyExcept on its False branch. The task's
+-- original reproducer spelled the test `col (head scene) == Red`; an == step
+-- of a point inversion now refuses its False arm at run time instead
+-- (task fuzz-unconsumed-vanyexcept-reaches-codegen, 'eqSetWitnessTests'), so
+-- that spelling no longer carries the placeholder. The constructor test still
+-- does (task point-inversion-vanyexcept-witness-crashes).
 vAnyExceptProgSrc :: String
 vAnyExceptProgSrc = unlines
   [ "data Color = Red | Green"
   , "data Obj = Obj col :: Color"
+  , "main = draw scene = [if Uniform < 0.5 then Obj Red else Obj Green] in isRed (col (head scene))"
+  ]
+
+-- | The original reproducer above, spelled with ==. A point inversion through
+-- an == observed False recovers only a set, which no engine measures as a
+-- point: every engine now refuses that query by name at run time (the
+-- interpreter died on a type error), and the module compiles to both text
+-- backends, so the True query answers there too (task
+-- fuzz-unconsumed-vanyexcept-reaches-codegen).
+eqSetWitnessSrc :: String
+eqSetWitnessSrc = unlines
+  [ "data Color = Red | Green"
+  , "data Obj = Obj col :: Color"
   , "main = draw scene = [if Uniform < 0.5 then Obj Red else Obj Green] in col (head scene) == Red"
+  ]
+
+eqSetWitnessTests :: TestTree
+eqSetWitnessTests = testGroup "EqSetWitness"
+  [ testCase "the False query is refused by name, not a type error" $
+      withParsed eqSetWitnessSrc $ \prog -> do
+        outcome <- try (evaluate (length (show (runProb defaultCompilerConfig prog [] (VBool False)))))
+        case outcome of
+          Right _ -> assertFailure "expected a runtime refusal at False"
+          Left (ex :: SomeException) ->
+            assertBool ("expected the set-witness refusal, got: " ++ show ex)
+              ("any value but one" `isInfixOf` show ex && not ("Type error" `isInfixOf` show ex))
+  , testCase "the True query still answers" $
+      withParsed eqSetWitnessSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VBool True))
+        case res of
+          Left e -> assertFailure ("the True query should answer, got: " ++ show e)
+          Right _ -> return ()
+  , testCase "both text backends compile it" $
+      withParsed eqSetWitnessSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> assertEqual "a VAnyExcept survived" Nothing (firstAnyExceptIR env)
+  -- The shrunk program of Slow prop_Fuzz_BackendsAgree
+  -- --quickcheck-replay=129863: the same == under `right`, its operand a
+  -- mixture, beside a dead neural binding. Its cumulative function inverted
+  -- the == too, which transports no bound, and is refused outright.
+  , testCase "the fuzz seed's program compiles to both text backends" $
+      withParsed (unlines
+        [ "neural nn :: (Symbol -> Bool)"
+        , "main v0 = (\\v1 -> (\\v2 -> right (v2 == 0)) (if Uniform < 0.5 then 2 else 1)) (nn v0)" ]) $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> assertEqual "a VAnyExcept survived" Nothing (firstAnyExceptIR env)
   ]
 
 vAnyExceptCodegenTests :: TestTree
@@ -1110,6 +1164,31 @@ vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal"
                                     ("VAnyExcept" `isInfixOf` msg)
             Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
   ]
+
+-- | A wildcard the inversion chain makes up itself (fst's inverse answers
+-- @(s, ANY)@) and an arithmetic step then reads (task
+-- fuzz-unconsumed-vanyexcept-reaches-codegen). The chain passes it on as an
+-- unconstrained witness and says it read one, so the query is refused by
+-- name -- at every optimisation level alike. Before, the interpreter took a
+-- Normal density at ANY (both levels); with the wildcard only passed on, -O2
+-- answered while -O0 evaluated @h + 1.0@ at ANY in the body and died.
+injectedWildcardArithmeticSrc :: String
+injectedWildcardArithmeticSrc = "main = draw h = Normal in fst (0, h + 1.0)\n"
+
+injectedWildcardArithmeticTests :: TestTree
+injectedWildcardArithmeticTests = testGroup "InjectedWildcardArithmetic"
+  [ testCase ("refused by name, not a type error, at -O" ++ show lvl) $
+      withParsed injectedWildcardArithmeticSrc $ \prog -> do
+        let res = runProb defaultCompilerConfig{optimizerLevel = lvl} prog [] (VInt 0)
+        outcome <- try (evaluate (length (show res)))
+        case outcome of
+          Right _ -> assertFailure ("expected a runtime refusal, got " ++ show res)
+          Left (ex :: SomeException) -> do
+            assertBool ("expected the unobserved-binding refusal, got: " ++ show ex)
+              ("is unobserved" `isInfixOf` show ex)
+            assertBool ("a type error leaked through: " ++ show ex)
+              (not ("Type error" `isInfixOf` show ex))
+  | lvl <- [0, 2] ]
 
 -- ----------------------------------------------------------------------------
 -- Comparisons with no closed form (task

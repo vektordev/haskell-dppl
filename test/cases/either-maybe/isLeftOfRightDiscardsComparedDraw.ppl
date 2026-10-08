@@ -1,0 +1,5 @@
+main = draw h = Normal in isLeft (right (h == 1.0))
+-- Task fuzz-unconsumed-vanyexcept-reaches-codegen: fstDiscardsComparedDraw
+-- through Either. isLeft's inverse answers `Left ANY` or `Right ANY` by the
+-- observation; fromRight is out of its domain on the first and reads the ANY
+-- out of the second, so =='s inverse only ever sees a wildcard.

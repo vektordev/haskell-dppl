@@ -226,7 +226,7 @@ toInvExpr fcData adtsDecls lambdaCN = merged
       Nothing -> error $ "toInvExpr: chain name does not resolve to an invertible lambda: " ++ lambdaCN
     -- Create the expression that calculates each occurrence; merge those that
     -- carry complementary information.
-    valueExprs = mapMaybe (toValueExpr clauseSet [paramClause] adtsDecls) toInvCNs
+    valueExprs = informative (mapMaybe (toValueExpr clauseSet [paramClause] adtsDecls) toInvCNs)
     merged = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
 
 -- | 'toInvExpr' with a recoverable outcome: Nothing when no occurrence of the
@@ -236,9 +236,25 @@ toInvExpr fcData adtsDecls lambdaCN = merged
 toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
 toInvExprMaybe fcData adtsDecls lambdaCN = do
   (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
-  case mapMaybe (toValueExpr (hornClauses fcData) [paramClause] adtsDecls) toInvCNs of
+  case informative (mapMaybe (toPointValueExpr (hornClauses fcData) [paramClause] adtsDecls) toInvCNs) of
     []  -> Nothing
     ves -> Just (mergeExpr toInvVarName lambdaCN toInvCNs ves)
+
+-- | The occurrences' chains with those that certainly recover nothing left
+-- out, where any other remains. An occurrence reached through a hole another
+-- inverse made up (the other slot of @fst@'s @(s, ANY)@, see
+-- 'injectedWildcards') recovers the variable as that hole whatever the
+-- observation: it carries no information, and merging it would only add its
+-- "read a wildcard" verdict to an occurrence that does constrain the
+-- variable. Where every occurrence is such, the witness is genuinely the
+-- hole, and they stay.
+informative :: [InvChain] -> [InvChain]
+informative chains = case filter (not . certainHole . invValue) chains of
+  [] -> chains
+  cs -> cs
+  where
+    certainHole (IRLetIn _ _ e) = certainHole e
+    certainHole e = isHoleConst e
 
 -- | Point-inversion of the chain from an arbitrary observed node (@seedCN@)
 -- down to one occurrence of a witnessed variable (@occCN@). The returned
@@ -259,20 +275,262 @@ toSeededInvExpr fcData adtsDecls seedCN occCN =
 -- result afterward): the value expression itself crashes on out-of-domain input
 -- (observe-partials-umbrella N1b).
 toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
-toValueExpr clauses paramClauses adtsDecls startCN = do
+toValueExpr = toValueExprWith (const id)
+
+-- | 'toValueExpr' for the lambda-witness point inversion ('toInvExprMaybe'),
+-- whose caller measures the recovered value as a point. An '==' step
+-- observed False recovers the set "any value but this one" ('VAnyExcept')
+-- instead, and every reader of it there -- a density, an enumerated
+-- comparison, the body factor's own '==' -- died on it in the interpreter with
+-- a type error, while no text backend could render it at all, so
+-- 'anyExceptCodegenRefusal' refused the whole module, every other query
+-- included (task fuzz-unconsumed-vanyexcept-reaches-codegen, second seed).
+-- That arm is a runtime refusal here instead, the same in every engine; the
+-- True arm is untouched. The cumulative value keeps the sentinel, which
+-- IRCompiler refuses statically (no bound crosses an '=='), and so does a
+-- constructor test's: the interpreter answers some of those through it
+-- (task point-inversion-vanyexcept-witness-crashes).
+toPointValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
+toPointValueExpr = toValueExprWith refuseEqSet
+  where
+    refuseEqSet (ExprHornClause _ _ (InjFInfo "eq") inv) | inv > 0 = irMap $ \e -> case e of
+      IRConst (VAnyExcept _) -> IRError
+        ("cannot compute marginal: an == observed False recovers its operand only as the set"
+         ++ " 'any value but one', which this engine cannot measure as a point"
+         ++ " (task point-inversion-vanyexcept-witness-crashes)")
+      _ -> e
+    refuseEqSet _ = id
+
+toValueExprWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
+toValueExprWith pointStep clauses paramClauses adtsDecls startCN = do
   relevantSortedClauses <- toValuePath clauses paramClauses startCN
   -- Calculate the symbolic derivative
   let deriv = derivativeOfPath adtsDecls relevantSortedClauses
   let cumStep = cumulativeStep adtsDecls relevantSortedClauses
+  -- A wildcard a step of the chain itself introduces is passed on, not read
+  -- ('injectedWildcards').
+  let wild = injectedWildcards adtsDecls relevantSortedClauses
+  let passWild = passInjectedWildcard adtsDecls wild
+  let pointWild c = passWild c . pointStep c
   -- Generate code
   Just InvChain
-    { invValue    = toLetInBlock clauses adtsDecls relevantSortedClauses
-    , invCoV    = wrapInLetInBlock clauses adtsDecls relevantSortedClauses deriv
-    , invGuard    = guardChain clauses adtsDecls relevantSortedClauses
-    , invReadsAny = readsAnyChain clauses adtsDecls relevantSortedClauses
-    , invCumValue = toLetInBlockWith (\c e -> maybe e fst (cumStep c)) clauses adtsDecls relevantSortedClauses
-    , invCumGuard = guardChainWith cumStep clauses adtsDecls relevantSortedClauses
+    { invValue    = toLetInBlockWith pointWild clauses adtsDecls relevantSortedClauses
+    , invCoV    = wrapInLetInBlockWith pointWild clauses adtsDecls relevantSortedClauses deriv
+    , invGuard    = guardChain pointStep wild clauses adtsDecls relevantSortedClauses
+    , invReadsAny = if any (computesOnCertainWildcard adtsDecls wild) (neededClauses relevantSortedClauses)
+                      then IRConst (VBool True)
+                      else readsAnyChain clauses adtsDecls relevantSortedClauses
+    , invCumValue = toLetInBlockWith (\c e -> passWild c (maybe e fst (cumStep c))) clauses adtsDecls relevantSortedClauses
+    , invCumGuard = guardChainWith cumStep wild clauses adtsDecls relevantSortedClauses
     }
+
+-- | The chain names of a path whose runtime value may BE a wildcard that the
+-- chain itself introduced, with whether it certainly is one.
+--
+-- 'readsAnyChain' tracks the wildcard a marginal query puts into the seed. A
+-- step can also make one up: an inverse that only knows part of its result
+-- fills the rest with a hole -- @fst@'s inverse answers @(s, ANY)@, a field
+-- accessor's the constructor with every other field @ANY@, @isLeft@'s
+-- @Left ANY@. A later step that deconstructs the hole back out hands the
+-- next one a bare @ANY@: in @fst (0, h == 1.0)@ the observation says nothing
+-- about @h == 1.0@, so @=='s@ inverse got @ANY@ as its condition and its
+-- @VAnyExcept@ arm survived into the emitted code (task
+-- fuzz-unconsumed-vanyexcept-reaches-codegen), and @fst (0, h + 1.0)@ took a
+-- density at @ANY@. Both are an unconstrained witness, not an error: a step
+-- whose input is a wildcard recovers a wildcard ('passInjectedWildcard'), and
+-- the caller's existing wildcard-witness handling (a sink's body factor, a
+-- single-use binding's open body, else a refusal) answers it.
+--
+-- A value that merely HOLDS a hole (@(s, ANY)@) is read safely by a
+-- deconstruction, so only a step reading a possibly-bare wildcard is touched.
+-- Where the deconstruction provably extracts the hole itself (@snd (s, ANY)@,
+-- folded statically by 'foldHoleAccess'), the next step's result is the hole
+-- outright, with no runtime test and no trace of the step's own inverse: the
+-- @VAnyExcept@ arm of an @==@ handed a certain wildcard is never emitted, at
+-- any optimisation level. Chains that introduce no hole are left exactly as
+-- they were.
+injectedWildcards :: [ADTDecl] -> [HornClause] -> [(ChainName, Bool)]
+injectedWildcards adtsDecls = mapMaybe bare . foldl' step []
+  where
+    bare (n, WildBare certain) = Just (n, certain)
+    bare _ = Nothing
+    step st c = case c of
+      ParameterHornClause _ -> st
+      EquivalenceHornClause [p] conc _ _ | Just w <- lookup p st -> (conc, w) : st
+      ExprHornClause pre conc info inv ->
+        let ins = mapMaybe (`lookup` st) pre
+            decl = case info of
+              InjFInfo name -> let FPair fwd invs = lookupFPair adtsDecls name
+                                   d = if inv == 0 then fwd else invs !! (inv - 1)
+                               in Just (foldr (\(old, new) dd -> renameDecl old new dd) d (zip (inputVars d) pre))
+              _ -> Nothing
+            hole = inv > 0 && maybe False (holdsWildcardConst . body) decl
+            holds = [ (p, sh) | p <- pre, Just (WildHolds sh) <- [lookup p st] ]
+            out | WildBare True `elem` ins = Just (WildBare True)
+                | WildBare False `elem` ins = Just (WildBare False)
+                | not (null holds), Just d <- decl, deconstructing d =
+                    case foldHoleAccess adtsDecls (substVars holds (body d)) of
+                      [Just x] -> classify st x
+                      outs | js@(_:_) <- catMaybes outs, all isHoleConst js -> Just (WildBare True)
+                           | otherwise -> Just (WildBare False)
+                | not (null holds) = Just (WildHolds (maybe (IRVar conc) (substVars holds . body) decl))
+                | hole, Just d <- decl = Just (WildHolds (body d))
+                | otherwise = Nothing
+        in maybe st (\w -> (conc, w) : st) out
+      _ -> st
+    -- What a deconstruction of a hole-holding value extracted, statically.
+    classify st x
+      | isHoleConst x = Just (WildBare True)
+      | IRVar n <- x = lookup n st
+      | unfolded x = Just (WildBare False)
+      | holdsWildcardConst x || any (`elem` map fst st) (irVars x) = Just (WildHolds x)
+      | otherwise = Nothing
+    unfolded x = case x of
+      IRDestruct _ _ -> True
+      IRApply _ _ -> True
+      _ -> False
+    irVars x = case x of
+      IRVar n -> [n]
+      _ -> concatMap irVars (getIRSubExprs x)
+    substVars binds = irMap (\e -> case e of IRVar n | Just v <- lookup n binds -> v; _ -> e)
+    holdsWildcardConst e = case e of
+      IRConst v -> valueHoldsWildcard v
+      _ -> any holdsWildcardConst (getIRSubExprs e)
+    valueHoldsWildcard v = case v of
+      VAny -> True
+      VList AnyList -> True
+      VList (ListCont x xs) -> valueHoldsWildcard x || valueHoldsWildcard (VList xs)
+      VTuple x y -> valueHoldsWildcard x || valueHoldsWildcard y
+      VEither (Left x) -> valueHoldsWildcard x
+      VEither (Right y) -> valueHoldsWildcard y
+      VADT _ fs -> any valueHoldsWildcard fs
+      _ -> False
+
+-- | See 'injectedWildcards': a value holding a hole somewhere, with its
+-- static shape, or one that may be a bare hole -- certainly so when True.
+data WildState = WildHolds IRExpr | WildBare Bool deriving (Eq)
+
+isHoleConst :: IRExpr -> Bool
+isHoleConst (IRConst VAny) = True
+isHoleConst (IRConst (VList AnyList)) = True
+isHoleConst _ = False
+
+-- | Statically fold a deconstruction of a value whose constructor is known
+-- (a tuple, cons cell, @Either@ or ADT constructor application, as an
+-- injecting inverse builds it) into the extracted component: one outcome per
+-- arm of a value an inverse selects by the observation (@isLeft@'s
+-- @if b then Left ANY else Right ANY@), Nothing for an arm the deconstruction
+-- is not applicable to (its domain guard zeroes that case, so its value is
+-- never read). Anything it does not recognise is left as it is.
+foldHoleAccess :: [ADTDecl] -> IRExpr -> [Maybe IRExpr]
+foldHoleAccess adtsDecls = go
+  where
+    go e = case e of
+      IRDestruct acc x -> concatMap (maybe [Nothing] (destruct acc)) (go x)
+      IRApply (IRVar f) x | isField f -> concatMap (maybe [Nothing] (field f)) (go x)
+      IRIf _ a b -> go a ++ go b
+      _ -> [Just e]
+    destruct AcFst (IRConstruct TgTuple [a, _]) = [Just a]
+    destruct AcSnd (IRConstruct TgTuple [_, b]) = [Just b]
+    destruct AcFst (IRConst (VTuple a _)) = [Just (IRConst a)]
+    destruct AcSnd (IRConst (VTuple _ b)) = [Just (IRConst b)]
+    destruct AcHead (IRConstruct TgCons [h, _]) = [Just h]
+    destruct AcTail (IRConstruct TgCons [_, t]) = [Just t]
+    destruct AcFromLeft (IRConst (VEither (Left v))) = [Just (IRConst v)]
+    destruct AcFromRight (IRConst (VEither (Right v))) = [Just (IRConst v)]
+    destruct AcFromLeft (IRConst (VEither (Right _))) = [Nothing]
+    destruct AcFromRight (IRConst (VEither (Left _))) = [Nothing]
+    destruct AcFromLeft (IRConstruct TgLeft [v]) = [Just v]
+    destruct AcFromRight (IRConstruct TgRight [v]) = [Just v]
+    destruct AcFromLeft (IRConstruct TgRight _) = [Nothing]
+    destruct AcFromRight (IRConstruct TgLeft _) = [Nothing]
+    destruct acc x = [Just (IRDestruct acc x)]
+    ctors = [ c | d <- adtsDecls, c <- constructors d ]
+    isField f = any (elem f . map fst . snd) ctors
+    field f x = case ctorSpine x [] of
+      Just (ctor, args)
+        | Just fields <- lookup ctor ctors, length args == length fields ->
+            case lookup f (zip (map fst fields) [0 ..]) of
+              Just i -> [Just (args !! i)]
+              Nothing -> [Nothing]
+      _ -> [Just (IRApply (IRVar f) x)]
+    ctorSpine (IRApply g a) acc = ctorSpine g (a : acc)
+    ctorSpine (IRVar c@(h:_)) acc | isUpper h = Just (c, acc)
+    ctorSpine _ _ = Nothing
+
+-- | The test that one of a step's inputs is a chain-introduced wildcard
+-- ('injectedWildcards'): Nothing for a step that reads none, @Just Nothing@
+-- for one that certainly reads one, else the runtime test. A copy (an
+-- equivalence) passes the wildcard on by itself and needs no test.
+injectedWildcardTest :: [(ChainName, Bool)] -> HornClause -> Maybe (Maybe IRExpr)
+injectedWildcardTest wild c = case c of
+  ExprHornClause pre _ _ _ -> case [ (p, certain) | p <- pre, Just certain <- [lookup p wild] ] of
+    [] -> Nothing
+    ps | any snd ps -> Just Nothing
+       | otherwise -> Just (Just (foldr1 (IROp OpOr) [IRUnaryOp OpIsAny (IRVar p) | (p, _) <- ps]))
+  _ -> Nothing
+
+-- | A step's value with a chain-introduced wildcard input passed on as a
+-- wildcard result: the input is unconstrained, so the recovered value is too.
+-- The hole is list-shaped where the step's declared result is a list, as
+-- 'anyOfType' places it.
+passInjectedWildcard :: [ADTDecl] -> [(ChainName, Bool)] -> HornClause -> IRExpr -> IRExpr
+passInjectedWildcard adtsDecls wild c e = case injectedWildcardTest wild c of
+  Nothing -> e
+  Just Nothing -> IRConst hole
+  Just (Just t) -> IRIf t (IRConst hole) e
+  where
+    hole = case c of
+      ExprHornClause _ _ (InjFInfo name) inv ->
+        let FPair fwd invs = lookupFPair adtsDecls name
+            Forall _ _ sig = contract (if inv == 0 then fwd else invs !! (inv - 1))
+        in anyOfType (resultType sig)
+      _ -> VAny
+    resultType (TArrow _ r) = resultType r
+    resultType r = r
+
+-- | The clauses of a sorted path the last one's value depends on. A path may
+-- hold steps toward other occurrences ('toValuePath' keeps superfluous
+-- clauses for the optimizer to drop), which a test about what the value reads
+-- must not count.
+neededClauses :: [HornClause] -> [HornClause]
+neededClauses [] = []
+neededClauses cs = filter ((`Set.member` needed) . conclusion) cs
+  where
+    needed = foldr step (Set.singleton (conclusion (last cs))) cs
+    step c acc
+      | conclusion c `Set.member` acc = foldr Set.insert acc (premises c)
+      | otherwise = acc
+
+-- | Whether a step COMPUTES with a wildcard the chain certainly made up (an
+-- arithmetic inverse, say, as against a deconstruction or an @==@ /
+-- constructor-test inverse). Its result passes the wildcard on
+-- ('passInjectedWildcard'), but the operation it inverts runs forward in the
+-- body, on the witness, wherever the caller evaluates the body at it: @h +
+-- 1.0@ at @h = ANY@ is a type error at @-O0@, where nothing folds the unread
+-- body away. That is exactly a chain reading a wildcard, so the chain says so
+-- ('invReadsAny'), and the caller takes its unevaluable-witness route (a
+-- single-use binding's open body, else a refusal). Only the certain case is
+-- static; a runtime test would have to re-emit the chain, which
+-- 'readsAnyChain' exists to avoid.
+computesOnCertainWildcard :: [ADTDecl] -> [(ChainName, Bool)] -> HornClause -> Bool
+computesOnCertainWildcard adtsDecls wild c = case c of
+  ExprHornClause _ _ (InjFInfo name) inv
+    | Just Nothing <- injectedWildcardTest wild c ->
+        let FPair fwd invs = lookupFPair adtsDecls name
+            d = if inv == 0 then fwd else invs !! (inv - 1)
+        in not (deconstructing d) && not (hasAnyExceptExpr (body d))
+  _ -> False
+
+-- | A step's applicability at a chain-introduced wildcard input: it holds, as
+-- it does for a marginal wildcard ('isConstrGuard'). The domain is the
+-- concrete value's to be outside of.
+passWildApp :: [(ChainName, Bool)] -> HornClause -> IRExpr -> IRExpr
+passWildApp _ _ app@(IRConst (VBool True)) = app
+passWildApp wild c app = case injectedWildcardTest wild c of
+  Nothing -> app
+  Just Nothing -> IRConst (VBool True)
+  Just (Just t) -> IRIf t (IRConst (VBool True)) app
 
 -- | The rounded value and applicability of each exact integer-quotient step
 -- of a chain, for a cumulative query (task cdf-through-discrete-inverse-wrong).
@@ -304,22 +562,29 @@ cumulativeStep adtsDecls path c = do
 
 -- | A Bool IRExpr, safe to evaluate unconditionally, that is True iff every step
 -- of the chain is within its inverse FDecl's applicability domain -- i.e. the
--- chain's value expression ('toLetInBlock') would not crash. Mirrors
--- 'wrapInLetInBlock's LetIn nesting so that a later step's applicability test
+-- chain's value expression ('toLetInBlockWith') would not crash. Mirrors
+-- 'wrapInLetInBlockWith's LetIn nesting so that a later step's applicability test
 -- (which may reference an earlier step's bound value) is only evaluated once the
 -- earlier step is known to be in-domain; a failing step short-circuits to False
 -- without ever forcing the unsafe binding that follows it.
-guardChain :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
-guardChain = guardChainWith (const Nothing)
+--
+-- A step reading a chain-introduced wildcard is within its domain
+-- ('passWildApp').
+-- A hook rewrites each step's value first ('toPointValueExpr').
+guardChain :: (HornClause -> IRExpr -> IRExpr) -> [(ChainName, Bool)] -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+guardChain post wild clauses adtsDecls =
+  guardChainWith (\c -> Just (post c (hornClauseToIRExpr clauses adtsDecls c), clauseApplicability adtsDecls c)) wild clauses adtsDecls
 
 -- | 'guardChain' with some steps' value and applicability replaced (Just), as
 -- 'cumulativeStep' replaces the rounded ones.
-guardChainWith :: (HornClause -> Maybe (IRExpr, IRExpr)) -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
-guardChainWith _ _ _ [] = IRConst (VBool True)
-guardChainWith override clauses adtsDecls (ParameterHornClause _:cs) = guardChainWith override clauses adtsDecls cs
-guardChainWith override clauses adtsDecls (c:cs) =
-  let (val, app) = fromMaybe (hornClauseToIRExpr clauses adtsDecls c, clauseApplicability adtsDecls c) (override c)
-      rest = IRLetIn (conclusion c) val (guardChainWith override clauses adtsDecls cs)
+guardChainWith :: (HornClause -> Maybe (IRExpr, IRExpr)) -> [(ChainName, Bool)] -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+guardChainWith _ _ _ _ [] = IRConst (VBool True)
+guardChainWith override wild clauses adtsDecls (ParameterHornClause _:cs) = guardChainWith override wild clauses adtsDecls cs
+guardChainWith override wild clauses adtsDecls (c:cs) =
+  let (val0, app0) = fromMaybe (hornClauseToIRExpr clauses adtsDecls c, clauseApplicability adtsDecls c) (override c)
+      val = passInjectedWildcard adtsDecls wild c val0
+      app = passWildApp wild c app0
+      rest = IRLetIn (conclusion c) val (guardChainWith override wild clauses adtsDecls cs)
   in case app of
     IRConst (VBool True) -> rest
     appTest -> IRIf appTest rest (IRConst (VBool False))
@@ -332,7 +597,7 @@ guardChainWith override clauses adtsDecls (c:cs) =
 -- caller must test this BEFORE evaluating the value expression
 -- (task fc-inverse-refuses-on-any-input).
 --
--- A wildcard only ever enters at the seed and only ever travels along the
+-- A query's wildcard only ever enters at the seed and only ever travels along the
 -- chain's *deconstructing* steps: an arithmetic step handed one does not
 -- produce a wildcard, it dies, and by then this test has already answered True.
 -- So the carriers -- the chain names whose runtime value can be a wildcard --
@@ -341,6 +606,10 @@ guardChainWith override clauses adtsDecls (c:cs) =
 -- cheap: it never re-emits the chain's let-in block (which would double the
 -- inverse at every nesting level of a let chain), only a handful of @isAny@
 -- tests over accessor paths.
+--
+-- A wildcard a step makes up mid-chain (@fst@'s inverse answering
+-- @(s, ANY)@) is not the query's; 'injectedWildcards' tracks those, and
+-- 'toValueExpr' folds the certain ones into this test.
 --
 -- Nested like 'guardChain', for the same reason and with the same shape: a
 -- step's premises are only inspected once every earlier step is known to be
@@ -708,18 +977,13 @@ getAllOriginatingEquivalenceHornClauses clauses cn = concatMap (filter (\hc -> i
 -- Takes a list of Horn clauses and converts them to nested letIn expressions.
 -- We do this by declaring a new variable named after the conclusion of the clause
 -- The value of this letIn depends on the type of Horn clause, but is in general either the forward path or an inversion of the expression used to create the clause
-toLetInBlock :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
-toLetInBlock = toLetInBlockWith (const id)
-
--- | 'toLetInBlock' with a hook rewriting each clause's expression before it
--- is bound (or, for the last clause, returned). 'toSeededMonotoneInvExpr'
--- uses it to clamp a spine step's input into the step's image.
+-- Each clause's expression passes through a hook before it is bound (or,
+-- for the last clause, returned): 'toSeededMonotoneInvExpr' uses it to clamp
+-- a spine step's input into the step's image, 'toValueExpr' to pass a
+-- chain-introduced wildcard on ('passInjectedWildcard').
 toLetInBlockWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
 toLetInBlockWith _ _ _ [] = error "Cannot convert empty clause set to LetIn block"
 toLetInBlockWith post clauses adtsDecls cs = wrapInLetInBlockWith post clauses adtsDecls (init cs) (post (last cs) (hornClauseToIRExpr clauses adtsDecls (last cs)))
-
-wrapInLetInBlock :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr -> IRExpr
-wrapInLetInBlock = wrapInLetInBlockWith (const id)
 
 wrapInLetInBlockWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr -> IRExpr
 wrapInLetInBlockWith post clauses adtsDecls (ParameterHornClause _:cs) inner = wrapInLetInBlockWith post clauses adtsDecls cs inner

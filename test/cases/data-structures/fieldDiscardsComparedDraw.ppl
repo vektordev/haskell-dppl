@@ -1,0 +1,5 @@
+data P = P pa::Int, pb::Bool
+main = draw h = Normal in pa (P 0 (h == 1.0))
+-- Task fuzz-unconsumed-vanyexcept-reaches-codegen: fstDiscardsComparedDraw
+-- through an ADT field. The accessor's inverse builds `P 0 ANY`, and the
+-- constructor's field inverse reads the ANY back out for =='s inverse.
