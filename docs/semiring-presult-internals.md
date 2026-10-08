@@ -224,6 +224,15 @@ point mass can leave a sibling density behind
 compare values at equal dim and otherwise require the pruned dim to be the
 higher one.
 
+What is dropped depends on **operand order**. An enumerated InjF `l (+) r`
+guards each term on `accProb * p(l = e)` and never on `p(r = …)`, and `accProb`
+changes only at an `if`, so a commutative swap changes what is pruned. In
+`test/cases/topk-pruning/topKOperandOrder`, `(x + y) + z` over three
+Bernoulli(0.3) bits answers `p(3) = 0` at threshold 0.1 (`p(x + y = 2) = 0.09`),
+while `z + (x + y)` keeps the exact `0.027`. `Corpus.TopKOperandOrder` (Slow)
+checks every commutative site of the corpus. No other corpus program diverges
+(task `topk-prunes-on-left-operand-marginal-only`).
+
 ## A pruned probability is a lower bound — and complements are not
 
 A pruned result is a **lower bound** on the exact one, and lower bounds
