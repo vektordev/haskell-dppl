@@ -382,7 +382,7 @@ Three tiers, each opt-in by environment variable:
 | tier | how to run | expected | run it |
 |---|---|---|---|
 | default | `stack test` | **green** | after every step; the gate |
-| `Slow` | `NEST_SLOW_TESTS=1 NEST_FULL_TESTS=1 stack test` | **green** | before a merge or a push |
+| `Slow` | `NEST_SLOW_TESTS=1 stack test` | **green** | before a merge or a push |
 | `Aspirational` | `NEST_ASPIRATIONAL_TESTS=1 stack test` | red/flaky, by definition | when working on what it pins |
 
 (`SuperSlow`, `NEST_SUPERSLOW_TESTS=1`, is the sampling-vs-PDF fuzz tier; see
@@ -487,8 +487,9 @@ once and each writes its manifest back whole. It is never committed. It maps eac
 passing key, so it does not grow without bound, and a `-p` run leaves the
 other slots alone. A missing or unreadable manifest means a full run.
 `NEST_FULL_TESTS=1` ignores the manifest, executes every check, and records
-each pass. **Run timings and the pre-merge `Slow` run with
-`NEST_FULL_TESTS=1`** (see below).
+each pass. Neither the pre-merge `Slow` run nor the timings need it (see
+below); use it when a change touches the manifest keys or the harness that
+computes them, since a wrong key is exactly what a cached run cannot see.
 
 **Adding a check, or changing one.** Wrap the property in `cachedProperty`
 (or `cachedBatch` for a shared process, or `cachedAction` for an HUnit
@@ -512,11 +513,14 @@ batched topK differentials are not covered either.
 **Every commit message that reports a test result also reports the default
 suite's wall time against the base it was measured from**: not just
 `1484/1484 green` but `1484/1484 green (45s -> 50s)`. Measure both numbers the
-same way, on the same machine, with a warm build and **`NEST_FULL_TESTS=1`**:
-`stack test` end to end, or both test binaries run directly and their times
-added. Say which. Without `NEST_FULL_TESTS` the time depends on how many
-programs the commit changed (the impact analysis above), which is not the
-number the audit tracks. A change
+same way, on the same machine, with a warm build and **a primed manifest**:
+run the suite once, then time a second consecutive run on the unchanged tree
+(`stack test` end to end, or both test binaries run directly and their times
+added; say which). That is the cost a developer pays per step: the checks
+impact analysis cannot skip, which is where growth now shows up. A first run
+after a change depends on how many programs the change touched, so it is not
+the audited number. Timing with `NEST_FULL_TESTS=1` is optional; report it
+too when a change adds or re-keys cached checks. A change
 that moves tests between tiers reports the tier times it affected too. The
 log this produces is how a slowdown gets traced to the commit that caused it.
 The suite has had to be trimmed back repeatedly because nobody saw it grow.

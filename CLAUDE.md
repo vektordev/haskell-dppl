@@ -63,7 +63,9 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   use a module-scoped `OPTIONS_GHC` with a comment explaining why (today:
   `test/ArbitrarySPLL.hs` `-Wno-orphans`, `IRCompiler` `-fmax-pmcheck-models`).
 - **Test tiers.** Default `stack test` must be green after every step.
-  `NEST_SLOW_TESTS=1 NEST_FULL_TESTS=1` must be green before a merge or push.
+  `NEST_SLOW_TESTS=1` must be green before a merge or push. Impact analysis
+  stays on for both; `NEST_FULL_TESTS=1` is not required (use it when a change
+  touches the manifest keys or the harness that computes them).
   `NEST_ASPIRATIONAL_TESTS=1` holds tests known to be red. A test your change
   broke is a regression and does not go into Aspirational. A fix that makes
   an aspirational test pass moves it back to Slow in the same commit.
@@ -73,8 +75,9 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   Details: `docs/testing.md`.
 - **Report suite time in commits.** A commit message that reports a test
   result also reports the default suite's wall time against its base,
-  measured the same way on a warm build with `NEST_FULL_TESTS=1`, e.g.
-  `3203/3203 green (90s -> 97s)`.
+  measured the same way on a warm build with a primed manifest (time the
+  second consecutive run), e.g. `3203/3203 green (90s -> 97s)`. Details:
+  `docs/testing.md`, "Test suite time".
 - **Static refusals use `Semiring.refuse`, not `error`.** A shape an engine
   can't handle becomes an absent variant with a recorded reason. `error` is
   for internal invariants only (`docs/modality-and-admission.md`).
