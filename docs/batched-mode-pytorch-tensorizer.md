@@ -104,7 +104,7 @@ covers the dense `[V]` axis for free too.
 
 Tested by the `BatchedPython` group, gated on the `.tst` `batched`/`dense`
 header tokens and a torch-enabled Python (`NEST_TORCH_PYTHON` → a venv
-path → `python3`; repo convention: `~/.cache/nest/torchvenv`) — **fails** if none is found,
+path → `python3`; repo convention: `~/.local/share/nest/torchvenv`, not under `~/.cache`, which cleaners may wipe) — **fails** if none is found,
 naming why (`End2EndTesting.noTorch`), unless `NEST_SKIP_TORCH=1` opts out
 explicitly. Refusal behaviour has separate
 torch-independent coverage.

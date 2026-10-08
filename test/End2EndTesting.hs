@@ -2324,7 +2324,7 @@ findTorchPython = do
   envPy <- lookupEnv "NEST_TORCH_PYTHON"
   home  <- lookupEnv "HOME"
   let candidates = maybe [] (:[]) envPy
-                ++ maybe [] (\h -> [h ++ "/.cache/nest/torchvenv/bin/python"]) home
+                ++ maybe [] (\h -> [h ++ "/.local/share/nest/torchvenv/bin/python"]) home
                 ++ ["python3"]
   firstWithTorch candidates
   where

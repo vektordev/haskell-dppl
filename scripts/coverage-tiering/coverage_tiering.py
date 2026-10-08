@@ -304,7 +304,7 @@ def write_shims(shim_dir, real_exe):
     os.makedirs(shim_dir, exist_ok=True)
     real_py = shutil.which("python3")
     torch_py = os.environ.get("NEST_TORCH_PYTHON") or os.path.expanduser(
-        "~/.cache/nest/torchvenv/bin/python")
+        "~/.local/share/nest/torchvenv/bin/python")
     shims = {
         # The exe is instrumented too: give each invocation its own tix file
         # (it would otherwise read the parent's, whose Main differs).
