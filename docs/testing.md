@@ -363,6 +363,18 @@ callee's parameter around the argument's own measure, so `h b` called under an
 enumerated `draw b` measured `b == b` and lost the draw's weight (29 corpus
 programs; `let-bindings/helperParamShadowsEnumeratedDraw`).
 
+`Corpus.TopKOperandOrder` (Slow, task
+`transformation-differential-testing-m1-config-differencing`) applies one more
+rewrite, `Rewrites.commuteSites`: swap the operands of one call of a
+commutative built-in (`plus`, `mult`, `and`, `or`, `max`, `eq` and the int
+forms). Each swapped program gets its own topK compile and answers the
+original's `p()` rows at threshold 0 (must agree with the original: hard) and
+0.1 (a divergence is logged as `ORDER-DEPENDENT`). Programs known to diverge are
+listed in `knownOperandOrderDependent` with their tracking task, and an entry
+that stops diverging fails. At landing, 393 sites over 247 programs agreed at
+both thresholds; only the constructed pin `topk-pruning/topKOperandOrder`
+diverges (see `semiring-presult-internals.md`, "topK Branch Pruning").
+
 ## Slow and Aspirational tests
 
 Three tiers, each opt-in by environment variable:

@@ -1,6 +1,7 @@
 -- | The @Corpus@ tasty group: metamorphic properties driven by the whole
 -- @test/cases/**/*.ppl@+@.tst@ corpus (validation, sampling-vs-PDF, topK, branch
--- counting, P(ANY)=1, log-space vs linear, and -O0 vs the default -O2).
+-- counting, P(ANY)=1, log-space vs linear, -O0 vs the default -O2, and operand
+-- order under topK).
 --
 -- This lives in its own module -- and, via @haskell-dppl-test-corpus@ in
 -- @package.yaml@, its own test-suite executable/OS process -- because
@@ -45,8 +46,11 @@ module TestCorpus
 import Test.QuickCheck hiding (verbose)
 import Test.Tasty (TestTree, testGroup, localOption)
 import Test.Tasty.QuickCheck (testProperty, QuickCheckMaxRatio(..))
+import Test.Tasty.HUnit (testCaseInfo, assertFailure)
+import Control.Exception (SomeException, evaluate, try)
+import System.Timeout (timeout)
 import Data.Maybe (fromMaybe)
-import Data.List (nubBy)
+import Data.List (nubBy, isPrefixOf)
 import Data.Function (on)
 import Data.Foldable (toList)
 import Control.Monad.Random.Lazy (evalRandIO, replicateM)
@@ -62,6 +66,7 @@ import TestTolerances (probTolerance, samplingTolerance)
 import TestSupport (topKConf, bcConf, reasonablyClose)
 import ImpactManifest
 import End2EndTesting (programRuntimeFields)
+import Rewrites (commuteSites)
 
 -- The expected-value tables that used to live here have moved into the
 -- test/cases/**/*.ppl + *.tst corpus (see the End2End groups). The metamorphic
@@ -222,6 +227,29 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
       , sweepSelect = corpusPoolEntry, sweepNote = "-O0 answers exactly what -O2 answers" } $ \probPool _ ->
       testProperty "UnoptimizedMatchesOptimized"
       (forAllNamedIn probPool (checkUnoptimizedMatchesOptimized unoptEnvs defaultEnvs))
+  -- task transformation-differential-testing-m1-config-differencing: does
+  -- topK pruning depend on the order of commutative operands? Every pool
+  -- program is compiled once more per commutative call site, its operands
+  -- swapped ('commuteSites'), and both spellings answer their p() rows from
+  -- one topK compile each at two runtime cutoffs. At threshold 0 pruning is
+  -- off, so the two must agree exactly (a hard failure: a commutativity bug,
+  -- not a topK one). At 0.1 they may not: an enumerated InjF guards each
+  -- term on accProb * pLeft, never on pRight, so the left operand's marginal
+  -- decides what is dropped (topk-pruning/topKOperandOrder pins the minimal
+  -- case). Those divergences are by design of the current pruning rule and
+  -- are logged, not failed -- 'TASTY_HIDE_SUCCESSES=false' shows them. Slow:
+  -- one extra compile per site.
+  , corpusSweepAll corpus SweepSpec
+      { sweepName = "Corpus.TopKOperandOrder", sweepTier = Slow, sweepSlow = SkipSlow
+      , sweepSelect = corpusPoolEntry, sweepNote = "swapping a commutative call's operands changes nothing at threshold 0; logs what it changes at 0.1" } $ \es ->
+      return $ testGroup "TopKOperandOrder"
+        [ testCaseInfo n (checkTopKOperandOrder (lookup n knownOperandOrderDependent) (lookupCompiled topK005Envs n) p rows)
+        | e <- es
+        , let n = ceName e
+        , let p = ceProgram e
+        , let rows = [ (inp, params) | (_, inp, params, _) <- map snd (probCasesOf [e]) ]
+        , not (null rows)
+        , not (null (commuteSites p)) ]
   ]
   where
     -- Each property is its own sweep over the same slice, and sees that
@@ -340,6 +368,79 @@ checkUnoptimizedMatchesOptimized unoptEnvs optEnvs n (p, inp, params, _) = ioPro
           (property $ abs (unoptP - optP) < probTolerance)
         .&&. unoptD === optD
     _ -> return $ counterexample "Return type was no tuple" False
+
+-- | Corpus programs known to answer differently at threshold 0.1 once a
+-- commutative call's operands are swapped, each with its tracking document.
+-- An entry whose program no longer diverges fails its test, so a fix to the
+-- pruning rule cannot leave the list stale. A divergence on a program not
+-- listed here is logged, not failed: pruning is lossy by design, and which
+-- term it drops depending on operand order is the documented behaviour until
+-- the tracking document changes the rule.
+knownOperandOrderDependent :: [(String, String)]
+knownOperandOrderDependent =
+  [ ("topKOperandOrder", "topk-prunes-on-left-operand-marginal-only") ]
+
+-- | One program's 'Corpus.TopKOperandOrder' check: per commutative site, the
+-- swapped program's topK compile against the original's, at threshold 0
+-- (must agree) and 0.1 (logged). A side that refuses, crashes or times out
+-- is logged; there is nothing to compare.
+checkTopKOperandOrder :: Maybe String -> Either CompilerError IREnv -> Program -> [(IRValue, [IRValue])] -> IO String
+checkTopKOperandOrder known origCompiled p rows = do
+  origAt <- mapM (\t -> answerAt p (Right =<< origCompiled) t) thresholds
+  verdicts <- mapM (\(site, p') -> do
+      c' <- timed (compile (topKConf 0.05) p')
+      swappedAt <- mapM (answerAt p' c') thresholds
+      return (site, judgeSite origAt swappedAt)) (commuteSites p)
+  let hard = [ site ++ ": " ++ m | (site, Left m) <- verdicts ]
+      logged = [ site ++ ": " ++ m | (site, Right (Just m)) <- verdicts ]
+      orderDependent = any (\m -> "ORDER-DEPENDENT" `isPrefixOf` m) [ m | (_, Right (Just m)) <- verdicts ]
+  if not (null hard)
+    then assertFailure (unlines hard) >> return ""
+    else if maybe False (const (not orderDependent)) known
+    then assertFailure ("known operand-order dependence no longer observed -- fixed? remove its \
+                        \knownOperandOrderDependent entry and update its .tst comment ["
+                        ++ concat known ++ "]") >> return ""
+    else return $ show (length verdicts) ++ " sites, " ++ show (length verdicts - length logged) ++ " agree"
+           ++ concatMap ("\n    " ++) logged
+  where
+    thresholds = [0.0, 0.1]
+    timed :: Either CompilerError IREnv -> IO (Either String IREnv)
+    timed c = do
+      r <- timeout (20 * 1000000) (try (evaluate c))
+      return $ case r of
+        Nothing -> Left "compile timeout (20s)"
+        Just (Left ex) -> Left ("compile crash: " ++ firstLine (show (ex :: SomeException)))
+        Just (Right (Left err)) -> Left ("refused: " ++ firstLine err)
+        Just (Right (Right env)) -> Right env
+    answerAt :: Program -> Either String IREnv -> Double -> IO (Either String [(Double, Double)])
+    answerAt _ (Left why) _ = return (Left why)
+    answerAt q (Right env) t = do
+      let env' = withTopKCutoff t env
+          one (s, params) = case runProbC q env' params s of
+            Right (VProbDim pr d) -> Right (pr, d)
+            Right v -> Left ("not a probability result: " ++ firstLine (show v))
+            Left err -> Left ("refused: " ++ firstLine err)
+          answers = mapM one rows
+          force x = either length (\xs -> length [ () | (a, b) <- xs, a + b == a + b ]) x `seq` x
+      r <- timeout (20 * 1000000) (try (evaluate (force answers)))
+      return $ case r of
+        Nothing -> Left "timeout (20s)"
+        Just (Left ex) -> Left ("crash: " ++ firstLine (show (ex :: SomeException)))
+        Just (Right x) -> x
+    -- Left: a hard failure; Right Nothing: agrees; Right (Just m): logged.
+    judgeSite [Right o0, Right o1] [Right s0, Right s1]
+      | not (and (zipWith agreesPD o0 s0)) = Left ("threshold 0 disagrees: original " ++ show o0 ++ ", swapped " ++ show s0)
+      | not (and (zipWith agreesPD o1 s1)) = Right (Just ("ORDER-DEPENDENT at 0.1: original " ++ show o1 ++ ", swapped " ++ show s1
+                                                          ++ maybe "" (\d -> " [known: " ++ d ++ "]") known))
+      | otherwise = Right Nothing
+    judgeSite [Left why, _] _ = Right (Just ("original does not answer: " ++ why))
+    judgeSite _ [Left why, _] = Right (Just ("swapped does not answer: " ++ why))
+    judgeSite o s = Right (Just ("does not answer at 0.1: " ++ concat (take 1 [ w | Left w <- o ++ s ])))
+    agreesPD (p1, d1) (p2, d2)
+      | isNaN p1 || isNaN p2 = isNaN p1 && isNaN p2 && d1 == d2
+      | p1 == 0 && p2 == 0 = True
+      | otherwise = abs (p1 - p2) <= probTolerance * max 1 (abs p1) && d1 == d2
+    firstLine m = let l = takeWhile (/= '\n') m in if length l > 160 then take 160 l ++ "..." else l
 
 checkProbAny :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkProbAny envs n (p, _, params, _) = ioProperty $ do

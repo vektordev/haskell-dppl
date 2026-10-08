@@ -38,6 +38,8 @@ module Rewrites
   , extractHelper
   , freshName
   , programNames
+  , commutativeInjFs
+  , commuteSites
   ) where
 
 import Data.List (nub)
@@ -123,6 +125,32 @@ everySite f ctx e = f ctx e ++
       Lambda x _ -> Ctx (ctxScope ctx ++ [x]) False
       Apply _ _ | i == 0 -> ctx { ctxCallee = True }
       _ -> ctx { ctxCallee = False }
+
+-- | The binary built-in functions whose operands commute: @f a b@ and
+-- @f b a@ denote the same value for every @a@, @b@, so swapping the operands
+-- of one call is semantics-preserving whatever they are -- random, shared
+-- with other subterms, or recursive (both operands are evaluated either way,
+-- and an independent draw does not care which is evaluated first).
+commutativeInjFs :: [String]
+commutativeInjFs = ["plus", "plusI", "mult", "multI", "and", "or", "max", "eq"]
+
+-- | Every program obtained from @p@ by swapping the operands of exactly one
+-- call of a 'commutativeInjFs' function, labelled by its site. A call whose
+-- two operands are the same expression has no site (the swap is the
+-- identity). Not a 'Family': the rewrite-invariance sweep compares at the
+-- default config, while operand order is the axis topK pruning is known to
+-- depend on (task transformation-differential-testing-m1-config-differencing,
+-- "Corpus.TopKOperandOrder").
+commuteSites :: Program -> [(String, Program)]
+commuteSites p =
+  [ (declName ++ ": " ++ lbl, p { functions = [ (m, if m == declName then e' else b) | (m, b) <- functions p ] })
+  | (declName, body) <- functions p
+  , (lbl, e', _) <- everySite site (Ctx [] False) body ]
+  where
+    site _ e = case node e of
+      InjF (Named f) [a, b] | f `elem` commutativeInjFs, a /= b ->
+        [("commute " ++ render e, e { node = InjF (Named f) [b, a] }, [])]
+      _ -> []
 
 -- | An unannotated node, as the parser would build it.
 mkExpr :: ExprF Expr -> Expr
