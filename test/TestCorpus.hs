@@ -30,6 +30,13 @@
 -- parameter of the compiled functions, so the 0, 0.05 and 0.1 thresholds share
 -- one compile re-thresholded by 'withTopKCutoff'. topK+log-space keeps its
 -- own compile, because log space is a compile-time semiring choice.)
+--
+-- Two of the six compiles serve only a Slow-tier property each, and since the
+-- maps are lazy a default run never builds them: topK+log-space
+-- (TopKLogSpaceMatchesLinear; the default "topK runtime cutoff" group already
+-- checks the log-space cutoff conversion on purpose-built programs) and -O0
+-- (UnoptimizedMatchesOptimized, a check on the optimizer and on IR the
+-- optimizer must not be load-bearing for).
 module TestCorpus
   ( corpusTests
   , CorpusProbCase
@@ -176,8 +183,10 @@ corpusTests corpus = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corp
   -- against the corresponding LINEAR topK compile at the same threshold, not
   -- against the (topK-off) .tst expectations, since topK is a real pruning
   -- optimisation whose own linear-mode result is the correct oracle here.
+  -- Slow: the cutoff's log conversion is covered in the default suite by the
+  -- "topK runtime cutoff" group; this is its corpus-wide version.
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.TopKLogSpaceMatchesLinear", sweepTier = Default, sweepSlow = SkipSlow
+      { sweepName = "Corpus.TopKLogSpaceMatchesLinear", sweepTier = Slow, sweepSlow = SkipSlow
       , sweepSelect = corpusPoolEntry, sweepNote = "log-space topK agrees with linear topK" } $ \probPool _ ->
       testProperty "TopKLogSpaceMatchesLinear"
       (forAllNamedIn probPool (checkTopKLogSpaceMatchesLinear topK005LogEnvs topK005Envs))
@@ -190,9 +199,10 @@ corpusTests corpus = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corp
   -- (which only ever compiles at the default level) stayed green over a real
   -- codegen defect. Comparing the two levels on the same corpus points closes
   -- that blind spot: the optimizer is a rewrite, so agreement is exact, not
-  -- approximate.
+  -- approximate. Slow: the -O0 corpus compile is a whole extra corpus compile
+  -- spent on the optimizer alone.
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.UnoptimizedMatchesOptimized", sweepTier = Default, sweepSlow = SkipSlow
+      { sweepName = "Corpus.UnoptimizedMatchesOptimized", sweepTier = Slow, sweepSlow = SkipSlow
       , sweepSelect = corpusPoolEntry, sweepNote = "-O0 answers exactly what -O2 answers" } $ \probPool _ ->
       testProperty "UnoptimizedMatchesOptimized"
       (forAllNamedIn probPool (checkUnoptimizedMatchesOptimized unoptEnvs defaultEnvs))
