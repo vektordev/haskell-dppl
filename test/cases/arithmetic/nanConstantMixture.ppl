@@ -1,0 +1,7 @@
+main = if Uniform < 0.5 then (1e400 - 1e400) < 1.0 else True
+-- An arm reads a NaN-valued constant (Infinity - Infinity). Its
+-- DiscreteValues tag holds VFloat NaN, and Analysis.annotateEnumsProg's
+-- fixpoint used to compare tag environments with (==), which never holds
+-- once a NaN is in them (NaN /= NaN), so the compile never finished. The
+-- comparison keeps NaN out of the result, which the batched runtime rejects.
+-- Docs task nan-constant-hangs-enum-annotation-fixpoint.
