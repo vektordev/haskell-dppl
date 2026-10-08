@@ -542,7 +542,7 @@ main = do
   -- regressions outside the code they pin. They're skipped unless
   -- NEST_SLOW_TESTS is set, e.g. `NEST_SLOW_TESTS=1 stack test --ta '-p Slow'`.
   -- The corpus sweeps in it gate themselves on their Slow tier.
-  slowInternals <- slowInternalsTests corpus
+  let slowInternals = slowInternalsTests
   slowE2e <- slowEnd2EndTests corpus manifest
   slowBatchedPy <- slowBatchedPythonTests corpus
   -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten

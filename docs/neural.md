@@ -96,8 +96,9 @@ constructors) on the operand's `MultiValue` itself (`Analysis.structuralTag`),
 never listing the cross product it stands for. Listing (`listedTag`) is the
 reference: wherever both answer they agree exactly, in canonical form
 (`Internals`' `structural enum propagation agrees with listing`, over every
-corpus node; a node whose listing exceeds 2^16 tuples is compared in the Slow
-tier instead). A non-canonical operand (a tuple constant is a flat
+corpus node; above 2^16 tuples the listing evaluates an ADT implicit function
+directly rather than through the interpreter, pinned equal to `listedTag` at
+every node within that bound). A non-canonical operand (a tuple constant is a flat
 `MultiDiscretes [VTuple ..]`) falls back to listing. Listing had made a 3^12
 tuple read with an `of` uncompilable: `fst s` needed 2·3^11 cross-product
 elements to see all three colours.

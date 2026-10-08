@@ -28,7 +28,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, structural)
-import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
+import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
@@ -4957,62 +4957,95 @@ structuralPropagationTests corpus = corpusSweepAll corpus SweepSpec
   , sweepNote = "each structural enum rule agrees with listing at every listable corpus node" } $ \es ->
   return $ testGroup "structural enum propagation agrees with listing"
   [ testCase "every corpus node a structural rule answers" $ do
-      compared <- compareStructuralWithListing es (<= structuralListingBound)
-      -- Non-vacuity: the corpus must exercise the rules.
+      (compared, wide, direct) <- compareStructuralWithListing es
+      -- Non-vacuity: the corpus must exercise the rules, and the direct
+      -- listing must be pinned against 'listedTag' somewhere before it
+      -- stands in for it on a wide node.
       assertBool ("structural rules answered only " ++ show compared ++ " corpus nodes") (compared > 100)
+      assertBool ("the direct listing agreed with listedTag at only " ++ show direct ++ " corpus nodes") (direct > 100)
+      -- The wide half: if the corpus stops holding a node above the bound,
+      -- the direct-listing path is unreached and this guard should go.
+      assertBool "no corpus node lists above the bound" (wide > 0)
   ]
 
--- | The wide half of 'structuralPropagationTests': the corpus nodes whose
--- listing is above 'structuralListingBound'. Today that is one node, the
--- 20-field @Face@ constructor of drawProductReadPerField20 (2^20 tuples, each
--- one an interpreter run: ~55 s on its own, the main binary's wall-clock
--- floor while it ran in the default suite).
-slowStructuralPropagationTests :: Corpus -> IO TestTree
-slowStructuralPropagationTests corpus = corpusSweepAll corpus SweepSpec
-  { sweepName = "Slow.Internals (slow).structural enum propagation agrees with listing (wide)"
-  , sweepTier = Slow, sweepSlow = IgnoreSlow, sweepSelect = const True
-  , sweepNote = "the structural rules against listing at the corpus nodes above the listing bound" } $ \es ->
-  return $ testGroup "structural enum propagation agrees with listing (wide)"
-  [ testCase "every corpus node a structural rule answers, listing above the bound" $ do
-      compared <- compareStructuralWithListing es (> structuralListingBound)
-      -- Non-vacuity: if the corpus stops holding a wide node, this half
-      -- checks nothing and should be removed rather than pass.
-      assertBool "no corpus node lists above the bound" (compared > 0)
-  ]
-
--- | How many tuples the default suite's listing may evaluate per node: the
--- product of the operands' value counts. Listing evaluates the forward
--- function once per tuple, ~50 us each, so this is ~3 s at worst. Every node
--- of the corpus but one is at or below 2^14 (task
--- structural-enum-propagation-test-is-the-critical-path).
+-- | How many tuples 'listedTag' may evaluate per node: the product of the
+-- operands' value counts. It evaluates the forward function once per tuple
+-- through the IR interpreter, ~50 us each, so this is ~3 s at worst. Above it
+-- the reference is 'directListing' instead (task
+-- structural-enum-propagation-test-is-the-critical-path). Every corpus node
+-- but one is at or below 2^14; the exception is the 20-field @Face@
+-- constructor of drawProductReadPerField20 (2^20 tuples, ~53 s through the
+-- interpreter, ~1 s directly).
 structuralListingBound :: Integer
 structuralListingBound = 65536
 
--- | Compare each structural rule against listing ('listedTag') at every
--- corpus InjF node whose operands are listable and whose listing size passes
--- the filter, returning the number of nodes compared.
-compareStructuralWithListing :: [CorpusEntry] -> (Integer -> Bool) -> IO Int
-compareStructuralWithListing entries sizeOk = do
-  compared <- forM entries $ \entry -> do
+-- | Listing without the interpreter, for the ADT implicit functions
+-- (constructors, constructor tests, field accessors): the same cross product,
+-- filtered by 'implicitFunctionApplicable' and evaluated by
+-- 'implicitFunctionImpl' -- which is what the interpreter itself dispatches
+-- an implicit function to -- then put in canonical form exactly as
+-- 'listedTag' (uncapped) does. 'Nothing' for any other InjF. Pinned equal to
+-- 'listedTag' at every corpus node within the bound where it answers.
+directListing :: [ADTDecl] -> String -> [MultiValue] -> Maybe (Maybe MultiValue)
+directListing ds name operands
+  | name `elem` implicitFunctionNames ds = Just $
+      -- Without the whole-value 'nubValues' 'listedTag' applies first: it
+      -- cannot change 'valueListToMultiValue''s answer, which de-duplicates
+      -- every leaf, and over 2^20 values it would be most of the cost.
+      case [ implicitFunctionImpl ds name t
+           | t <- mapM multiValueToValueList operands
+           , implicitFunctionApplicable ds name t ] of
+        [] -> Nothing
+        vals -> Just (valueListToMultiValue vals)
+  | otherwise = Nothing
+
+-- | Compare each structural rule against listing at every corpus InjF node
+-- whose operands are listable. The reference is 'listedTag' within
+-- 'structuralListingBound' and 'directListing' above it; within the bound,
+-- 'directListing' is also checked against 'listedTag' wherever it answers.
+-- Returns the nodes compared, the nodes above the bound, and the nodes where
+-- the two listings were checked against each other.
+compareStructuralWithListing :: [CorpusEntry] -> IO (Int, Int, Int)
+compareStructuralWithListing entries = do
+  counts <- forM entries $ \entry -> do
     let path = cePpl entry
     case rtypedProgram (ceProgram entry) of
-      Left _ -> return 0
+      Left _ -> return (0, 0, 0)
       Right rtyped -> do
         let annotated = annotateEnumsProg rtyped
             ds = adts rtyped
-            cases = [ (name, operands, structural', listed)
+            nodes = [ (name, operands, structural', size)
                     | Expr _ (InjF (Named name) params) <- allNodes annotated
                     , Just rule <- [structuralTag ds name]
                     , Just operands <- [mapM tagOf params]
                     , all listable operands
-                    , sizeOk (product (mapMaybe enumeratedCount operands))
-                    , Just structural' <- [rule operands]
-                    , Just listed <- [listedTag ds Nothing name operands] ]
-        forM_ cases $ \(name, operands, s, l) ->
-          assertEqual (path ++ ": " ++ name ++ " " ++ show operands) (Just l) s
-        return (length cases)
-  return (sum compared)
+                    , let size = product (mapMaybe enumeratedCount operands)
+                    , Just structural' <- [rule operands] ]
+            label name operands = path ++ ": " ++ name ++ " " ++ show operands
+        results <- forM nodes $ \(name, operands, s, size) ->
+          if size <= structuralListingBound
+            then case listedTag ds Nothing name operands of
+              Nothing -> return (0, 0, 0)
+              Just l -> do
+                assertEqual (label name operands) (Just l) s
+                case directListing ds name operands of
+                  Nothing -> return (1, 0, 0)
+                  Just d -> do
+                    assertEqual ("direct listing vs listedTag at " ++ label name operands) (Just l) d
+                    return (1, 0, 1)
+            else case directListing ds name operands of
+              -- Listing answers nothing here; as within the bound, not compared.
+              Just Nothing -> return (0, 1, 0)
+              Just (Just d) -> do
+                assertEqual (label name operands) (Just d) s
+                return (1, 1, 0)
+              Nothing -> assertFailure
+                ("no listing within the bound for a non-implicit InjF: " ++ label name operands
+                 ++ " lists " ++ show size ++ " tuples; raise structuralListingBound or list it directly")
+        return (sum3 results)
+  return (sum3 counts)
   where
+    sum3 = foldr (\(a, b, c) (x, y, z) -> (a + x, b + y, c + z)) (0, 0, 0)
     tagOf e = case [mv | DiscreteValues mv <- tags (getTypeInfo e)] of
       [mv] -> Just mv
       _ -> Nothing
@@ -5330,17 +5363,14 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
 -- `stack test` used to take. 'test_planEnumBoolCtorPolynomial' stays in the fast
 -- group -- its depth pair (8/12) was deliberately chosen to fail in about a
 -- minute rather than OOM (see its own comment), and it is cheap (well under 1s).
-slowInternalsTests :: Corpus -> IO TestTree
-slowInternalsTests corpus = do
-  wide <- slowStructuralPropagationTests corpus
-  return $ testGroup "Internals (slow)"
+slowInternalsTests :: TestTree
+slowInternalsTests = testGroup "Internals (slow)"
     [ test_planEnumRecTopKAndBC
     , test_planEnumM4Polynomial
     , test_planEnumFusedJointStatePolynomial
     , test_planEnumStructuralGrouped
     , test_planHelperOnFoldResultMatchesDense
     , test_planSharedFoldValueMatchesDense
-    , wide
     ]
 
 -- ===========================================================================
