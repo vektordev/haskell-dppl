@@ -26,6 +26,15 @@ rather than `property True`, so QuickCheck's own discard-ratio accounting
 reports this honestly instead of it being invisible inside an inflated
 success count.
 
+The two crash-freedom properties (`prop_Fuzz_CompileNeverCrashes` on raw
+draws, `prop_Fuzz_TypedCompileNeverCrashes` on typed ones) go all the way
+through codegen: a draw that compiles is also emitted as scalar Python, Julia
+and batched Python along the CLI's own path (`SPLL.Prelude.codeGenToLang` /
+`emitCompiled`, refusal guard included), and the emitted source is forced. A
+codegen refusal passes; an exception fails, naming the backend. Nothing is
+executed, so neither needs Python or Julia. Batched Python costs a second
+compile, which is why both budget two compiles per draw.
+
 The five inference invariants share draws (`invariantsProperty`): one draw is
 compiled once per config its invariants read (default, topK, branch
 counting; topK 0 and 0.1 share one compile, since the cutoff is a runtime

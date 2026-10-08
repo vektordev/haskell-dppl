@@ -563,7 +563,7 @@ withinBudgetScaled name factor act = do
 -- and queries its own probability, exercising the generate/probability code
 -- paths too, not just the compile pipeline itself.
 prop_Fuzz_CompileNeverCrashes :: Property
-prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize fuzzSize genRawFuzzProgram) $ \p -> ioProperty $ withinBudget "prop_Fuzz_CompileNeverCrashes" $ do
+prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize fuzzSize genRawFuzzProgram) $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_CompileNeverCrashes" 2 $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -571,12 +571,12 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize f
       sample <- drawSample p irEnv
       unless (isRuntimeFailure sample) $
         void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
-      return $ property True
+      emitEveryBackend defaultCompilerConfig p irEnv
 
 -- | Well-typed scalar programs: a stronger, unguarded crash-freedom check
 -- (see module header for why this differs from the invariant properties).
 prop_Fuzz_TypedCompileNeverCrashes :: Property
-prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_TypedCompileNeverCrashes" $ do
+prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_TypedCompileNeverCrashes" 2 $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -584,7 +584,27 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrin
       sample <- drawSample p irEnv
       unless (isRuntimeFailure sample) $
         void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
-      return $ property True
+      emitEveryBackend defaultCompilerConfig p irEnv
+
+-- | Crash-freedom through codegen, for a program that compiled to @irEnv@
+-- under @conf@: emit it for every backend the CLI's @compile@ subcommand
+-- reaches ('codeGenToLang') and force the emitted source in full. Scalar Python
+-- and Julia reuse @irEnv@ ('emitCompiled'); batched Python needs its own
+-- compile under @batched = True@, which is why the callers budget two compiles
+-- per draw. A refusal ('Left') passes; a Haskell exception fails, naming the
+-- backend. Nothing is executed, so no Python or Julia install is involved.
+emitEveryBackend :: CompilerConfig -> Program -> IREnv -> IO Property
+emitEveryBackend conf p irEnv = conjoin <$> mapM emitOne
+  [ ("Python", emitCompiled TargetPython False conf irEnv)
+  , ("Julia", emitCompiled TargetJulia False conf irEnv)
+  , ("batched Python", codeGenToLang TargetPython False conf{batched = True} p)
+  ]
+  where
+    emitOne (backend, out) = do
+      r <- trySync (evaluate (either length length out))
+      return $ case r of
+        Right _ -> property True
+        Left e -> counterexample (backend ++ " codegen threw: " ++ show e) False
 
 -- | 'compile' never hands back an 'IREnv' whose probability/integrate/
 -- normal/writeLogits bodies draw randomness (task
@@ -1768,7 +1788,9 @@ aspirationalFuzzNames =
   [ ("prop_Fuzz_TypedCompileNeverCrashes",
      "3/3 runs, a different compiler crash each time (getProbIndex's \"More \
      \than one probabilistic argument\", \"found no way to convert to IR\", an \
-     \enumerated conditional meeting a density)")
+     \enumerated conditional meeting a density); since it reaches codegen \
+     \(2026-10-08) also the batched emitter's missing infix form for OpIntDiv/OpMax \
+     \(task batched-int-mult-inverse-no-intdiv)")
   , ("prop_Fuzz_ProbNeverGenerateBacked",
      "3/3 runs: gives up on its discard rate within the wall-clock budget, \
      \or is falsified")
