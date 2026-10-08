@@ -73,11 +73,6 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   torch-enabled python is found (`NEST_TORCH_PYTHON`); `NEST_SKIP_TORCH=1`
   skips them deliberately, and a run with it set is not a green run.
   Details: `docs/testing.md`.
-- **Report suite time in commits.** A commit message that reports a test
-  result also reports the default suite's wall time against its base,
-  measured the same way on a warm build with a primed manifest (time the
-  second consecutive run), e.g. `3203/3203 green (90s -> 97s)`. Details:
-  `docs/testing.md`, "Test suite time".
 - **Static refusals use `Semiring.refuse`, not `error`.** A shape an engine
   can't handle becomes an absent variant with a recorded reason. `error` is
   for internal invariants only (`docs/modality-and-admission.md`).
