@@ -678,8 +678,8 @@ it from the program's own `adts`, and the expression-level exports
 (`genTypedExpr`, `tyOfTypedExpr`, `shrinkTypedExpr`, `typedLeaves`, `genTy`)
 run against the pool, so standalone-expression properties are unchanged.
 
-**Two shapes the generator can build are switched off, because each re-finds
-a filed bug** (the M4 rule for the diverging scalar recursion, above):
+**One shape the generator can build is switched off, because it re-finds a
+filed bug** (the M4 rule for the diverging scalar recursion, above):
 
 - **Mutually recursive pairs** (`generateMutualPairs = False`). A program
   using one does not finish compiling. `data A = A0 | A1 ab::B; data B = B0 |
@@ -688,14 +688,14 @@ a filed bug** (the M4 rule for the diverging scalar recursion, above):
   probe hit it 18 times in 1,500 draws). The pair generator stays and is
   pinned by `a mutually recursive pair validates, is mutual, and has finite
   leaves`.
-- **Constructors named `Any` or `Base`** (`knownCollidingNames`). `Any`'s
-  `isAny` test shadows the runtimes' own `isAny`: Python recurses forever and
-  Julia overflows its stack. `Base` redefines Julia's `Base` module, so the
-  module does not load (internal-docs `adt-constructor-name-shadows-runtime`).
-  `prop_Fuzz_BackendsAgree` failed on one of them in 3 of its first 6 runs.
-  A deterministic sweep of every target-language name in the generator's
-  lists, as a constructor, a type and a field, through both backends found
-  these two and nothing else. Afterwards 6 of 6 fresh-seed runs were green.
+
+Target-language names a backend breaks on go in `knownCollidingNames`, which
+is empty. It held the constructors `Any` (whose `isAny` test shadowed the
+runtimes' own) and `Base` (which redefined Julia's `Base` module) until
+internal-docs `adt-constructor-name-shadows-runtime` escaped them; they were
+found by `prop_Fuzz_BackendsAgree` in 3 of its first 6 runs, and a
+deterministic sweep of every name in the generator's hazard lists, as a
+constructor, a type and a field, through both backends found nothing else.
 
 Measured over 200 draws at `fuzzSize = 12` when M4 landed, with the pool
 only: 46.5% of draws declare an ADT, 10.5% have an ADT target, 16% contain a

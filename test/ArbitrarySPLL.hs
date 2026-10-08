@@ -1553,17 +1553,13 @@ nameOk taken nm =
                       | pfx <- ["v", "h", "r", "d", "va", "vb", "p"] ]
 
 -- | Target-language names a generated declaration may *not* use, because a
--- backend breaks on them: a constructor @Any@ emits an @isAny@ test that
--- shadows the runtimes' own @isAny@ (Python recurses forever, Julia
--- overflows its stack), and a constructor @Base@ redefines Julia's @Base@
--- module, so the module does not load. Filed as internal-docs
--- @adt-constructor-name-shadows-runtime@, found by this generator's first
--- Slow runs and confirmed by sweeping every hazard name below through both
--- backends (the only two that broke). Excluded rather than re-found on every
--- run, like the hangs 'generateMutualPairs' avoids; drop them from here when
--- that bug is fixed.
+-- backend breaks on them. Empty: the constructors @Any@ (whose @isAny@ test
+-- shadowed the runtimes' own) and @Base@ (which redefined Julia's @Base@
+-- module) were excluded here until internal-docs
+-- @adt-constructor-name-shadows-runtime@ escaped them. Add a name back only
+-- with a filed bug, and drop it again when that bug is fixed.
 knownCollidingNames :: [String]
-knownCollidingNames = ["Any", "Base"]
+knownCollidingNames = []
 
 upperWords, hazardUpper, lowerWords, hazardLower :: [String]
 upperWords =
@@ -1579,7 +1575,8 @@ hazardUpper =
   , "Some", "Int", "Float", "Bool", "String", "Tuple", "Any", "Type", "Base"
   , "Vector", "Array", "Symbol", "Missing", "Exception", "Function", "EnumBatch"
   , "InferenceList", "EmptyInferenceList", "Dict", "Set", "Union", "Ref", "Inf"
-  , "NaN", "Main", "Core", "Float64", "Int64", "Char", "Real", "Number", "Tensor" ]
+  , "NaN", "Main", "Core", "Float64", "Int64", "Char", "Real", "Number", "Tensor"
+  , "Possible" ]
 lowerWords =
   [ "val", "x", "y", "w", "lo", "hi", "size", "flag", "kid", "rest", "nxt"
   , "item", "tag", "score", "mass", "elem", "body", "key", "count", "weight"

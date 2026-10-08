@@ -81,14 +81,17 @@ module SPLL.ReservedNames
   , pythonBuiltinNames
   , pythonReservedIdentifiers
   , isPythonReserved
+  , constructorTestName
+  , pythonNeedsEscape
   , juliaKeywords
   , juliaRuntimeNames
   , juliaBaseNames
   , juliaReservedIdentifiers
   , isJuliaReserved
+  , juliaNeedsEscape
   ) where
 
-import Data.Char (isDigit)
+import Data.Char (isDigit, isUpper)
 import Data.List (isPrefixOf, isSuffixOf, find, stripPrefix)
 import qualified Data.Set as Set
 
@@ -474,6 +477,27 @@ pythonReservedSet = Set.fromList pythonReservedIdentifiers
 isPythonReserved :: String -> Bool
 isPythonReserved n = Set.member n pythonReservedSet
 
+-- | The predicate every backend derives for a constructor: @isLeaf@ for
+-- @Leaf@, emitted as a definition of its own beside the constructor's class
+-- or struct.
+constructorTestName :: String -> String
+constructorTestName = ("is" ++)
+
+-- | Whether an identifier must be escaped because a name it /derives/ is
+-- reserved, though it is not reserved itself. Only a constructor derives a
+-- name ('constructorTestName'), and only a capitalised identifier can be one.
+-- A constructor @Any@ emitted @def isAny@ over the runtime's wildcard test,
+-- and the new definition, which refuses a hole by calling @isAny@ first,
+-- recursed into itself (task adt-constructor-name-shadows-runtime).
+derivesReservedName :: (String -> Bool) -> String -> Bool
+derivesReservedName reserved n@(c:_) = isUpper c && reserved (constructorTestName n)
+derivesReservedName _ [] = False
+
+-- | What 'SPLL.CodeGenPyTorch.pyMangle' asks of a name (stripped of trailing
+-- underscores): reserved itself, or deriving a reserved constructor test.
+pythonNeedsEscape :: String -> Bool
+pythonNeedsEscape n = isPythonReserved n || derivesReservedName isPythonReserved n
+
 -- | Julia's reserved words. Mangled by 'SPLL.CodeGenJulia.juliaMangle'.
 --
 -- A field named @end@ emits @struct Mk / end / end@, which closes the struct
@@ -523,6 +547,11 @@ juliaBaseNames =
   [ "exp", "abs", "sign", "sum", "maximum", "max", "map", "all", "rand"
   , "randn", "throw", "string", "typeof", "Inf", "NaN", "nothing"
   , "AbstractFloat", "Bool", "Integer"
+    -- The module names every Julia module has in scope. Emitted code never
+    -- refers to them, but a constructor @Base@ emitted @struct Base@, which
+    -- Julia refuses as "invalid redefinition of constant Base" (at top level
+    -- @Core@ and @Main@ too), so the module did not load.
+  , "Base", "Core", "Main"
   ]
 
 -- | Every name 'SPLL.CodeGenJulia.juliaMangle' escapes: the keywords, the
@@ -537,3 +566,8 @@ juliaReservedSet = Set.fromList juliaReservedIdentifiers
 -- | Membership in 'juliaReservedIdentifiers', as a set lookup.
 isJuliaReserved :: String -> Bool
 isJuliaReserved n = Set.member n juliaReservedSet
+
+-- | What 'SPLL.CodeGenJulia.juliaMangle' asks of a name (stripped of trailing
+-- underscores); see 'pythonNeedsEscape'.
+juliaNeedsEscape :: String -> Bool
+juliaNeedsEscape n = isJuliaReserved n || derivesReservedName isJuliaReserved n

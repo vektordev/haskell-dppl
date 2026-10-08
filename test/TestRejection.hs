@@ -16,6 +16,7 @@ module TestRejection (rejectionTests) where
 -- HUnit case asserting both that it is rejected and *why* -- so a regression
 -- that changes which rule fires is pinpointed to the offending program.
 
+import Data.Char (isUpper)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), GenericList(..), MultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
 import SPLL.Typing.RType (RType(..), Extent(..))
@@ -503,6 +504,25 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
                  (not (any ((`elem` pythonReservedIdentifiers) . pyMangle) pythonReservedIdentifiers))
       assertBool "a mangled Julia name is still reserved"
                  (not (any ((`elem` juliaReservedIdentifiers) . juliaMangle) juliaReservedIdentifiers))
+  , testCase "a constructor whose derived test is reserved is mangled" $ do
+      -- Task adt-constructor-name-shadows-runtime: a constructor Any derived
+      -- isAny, which the emitted module defined over the runtime's wildcard
+      -- test, and Base redefined Julia's Base module.
+      assertEqual "Python: derives isAny" "Any_" (pyMangle "Any")
+      assertEqual "Python: derives isPossible" "Possible_" (pyMangle "Possible")
+      assertEqual "Julia: derives isAny" "Any_" (juliaMangle "Any")
+      assertEqual "Julia: module name" "Base_" (juliaMangle "Base")
+      assertEqual "Python: family shifts along" ["Any_", "Any__"] (map pyMangle ["Any", "Any_"])
+      assertEqual "a lowercase name derives nothing (isclose is reserved)" "close" (juliaMangle "close")
+      -- The class, not the instances: no capitalised name derives a test that
+      -- is reserved once the name is mangled.
+      let derivedStillReserved mangle reserved =
+            [ c | ('i':'s':c@(h:_)) <- reserved, isUpper h
+                , ("is" ++ mangle c) `elem` reserved ]
+      assertEqual "Python: a mangled constructor still derives a reserved test" []
+                  (derivedStillReserved pyMangle pythonReservedIdentifiers)
+      assertEqual "Julia: a mangled constructor still derives a reserved test" []
+                  (derivedStillReserved juliaMangle juliaReservedIdentifiers)
   , testCase "a collision mangling cannot see is refused, not silently emitted" $
       -- Residue of the name-local design: pyMangle sees one name at a time, so
       -- a field named isNone_ colliding with constructor None's derived

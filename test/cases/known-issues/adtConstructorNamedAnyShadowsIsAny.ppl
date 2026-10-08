@@ -1,2 +1,0 @@
-data Box = Any | Nil
-main = if Uniform < 0.3 then Any else Nil
