@@ -294,15 +294,28 @@ instance Arbitrary TypeInfo where
 -- @left x@ node fixes only the left component, a @right y@ node only the
 -- right, and neither says anything about the other. A 'Lambda' is the third
 -- such node -- nothing on it records what its parameter was bound at -- so a
--- function value recovers as @TyArrow TyAny r@ unless it is read at an
--- application, where the argument pins the parameter. See 'tyOfTypedExpr'.
+-- function value whose body ignores its parameter recovers as
+-- @TyArrow TyAny r@ unless it is read at an application, where the argument
+-- pins the parameter. See 'tyOfTypedExpr'.
+--
+-- 'TyUnrecovered' is the other kind of unknown, and the two must not be
+-- confused (task fuzz-tyany-conflates-free-and-unrecovered): some node *does*
+-- fix this position, but recovery could not work out to what. A lambda's
+-- parameter read outside an application is the source -- something elsewhere
+-- applies the function, so the parameter has a type, and nothing here says
+-- which. Every consumer reads it as "cannot conclude": it generalizes nothing
+-- and nothing but a free position generalizes it ('tyGeneralizes'), so a
+-- shrink check rejects rather than reading it as "anything fits". 'TyAny'
+-- used to stand for both, and the shrinker was caught out by the second
+-- meaning twice (task shrinker-type-recovery-flake).
 data Ty = TyFloat | TyInt | TyBool
         | TyTuple Ty Ty
         | TyEither Ty Ty
         | TyList Ty
         | TyArrow Ty Ty
         | TyADT String   -- ^ a declaration in the 'HasADTs' context, by name (milestone M4)
-        | TyAny
+        | TyAny          -- ^ free: no node commits this position
+        | TyUnrecovered  -- ^ committed by some node, but recovery could not determine it
   deriving (Show, Eq)
 
 -- | The variables in scope and the 'Ty' each was bound at. Innermost binding
@@ -701,8 +714,9 @@ genTypedExpr :: Ty -> Int -> Gen Expr
 genTypedExpr ty n = withPool (uniquifyBinders <$> genTypedExprIn [] ty n)
 
 genTypedExprIn :: HasADTs => TyEnv -> Ty -> Int -> Gen Expr
-genTypedExprIn env TyAny n = do
-  -- Only reachable if a caller hands us a recovered type. Resolve the free
+genTypedExprIn env TyAny n = genTypedExprIn env TyUnrecovered n
+genTypedExprIn env TyUnrecovered n = do
+  -- Only reachable if a caller hands us a recovered type. Resolve the
   -- position to a concrete one rather than failing.
   ty <- genTyIn 0
   genTypedExprIn env ty n
@@ -744,6 +758,7 @@ genTypedLeaf TyBool = oneof
   , bernoulli <$> choose (0.01, 0.99)
   ]
 genTypedLeaf TyAny = genTypedLeaf TyFloat
+genTypedLeaf TyUnrecovered = genTypedLeaf TyFloat
 -- The smallest function value is a constant one. It ignores its argument,
 -- which is not a degenerate case to be avoided but a shape worth covering:
 -- whatever randomness the argument carries is dropped on the floor, and the
@@ -874,6 +889,7 @@ genTypedRec env ty n =
                      ]
     tyRec = case ty of
       TyAny -> []
+      TyUnrecovered -> []
       TyADT nm -> adtCtorProds env nm n
       -- The subtraction sugars stay explicit alongside the catalog: @a - b@ is
       -- @plus a (neg b)@, a *composite* shape the catalog cannot name, and the
@@ -1869,6 +1885,7 @@ tyToRType TyFloat        = TFloat
 tyToRType TyInt          = TInt
 tyToRType TyBool         = TBool
 tyToRType TyAny          = TFloat
+tyToRType TyUnrecovered  = TFloat
 tyToRType (TyTuple a b)  = Tuple (tyToRType a) (tyToRType b)
 tyToRType (TyEither a b) = TEither (tyToRType a) (tyToRType b)
 tyToRType (TyList a)     = ListOf (tyToRType a)
@@ -2098,6 +2115,7 @@ genNeuralObs e (TyADT n) = case adtCtors n of
 -- total.
 genNeuralObs e (TyList _) = pure (isNull e)
 genNeuralObs _ TyAny      = constB <$> arbitrary
+genNeuralObs _ TyUnrecovered = constB <$> arbitrary
 -- A network's target type is never an arrow: neither 'genAutoNeuralTy' nor
 -- 'genDiscreteNeuralTy' can draw one, and 'autoDeriveMultiValue' has no plan
 -- for a function anyway. Answering with a constant keeps this total rather
@@ -2310,10 +2328,15 @@ tyOfTypedExprIn env e = case node e of
   Apply f val         -> tyOfArgument env f val >>= \vty -> tyOfApplied env vty f
   -- A function value read somewhere other than at an application -- bound by
   -- a @let@, passed as an argument, chosen by an @if@. Nothing on a 'Lambda'
-  -- node records what its parameter was bound at, so the parameter position
-  -- stays free and the result is recovered under it. That is the same 'TyAny'
-  -- contract @left@/@right@ already use for the component they do not pin.
-  Lambda x body       -> TyArrow TyAny <$> tyOfTypedExprIn ((x, TyAny) : env) body
+  -- node records what its parameter was bound at. Some application elsewhere
+  -- does fix it, so the parameter is bound 'TyUnrecovered', not 'TyAny': a
+  -- variable whose type merely was not recovered is not a free position, and
+  -- reading it as one is what let @sq a@ shrink to @a@ under a polymorphic
+  -- parent (task shrinker-type-recovery-flake). The arrow's own parameter
+  -- position is free only when the body ignores it -- the constant function
+  -- @\\p -> 0@ is well-typed at every argument type.
+  Lambda x body       -> TyArrow (if mentionsVar x body then TyUnrecovered else TyAny)
+                           <$> tyOfTypedExprIn ((x, TyUnrecovered) : env) body
   _                   -> Nothing
 
 -- | The type of applying @f@ to an argument of type @aty@.
@@ -2410,6 +2433,7 @@ tyOfTypedInjF env "right" [x]    = TyEither TyAny <$> tyOfTypedExprIn env x
 tyOfTypedInjF env "recip" [x]    = tyOfTypedExprIn env x >>= \t -> case t of
   TyFloat -> Just TyFloat
   TyAny   -> Just TyFloat
+  TyUnrecovered -> Just TyFloat
   _       -> Nothing
 -- The structural predicates. Their result is 'TyBool' whatever they test, but
 -- they are *not* catalog entries -- the catalog is the scalar fragment, and
@@ -2420,6 +2444,7 @@ tyOfTypedInjF env "recip" [x]    = tyOfTypedExprIn env x >>= \t -> case t of
 tyOfTypedInjF env "isNull" [x]   = tyOfTypedExprIn env x >>= \t -> case t of
   TyList _ -> Just TyBool
   TyAny    -> Just TyBool
+  TyUnrecovered -> Just TyBool
   _        -> Nothing
 tyOfTypedInjF env "isLeft" [x]   = tyOfTypedEitherTest env x
 tyOfTypedInjF env "isRight" [x]  = tyOfTypedEitherTest env x
@@ -2432,15 +2457,18 @@ tyOfTypedInjF env f args
   | Just (owner, ftys) <- ctorInfo f
   = if length ftys == length args
       then do argTys <- mapM (tyOfTypedExprIn env) args
-              if and (zipWith (flip tyGeneralizes) ftys argTys)
+              -- An argument position recovery could not determine says
+              -- nothing against the field, and the node's type does not
+              -- depend on it, so it is checked as if free.
+              if and (zipWith (flip tyGeneralizes) ftys (map unrecoveredAsFree argTys))
                 then Just (TyADT owner) else Nothing
       else Nothing
   | Just (owner, _, fty, _) <- fieldInfo f, [x] <- args
   = tyOfTypedExprIn env x >>= \t ->
-      if t == TyADT owner || t == TyAny then Just fty else Nothing
+      if t == TyADT owner || t == TyAny || t == TyUnrecovered then Just fty else Nothing
   | Just owner <- testInfo f, [x] <- args
   = tyOfTypedExprIn env x >>= \t ->
-      if t == TyADT owner || t == TyAny then Just TyBool else Nothing
+      if t == TyADT owner || t == TyAny || t == TyUnrecovered then Just TyBool else Nothing
 -- Everything else is a scalar application, and its result type is whatever
 -- the catalog entry matching the *recovered argument types* produces. This is
 -- the same table 'genTypedRec' generates from, read backwards -- which is what
@@ -2449,7 +2477,9 @@ tyOfTypedInjF env f args
 -- them.
 --
 -- A recovered 'TyAny' argument (a position no node commits) matches any
--- catalog argument, so recovery stays as total as it was; an ambiguous match
+-- catalog argument, so recovery stays as total as it was, and so does a
+-- 'TyUnrecovered' one: the argument has *some* type, and a single matching
+-- row fixes the result whichever it is. An ambiguous match
 -- yields 'Nothing' rather than a guess, because a wrong type here is a
 -- type-changing "shrink", which M2 established is worse than no shrink.
 tyOfTypedInjF env f args = do
@@ -2461,7 +2491,28 @@ tyOfTypedInjF env f args = do
            , and (zipWith argMatches (injFArgs s) argTys) ] of
     [t] -> Just t
     _   -> Nothing
-  where argMatches want got = got == TyAny || want == got
+  where argMatches want got = got == TyAny || got == TyUnrecovered || want == got
+
+-- | Read every not-recovered position as free. Only for a check whose verdict
+-- does not depend on that position (a constructor's argument, which the
+-- node's own type does not mention); everywhere else the two must stay apart.
+unrecoveredAsFree :: Ty -> Ty
+unrecoveredAsFree = mapTy (\t -> if t == TyUnrecovered then TyAny else t)
+
+-- | Mark every free position not recovered: what a position some *other*
+-- reading left free becomes once it is joined with a reading that commits it
+-- to something unknown ('tyJoin').
+freeAsUnrecovered :: Ty -> Ty
+freeAsUnrecovered = mapTy (\t -> if t == TyAny then TyUnrecovered else t)
+
+-- | Rewrite the leaves of a 'Ty' bottom-up.
+mapTy :: (Ty -> Ty) -> Ty -> Ty
+mapTy f t = f $ case t of
+  TyTuple a b  -> TyTuple (mapTy f a) (mapTy f b)
+  TyEither a b -> TyEither (mapTy f a) (mapTy f b)
+  TyList a     -> TyList (mapTy f a)
+  TyArrow a b  -> TyArrow (mapTy f a) (mapTy f b)
+  _            -> t
 
 -- | @isLeft@/@isRight@ recover to 'TyBool' exactly when their argument is an
 -- 'Either' (or an as-yet-uncommitted position).
@@ -2469,6 +2520,7 @@ tyOfTypedEitherTest :: HasADTs => TyEnv -> Expr -> Maybe Ty
 tyOfTypedEitherTest env x = tyOfTypedExprIn env x >>= \t -> case t of
   TyEither _ _ -> Just TyBool
   TyAny        -> Just TyBool
+  TyUnrecovered -> Just TyBool
   _            -> Nothing
 
 -- | Every InjF name appearing anywhere in an expression. Used by the
@@ -2662,9 +2714,17 @@ injFCatalogFor ty = [ s | s <- injFCatalog, injFResult s == ty ]
 -- (structurally, component-wise). 'Nothing' means the two are incompatible,
 -- which for an expression the generator produced cannot happen -- it means the
 -- node is outside the recognised space.
+--
+-- 'TyUnrecovered' is a reading that commits the *whole* type to something
+-- unknown. Joined with a concrete reading it yields that reading -- both are
+-- the one node's type -- except that the positions the concrete side left
+-- free are no longer free: the other side may commit them, so they become
+-- 'TyUnrecovered' too.
 tyJoin :: Ty -> Ty -> Maybe Ty
 tyJoin TyAny t = Just t
 tyJoin t TyAny = Just t
+tyJoin TyUnrecovered t = Just (freeAsUnrecovered t)
+tyJoin t TyUnrecovered = Just (freeAsUnrecovered t)
 tyJoin (TyTuple a b)  (TyTuple c d)  = TyTuple  <$> tyJoin a c <*> tyJoin b d
 tyJoin (TyEither a b) (TyEither c d) = TyEither <$> tyJoin a c <*> tyJoin b d
 tyJoin (TyList a)     (TyList b)     = TyList   <$> tyJoin a b
@@ -2697,8 +2757,15 @@ tyJoin a b
 -- the expression's type and breaking recovery somewhere further out. The
 -- asymmetric test refuses that, and refuses the mirror-image error of
 -- committing a position the context left free.
+--
+-- 'TyUnrecovered' on either side is "cannot conclude", which for a shrink
+-- check means reject: an unknown type generalizes nothing (not even another
+-- unknown -- two not-recovered positions need not be the same type), and only
+-- a free position generalizes an unknown one.
 tyGeneralizes :: Ty -> Ty -> Bool
 tyGeneralizes TyAny _ = True
+tyGeneralizes TyUnrecovered _ = False
+tyGeneralizes _ TyUnrecovered = False
 tyGeneralizes (TyTuple a b)  (TyTuple c d)  = tyGeneralizes a c && tyGeneralizes b d
 tyGeneralizes (TyEither a b) (TyEither c d) = tyGeneralizes a c && tyGeneralizes b d
 tyGeneralizes (TyList a)     (TyList b)     = tyGeneralizes a b
@@ -2755,6 +2822,9 @@ typedLeavesIn TyBool  = [constB False, constB True]
 -- committing the unknown side to a concrete type is exactly the shrink that
 -- would be ill-typed in the surrounding context.
 typedLeavesIn TyAny   = []
+-- Nor for one recovery could not determine: there is no leaf of an unknown
+-- type, and guessing one is exactly the type-changing shrink to avoid.
+typedLeavesIn TyUnrecovered = []
 typedLeavesIn (TyTuple a b) =
   [ tuple x y | x <- take 1 (typedLeavesIn a), y <- take 1 (typedLeavesIn b) ]
 typedLeavesIn (TyEither a b) =
@@ -2811,9 +2881,11 @@ shrinkTypedExprIn env e = case tyOfTypedExprIn env e of
     -- 'Shrinker' group's type-preservation property, task
     -- shrinker-type-recovery-flake):
     --
-    --   * 'TyAny' at the child's site reads as "free", but may only mean "not
-    --     recovered": @sq a@ with @a : ?@ collapses to @a@, and an enclosing
-    --     polymorphic @neg@ then recovers 'Nothing'.
+    --   * 'TyAny' at the child's site read as "free", but only meant "not
+    --     recovered": @sq a@ with @a : ?@ collapsed to @a@, and an enclosing
+    --     polymorphic @neg@ then recovered 'Nothing'. Recovery now says
+    --     'TyUnrecovered' there, which the site-local test already rejects
+    --     (task fuzz-tyany-conflates-free-and-unrecovered).
     --   * The replacement is recovered by a *different, more precise* rule once
     --     it sits in the parent: a callee @(\\v0 -> \\v1 -> v1) x@ collapses to
     --     the literal @\\v1 -> v1@, the enclosing 'Apply' becomes a @let@ that
@@ -2824,7 +2896,9 @@ shrinkTypedExprIn env e = case tyOfTypedExprIn env e of
     -- the root has been verified against every node on its path, which is what
     -- the property actually asks. The price is that rejected candidates cost a
     -- re-typing per enclosing level (quadratic in depth), accepted as cheaper
-    -- than a shrinker that hands the property ill-typed programs.
+    -- than a shrinker that hands the property ill-typed programs. It stays
+    -- after the 'TyUnrecovered' split: that closes the first route, but the
+    -- second is about rules, not markers, and nothing proves it closed.
     --
     -- Judged in the node's own scope: a @let@ collapse that only type-checks
     -- under the binding being removed is not a candidate at all. And judged
@@ -2891,10 +2965,11 @@ childShrinks env e = case asLet e of
     -- node nothing says what its parameter was bound at, and the shrinker has
     -- no type for a binder it cannot name.
     --
-    -- Binding it at 'TyAny' and descending anyway is wrong, and not subtly:
+    -- Binding it at 'TyAny' and descending anyway was wrong, and not subtly:
     -- 'tyGeneralizes' reads 'TyAny' as "this position is free, so anything may
     -- fill it", which is true of a position *no node commits* and false of a
-    -- variable whose type merely was not recovered. With @v : TyAny@ in scope,
+    -- variable whose type merely was not recovered ('TyUnrecovered', since
+    -- task fuzz-tyany-conflates-free-and-unrecovered). With @v : TyAny@ in scope,
     -- @collapses@ accepts @v@ as a replacement for any node at all, and
     -- @fst (v, xs)@ -- whose value is @v@ -- duly shrank to @fst v@, which is
     -- @fst@ of an Int. (Found by the @Shrinker@ group's type-preservation
@@ -2942,8 +3017,20 @@ shrinkOne f (x:xs) =
 -- Last, the ADT declarations themselves shrink ('adtDeclShrinks'): an unused
 -- constructor or field goes, and 'withADTs' drops a declaration nothing uses
 -- any more. Recovery runs against the program's own declarations.
+--
+-- Every candidate is re-typed at the root, too ('keepsCoreTy'): the
+-- program-level instance of the per-level re-check in 'shrinkTypedExprIn'.
+-- @main@'s core is shrunk in the scope 'helperEnv' recovers for the
+-- *original* program, and that scope is itself read off @main@ -- a helper's
+-- parameter is typed at its call site there. A shrink that drops the only
+-- call site that recovers leaves the helper at its value reading, with a
+-- not-recovered parameter, and @main@ with it. While that reading said 'TyAny'
+-- the change passed as "more general"; since the 'TyUnrecovered' split it is
+-- correctly "cannot conclude", and the candidate is not offered (task
+-- fuzz-tyany-conflates-free-and-unrecovered, replay 520205 of the 'Shrinker'
+-- group's type-preservation property at 50000 cases).
 shrinkTypedProgram :: Program -> [Program]
-shrinkTypedProgram p = inProgram p $ filter guarded $ map withADTs $ (case typedMainParts p of
+shrinkTypedProgram p = filter keepsCoreTy $ inProgram p $ filter guarded $ map withADTs $ (case typedMainParts p of
   Nothing -> []
   Just ((env, core), rebuild) ->
     [ replaceDecl "main" (uniquifyBinders (rebuild core'))
@@ -2955,6 +3042,11 @@ shrinkTypedProgram p = inProgram p $ filter guarded $ map withADTs $ (case typed
   ++ adtDeclShrinks p
   where
     guarded p' = length (unguardedProjections p') <= length (unguardedProjections p)
+    origTy = typedMainCoreTy p
+    keepsCoreTy p' = case (typedMainCoreTy p', origTy) of
+      (Just a, Just b)   -> a `tyGeneralizes` b
+      (Nothing, Nothing) -> True
+      _                  -> False
     replaceDecl nm body' =
       p { functions = [ (n, if n == nm then body' else b) | (n, b) <- functions p ] }
 

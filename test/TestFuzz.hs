@@ -93,7 +93,7 @@ import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
                       InjFSig(..), injFCatalog, injFExcluded, InjFExclusion(..),
                       injFNamesOf, injFLeafApp, tyOfTypedExpr,
                       shrinkTypedProgram, shrinkTypedExpr,
-                      tyGeneralizes,
+                      tyGeneralizes, tyJoin,
                       typedExprSize, typedExprDepth,
                       LetShape(..), letShapeOf, uniquifyBindersFrom,
                       ArrowShape(..), arrowShapeOf, arrowShapeOfProgram,
@@ -1424,6 +1424,7 @@ showTy TyFloat         = "Float"
 showTy TyInt           = "Int"
 showTy TyBool          = "Bool"
 showTy TyAny           = "?"
+showTy TyUnrecovered   = "<unrecovered>"
 showTy (TyTuple a b)   = "(" ++ showTy a ++ ", " ++ showTy b ++ ")"
 showTy (TyEither a b)  = "Either " ++ showTy a ++ " " ++ showTy b
 showTy (TyList a)      = "[" ++ showTy a ++ "]"
@@ -2481,10 +2482,13 @@ liveLet = letIn "v0" uniform (Expr makeTypeInfo (Var "v0") #+# constF 1.0)
 -- pinned here deterministically.
 --
 -- 'TyAny' read as "free" where it only meant "not recovered": the argument of
--- @sq@ applies a variable bound to a function value, which recovers as '?'.
--- @sq@ is Float-only, so @sq a@ is Float and collapsing it to @a@ passes the
+-- @sq@ applies a variable bound to a function value, which recovered as '?'.
+-- @sq@ is Float-only, so @sq a@ is Float and collapsing it to @a@ passed the
 -- site-local test -- but the enclosing @neg@ is polymorphic, and @neg a@
--- recovers as 'Nothing'.
+-- recovers as 'Nothing'. (Since task adt-generator-core-type-recoverable-flake
+-- the call site types @f@ and this exact shape recovers as Float throughout;
+-- 'notRecoveredUnderSq' keeps the class reachable by applying @f@ through a
+-- selection, which the call-site push does not see.)
 shrinkUnderPolymorphicParent :: Expr
 shrinkUnderPolymorphicParent =
   negF (injF "sq" [letIn "f" ("y" #-># var "y") (apply (var "f") (constF 1.0))])
@@ -2499,6 +2503,82 @@ shrinkChangesParentRule :: Expr
 shrinkChangesParentRule =
   tuple (apply (letIn "a" (constF 0.0) ("b" #-># var "b")) (cons (constB True) nul))
         (constF 0.0)
+
+-- | The function value of 'shrinkUnderPolymorphicParent', applied through an
+-- @if@ so that its parameter is not typed at a call site: @f@ keeps its
+-- value reading, @\y -> y@ at an unrecovered parameter, and the application
+-- recovers as 'TyUnrecovered'.
+notRecoveredArg :: Expr
+notRecoveredArg =
+  letIn "f" ("y" #-># var "y")
+    (apply (ifThenElse (constB True) (var "f") (var "f")) (constF 1.0))
+
+notRecoveredUnderSq :: Expr
+notRecoveredUnderSq = injF "sq" [notRecoveredArg]
+
+-- | Task fuzz-tyany-conflates-free-and-unrecovered: recovery tells "no node
+-- commits this position" ('TyAny') from "some node does, recovery could not
+-- tell to what" ('TyUnrecovered'), and the consumers read the second as
+-- "cannot conclude".
+freeVsUnrecoveredTests :: TestTree
+freeVsUnrecoveredTests = testGroup "free vs not recovered"
+  [ testCase "a free position recovers as TyAny" $ do
+      assertEqual "left pins only its own side" (Just (TyEither TyFloat TyAny))
+        (tyOfTypedExpr (left (constF 1.0)))
+      assertEqual "a constant function's parameter is free" (Just (TyArrow TyAny TyFloat))
+        (tyOfTypedExpr ("p" #-># constF 0.0))
+  , testCase "the first shrinker counterexample's function value is not recovered" $ do
+      -- 'shrinkUnderPolymorphicParent''s @f@, read as a value.
+      assertEqual "the bound value" (Just (TyArrow TyUnrecovered TyUnrecovered))
+        (tyOfTypedExpr ("y" #-># var "y"))
+      assertEqual "applied where the call site cannot type it" (Just TyUnrecovered)
+        (tyOfTypedExpr notRecoveredArg)
+  , testCase "the second shrinker counterexample's callee is not recovered" $
+      -- 'shrinkChangesParentRule''s callee, read on its own.
+      assertEqual "" (Just (TyArrow TyUnrecovered TyUnrecovered))
+        (tyOfTypedExpr (letIn "a" (constF 0.0) ("b" #-># var "b")))
+  , testCase "a not-recovered argument is rejected at its own site" $ do
+      -- Without the split this collapse passed the site-local test, and only
+      -- the per-level re-check one node up caught it.
+      assertBool "sq x does not shrink to x"
+        (notRecoveredArg `notElem` shrinkTypedExpr notRecoveredUnderSq)
+      assertBool "the callee does not collapse onto the bare lambda"
+        (("b" #-># var "b") `notElem` shrinkTypedExpr (letIn "a" (constF 0.0) ("b" #-># var "b")))
+  , testCase "TyUnrecovered generalizes nothing, and only TyAny generalizes it" $ do
+      assertBool "not itself" (not (tyGeneralizes TyUnrecovered TyUnrecovered))
+      assertBool "not a concrete type" (not (tyGeneralizes TyUnrecovered TyFloat))
+      assertBool "no concrete type generalizes it" (not (tyGeneralizes TyFloat TyUnrecovered))
+      assertBool "nor one nested in a structure"
+        (not (tyGeneralizes (TyEither TyFloat TyFloat) (TyEither TyFloat TyUnrecovered)))
+      assertBool "but a free position nested in one does"
+        (tyGeneralizes (TyEither TyFloat TyAny) (TyEither TyFloat TyUnrecovered))
+      assertBool "a free position does" (tyGeneralizes TyAny TyUnrecovered)
+  , testCase "joining a not-recovered reading unfrees the other side's free positions" $ do
+      assertEqual "" (Just (TyEither TyFloat TyUnrecovered))
+        (tyJoin (TyEither TyFloat TyAny) TyUnrecovered)
+      assertEqual "" (Just TyUnrecovered) (tyJoin TyAny TyUnrecovered)
+  , testProperty "a shrink is re-typed under a polymorphic parent (not-recovered argument)" $ once $
+      shrinkPreservesTy (negF notRecoveredUnderSq)
+  , testCase "a main shrink may not drop the call site that types a helper (replay 520205)" $ do
+      -- The helper's parameter is typed at its call in @main@, whose argument
+      -- recovers only through the @if@'s else-arm. Collapsing the @if@ onto
+      -- its then-arm is type-preserving in the scope the *original* program
+      -- recovers, but leaves the helper at its value reading -- parameter not
+      -- recovered -- and @main@ with it.
+      let helper = "h0" #-># injF "head" [injF "Cons" [var "h0", nul]]
+          selected = ifThenElse (constB False) (var "helper") (var "helper")
+          mainE  = apply (var "helper")
+                     (apply (ifThenElse (constB True) selected ("v1" #-># constI 1)) (constI 2))
+          p = Program [("helper", helper), ("main", mainE)] [] [] [] []
+          collapsed = apply (var "helper") (apply selected (constI 2))
+      assertEqual "the original recovers" (Just TyInt) (typedMainCoreTy p)
+      assertEqual "the collapse alone does not"
+        (Just TyUnrecovered) (typedMainCoreTy p { functions = [("helper", helper), ("main", collapsed)] })
+      assertBool "and is not offered"
+        (collapsed `notElem` [ e | p' <- shrinkTypedProgram p, Just e <- [lookup "main" (functions p')] ])
+      assertBool "every offered shrink keeps the core type"
+        (and [ compatibleTys (typedMainCoreTy p') (typedMainCoreTy p) | p' <- shrinkTypedProgram p ])
+  ]
 
 shrinkerTests :: TestTree
 shrinkerTests = testGroup "Shrinker"
@@ -2596,6 +2676,7 @@ shrinkerTests = testGroup "Shrinker"
             let m = minimizeBy containsNormal b
             in counterexample (show m)
                  (containsNormal m .&&. typedExprSize m <= typedExprSize b)
+  , freeVsUnrecoveredTests
   ]
 
 -- ---------------------------------------------------------------------------
