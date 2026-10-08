@@ -1756,6 +1756,41 @@ test_gaussianChainIRNotExponential = testGroup "gaussianChainIRNotExponential"
                   ++ " (" ++ show small ++ " -> " ++ show large ++ ")")
         (ratio < 8)
 
+-- | Task short-gaussian-trajectory-module-larger-than-long: a function with at
+-- most @--marginalSlots@ correlated slots gets a probability variant per mask,
+-- each compiled from the program with the masked slots unobserved. The
+-- dispatcher calls one only after testing that every slot it leaves concrete
+-- is not ANY, yet each variant re-guarded those slots, and every guard's ANY
+-- arm was another copy of the inference with that slot unobserved too. So the
+-- 15 variants of the 4-step Gaussian trajectory were 5.6x the size of the base
+-- function's own dispatcher and body, as optimized IR (the -O2 module was 293
+-- KB, against 53 KB at five steps, which has no variants).
+-- 'MaskVariants.assumeObserved' folds those tests; the variants are now 2.1x
+-- the base, about 5 KB of Python each. The bound of 3.5x fails on the old shape.
+test_shortGaussianTrajectoryVariantsCompact :: TestTree
+test_shortGaussianTrajectoryVariantsCompact = testCase "shortGaussianTrajectoryVariantsCompact" $
+  case tryParseProgram "trajectory4" src of
+    Left err -> assertFailure ("parse error: " ++ show err)
+    Right prog -> case compile defaultCompilerConfig prog of
+      Left e -> assertFailure ("compile error: " ++ show e)
+      Right ir@(IREnv groups _ _) -> do
+        let probSize g = maybe 0 (length . show . fst) (probFun g)
+            variants = [ g | g <- groups, maskVariantOf g == Just "main" ]
+            base = probSize (lookupIREnv "main" ir)
+            total = sum (map probSize variants)
+            ratio = fromIntegral total / fromIntegral base :: Double
+        assertEqual "variants of main" 15 (length variants)
+        assertBool ("the 15 variants are " ++ show ratio ++ "x the base probability function ("
+                    ++ show total ++ " vs " ++ show base ++ ")")
+          (ratio < 3.5)
+  where
+    src = unlines $
+      ["main thetas ="]
+      ++ [ "  draw s" ++ show i ++ " = (" ++ prev i ++ " - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in"
+         | i <- [1 .. 4 :: Int] ]
+      ++ ["  (s1, (s2, (s3, s4)))"]
+    prev i = if i == 1 then "3.0" else "s" ++ show (i - 1)
+
 -- | Task anyexcept-any-arm-compiled-instead-of-constant: a query of an InjF
 -- whose inverse yields "any value except c" (here @==@) is measured as the
 -- marginal minus the point. The marginal is the constant (1, dim 0) and must
@@ -5340,6 +5375,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_gaussianChainIRNotExponential
+  , test_shortGaussianTrajectoryVariantsCompact
   , test_nestedEqualityChainAnyArmConstant
   , test_wideConstructorPruneGuardLinear
   , test_witnessFoldOpenBodyShared

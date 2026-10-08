@@ -103,6 +103,16 @@ Things worth knowing:
   budget 0 whose `(ANY, _)` variant takes ~110 s; eagerly, every query of that
   program paid it. An admitted mask whose compile an engine then refuses is a
   variant whose body is that refusal.
+- **A variant assumes what the dispatcher tested.** Compiled from an ordinary
+  program, a variant guards every slot it still observes against `ANY`, and
+  each guard's `ANY` arm is another copy of the inference. The dispatcher only
+  calls it with a non-`ANY` root and every slot outside the mask (and each node
+  above one) not `ANY`, so `MaskVariants.assumeObserved` folds those `isAny`
+  tests to `False`, following the slot paths through `let`s, beta-redexes and
+  rebuilt tuples. On the 4-step Gaussian trajectory that took the variants from
+  5.6x the base function to 2.1x (`TestInternals`
+  `shortGaussianTrajectoryVariantsCompact`). The all-concrete body is left as
+  it is.
 - **The flags are inline, not let-bound**, on purpose: an inline `isAny`/tag
   test is what `IRSelectPass` and the batched backend's `structural` recognise
   as bucket-uniform, so under `--batched` the dispatch stays a real Python

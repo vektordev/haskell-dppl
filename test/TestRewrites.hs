@@ -117,10 +117,18 @@ knownDivergences =
   -- ouChainUnrolled joined the corpus.
   , Known "ouChainUnrolled" DrawIntro "draw-intro Normal" aliasDoubleJacobian
   , Known "ouChainUnrolled" AliasIntro "" aliasDoubleJacobian
+  -- `draw y = Normal in draw s1 = y in draw s2 = s1 + 0.5 * Normal in draw s3 =
+  -- s2 + 0.5 * Normal in (s1, (s2, s3))`: an aliased first step doubles the
+  -- third step's Jacobian (25x at four steps), and an aliased third step
+  -- answers the (_, _, _, ANY) marginal as impossible. Pre-existing (identical
+  -- at abc449c); exposed when gaussianTrajectory4 joined the corpus.
+  , Known "gaussianTrajectory4" DrawIntro "" aliasChainJacobian
+  , Known "gaussianTrajectory4" AliasIntro "" aliasChainJacobian
   ]
   where
     zeroRandomBound = "draw-bound-random-factor-times-literal-zero-loses-dirac-mass"
     aliasDoubleJacobian = "aliased-draw-scaled-sibling-double-jacobian"
+    aliasChainJacobian = "aliased-draw-chain-scaled-step-double-jacobian"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
 
