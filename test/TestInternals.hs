@@ -50,7 +50,7 @@ import System.Random (StdGen, mkStdGen)
 import Control.Monad.Random (Rand, evalRand)
 import Control.Monad (forM, forM_, when)
 import Data.Number.Erf (erf)
-import Utils (splitByString)
+import Utils (splitByString, reflexiveEq)
 import Data.Maybe (isJust)
 import TestSupport (expectVariantRefused)
 import Data.Functor.Identity (runIdentity)
@@ -1956,6 +1956,35 @@ test_mixtureNegativeLogNormalScaleCompiles = testCase "mixtureNegativeLogNormalS
       \within 10s -- this is the NaN-poisons-the-optimizer-fixpoint non-termination \
       \bug task mixture-combination-rules-compile-hang fixed"
     Just n -> assertBool ("unexpectedly empty compiled IR (" ++ show n ++ " chars)") (n > 0)
+
+-- | A constant that folds to NaN compiles (docs-repo task
+-- nan-constant-hangs-enum-annotation-fixpoint). Its 'DiscreteValues' tag
+-- holds @VFloat NaN@, and 'annotateEnumsProg' iterated its tag environment
+-- with a @(==)@ convergence test, which never holds once a NaN is in it, so
+-- the compile ran (and allocated) forever before the first stage dump.
+-- 'Utils.reflexiveEq' is the fix. The shapes: the task's @0.0 / 0.0@,
+-- @Infinity - Infinity@, and the Slow fuzz draw's
+-- @mult 0.0 (recip 0.0)@ (prop_Fuzz_MixtureFollowsCombinationRules,
+-- replay 117031) as a mixture arm.
+test_nanConstantCompiles :: TestTree
+test_nanConstantCompiles = testGroup "NaN-valued constant compiles"
+  [ testCase "reflexiveEq is reflexive on NaN and still tells values apart" $ do
+      let nan = 0 / 0 :: Double
+      assertBool "[NaN] /= [NaN] under reflexiveEq" (reflexiveEq [nan] [nan])
+      assertBool "[0] == [1] under reflexiveEq" (not (reflexiveEq [0, nan] [1, nan :: Double]))
+  , compiles "0.0 / 0.0" (constF 0 #/# constF 0)
+  , compiles "Infinity - Infinity" (constF inf #+# negF (constF inf))
+  , compiles "mixture arm mult 0.0 (recip 0.0)"
+      (ifThenElse (uniform #<# constF 0.5) (constF 0 #*# recipF (constF 0)) (constF 1))
+  ]
+  where
+    inf = 1 / 0
+    compiles name expr = testCase name $ do
+      let prog = Program [("main", expr)] [] [] [] []
+      annotated <- timeout (10 * 1000000) (evaluate (length (show (annotateEnumsProg prog))))
+      assertBool "annotateEnumsProg did not finish within 10s (NaN-poisoned fixpoint)" (isJust annotated)
+      compiled <- timeout (10 * 1000000) (evaluate (length (show (compile defaultCompilerConfig prog))))
+      assertBool "compile did not finish within 10s" (isJust compiled)
 
 -- | A right-nested tuple of @n@ independent coin flips compiles and answers
 -- in milliseconds (docs-repo task tuple-probability-exponential-in-arity).
@@ -5317,6 +5346,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_recursiveListMissedCSE
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
+  , test_nanConstantCompiles
   , test_wideTupleCompilesFast
   , test_wideProductSceneAccessorCompilesFast
   , test_wideProductSceneBatchedCompilesFast

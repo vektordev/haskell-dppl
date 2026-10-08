@@ -2188,16 +2188,31 @@ helperEnv p = pass (pass [])
       _ -> tyOfTypedExprIn scope e
     -- Recovered in the *empty* scope, which both terminates and is right: an
     -- argument mentioning the function being typed cannot pin its parameter.
+    --
+    -- Every call site is tried, not only the first, and a site through a
+    -- @let@ alias counts (@let v = helper in v e@, a 'genFunctionLet' draw
+    -- with the helper as its function value): where the direct call's
+    -- argument mentions the helper itself, the alias's call may be the only
+    -- one that recovers (task adt-generator-core-type-recoverable-flake).
     callSiteArgTy nm = do
       body <- lookup "main" (functions p)
-      arg  <- appliedTo nm body
-      tyOfTypedExprIn [] arg
+      listToMaybe [ t | arg <- callSites nm body, Just t <- [tyOfTypedExprIn [] arg] ]
 
--- | The first argument @nm@ is applied to anywhere in an expression.
-appliedTo :: String -> Expr -> Maybe Expr
-appliedTo nm e = case node e of
-  Apply f arg | Var v <- node f, v == nm -> Just arg
-  _ -> listToMaybe [ a | c <- children e, Just a <- [appliedTo nm c] ]
+-- | 'appliedToAll', plus the arguments of every @let@-bound alias of @nm@
+-- (@(\\v -> ... v a ...) nm@ contributes @a@).
+callSites :: String -> Expr -> [Expr]
+callSites nm e = appliedToAll nm e ++
+  [ a | Just (x, val, body) <- map asLet (subExprs e)
+      , Var v <- [node val], v == nm, x /= nm
+      , a <- callSites x body ]
+  where subExprs t = t : concatMap subExprs (children t)
+
+-- | Every argument @nm@ is applied to in an expression, outermost first.
+appliedToAll :: String -> Expr -> [Expr]
+appliedToAll nm e = case node e of
+  Apply f arg | Var v <- node f, v == nm -> arg : rest
+  _ -> rest
+  where rest = concatMap (appliedToAll nm) (children e)
 
 -- | The same program with its neural declaration's @of@ clause flipped on or
 -- off -- the materializing twin of a lazy draw, or the reverse.
@@ -2292,7 +2307,7 @@ tyOfTypedExprIn env e = case node e of
   -- node's type is whatever the callee returns *given that argument type*
   -- ('tyOfApplied'). A @let@ is this case with a literal lambda for the
   -- callee, which is how 'SPLL.Prelude.letIn' spells one.
-  Apply f val         -> tyOfTypedExprIn env val >>= \vty -> tyOfApplied env vty f
+  Apply f val         -> tyOfArgument env f val >>= \vty -> tyOfApplied env vty f
   -- A function value read somewhere other than at an application -- bound by
   -- a @let@, passed as an argument, chosen by an @if@. Nothing on a 'Lambda'
   -- node records what its parameter was bound at, so the parameter position
@@ -2310,18 +2325,59 @@ tyOfTypedExprIn env e = case node e of
 -- arrow type of its own -- a variable bound to a function value, a top-level
 -- function, or a nested application returning one.
 tyOfApplied :: HasADTs => TyEnv -> Ty -> Expr -> Maybe Ty
-tyOfApplied env aty f = case node f of
-  Lambda x body    -> tyOfTypedExprIn ((x, aty) : env) body
-  -- Both arms are applied to the same argument, so each is pushed the same
-  -- type and the results are joined -- the same treatment, for the same
+tyOfApplied env aty = tyOfSpine env [aty]
+
+-- | 'tyOfApplied' over a whole application spine: the type of applying @f@ to
+-- arguments of the given types, innermost first.
+--
+-- A callee that is itself an application (@(f a) b@) adds its own argument to
+-- the front of the spine rather than being recovered on its own, so a
+-- curried literal lambda (@(\\x -> \\y -> neg y) a b@) has *both* its
+-- parameters pushed in. Recovered on its own, the inner @\\y -> neg y@ would
+-- have a free parameter, and a polymorphic catalog entry such as @neg@ matches
+-- more than one row at 'TyAny' and recovers 'Nothing' -- the whole draw then
+-- stops being recognised (task adt-generator-core-type-recoverable-flake).
+tyOfSpine :: HasADTs => TyEnv -> [Ty] -> Expr -> Maybe Ty
+tyOfSpine env [] f = tyOfTypedExprIn env f
+tyOfSpine env tys@(aty : rest) f = case node f of
+  Lambda x body    -> tyOfSpine ((x, aty) : env) rest body
+  -- Both arms are applied to the same arguments, so each is pushed the same
+  -- types and the results are joined -- the same treatment, for the same
   -- reason, that 'tyOfTypedExprIn' gives an @if@'s own arms.
-  IfThenElse _ t g -> case (tyOfApplied env aty t, tyOfApplied env aty g) of
+  IfThenElse _ t g -> case (tyOfSpine env tys t, tyOfSpine env tys g) of
     (Just a, Just b)  -> tyJoin a b
     (Just a, Nothing) -> Just a
     (Nothing, mb)     -> mb
-  _ -> tyOfTypedExprIn env f >>= \tf -> case tf of
-    TyArrow _ r -> Just r
-    _           -> Nothing
+  Apply g a        -> tyOfArgument env g a >>= \t -> tyOfSpine env (t : tys) g
+  _ -> tyOfTypedExprIn env f >>= peel tys
+  where
+    peel [] r                = Just r
+    peel (_ : ts) (TyArrow _ r) = peel ts r
+    peel _ _                 = Nothing
+
+-- | The type of the argument @val@ that callee @f@ is applied to.
+--
+-- Ordinarily just @val@'s own recovered type. The exception is a @let@ that
+-- binds a function value -- @(\\f -> f a) (\\x -> neg x)@, which is what
+-- 'genFunctionLet' draws. Read as a value, the bound function has a free
+-- parameter, and recovers either nothing (@neg@ over 'TyAny' matches two
+-- catalog rows, see 'tyOfSpine') or a result that is 'TyAny' where it should
+-- not be (@(\\a -> \\b -> b) e@ reads as @? -> ?@, and a @neg@ applied to
+-- its call is again ambiguous). So where the body applies the bound name, its
+-- parameter type is taken from **that call site**, the same push-down
+-- 'helperEnv' does for a top-level helper applied in @main@: the first
+-- argument the name is applied to that recovers in the outer scope. The
+-- value's own reading is the fallback, for a function the body only passes
+-- on (task adt-generator-core-type-recoverable-flake).
+tyOfArgument :: HasADTs => TyEnv -> Expr -> Expr -> Maybe Ty
+tyOfArgument env f val = case node f of
+  Lambda x body
+    | (t : _) <- [ TyArrow aty r
+                 | arg <- appliedToAll x body
+                 , Just aty <- [tyOfTypedExprIn env arg]
+                 , Just r <- [tyOfApplied env aty val] ]
+    -> Just t
+  _ -> tyOfTypedExprIn env val
 
 -- | Result type of an InjF application the typed generator can emit. The
 -- structured entries are computed from the arguments rather than looked up:
@@ -2809,7 +2865,7 @@ childShrinks env e = case asLet e of
     -- against it here, which is why the env carries the *recovered* type
     -- rather than the one generation chose.
     [ mkLet x val' body | val' <- shrinkTypedExprIn env val ]
-    ++ case tyOfTypedExprIn env val of
+    ++ case tyOfArgument env (x #-># body) val of
          Nothing  -> []
          Just vty -> [ mkLet x val body' | body' <- shrinkTypedExprIn ((x, vty) : env) body ]
   Nothing -> case node e of

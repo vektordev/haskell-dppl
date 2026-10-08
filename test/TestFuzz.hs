@@ -1962,6 +1962,28 @@ arrowGeneratorTests = testGroup "Arrow generator"
       -- this the whole function-value surface would generate but never shrink.
       assertEqual "" (Just TyFloat)
         (tyOfTypedExpr (letIn "v0" incLam (apply (var "v0") (constF 1.0))))
+  , testCase "a let-bound function value with a polymorphic body is recoverable" $ do
+      -- Task adt-generator-core-type-recoverable-flake: 'genFunctionLet'
+      -- binds a lambda and applies it in the body. Read as a value, the
+      -- lambda's parameter is free, and @neg@ over a free argument matches
+      -- both its Float and its Int catalog row, so it recovers nothing; the
+      -- parameter is taken from the call site instead.
+      let negLam = "v1" #-># injF "neg" [ifThenElse (constB False) (var "v1") (var "v1")]
+      assertEqual "standalone, the lambda is unrecoverable" Nothing (tyOfTypedExpr negLam)
+      assertEqual "applied in a let body" (Just TyFloat)
+        (tyOfTypedExpr (letIn "v0" negLam (apply (var "v0") normal)))
+      assertEqual "applied to an Int" (Just TyInt)
+        (tyOfTypedExpr (letIn "v0" ("v1" #-># injF "neg" [var "v1"]) (apply (var "v0") (constI 1))))
+  , testCase "a let-bound function value is typed at its call site even when it recovers alone" $
+      -- The neural-draw twin of the above (replay 913155 of "a neural draw's
+      -- core type is recoverable"): @(\\a -> \\b -> b) e@ recovers alone, but
+      -- only as @? -> ?@, which leaves the @neg@ around its call ambiguous.
+      assertEqual "" (Just TyFloat)
+        (tyOfTypedExpr (injF "neg" [letIn "v0" (apply ("a" #-># ("b" #-># var "b")) (constB True))
+                                              (apply (var "v0") normal)]))
+  , testCase "a curried literal lambda has both parameters pushed in" $
+      assertEqual "" (Just TyInt)
+        (tyOfTypedExpr (apply (apply ("a" #-># ("b" #-># injF "neg" [var "b"])) (constB True)) (constI 2)))
   , testCase "a function value shrinks to a constant function, not from within" $
       -- The soundness rule the 'Shrinker' group's type-preservation property
       -- caught the violation of: at a bare lambda nothing says what the
@@ -1979,6 +2001,16 @@ arrowGeneratorTests = testGroup "Arrow generator"
          -- At least: the helper's body and the argument are ordinary draws and
          -- may contain a computed callee of their own.
          .&&. property (arrowShapeOfProgram p >= AppliedFun)
+  , testCase "a helper called only through a let alias is typed at the alias's call" $ do
+      -- replay 272312 of the property below, shrunk by hand: the direct call's
+      -- argument mentions the helper itself, so only the alias's call site
+      -- (@v0 1.0@) pins the parameter, and @mult h0 h0@ over a free parameter
+      -- is ambiguous between Float and Int.
+      let helper = "h0" #-># injF "mult" [var "h0", var "h0"]
+          mainE = apply (var "helper")
+                    (injF "neg" [letIn "v0" (var "helper") (apply (var "v0") (constF 1.0))])
+      assertEqual "" (Just TyFloat)
+        (typedMainCoreTy (Program [("helper", helper), ("main", mainE)] [] [] [] []))
   , testProperty "a helper draw's main type is recoverable" $
       forAll (resize fuzzSize genHelperProgram) $ \p ->
         counterexample (show p) (property (isJust (typedMainCoreTy p)))
@@ -2023,6 +2055,21 @@ adtRecursionGeneratorTests = testGroup "ADT and recursion generator"
       -- replaced by a value of another type: a constructor node's own type
       -- says nothing about its arguments.
       assertEqual "" Nothing (tyOfTypedExpr (injF "MkPt" [constB True, constB True]))
+  , testCase "an ADT draw binding a polymorphic function value is recoverable (seed 890826)" $ do
+      -- The minimal counterexample of --quickcheck-replay=890826 on the
+      -- property below (task adt-generator-core-type-recoverable-flake),
+      -- verbatim: its ADT was incidental, the unrecoverable part was the
+      -- let-bound @\v3 -> neg (...)@ whose parameter only the call site pins.
+      let more = injF "More" [injF "left" [injF "lt" [uniform, constF 0.46678494200011444]]]
+          inner = injF "TCons" [injF "TCons" [cons normal (constL []), constF 0.0], cons (constF (-8.50593741805913)) (constL [])]
+          pick3 = injF "plus" [constI 1, ifThenElse (injF "lt" [uniform, constF (1/3)]) (constI 3)
+                     (ifThenElse (injF "lt" [uniform, constF 0.5]) (constI 2) (constI 1))]
+          negLam = "v3" #-># injF "neg" [ifThenElse (constB False) (var "v3") (var "v3")]
+          body = apply ("v0" #-># injF "fst" [apply ("v1" #-># injF "snd" [injF "TCons" [more, inner]]) pick3])
+                       (apply ("v2" #-># apply (var "v2") normal) negLam)
+          p = Program [("main", body)] [] [ADTDecl "More" [("More", [("idx", TEither TBool TBool)])] Nothing] [] []
+      assertEqual "validates" (Right ()) (validateProgram p)
+      assertEqual "core type" (Just (TyTuple (TyList TyFloat) TyFloat)) (typedMainCoreTy p)
   , testProperty "an ADT draw validates and its core type is recoverable" $
       forAll (resize fuzzSize genTypedProgram) $ \p ->
         not (null (adts p)) ==>
