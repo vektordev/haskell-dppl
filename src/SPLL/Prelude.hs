@@ -63,6 +63,9 @@ module SPLL.Prelude
   , rtypedProgram
   , chainNamedProgram
   , batchedRefusal
+  , CodeGenTarget(..)
+  , codeGenToLang
+  , emitCompiled
   , runGen
   , runProb
   , runInteg
@@ -112,6 +115,8 @@ import SPLL.IRCompiler
 import SPLL.IROptimizer (optimizeEnvWith)
 import SPLL.IRSelectPass (selectPassEnv)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
+import qualified SPLL.CodeGenPyTorch
+import qualified SPLL.CodeGenJulia
 import Debug.Trace
 import Data.Either
 import SPLL.Typing.ForwardChaining (annotateProg, FCData)
@@ -575,6 +580,34 @@ batchedRefusal conf p =
     Right _  -> Nothing
   where
     quiet = conf{batched = True, verbose = 0, showIntermediates = False, optStats = False}
+
+-- | A backend 'codeGenToLang' emits source for.
+data CodeGenTarget = TargetPython | TargetJulia deriving (Show, Eq, Enum, Bounded)
+
+-- | The CLI's @compile@ subcommand: compile, then emit the target's source, as
+-- one string. @truncOut@ is the CLI's truncation flag (the backends' "emit the
+-- full runtime" argument is its negation). Python under @batched conf@ goes to
+-- the batched emitter, which may refuse; the scalar backends first refuse a
+-- program whose IR still holds an @ANY@ they cannot emit
+-- ('anyExceptCodegenRefusal').
+--
+-- Library code rather than part of @app/Main.hs@ so that the fuzz
+-- crash-freedom properties drive the path the CLI takes, guard included.
+codeGenToLang :: CodeGenTarget -> Bool -> CompilerConfig -> Program -> Either CompilerError String
+codeGenToLang target truncOut conf prog = compile conf prog >>= emitCompiled target truncOut conf
+
+-- | The emitting half of 'codeGenToLang', for an 'IREnv' already compiled under
+-- @conf@. Pure string building: it needs no Python or Julia installed.
+emitCompiled :: CodeGenTarget -> Bool -> CompilerConfig -> IREnv -> Either CompilerError String
+emitCompiled target truncOut conf compiled = case target of
+  TargetPython
+    | batched conf -> intercalate "\n" <$> generateFunctionsBatched (not truncOut) compiled
+    | otherwise    -> do
+        anyExceptCodegenRefusal "Python" compiled
+        Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not truncOut) compiled)
+  TargetJulia -> do
+    anyExceptCodegenRefusal "Julia" compiled
+    Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Either CompilerError (Rand g IRValue)
 runGen _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
