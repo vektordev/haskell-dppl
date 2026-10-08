@@ -589,8 +589,15 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
   -- broken was downstream, in 'SPLL.IRCompiler' -- so these assertions are the
   -- half of the regression net that guards the *verdict* while the
   -- @test/cases/higher-order/arrowApply*@ corpus pairs guard the compiled answer. Row 7
-  -- (@\x -> x + x@) is a wontfix precision gap and is pinned as a refusal in
-  -- 'TestRejection' instead.
+  -- (@\x -> x + x@) was once a refusal; affine marginalisation now answers it
+  -- (corpus @higher-order/arrowApplySelfSum@).
+  --
+  -- The rows after the eight are the 2026-10-08 rerun's probes (same
+  -- investigation): function values reaching an application through a named
+  -- higher-order function, a function-returning function, and a let-bound or
+  -- draw-gated random choice. Every verdict is sound; where the compiled
+  -- answer is not yet there, the comment names the open ticket and its
+  -- known-issues pin.
   , testGroup "arrow space: a function value reaching an application"
       [ testCase "row 1: a named function applied to a Normal is PNormal" $
           assertEqual "" PNormal $
@@ -621,6 +628,43 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           -- measurable but carries no family.
           assertEqual "" Integrate $
             mainPType "main = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) 3.0"
+      , testCase "a named higher-order function applying its argument is PNormal" $
+          -- IRCompiler refuses it ("tagged invocation"): pinned as
+          -- known-issues/namedHofForwardsRandomArg, ticket helper-calls-helper-random-arg
+          assertEqual "" PNormal $
+            mainPType "app f x = f x\nmain = app (\\x -> x + 1.0) Normal"
+      , testCase "twice applied to a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "twice f x = f (f x)\nmain = twice (\\y -> y + 1.0) Normal"
+      , testCase "compose applied to a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "compose f g z = f (g z)\nmain = compose (\\a -> a * 2.0) (\\b -> b + 1.0) Normal"
+      , testCase "a random function passed to a named higher-order function is Integrate" $
+          -- Miscompiled downstream: known-issues/namedHofRandomFunctionArg,
+          -- ticket named-hof-random-function-argument-miscompiled
+          assertEqual "" Integrate $
+            mainPType "app f x = f x\nmain = app (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) 3.0"
+      , testCase "a random function passed as the only argument is Integrate" $
+          assertEqual "" Integrate $
+            mainPType "app f = f 3.0\nmain = app (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0))"
+      , testCase "a returned closure applied to a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "shift a = \\x -> x + a\nmain = (shift 2.0) Normal"
+      , testCase "a returned closure capturing a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "shift a = \\x -> x + a\nmain = (shift Normal) 1.0"
+      , testCase "a randomly selected function applied to a Normal is Integrate" $
+          -- a two-Gaussian mixture: measurable, no family
+          assertEqual "" Integrate $
+            mainPType "main = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
+      , testCase "a draw-gated function choice applied to a Normal is Integrate" $
+          -- the interpreter stops at query time: ticket enumerated-sum-over-density-body
+          assertEqual "" Integrate $
+            mainPType "main = draw b = Uniform < 0.5 in (if b then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
+      , testCase "a draw-bound random function applied to a Normal is Integrate" $
+          -- refused (generate-backed guard): ticket arrow-lifted-mixture-for-function-values
+          assertEqual "" Integrate $
+            mainPType "main = draw f = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) in f Normal"
       , testCase "a let-chained PNormal variable keeps the family" $
           -- The no-function-value reach of the same IRCompiler fallthrough
           -- (bug A, 2026-09-13): the verdict is right, the shortcut was not.

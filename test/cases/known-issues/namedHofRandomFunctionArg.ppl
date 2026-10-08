@@ -1,0 +1,2 @@
+app f x = f x
+main = app (if Uniform < 0.5 then (\x -> x + 1.0) else (\x -> x * 2.0)) 3.0

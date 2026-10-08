@@ -1,0 +1,2 @@
+app f x = f x
+main = app (\x -> x + 1.0) Normal
