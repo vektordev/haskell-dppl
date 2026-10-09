@@ -7,12 +7,13 @@
 -- interpreter from a corpus program's test key on the strength of the
 -- agreement property. That is only justified for constructs the property
 -- actually puts through both backends, so this test computes, over the
--- probability and integrate bodies of
+-- deterministic bodies (probability, integrate, writeLogits and normal) of
 --
---   * the corpus (every non-slow program, default config), and
+--   * the corpus (every non-slow program, default config;
+--     'BackendAgreement.deterministicBodies'), and
 --   * a fixed-seed sample of the agreement property's own draws (the ones
---     with at least one interpreter-answered query -- what the property
---     compares),
+--     with at least one interpreter-answered query, and of those only the
+--     bodies the property evaluates; 'BackendAgreement.comparedBodies'),
 --
 -- the constructs ('BackendAgreement.irConstructs') the corpus uses and the
 -- sample does not, and requires that set to be exactly
@@ -23,12 +24,12 @@
 -- construct the generator starts reaching must leave it, and one the corpus
 -- starts using must be added (and so be seen).
 --
--- Only inference bodies are compared on both sides, because only they are
--- compared by the property. Generate bodies are never checked across
--- backends (a sample is random, so there is no point value to agree on), nor
--- are writeLogits or normal functions; every corpus program has a generate
--- function, so M2 cannot drop the runtimes for /those/ on this evidence at
--- all. That is stated in the task doc rather than encoded here, since a
+-- Generate bodies are left out on both sides: they are never checked across
+-- backends (a sample is random, so there is no point value to agree on; task
+-- @backend-agreement-writelogits-and-normal-functions@). M2 carries the
+-- argument that generate is equivalent anyway: its random primitives are few
+-- and simple, and its non-random IR is built from the constructs this census
+-- certifies. That is stated in the task docs rather than encoded here, since a
 -- construct list cannot express it.
 module BackendCoverage (backendCoverageTests, fuzzCoverageExceptions) where
 
@@ -46,7 +47,7 @@ import Test.Tasty.HUnit (testCase, assertFailure)
 
 import SPLL.Prelude (compile)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig)
-import BackendAgreement (AgreementCase(..), irEnvConstructs, inferenceBodies)
+import BackendAgreement (irConstructs, irEnvConstructs, deterministicBodies, comparedBodies)
 import CorpusSweep
 import TestFuzz (prepareAgreementCase, genAgreementProgram, agreementFuzzSize)
 
@@ -56,7 +57,10 @@ fuzzCoverageExceptions :: [(String, String)]
 fuzzCoverageExceptions =
   -- Measured 2026-10-06 (sample of 1000 draws, ~550 compared, against 476
   -- non-slow corpus programs; the corpus uses 59 constructs, the sample
-  -- covers 54). BIndex joined 2026-10-06 (60 constructs).
+  -- covers 54). BIndex joined 2026-10-06 (60 constructs). Re-measured
+  -- 2026-10-09 over all deterministic bodies (writeLogits and normal added;
+  -- 556 non-slow corpus programs, 545 of 1000 draws compared): the corpus
+  -- uses 62 constructs, the sample covers 56, and the list is unchanged.
   [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (lambdaThetaInverse, affineChainEndpoint)")
   , ("Builtin:BIndex",     "agreement point query: needs the agreement fusion's `right v` arm over a contiguous Int domain (categoricalProductFusion)")
@@ -93,7 +97,7 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
           example c = c ++ "  (" ++ show (length (users c)) ++ " corpus programs, e.g. "
                         ++ intercalate ", " (take 3 (users c)) ++ ")"
       hPutStrLn stderr ("backend agreement coverage: corpus uses " ++ show (length used)
-                        ++ " constructs in inference bodies over " ++ show (length corpus)
+                        ++ " constructs in deterministic bodies over " ++ show (length corpus)
                         ++ " programs; the fuzz sample (" ++ show (length fuzz) ++ " compared of "
                         ++ show coverageDraws ++ " drawn) covers " ++ show (length (used \\ uncovered))
                         ++ "; uncovered: " ++ show uncovered)
@@ -103,14 +107,15 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
         ++ (if null stale then [] else "Listed, but now covered by the fuzzer (remove them):" : map ("  " ++) stale)
   ]
 
--- | Per corpus program of the sweep (non-slow), the constructs of its inference bodies.
+-- | Per corpus program of the sweep (non-slow), the constructs of its
+-- deterministic bodies.
 -- A program that does not compile in time is skipped: the corpus's own
 -- groups are what report that.
 corpusConstructs :: [CorpusEntry] -> IO [(String, [String])]
 corpusConstructs entries =
   fmap concat $ forM entries $ \e -> do
       let p = ceProgram e
-      r <- timeout (30 * 1000 * 1000) $ try (evaluate (forceList (either (const []) (irEnvConstructs inferenceBodies) (compile defaultCompilerConfig p))))
+      r <- timeout (30 * 1000 * 1000) $ try (evaluate (forceList (either (const []) (irEnvConstructs deterministicBodies) (compile defaultCompilerConfig p))))
       return $ case r of
         Just (Right cs) -> [(ceName e, cs)]
         Just (Left (_ :: SomeException)) -> []
@@ -126,7 +131,7 @@ fuzzConstructs = do
                     (mkQCGen coverageSeed) agreementFuzzSize
   prepared <- mapM prepareAgreementCase draws
   forM (rights prepared) $ \c -> do
-    r <- try (evaluate (forceList (irEnvConstructs inferenceBodies (acEnv c)))) :: IO (Either SomeException [String])
+    r <- try (evaluate (forceList (sort (nub (concatMap irConstructs (comparedBodies c)))))) :: IO (Either SomeException [String])
     return (either (const []) id r)
   where
     forceList xs = length (concat xs) `seq` xs

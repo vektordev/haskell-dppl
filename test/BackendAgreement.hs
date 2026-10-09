@@ -20,16 +20,27 @@
 -- @try@, and results are flushed line by line, so one broken program
 -- reports against itself and never takes its batch-mates down with it.
 --
+-- Besides @main@'s probability and integrate functions, the property also
+-- evaluates the other two deterministic bodies of a group (task
+-- @backend-agreement-writelogits-and-normal-functions@): a Gaussian function's
+-- normal-parameter function (@QNormal@, its @(mu, sigma)@) and a
+-- logit-representable function's writeLogits function (@QWriteLogits@, its
+-- logit vector). Both answer a vector ('AnsweredVec'), compared element-wise
+-- with 'probAgrees'. They take the function's own arguments rather than a
+-- query point, so a query of either kind carries its arguments.
+--
 -- Also here: 'irConstructs', the construct inventory of emitted IR that the
 -- coverage table and the corpus-minus-fuzz exception list are built from.
 module BackendAgreement
   ( Query(..)
   , queryPoint
+  , bodyKind
   , Answer(..)
   , AgreementCase(..)
   , Disagreement(..)
   , renderDisagreement
   , interpreterAnswer
+  , interpreterBodyAnswer
   , probAgrees
   , answersAgree
   , anyHoles
@@ -43,6 +54,8 @@ module BackendAgreement
   , irConstructs
   , irEnvConstructs
   , inferenceBodies
+  , deterministicBodies
+  , comparedBodies
   , allBodies
   ) where
 
@@ -61,7 +74,11 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
-import SPLL.Prelude (runProbC, runIntegC)
+import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC)
+import SPLL.ReservedNames (componentNormalName)
+import IRInterpreter (generateDet)
+import Control.Monad.Random (evalRand)
+import System.Random (mkStdGen)
 import qualified SPLL.CodeGenPyTorch as Py
 import qualified SPLL.CodeGenJulia as Jl
 import PrettyPrint (pPrintProg)
@@ -72,18 +89,48 @@ import End2EndTesting (qualifyConstructors, juliaTestFlags)
 -- Queries and answers
 
 -- | A point to evaluate @main@'s probability function (@QProb@) or its
--- integrate function (@QInteg@) at.
+-- integrate function (@QInteg@) at; or a group's normal-parameter function
+-- (@QNormal@) or writeLogits function (@QWriteLogits@), named by the group,
+-- with the arguments the text backends take (a neural @main@'s mock envelope
+-- already resolved, as 'acBackendArgs' is).
 data Query = QProb IRValue | QInteg IRValue
+           | QNormal String [IRValue] | QWriteLogits String [IRValue]
   deriving (Show, Eq)
 
+-- | The argument list a backend calls the query's function with, given the
+-- case's backend arguments for @main@.
+callArgs :: [IRValue] -> Query -> [IRValue]
+callArgs args (QProb v) = v : args
+callArgs args (QInteg v) = v : args
+callArgs _ (QNormal _ as) = as
+callArgs _ (QWriteLogits _ as) = as
+
+-- | The query point of an inference query. A body query has none; its first
+-- argument stands in (only used for labelling).
 queryPoint :: Query -> IRValue
 queryPoint (QProb v) = v
 queryPoint (QInteg v) = v
+queryPoint q = case callArgs [] q of
+  (v : _) -> v
+  [] -> VAny
+
+-- | Which body a query evaluates: @prob@, @integ@, @normal@ or @writeLogits@.
+bodyKind :: Query -> String
+bodyKind (QProb _) = "prob"
+bodyKind (QInteg _) = "integ"
+bodyKind (QNormal _ _) = "normal"
+bodyKind (QWriteLogits _ _) = "writeLogits"
 
 -- | What one engine said at one point. 'Raised' is any failure to produce a
 -- number: an exception in the backend, a module that did not load, codegen
 -- throwing on the Haskell side, or (for the interpreter) a 'Left'.
+--
+-- 'AnsweredVec' is a body query's vector: @[mu, sigma]@ or the logit vector.
+-- A 'Nothing' slot is not compared: a writeLogits slot of a dead arm holds iid
+-- noise (task @writelogits-dead-arm-nan@), recognised by the interpreter
+-- answering it differently under two seeds.
 data Answer = Answered Double Double Bool   -- ^ probability, dim, impossible
+            | AnsweredVec [Maybe Double]
             | Raised String
   deriving (Show, Eq)
 
@@ -119,15 +166,18 @@ renderDisagreement d = unlines
 
 -- | The interpreter's answer at a query, or 'Nothing' where it does not
 -- answer (a refusal, a missing variant, a malformed result). Pure; the
--- caller forces it under its own timeout.
+-- caller forces it under its own timeout. @args@ are @main@'s; a body query
+-- takes its own and is answered by 'interpreterBodyAnswer' instead.
 interpreterAnswer :: Program -> IREnv -> [IRValue] -> Query -> Maybe Answer
 interpreterAnswer p env args q = case run of
-  Right r@(VProbDim pr d) -> Just (Answered pr d (fromMaybe False (resultImpossible r)))
+  Just (Right r@(VProbDim pr d)) -> Just (Answered pr d (fromMaybe False (resultImpossible r)))
   _ -> Nothing
   where
     run = case q of
-      QProb v  -> runProbC p env args v
-      QInteg v -> runIntegC p env args v
+      QProb v  -> Just (runProbC p env args v)
+      QInteg v -> Just (runIntegC p env args v)
+      QNormal _ _ -> Nothing
+      QWriteLogits _ _ -> Nothing
 
 -- | Probabilities agree when both are NaN, both are the same infinity, or
 -- they are within 'probTolerance', relative above 1 (a density can be large,
@@ -140,7 +190,37 @@ probAgrees a b
 
 answersAgree :: Answer -> Answer -> Bool
 answersAgree (Answered p1 d1 i1) (Answered p2 d2 i2) = probAgrees p1 p2 && d1 == d2 && i1 == i2
+answersAgree (AnsweredVec xs) (AnsweredVec ys) = length xs == length ys && and (zipWith slot xs ys)
+  where slot (Just a) (Just b) = probAgrees a b
+        slot _ _ = True
 answersAgree _ _ = False
+
+-- | The interpreter's answer to a body query ('QNormal', 'QWriteLogits'),
+-- given the arguments the interpreter takes (for a neural @main@ the mock
+-- envelope, not the resolved vector the query carries). 'Nothing' where it
+-- does not answer: no such body, a 'Left', or a result that is not a flat
+-- vector of floats. Pure, like 'interpreterAnswer'.
+interpreterBodyAnswer :: Program -> IREnv -> [IRValue] -> Query -> Maybe Answer
+interpreterBodyAnswer p env args q = case q of
+  QNormal g _ -> do
+    (body, _) <- normalFun (lookupIREnv g env)
+    case generateDet (neurals p) (writeLogitsDecls p) env (map IRConst args) body of
+      Right (VTuple (VFloat m) (VFloat s)) -> Just (AnsweredVec [Just m, Just s])
+      _ -> Nothing
+  QWriteLogits g _ -> do
+    xs <- floatsAt g 0
+    ys <- floatsAt g 1
+    if length xs /= length ys then Nothing else
+      Just (AnsweredVec [ if x == y || (isNaN x && isNaN y) then Just x else Nothing | (x, y) <- zip xs ys ])
+  _ -> Nothing
+  where
+    floatsAt g seed = case evalRand (runWriteLogitsRandC p env g args) (mkStdGen seed) of
+      Right (VList l) -> mapM asFloat (listItems l)
+      _ -> Nothing
+    asFloat (VFloat x) = Just x
+    asFloat _ = Nothing
+    listItems (ListCont x xs) = x : listItems xs
+    listItems _ = []
 
 -- ---------------------------------------------------------------------------
 -- Query points beyond the drawn samples
@@ -204,6 +284,9 @@ pythonDriver projectDir programs = unlines $
   , "    sys.stdout.write(s + '\\n'); sys.stdout.flush()"
   , "def _msg(e):"
   , "    return (type(e).__name__ + ': ' + str(e)).replace('\\n', ' ')[:400]"
+  , "def _vals(r):"
+  , "    if hasattr(r, 't1') and hasattr(r, 't2'): return [r.t1, r.t2]"
+  , "    return list(r)"
   ] ++ concat (zipWith program [0 :: Int ..] programs)
   where
     program i (path, args, qs) =
@@ -222,15 +305,25 @@ pythonDriver projectDir programs = unlines $
       , "        signal.setitimer(signal.ITIMER_REAL, 10.0)"
       -- Evaluated inside the program's namespace: a query point names the
       -- program's own ADT constructor classes.
-      , "        _r = eval(" ++ show ("main." ++ method q ++ "(" ++ intercalate ", " (map Py.pyVal (queryPoint q : args)) ++ ")") ++ ", _ns)"
+      , "        _r = eval(" ++ show (target q ++ "." ++ method q ++ "(" ++ intercalate ", " (map Py.pyVal (callArgs args q)) ++ ")") ++ ", _ns)"
       , "        signal.setitimer(signal.ITIMER_REAL, 0)"
-      , "        _out('R " ++ show i ++ " " ++ show j ++ " ' + repr(float(_r[0])) + ' ' + repr(float(_r[1][0])) + ' ' + str(bool(_r[1][1])))"
+      , "        _out(" ++ output i j q ++ ")"
       , "    except BaseException as _e:"
       , "        signal.setitimer(signal.ITIMER_REAL, 0)"
       , "        _out('E " ++ show i ++ " " ++ show j ++ " ' + _msg(_e))"
       ]
     method (QProb _) = "forward"
     method (QInteg _) = "integrate"
+    method (QNormal _ _) = "normal_params"
+    method (QWriteLogits _ _) = "writeLogits"
+    target (QNormal g _) = g
+    target (QWriteLogits g _) = g
+    target _ = "main"
+    output i j q = case q of
+      QProb _ -> rLine
+      QInteg _ -> rLine
+      _ -> "'V " ++ show i ++ " " ++ show j ++ " ' + ' '.join(repr(float(x)) for x in _vals(_r))"
+      where rLine = "'R " ++ show i ++ " " ++ show j ++ " ' + repr(float(_r[0])) + ' ' + repr(float(_r[1][0])) + ' ' + str(bool(_r[1][1]))"
 
 -- | The Julia driver; same output protocol as 'pythonDriver'. Each program is
 -- a @module ProgN@ in its own file, @include@d inside a @try@ so a module
@@ -241,6 +334,7 @@ juliaDriver projectDir programs = unlines $
   [ "include(" ++ show (projectDir </> "juliaLib.jl") ++ ")"
   , "using .JuliaSPPLLib"
   , "_msg(e) = first(replace(sprint(showerror, e), '\\n' => ' '), 400)"
+  , "_vals(r) = r isa JuliaSPPLLib.T ? [r.t1, r.t2] : collect(r)"
   ] ++ concat (zipWith program [0 :: Int ..] programs)
   where
     program i (path, args, qs) =
@@ -252,8 +346,8 @@ juliaDriver projectDir programs = unlines $
          , "  println(\"L " ++ show i ++ " \", _msg(e)); flush(stdout)"
          , "end"
          ] ++ concat [ [ "try"
-                       , "  r = Base.invokelatest(" ++ modName ++ "." ++ fn q ++ ", " ++ intercalate ", " (map jv (queryPoint q : args)) ++ ")"
-                       , "  println(\"R " ++ show i ++ " " ++ show j ++ " \", repr(Float64(r[1])), \" \", repr(Float64(r[2][1])), \" \", Bool(r[2][2])); flush(stdout)"
+                       , "  r = Base.invokelatest(" ++ intercalate ", " ((modName ++ "." ++ fn q) : map jv (callArgs args q)) ++ ")"
+                       , "  " ++ output i j q ++ "; flush(stdout)"
                        , "catch e"
                        , "  println(\"E " ++ show i ++ " " ++ show j ++ " \", _msg(e)); flush(stdout)"
                        , "end"
@@ -261,8 +355,16 @@ juliaDriver projectDir programs = unlines $
                      | (j, q) <- zip [0 :: Int ..] qs ]
     fn (QProb _) = "main_prob"
     fn (QInteg _) = "main_integ"
+    fn (QNormal g _) = g ++ "_normal"
+    fn (QWriteLogits g _) = g ++ "_writeLogits"
+    output i j q = case q of
+      QProb _ -> rLine
+      QInteg _ -> rLine
+      _ -> "println(\"V " ++ show i ++ " " ++ show j ++ " \", join([repr(Float64(x)) for x in _vals(r)], \" \"))"
+      where rLine = "println(\"R " ++ show i ++ " " ++ show j ++ " \", repr(Float64(r[1])), \" \", repr(Float64(r[2][1])), \" \", Bool(r[2][2]))"
 
--- | One line of driver output: @(program, Just query, answer)@ for a query,
+-- | One line of driver output (@R@ an inference answer, @V@ a body query's
+-- vector): @(program, Just query, answer)@ for a query,
 -- @(program, Nothing, Raised msg)@ for a module that did not load.
 parseAnswerLine :: String -> Maybe (Int, Maybe Int, Answer)
 parseAnswerLine l = case words l of
@@ -270,6 +372,10 @@ parseAnswerLine l = case words l of
     i' <- readMaybe i; j' <- readMaybe j
     p' <- readNum p; d' <- readNum d; b <- readBool imp
     return (i', Just j', Answered p' d' b)
+  ("V" : i : j : xs) -> do
+    i' <- readMaybe i; j' <- readMaybe j
+    vs <- mapM readNum xs
+    return (i', Just j', AnsweredVec (map Just vs))
   ("E" : i : j : _) -> do
     i' <- readMaybe i; j' <- readMaybe j
     return (i', Just j', Raised (dropFields 3 l))
@@ -436,6 +542,28 @@ valueExprs v = case v of
 -- 'prop_Fuzz_BackendsAgree' actually evaluates in both backends.
 inferenceBodies :: IREnv -> [IRExpr]
 inferenceBodies (IREnv gs _ _) = [ b | g <- gs, Just (b, _) <- [probFun g, integFun g] ]
+
+-- | The probability, integrate, writeLogits and normal bodies of every group:
+-- every body that has a value the backends can agree on. The corpus side of
+-- 'BackendCoverage''s census.
+deterministicBodies :: IREnv -> [IRExpr]
+deterministicBodies (IREnv gs _ _) =
+  [ b | g <- gs, Just (b, _) <- [probFun g, integFun g, writeLogitsFun g, normalFun g] ]
+
+-- | The bodies a compared case puts through the backends: every group's
+-- inference bodies (as 'inferenceBodies'; a helper's are reached through
+-- @main@'s), the normal and writeLogits body of each group a query of that
+-- kind was answered for, and, when any writeLogits query was, the per-tuple-
+-- component normal functions a writeLogits body calls.
+comparedBodies :: AgreementCase -> [IRExpr]
+comparedBodies c = inferenceBodies env ++
+  [ b | g <- gs, Just (b, _) <- [normalFun g], groupName g `elem` normals ] ++
+  [ b | g <- gs, Just (b, _) <- [writeLogitsFun g], groupName g `elem` logits ] ++
+  [ b | not (null logits), g <- gs, Just _ <- [componentNormalName (groupName g)], Just (b, _) <- [normalFun g] ]
+  where
+    env@(IREnv gs _ _) = acEnv c
+    normals = [ g | (QNormal g _, _) <- acQueries c ]
+    logits = [ g | (QWriteLogits g _, _) <- acQueries c ]
 
 -- | Every emitted body, generate and writeLogits included: what a corpus
 -- program asks of the backends.

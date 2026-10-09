@@ -67,9 +67,12 @@ import Data.Maybe (isJust, fromMaybe)
 import Data.Either (rights)
 import Control.Monad.Random (evalRand)
 import System.Random (mkStdGen)
-import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, anyHoles, offSupport,
+import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer,
+                         anyHoles, offSupport, bodyKind,
                          runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
-                         irEnvConstructs, inferenceBodies)
+                         comparedBodies, irConstructs)
+import Control.Monad.Random (Rand, getRandom, getRandomR)
+import System.Random (StdGen)
 import End2EndTesting (resolveNeuralParams, networkNames)
 import Data.List (sort, nub, intersect, find, isInfixOf, isPrefixOf)
 import PrettyPrint (pPrintProg)
@@ -1664,34 +1667,48 @@ shrinkAgreementBatch xs = map (: []) xs
 
 -- | Compile a program, draw its query points from its own generator, and keep
 -- the points the interpreter answers at, with its answers. 'Left' says why a
--- program has nothing to compare (no compile, no probability function, a
--- timeout, or no point the interpreter answers).
+-- program has nothing to compare (no compile, no body to compare, a timeout,
+-- or no point the interpreter answers).
 --
 -- Points: three forward samples, their @ANY@-holed variants and their
 -- off-support neighbours ('anyHoles', 'offSupport'), at most 'maxAgreementPoints'
 -- of them, at @main@'s probability function -- and at its integrate function
 -- for the ones without a wildcard, where it has one.
+--
+-- Then the normal-parameter and writeLogits bodies ('bodyQueries') of every
+-- top-level function that has them: @main@ at its own arguments, any other
+-- function at seeded draws of its parameter types and their off-support
+-- neighbours.
 prepareAgreementCase :: (Program, Int) -> IO (Either String AgreementCase)
 prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout agreementPerProgramMicros $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return (Left "no compile")
-    Just env | not (hasProbFun env) -> return (Left "no probability function")
     Just env -> do
       let args = fuzzArgs p
-      drawn <- trySync (evaluate (forceShow (evalRand (replicateM 3 (runGenC p env args)) (mkStdGen seed))))
+          backendArgs = resolveNeuralParams p args
+      drawn <- if hasProbFun env
+                 then trySync (evaluate (forceShow (evalRand (replicateM 3 (runGenC p env args)) (mkStdGen seed))))
+                 else return (Right [])
       let samples = [ s | Right ss <- [drawn], s <- ss, queryable s ]
           points = take maxAgreementPoints (nub (samples ++ concatMap anyHoles samples ++ concatMap offSupport samples))
-          queries = map QProb points
+          queries = if not (hasProbFun env) then [] else
+                    map QProb points
                     ++ (if hasIntegFun env then [ QInteg v | v <- points, not (hasWildcard v) ] else [])
-      answered <- fmap concat $ mapM (\q -> do
-                    r <- trySync (evaluate (forceShow (interpreterAnswer p env args q)))
-                    return [ (q, a) | Right (Just a) <- [r] ]) queries
-      return $ if null answered then Left "interpreter answered no point" else Right AgreementCase
-        { acProgram = p, acEnv = env
-        , acBackendArgs = resolveNeuralParams p args
-        , acNets = networkNames p
-        , acQueries = answered }
+          bodies = bodyQueries p env seed args backendArgs
+      if null queries && null bodies then return (Left "no body to compare") else do
+        answered <- fmap concat $ mapM (\q -> do
+                      r <- trySync (evaluate (forceShow (interpreterAnswer p env args q)))
+                      return [ (q, a) | Right (Just a) <- [r] ]) queries
+        answeredBodies <- fmap concat $ mapM (\(q, iargs) -> do
+                      r <- trySync (evaluate (forceShow (interpreterBodyAnswer p env iargs q)))
+                      return [ (q, a) | Right (Just a) <- [r] ]) bodies
+        let allAnswered = answered ++ answeredBodies
+        return $ if null allAnswered then Left "interpreter answered no point" else Right AgreementCase
+          { acProgram = p, acEnv = env
+          , acBackendArgs = backendArgs
+          , acNets = networkNames p
+          , acQueries = allAnswered }
   where
     queryable v = not (isRuntimeFailure v) && renderable v
     -- A sample is rendered into both backends' source; a closure or a symbol
@@ -1723,6 +1740,83 @@ prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout a
 
 maxAgreementPoints :: Int
 maxAgreementPoints = 12
+
+-- | The normal-parameter ('QNormal') and writeLogits ('QWriteLogits') queries
+-- of a compiled program, each with the arguments the interpreter takes for it
+-- (the query itself carries the backends'). One per top-level function that
+-- has the body, at each of its argument points:
+--
+-- * @main@ at the program's own arguments ('fuzzArgs', resolved for the
+--   backends), the one point a neural @main@'s mock envelope gives;
+-- * any other function at up to 'maxBodyPoints' argument tuples: three
+--   seeded draws of its parameter types ('argGen') and their off-support
+--   neighbours ('offSupport'), like an inference query's points. A function
+--   with a parameter of no generatable type (an arrow, a symbol, a type
+--   variable) is skipped. Its parameters take no network input (only a
+--   neural @main@ reads one), so its interpreter and backend arguments
+--   coincide.
+bodyQueries :: Program -> IREnv -> Int -> [IRValue] -> [IRValue] -> [(Query, [IRValue])]
+bodyQueries p (IREnv gs _ _) seed mainArgs mainBackendArgs =
+  [ (mk (groupName g) bargs, iargs)
+  | (gi, g) <- zip [0 :: Int ..] gs
+  , groupName g `elem` map fst (functions p)
+  , (iargs, bargs) <- pointsFor gi (groupName g)
+  , (present, mk) <- [(isJust (normalFun g), QNormal), (isJust (writeLogitsFun g), QWriteLogits)]
+  , present ]
+  where
+    pointsFor gi name
+      | name == "main" = [(mainArgs, mainBackendArgs)]
+      | otherwise = case paramTypes name >>= mapM (argGen (adts p) 3) of
+          Nothing -> []
+          Just gens ->
+            let drawn = evalRand (replicateM 3 (sequence gens)) (mkStdGen (seed + 7919 * (gi + 1)))
+                neighbours xs = [ take k xs ++ [x'] ++ drop (k + 1) xs | (k, x) <- zip [0 ..] xs, x' <- offSupport x ]
+            in [ (xs, xs) | xs <- take maxBodyPoints (nub (drawn ++ concatMap neighbours drawn)) ]
+    paramTypes name = do
+      typed <- either (const Nothing) (Just . fst) (addTypeInfo (annotateProg (annotateEnumsProg p)))
+      binding <- lookup name (functions typed)
+      return (lambdaParams binding)
+    lambdaParams (Expr ti (Lambda _ b)) = case rType ti of
+      TArrow a _ -> a : lambdaParams b
+      _ -> []
+    lambdaParams _ = []
+
+maxBodyPoints :: Int
+maxBodyPoints = 6
+
+-- | A seeded draw of a value of a type, or 'Nothing' for a type with no value
+-- to draw (an arrow, a symbol, a type variable, an ADT nested past @depth@).
+-- Small values, so a recursive function's counter stays cheap.
+argGen :: [ADTDecl] -> Int -> RType -> Maybe (Rand StdGen IRValue)
+argGen adtDecls depth rt = case rt of
+  TFloat -> Just (VFloat <$> getRandomR (-3, 3))
+  TInt -> Just (VInt <$> getRandomR (0, 4))
+  TBool -> Just (VBool <$> getRandom)
+  Tuple a b -> do
+    ga <- argGen adtDecls depth a
+    gb <- argGen adtDecls depth b
+    Just (VTuple <$> ga <*> gb)
+  TEither a b -> do
+    ga <- argGen adtDecls depth a
+    gb <- argGen adtDecls depth b
+    Just $ do
+      isLeft <- getRandom
+      if isLeft then VEither . Left <$> ga else VEither . Right <$> gb
+  ListOf a -> do
+    ga <- argGen adtDecls depth a
+    Just $ do
+      n <- getRandomR (0, 2)
+      xs <- replicateM n ga
+      return (VList (foldr ListCont EmptyList xs))
+  TADT n | depth > 0 -> do
+    decl <- find ((== n) . dataName) adtDecls
+    let ctors = [ (c, gens) | (c, fields) <- constructors decl
+                            , Just gens <- [mapM (argGen adtDecls (depth - 1) . snd) fields] ]
+    if null ctors then Nothing else Just $ do
+      k <- getRandomR (0, length ctors - 1)
+      let (c, gens) = ctors !! k
+      VADT c <$> sequence gens
+  _ -> Nothing
 
 -- | Printed once per process: the Julia arm skips, visibly, where there is no
 -- @julia@ -- the same convention 'BatchedPython' follows for a missing torch.
@@ -1756,7 +1850,8 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
           $ tabulate "julia arm" [maybe "skipped (no julia)" (const "ran") julia]
           $ tabulate "drawn program" [ either id (const "compared") r | r <- prepared ]
           $ tabulate "query kind" [ kind q | c <- cases, (q, _) <- acQueries c ]
-          $ tabulate "IR construct in a compared body" (concatMap (irEnvConstructs inferenceBodies . acEnv) cases)
+          $ tabulate "body kind" [ bodyKind q | c <- cases, (q, _) <- acQueries c ]
+          $ tabulate "IR construct in a compared body" (concatMap (sort . nub . concatMap irConstructs . comparedBodies) cases)
           $ counterexample (show (length ds) ++ " disagreement(s) over " ++ show (length cases)
                             ++ " programs / " ++ show nQueries ++ " interpreter-answered queries; first:\n"
                             ++ concatMap renderDisagreement (take 2 ds))
@@ -1764,6 +1859,7 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
   where
     kind (QProb v) = "prob" ++ wildcardTag v
     kind (QInteg _) = "integ"
+    kind q = bodyKind q
     wildcardTag :: IRValue -> String
     wildcardTag v = if v == VAny then " ANY" else if "VAny" `isInfixOf` show v then " partial ANY" else ""
 

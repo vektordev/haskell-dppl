@@ -59,7 +59,7 @@ import SPLL.Validator (validateProgram)
 import SPLL.ReservedNames (queryParamName, distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
-import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement)
+import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement)
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -3633,6 +3633,33 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
         Just jl -> do
           jlD <- runJuliaBatch jl acs
           assertBool (concatMap renderDisagreement jlD) (null jlD)
+  , testCase "normal and writeLogits body queries round-trip through every scalar backend, and a wrong vector disagrees" $ do
+      -- Task backend-agreement-writelogits-and-normal-functions: the body
+      -- queries' "V" output lines are parsed and compared slot by slot. The
+      -- wrong-vector half keeps the comparison from passing vacuously.
+      let rows = [ ("main = Normal * 3.0 + 1.0", [QNormal "main" [], QWriteLogits "main" []])
+                 , ("main = Uniform < 0.3", [QWriteLogits "main" []]) ]
+      acs <- forM rows $ \(src, qs) -> do
+        prog <- parseOrFail src
+        env <- either (\e -> assertFailure (src ++ ": " ++ show e)) return (compile defaultCompilerConfig prog)
+        answered <- forM qs $ \q -> case interpreterBodyAnswer prog env [] q of
+          Just a -> return (q, a)
+          Nothing -> assertFailure (src ++ ": the interpreter does not answer " ++ show q)
+        return (AgreementCase prog env [] [] answered)
+      case acQueries (head acs) of
+        ((_, a) : _) -> assertBool ("main_normal of Normal * 3 + 1 is (1, 3), got " ++ show a)
+                          (answersAgree a (AnsweredVec [Just 1.0, Just 3.0]))
+        [] -> assertFailure "no answered query"
+      let wrong = [ c { acQueries = [ (q, AnsweredVec [Just 1.0, Just 4.0]) | (q@(QNormal _ _), _) <- acQueries c ] }
+                  | c <- take 1 acs ]
+          check run = do
+            ds <- run acs
+            assertBool (concatMap renderDisagreement ds) (null ds)
+            dsWrong <- run wrong
+            assertEqual "a wrong (mu, sigma) is one disagreement" 1 (length dsWrong)
+      check runPythonBatch
+      julia <- findJulia
+      maybe (return ()) (check . runJuliaBatch) julia
   ]
 
 -- | A literal mock-NN parameter: the digit distribution, padded to the ten
