@@ -832,7 +832,9 @@ call). The comparison is `answersAgree`, exact on dim and the flag, and
 float32-aware where the literal is float32: an answer also agrees if it
 matches the interpreter at the point rounded to float32 (`float32Point`).
 A batched raise whose message names a filed family
-(`knownBatchedFamilies`: message needle to ticket) is tabulated under `known
+(`knownBatchedFamilies`: message needle to ticket; `'<' not supported between
+instances of 'str'` is the marginalised `ANY` being indexed, see
+`known-issues/cdfFstOfNestedTupleIndexesAny`) is tabulated under `known
 batched family` rather than failed, as `knownOverPromises` does for the
 admission oracle; a wrong value always fails. A call that raises reports
 every point in it, so one bad point fails its batch-mates too; a disagreement's minimal repro is a single point, as in

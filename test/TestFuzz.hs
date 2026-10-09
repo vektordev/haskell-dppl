@@ -1831,7 +1831,7 @@ knownBatchedFamilies :: [(String, String)]
 knownBatchedFamilies =
   [ ("No match in field accessor", "batched-ctor-test-behind-eq-evaluates-accessor")
   , ("where() received an invalid combination of arguments", "batched-guarded-select-over-tuple-result")
-  , ("'<' not supported between instances of 'str' and 'int'", "adt-cdf-through-tuple-answers")
+  , ("'<' not supported between instances of 'str' and", "cdf-fst-of-nested-tuple-indexes-any")
   ]
 
 knownBatchedFamily :: Disagreement -> Maybe String

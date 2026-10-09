@@ -5,10 +5,11 @@
 -- then Box else Grid` errors at query time on the interpreter, and the
 -- batched module raises its NaN diagnostic). Reached through head/fst of a
 -- tuple carrying an enumerated Int, the interpreter and scalar Python
--- instead answer cdf(Box) = 0.74, and the batched module raises
--- "TypeError: '<' not supported between instances of 'str' and 'int'".
--- Pinned is the interpreter's and Python's value; the fix is expected to
--- refuse it.
+-- instead answer cdf(Box) = 0.74. The batched module raises
+-- "TypeError: '<' not supported between instances of 'str' and 'int'",
+-- which is cdf-fst-of-nested-tuple-indexes-any (the tuple's second
+-- component is a tuple). Pinned is the interpreter's and Python's value; the
+-- fix is expected to refuse it.
 backends: interpreter, python
 expect-failure: wrong-result
 cdf(Box)=(0.74, 0.0)
