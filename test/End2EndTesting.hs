@@ -3417,6 +3417,24 @@ slowEnd2EndTests :: Corpus -> Manifest -> IO TestTree
 slowEnd2EndTests corpus manifest =
   buildEnd2EndTree corpus manifest "Slow.End2End (slow)" "End2End (slow)" Slow OnlySlow False
 
+-- | Corpus programs the interpreter cannot serve at the default -O, each with
+-- why (task impact-analysis-m2-drop-runtime-from-key, precondition "the
+-- interpreter supports every corpus case"). Every other program's every
+-- @.tst@ row is answered by the interpreter: the routed ones by the
+-- @Interpreter@ group, the rest by @Interpreter serves unrouted@, whatever the
+-- file's @backends:@ header says. The -O0 group's own exemptions
+-- ('unoptimizedRecompileExempt') are a separate matter: they concern the
+-- optimizer differential, not whether the interpreter can answer.
+--
+-- Empty as measured 2026-10-09: the only unrouted programs,
+-- @drawProductReadPerField@ and @drawProductReadPerField20@ (@backends:
+-- python@), are left off the interpreter because End2End's Normalization
+-- sweep, which every interpreter-routed neural program joins, samples a 2^14
+-- (2^20) support; the interpreter answers their rows. An entry here must be
+-- a program the interpreter genuinely cannot answer, with its ticket.
+interpreterServesExempt :: [(String, String)]
+interpreterServesExempt = []
+
 -- | Programs whose -O0 recompilation is disproportionately expensive relative
 -- to the regression class the "Interpreter Unoptimized" group exists to catch
 -- (the optimizer changing an answer). 'recursiveAdtMultiCtor' pairs an
@@ -3510,6 +3528,17 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
       let n = ceName e; p = ceProgram e; c = opt e; tcs = rows e
       in testProperty n (once $ cachedProperty manifest (check "Interpreter") n (interpreterKey manifest p c tcs)
                                   (conjoin (map (testInterpreter p c) tcs)))
+  -- The interpreter serves the programs whose header leaves it out too (task
+  -- impact-analysis-m2-drop-runtime-from-key, precondition): with the group
+  -- above, every corpus program's every row is answered by the interpreter
+  -- at -O2, bar 'interpreterServesExempt'.
+  interpUnrouted <- corpusSweep corpus SweepSpec
+    { sweepName = path ++ ".Interpreter serves unrouted", sweepTier = tier, sweepSlow = slowH
+    , sweepSelect = \e -> not (interpreterRouted e) && ceName e `notElem` map fst interpreterServesExempt
+    , sweepNote = "every .tst row of a program its header does not route to the interpreter, against the interpreter at -O2" } $ \e ->
+      let n = ceName e; p = ceProgram e; c = opt e; tcs = rows e
+      in testProperty n (once $ cachedProperty manifest (check "Interpreter serves unrouted") n (interpreterKey manifest p c tcs)
+                                  (conjoin (map (testInterpreter p c) tcs)))
   -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
   interpUnopt <- corpusSweep corpus SweepSpec
     { sweepName = path ++ ".Interpreter Unoptimized", sweepTier = tier, sweepSlow = slowH
@@ -3596,7 +3625,7 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
           in testProperty n (once $ cachedProperty manifest (check "Python Unoptimized") n (pythonKey manifest [] (unopt e) (queries e))
                                       (testPython [] (unopt e) (queries e)))
     ]
-  return $ testGroup treeName ([interp, interpUnopt] ++ backends)
+  return $ testGroup treeName ([interp, interpUnrouted, interpUnopt] ++ backends)
   where
     -- The manifest slot prefix: the sweep's full group name.
     check grp = treeName ++ "." ++ grp

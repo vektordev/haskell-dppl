@@ -35,6 +35,7 @@ import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestCLI (cliTests)
 import BackendCoverage (backendCoverageTests)
+import GenerateCensus (generateCensusTests)
 import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests)
@@ -550,9 +551,10 @@ main = do
   -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
   rewriteCorpus <- rewriteCorpusTests corpus manifest
   backendCoverage <- backendCoverageTests corpus
+  generateCensus <- generateCensusTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
-        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests, backendCoverage]
+        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests, backendCoverage, generateCensus]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it

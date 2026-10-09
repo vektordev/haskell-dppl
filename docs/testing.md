@@ -67,6 +67,10 @@ current list for whichever binary you run):
 - `test/BackendAgreement.hs` / `BackendCoverage.hs` — the batched backend
   drivers behind `prop_Fuzz_BackendsAgree`, and the corpus-minus-fuzz construct
   exception list (see `fuzz-testing.md`, "Backend agreement")
+- `test/GenerateCensus.hs` — `Slow.GenerateCensus`: every non-sampling
+  construct of a corpus generate body also occurs in a corpus inference body
+  (exact list `generateOnlyConstructs`), the generate half of the
+  corpus-minus-fuzz argument
 - `test/AdmissionOracle.hs` — the ModalityInfer ↔ IRCompiler admission
   contract (see `modality-and-admission.md`, "The admission contract"), driven by the `Slow` property
   `prop_Fuzz_AdmissionTotality`
@@ -130,6 +134,9 @@ eligibility, asserted by the `BatchedPython` group rather than filtered)
 and `dense` (declares a finite query domain, presupposes `batched`); and,
 for a `test/cases/known-issues/` file only, `expect-failure: <shape>`
 (design testcases-corpus-restructure — see "Known-issues corpus" below).
+The interpreter answers every ordinary corpus program's rows whatever the
+header says: `End2End.Interpreter serves unrouted` covers the programs it
+leaves out, bar `End2EndTesting.interpreterServesExempt` (empty).
 Comments are only allowed as a leading/trailing block, not interleaved
 between test cases; an unparseable line is a hard parse failure naming
 the file and line. Beware CRLF files when adding a token by script —
