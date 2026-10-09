@@ -61,12 +61,14 @@ shifting a pinned message or number.
 
 The rows are checked on every backend the `backends:` header declares (no
 header means interpreter, julia, python, as everywhere else) that the harness
-can evaluate: the interpreter, and Python via the emitted module. A failure
-names the backend. So declare where the bug actually lives: a
-Python-only bug (say, the emitted module does not load) is `backends: python`,
-otherwise the interpreter's correct answer reads as "may be fixed". Julia,
-batched and dense are not evaluated here, and a `broken` or `wrong-result` pin
-that declares only those fails outright instead of passing vacuously.
+can evaluate: the interpreter, Python via the emitted module, and batched via
+the corpus's batched driver (it needs a torch-enabled Python, as every
+batched check does). A failure names the backend. So declare where the bug
+actually lives: a Python-only bug (say, the emitted module does not load) is
+`backends: python`, a batched-only one `backends: batched`, otherwise the
+interpreter's correct answer reads as "may be fixed". Julia and dense are not
+evaluated here, and a `broken` or `wrong-result` pin that declares only those
+fails outright instead of passing vacuously.
 
 **Prefer `broken` over not filing at all.** If you have a program that
 misbehaves but you have not worked out precisely how, `broken` is the header

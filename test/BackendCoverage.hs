@@ -31,7 +31,7 @@
 -- and simple, and its non-random IR is built from the constructs this census
 -- certifies. That is stated in the task docs rather than encoded here, since a
 -- construct list cannot express it.
-module BackendCoverage (backendCoverageTests, fuzzCoverageExceptions) where
+module BackendCoverage (backendCoverageTests, fuzzCoverageExceptions, batchedFuzzCoverageExceptions) where
 
 import Control.Exception (SomeException, try, evaluate)
 import Control.Monad (forM)
@@ -46,10 +46,13 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertFailure)
 
 import SPLL.Prelude (compile)
-import SPLL.IntermediateRepresentation (defaultCompilerConfig)
-import BackendAgreement (irConstructs, irEnvConstructs, deterministicBodies, comparedBodies, maskedConstruct)
+import Control.Concurrent.MVar (newMVar, modifyMVar)
+import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv, IRExpr)
+import BackendAgreement (AgreementCase, irConstructs, irEnvConstructs, deterministicBodies, comparedBodies, maskedConstruct,
+                         inferenceBodies, batchedComparedBodies)
 import CorpusSweep
-import TestFuzz (prepareAgreementCase, genAgreementProgram, agreementFuzzSize)
+import TestCaseParser (Backend(Batched))
+import TestFuzz (prepareAgreementCase, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize)
 
 -- | Corpus constructs the agreement property does not reach, each with why.
 -- See the module header for what this list means and why it must be exact.
@@ -73,6 +76,24 @@ fuzzCoverageExceptions =
   , ("Sample:IRNormal",    "writeLogits dead-arm noise: a random draw, whose slots the agreement property masks rather than compares (maskedConstruct)")
   ]
 
+-- | The batched arm's counterpart of 'fuzzCoverageExceptions' (task
+-- @backend-agreement-batched-arm@): constructs of the probability and
+-- integrate bodies of the corpus programs that declare @batched@, compiled
+-- for batched mode, that the agreement property never puts through the
+-- batched backend. Exact, like the scalar list: it says which
+-- @batched-vs-expected@ checks the fuzzer certifies (a program none of whose
+-- batched constructs is listed). Only the value check: the corpus's batched
+-- gradient, generate-density, dense and topK checks are not compared by the
+-- fuzzer at all.
+batchedFuzzCoverageExceptions :: [(String, String)]
+batchedFuzzCoverageExceptions =
+  -- Measured 2026-10-09 (the same 1000-draw sample: 337 of its 548 compared
+  -- programs are batched-eligible; 233 non-slow corpus programs declare
+  -- `batched`): the corpus uses 56 constructs, the sample reaches 54.
+  [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
+  , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (gaussianTrajectory4, theta)")
+  ]
+
 -- | How many draws the fixed-seed sample takes, and from which seed. Large
 -- enough that a construct the generator reaches at all is in it: a run of the
 -- property compares ~150 programs, this sample ~4x that.
@@ -86,40 +107,62 @@ backendCoverageTests :: Corpus -> IO TestTree
 backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
   { sweepName = "Slow.BackendAgreementCoverage", sweepTier = Slow, sweepSlow = SkipSlow
   , sweepSelect = const True
-  , sweepNote = "the constructs the corpus compiles to and the agreement fuzzer never compares are listed" } $ \es ->
+  , sweepNote = "the constructs the corpus compiles to and the agreement fuzzer never compares are listed" } $ \es -> do
+  -- Both censuses draw the same sample; whichever runs first prepares it.
+  cache <- newMVar Nothing
+  let sample = modifyMVar cache $ \c -> case c of
+        Just cs -> return (c, cs)
+        Nothing -> do
+          cs <- sampleCases
+          return (Just cs, cs)
   return $ testGroup "BackendAgreementCoverage"
-  [ testCase "corpus constructs the agreement fuzzer misses are exactly fuzzCoverageExceptions" $ do
-      corpus <- corpusConstructs es
-      fuzz <- fuzzConstructs
-      let fuzzSet = filter (not . maskedConstruct) (nub (concat fuzz))
-          used = sort (nub (concatMap snd corpus))
-          uncovered = used \\ fuzzSet
-          listed = map fst fuzzCoverageExceptions
-          new = uncovered \\ listed
-          stale = listed \\ uncovered
-          users c = [ n | (n, cs) <- corpus, c `elem` cs ]
-          example c = c ++ "  (" ++ show (length (users c)) ++ " corpus programs, e.g. "
-                        ++ intercalate ", " (take 3 (users c)) ++ ")"
-      hPutStrLn stderr ("backend agreement coverage: corpus uses " ++ show (length used)
-                        ++ " constructs in deterministic bodies over " ++ show (length corpus)
-                        ++ " programs; the fuzz sample (" ++ show (length fuzz) ++ " compared of "
-                        ++ show coverageDraws ++ " drawn) covers " ++ show (length (used \\ uncovered))
-                        ++ "; uncovered: " ++ show uncovered)
-      if null new && null stale then return () else assertFailure $ unlines $
-        [ "fuzzCoverageExceptions is out of date." ]
-        ++ (if null new then [] else "Used by the corpus, never compared by the fuzzer, and not listed:" : map (("  " ++) . example) new)
-        ++ (if null stale then [] else "Listed, but now covered by the fuzzer (remove them):" : map ("  " ++) stale)
-  ]
+    [ testCase "corpus constructs the agreement fuzzer misses are exactly fuzzCoverageExceptions" $ do
+        corpus <- corpusConstructs es
+        fuzz <- fuzzConstructs sample
+        checkExceptions "scalar" "fuzzCoverageExceptions" "deterministic bodies" corpus fuzz fuzzCoverageExceptions
+    , testCase "batched corpus constructs the agreement fuzzer misses are exactly batchedFuzzCoverageExceptions" $ do
+        corpus <- corpusConstructsWith (defaultCompilerConfig { batched = True }) inferenceBodies
+                    [ e | e <- es, Batched `elem` ceBackends e ]
+        fuzz <- batchedFuzzConstructs sample
+        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of `batched`-declaring programs," corpus fuzz batchedFuzzCoverageExceptions
+    ]
+
+-- | The census verdict: the constructs the corpus uses and the fuzz sample
+-- does not must be exactly @listed@.
+checkExceptions :: String -> String -> String -> [(String, [String])] -> [[String]] -> [(String, String)] -> IO ()
+checkExceptions arm listName what corpus fuzz exceptions = do
+  let fuzzSet = filter (not . maskedConstruct) (nub (concat fuzz))
+      used = sort (nub (concatMap snd corpus))
+      uncovered = used \\ fuzzSet
+      listed = map fst exceptions
+      new = uncovered \\ listed
+      stale = listed \\ uncovered
+      users c = [ n | (n, cs) <- corpus, c `elem` cs ]
+      example c = c ++ "  (" ++ show (length (users c)) ++ " corpus programs, e.g. "
+                    ++ intercalate ", " (take 3 (users c)) ++ ")"
+  hPutStrLn stderr ("backend agreement coverage (" ++ arm ++ "): corpus uses " ++ show (length used)
+                    ++ " constructs in " ++ what ++ " over " ++ show (length corpus)
+                    ++ " programs; the fuzz sample (" ++ show (length fuzz) ++ " compared of "
+                    ++ show coverageDraws ++ " drawn) covers " ++ show (length (used \\ uncovered))
+                    ++ "; uncovered: " ++ show uncovered)
+  if null new && null stale then return () else assertFailure $ unlines $
+    [ listName ++ " is out of date." ]
+    ++ (if null new then [] else "Used by the corpus, never compared by the fuzzer, and not listed:" : map (("  " ++) . example) new)
+    ++ (if null stale then [] else "Listed, but now covered by the fuzzer (remove them):" : map ("  " ++) stale)
 
 -- | Per corpus program of the sweep (non-slow), the constructs of its
 -- deterministic bodies.
 -- A program that does not compile in time is skipped: the corpus's own
 -- groups are what report that.
 corpusConstructs :: [CorpusEntry] -> IO [(String, [String])]
-corpusConstructs entries =
+corpusConstructs = corpusConstructsWith defaultCompilerConfig deterministicBodies
+
+-- | 'corpusConstructs' under a config, over the bodies @which@ picks.
+corpusConstructsWith :: CompilerConfig -> (IREnv -> [IRExpr]) -> [CorpusEntry] -> IO [(String, [String])]
+corpusConstructsWith conf which entries =
   fmap concat $ forM entries $ \e -> do
       let p = ceProgram e
-      r <- timeout (30 * 1000 * 1000) $ try (evaluate (forceList (either (const []) (irEnvConstructs deterministicBodies) (compile defaultCompilerConfig p))))
+      r <- timeout (30 * 1000 * 1000) $ try (evaluate (forceList (either (const []) (irEnvConstructs which) (compile conf p))))
       return $ case r of
         Just (Right cs) -> [(ceName e, cs)]
         Just (Left (_ :: SomeException)) -> []
@@ -128,13 +171,31 @@ corpusConstructs entries =
     forceList :: [String] -> [String]
     forceList xs = length (concat xs) `seq` xs
 
--- | The constructs of each compared program in the fixed-seed sample.
-fuzzConstructs :: IO [[String]]
-fuzzConstructs = do
+-- | The fixed-seed sample's compared cases.
+sampleCases :: IO [AgreementCase]
+sampleCases = do
   let draws = unGen (vectorOf coverageDraws ((,) <$> resize agreementFuzzSize genAgreementProgram <*> arbitrary))
                     (mkQCGen coverageSeed) agreementFuzzSize
-  prepared <- mapM prepareAgreementCase draws
-  forM (rights prepared) $ \c -> do
+  rights <$> mapM prepareAgreementCase draws
+
+-- | The constructs of each batched-compared program in the fixed-seed sample:
+-- the compared cases batched mode takes, over their batched compile's
+-- inference bodies ('batchedComparedBodies').
+batchedFuzzConstructs :: IO [AgreementCase] -> IO [[String]]
+batchedFuzzConstructs sample = do
+  cases <- sample
+  batchedCases <- rights <$> mapM prepareAgreementBatched cases
+  forM batchedCases $ \c -> do
+    r <- try (evaluate (forceList (sort (nub (concatMap irConstructs (batchedComparedBodies c)))))) :: IO (Either SomeException [String])
+    return (either (const []) id r)
+  where
+    forceList xs = length (concat xs) `seq` xs
+
+-- | The constructs of each compared program in the fixed-seed sample.
+fuzzConstructs :: IO [AgreementCase] -> IO [[String]]
+fuzzConstructs sample = do
+  cases <- sample
+  forM cases $ \c -> do
     r <- try (evaluate (forceList (sort (nub (concatMap irConstructs (comparedBodies c)))))) :: IO (Either SomeException [String])
     return (either (const []) id r)
   where

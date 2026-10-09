@@ -1,0 +1,2 @@
+data Pt = MkPt x::Float, b::Bool
+main = head (if Uniform > 0.88 then [MkPt 0.05 True, MkPt 6.2 False] else [MkPt 1.0 (Uniform < 0.86)])

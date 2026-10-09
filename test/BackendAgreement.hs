@@ -48,6 +48,13 @@ module BackendAgreement
   , runPythonBatch
   , runJuliaBatch
   , findJulia
+  , BatchedCase(..)
+  , BatchedGroup(..)
+  , prepareBatchedCase
+  , runBatchedPythonBatch
+  , batchedComparedBodies
+  , batchedRefusalReason
+  , float32Point
   , parseAnswerLine
   , pythonDriver
   , juliaDriver
@@ -75,7 +82,8 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
-import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC)
+import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC, compile)
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.ReservedNames (componentNormalName)
 import IRInterpreter (generateDet)
 import Control.Monad.Random (evalRand)
@@ -84,7 +92,8 @@ import qualified SPLL.CodeGenPyTorch as Py
 import qualified SPLL.CodeGenJulia as Jl
 import PrettyPrint (pPrintProg)
 import TestTolerances (probTolerance)
-import End2EndTesting (qualifyConstructors, juliaTestFlags)
+import End2EndTesting (qualifyConstructors, juliaTestFlags, SampleBatch(..), batchSamples,
+                       batchSymColumn, networkMocks, batchedMockExpr, netMockName)
 
 -- ---------------------------------------------------------------------------
 -- Queries and answers
@@ -494,6 +503,223 @@ runJuliaBatch julia cases = runBatch "julia" emit ".jl" juliaDriver (\f -> runBo
     -- Cases have no identity of their own; programs in one batch are
     -- distinct draws, so their printed forms are distinct enough to index by.
     sameCase a b = show (acProgram a) == show (acProgram b) && map fst (acQueries a) == map fst (acQueries b)
+
+-- ---------------------------------------------------------------------------
+-- The batched arm (task backend-agreement-batched-arm)
+
+-- | One batched call: all of a program's answered points of one inference
+-- kind (@forward@ or @integrate@), handed over as one batch, the way the
+-- corpus's @batched-vs-expected@ hands over a @.tst@ file's points
+-- ('End2EndTesting.batchSamples': one structure-of-arrays tensor, or the host
+-- bucketing wrapper when a point carries structure). Each query carries the
+-- interpreter's answer and, for a point a float32 batch literal rounds, the
+-- interpreter's answer at the rounded point ('float32Point').
+data BatchedGroup = BatchedGroup
+  { bgCumul   :: Bool
+  , bgBatch   :: SampleBatch
+  , bgQueries :: [(Query, Answer, Maybe Answer)]
+  }
+
+-- | A compared case that batched mode takes: its batched compile, the emitted
+-- module and its groups.
+data BatchedCase = BatchedCase
+  { bcCase   :: AgreementCase
+  , bcEnv    :: IREnv
+  , bcSource :: String
+  , bcGroups :: [BatchedGroup]
+  }
+
+-- | Batched eligibility, decided as the corpus decides it
+-- ('End2EndTesting.batchedEligibility'): a @batched = True@ compile, a
+-- 'generateFunctionsBatched' emission, and batchable query points. 'Left' is
+-- the reason it is not eligible, normalised for tabulation
+-- ('batchedRefusalReason'); a refusal is not a disagreement.
+--
+-- Only the inference queries go through this arm (the batched backend emits
+-- no @normal_params@ or @writeLogits@), and of those not the ones the
+-- interpreter answers with a NaN: every batched return goes through
+-- @check_result@, which raises on a NaN by design (task
+-- batched-adt-cdf-refusal-becomes-nan), and it would take the whole batch
+-- with it. @interpArgs@ are what the interpreter takes for @main@.
+prepareBatchedCase :: [IRValue] -> AgreementCase -> IO (Either String BatchedCase)
+prepareBatchedCase interpArgs c = do
+  compiled <- try (evaluate (forceEither (compile defaultCompilerConfig{batched = True} (acProgram c))))
+  case compiled of
+    Left (e :: SomeException) -> return (Left ("batched compile crashed: " ++ batchedRefusalReason (show e)))
+    Right (Left msg) -> return (Left ("batched compile failed: " ++ batchedRefusalReason msg))
+    Right (Right env) -> do
+      emitted <- try (evaluate (forceEither (generateFunctionsBatched True env)))
+      case emitted of
+        Left (e :: SomeException) -> return (Left ("batched codegen crashed: " ++ batchedRefusalReason (show e)))
+        Right (Left msg) -> return (Left (batchedRefusalReason msg))
+        Right (Right src) -> do
+          let kinds = [ (cumul, qs) | cumul <- [False, True], let qs = inference cumul, not (null qs) ]
+          if null kinds then return (Left "no non-NaN inference answer") else
+            case mapM (\(cumul, qs) -> (,,) cumul qs <$> batchSamples (map (queryPoint . fst) qs)) kinds of
+              Nothing -> return (Left "query points not batchable")
+              Just gs -> do
+                groups <- mapM (\(cumul, qs, sb) -> BatchedGroup cumul sb <$> mapM (withRounded sb) qs) gs
+                return (Right (BatchedCase c env (intercalate "\n" src) groups))
+  where
+    inference cumul = [ (q, a) | (q, a@(Answered pr _ _)) <- acQueries c, isCumul q == Just cumul, not (isNaN pr) ]
+    isCumul (QProb _) = Just False
+    isCumul (QInteg _) = Just True
+    isCumul _ = Nothing
+    forceEither :: Show a => Either String a -> Either String a
+    forceEither r = length (show r) `seq` r
+    -- Only a structure-of-arrays literal is float32 ('batchLiteral' leaves
+    -- torch's default dtype); the bucketing wrapper packs at the runtime's
+    -- float64.
+    withRounded (SoA _) (q, a) =
+      let v = queryPoint q
+          v' = float32Point v
+      in if v' == v then return (q, a, Nothing) else do
+           r <- try (evaluate (forceShow (interpreterAnswer (acProgram c) (acEnv c) interpArgs (retarget q v'))))
+           return (q, a, either (\(_ :: SomeException) -> Nothing) id r)
+    withRounded _ (q, a) = return (q, a, Nothing)
+    retarget (QInteg _) v = QInteg v
+    retarget _ v = QProb v
+    forceShow x = length (show x) `seq` x
+
+-- | A query point as a float32 batch literal delivers it: every float leaf
+-- rounded to the nearest float32. The corpus's structure-of-arrays literals
+-- are float32 too, so this arm compares under the corpus's own float32
+-- awareness: a batched answer agrees if it matches the interpreter at the
+-- point, or at the rounded point.
+float32Point :: IRValue -> IRValue
+float32Point v = case v of
+  VFloat x -> VFloat (realToFrac (realToFrac x :: Float))
+  VTuple a b -> VTuple (float32Point a) (float32Point b)
+  _ -> v
+
+-- | A batched refusal, stripped of the program-specific names in it (group
+-- names, generated identifiers), so the eligibility table groups refusals by
+-- kind: the construct named after "fragment:" where there is one, else the
+-- message with every word containing an underscore or a digit, and the
+-- function name a message starts with, dropped.
+batchedRefusalReason :: String -> String
+batchedRefusalReason msg0 = take 90 $ case breakOn "outside the tensor fragment: " msg of
+  Just rest -> "outside the tensor fragment: " ++ clause rest
+  Nothing -> clause (unwords (filter generic (words msg)))
+  where
+    -- The kind of refusal, not its instance: up to a parenthesised detail
+    -- (the offending constant) or the next sentence.
+    clause = trim . upTo
+    upTo (ch : rest)
+      | ch `elem` "(.;" = []
+      | ch == ':', take 1 rest == " " = []
+      | otherwise = ch : upTo rest
+    upTo [] = []
+    trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+    msg = dropPrefix "batched PyTorch codegen: " $ dropPrefix "batched mode: " $ (map (\ch -> if ch == '\n' then ' ' else ch) msg0)
+    dropPrefix pre s = if pre `isPrefixOf` s then drop (length pre) s else s
+    breakOn pat s
+      | null s = Nothing
+      | pat `isPrefixOf` s = Just (drop (length pat) s)
+      | otherwise = breakOn pat (tail s)
+    generic w = not (any (`elem` "_0123456789'") w)
+
+-- | The bodies a batched case puts through the batched backend: every group's
+-- probability and integrate body, from the batched compile (so after the
+-- select pass: @IRSelect@ rather than @IRIf@ where it applied).
+batchedComparedBodies :: BatchedCase -> [IRExpr]
+batchedComparedBodies = inferenceBodies . bcEnv
+
+-- | The batched driver: every case in one torch process, each module in its
+-- own namespace with its network mocks ('End2EndTesting.batchedMockExpr'),
+-- each group one call under a 20 s alarm. Same output protocol as
+-- 'pythonDriver'; a group that raises reports every one of its queries.
+batchedDriver :: FilePath -> [BatchedCase] -> String
+batchedDriver projectDir cases = unlines $
+  [ "import sys, signal"
+  , "sys.path.insert(0, " ++ show projectDir ++ ")"
+  , "import torch"
+  , "from pythonLibBatched import bucketed"
+  , "sys.setrecursionlimit(20000)"
+  , "class _Timeout(Exception): pass"
+  , "def _alarm(signum, frame): raise _Timeout('batch exceeded its time limit')"
+  , "signal.signal(signal.SIGALRM, _alarm)"
+  , "def _out(s):"
+  , "    sys.stdout.write(s + '\\n'); sys.stdout.flush()"
+  , "def _msg(e):"
+  , "    return (type(e).__name__ + ': ' + str(e)).replace('\\n', ' ')[:400]"
+  , "def _leaf(x, k):"
+  , "    if torch.is_tensor(x):"
+  , "        return x[k].item() if x.dim() > 0 else x.item()"
+  , "    return x"
+  ] ++ concat (zipWith program [0 :: Int ..] cases)
+  where
+    program i bc =
+      let c = bcCase bc
+          nets = networkMocks (acProgram c)
+          offsets = scanl (+) 0 (map (length . bgQueries) (bcGroups bc))
+      in [ "_ns = {}"
+         , "try:"
+         , "    exec(compile(" ++ show (bcSource bc) ++ ", " ++ show ("prog" ++ show i) ++ ", 'exec'), _ns)"
+         ] ++ [ "    _ns[" ++ show (netMockName nm) ++ "] = " ++ batchedMockExpr nm | nm <- nets ] ++
+         [ "    _ns['bucketed'] = bucketed"
+         , "    _loaded = True"
+         , "except BaseException as _e:"
+         , "    _out('L " ++ show i ++ " ' + _msg(_e))"
+         , "    _loaded = False"
+         , "if _loaded:"
+         ] ++ concat (zipWith (group i (not (null nets)) (acBackendArgs c)) offsets (bcGroups bc))
+         ++ [ "    pass" ]
+    group i neural args off g =
+      let n = length (bgQueries g)
+          method = if bgCumul g then "integrate" else "forward"
+          params = concatMap ((", " ++) . paramExpr neural n) args
+          (setup, call) = case bgBatch g of
+            SoA lit -> ([], "main." ++ method ++ "(" ++ lit ++ params ++ ")")
+            -- Evaluated inside the program's namespace: a sample may name
+            -- the program's own ADT constructors.
+            Bucketed lit _ -> ( [ "        _ns['_samples'] = eval(" ++ show lit ++ ", _ns)" ]
+                              , "bucketed(main." ++ method ++ ", _samples" ++ params ++ ")" )
+          ix = "str(" ++ show off ++ " + _k)"
+      in [ "    try:"
+         , "        signal.setitimer(signal.ITIMER_REAL, 20.0)"
+         ] ++ setup ++
+         [ "        _r = eval(" ++ show call ++ ", _ns)"
+         , "        signal.setitimer(signal.ITIMER_REAL, 0)"
+         , "        for _k in range(" ++ show n ++ "):"
+         , "            try:"
+         , "                _out('R " ++ show i ++ " ' + " ++ ix ++ " + ' ' + repr(float(_leaf(_r[0], _k))) + ' ' + repr(float(_leaf(_r[1][0], _k))) + ' ' + str(bool(_leaf(_r[1][1], _k))))"
+         , "            except BaseException as _e:"
+         , "                _out('E " ++ show i ++ " ' + " ++ ix ++ " + ' ' + _msg(_e))"
+         , "    except BaseException as _e:"
+         , "        signal.setitimer(signal.ITIMER_REAL, 0)"
+         , "        for _k in range(" ++ show n ++ "):"
+         , "            _out('E " ++ show i ++ " ' + " ++ ix ++ " + ' ' + _msg(_e))"
+         ]
+    -- A neural @main@'s argument is one logit vector shared by every point;
+    -- batched, it is a @[B, n]@ column of it, as the corpus passes per-point
+    -- symbols. Any other argument broadcasts.
+    paramExpr neural n v
+      | neural, VList _ <- v, Just col <- batchSymColumn (replicate n (VTuple (VInt 2) v)) = col
+      | otherwise = Py.pyVal v
+
+-- | Run every batched case through one torch-enabled Python process and pair
+-- each query with the interpreter's answer. A batched answer agrees if it
+-- agrees with the interpreter at the point or, for a float32-rounded point,
+-- at the rounded point.
+runBatchedPythonBatch :: FilePath -> [BatchedCase] -> IO [Disagreement]
+runBatchedPythonBatch py cases = withSystemTempDirectory "nest-batched" $ \dir -> do
+  projectDir <- getCurrentDirectory
+  let driverPath = dir </> "driver.py"
+  writeFile driverPath (batchedDriver projectDir cases)
+  (_, out, err) <- runBounded py [driverPath]
+  let parsed = [ x | Just x <- map parseAnswerLine (lines out) ]
+      tailErr = oneLine (reverse (take 400 (reverse err)))
+      answerFor i j = case [ a | (i', Just j', a) <- parsed, i' == i, j' == j ] of
+        (a : _) -> a
+        [] -> case [ a | (i', Nothing, a) <- parsed, i' == i ] of
+          (a : _) -> a
+          [] -> Raised ("no answer from the batched process; stderr: " ++ tailErr)
+  return [ Disagreement "batched" (acProgram (bcCase bc)) q ia ba
+         | (i, bc) <- zip [0 ..] cases
+         , (j, (q, ia, rounded)) <- zip [0 ..] (concatMap bgQueries (bcGroups bc))
+         , let ba = answerFor i j
+         , not (answersAgree ia ba || maybe False (`answersAgree` ba) rounded) ]
 
 -- ---------------------------------------------------------------------------
 -- Construct inventory

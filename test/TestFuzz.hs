@@ -44,7 +44,7 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, prepareAgreementCase, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+module TestFuzz (fuzzTests, prepareAgreementCase, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests) where
 
@@ -70,11 +70,14 @@ import System.Random (mkStdGen)
 import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer,
                          anyHoles, offSupport, bodyKind,
                          runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
-                         comparedBodies, irConstructs, maskedConstruct)
+                         comparedBodies, irConstructs, maskedConstruct,
+                         BatchedCase(..), BatchedGroup(..), prepareBatchedCase,
+                         runBatchedPythonBatch, batchedComparedBodies,
+                         Disagreement(..), Answer(..))
 import Control.Monad.Random (Rand, getRandom, getRandomR)
 import System.Random (StdGen)
-import End2EndTesting (resolveNeuralParams, networkNames)
-import Data.List (sort, nub, intersect, find, isInfixOf, isPrefixOf)
+import End2EndTesting (resolveNeuralParams, networkNames, findTorchPython, noTorch)
+import Data.List (sort, nub, intersect, find, isInfixOf, isPrefixOf, partition)
 import PrettyPrint (pPrintProg)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.PType (PType(Bottom))
@@ -1818,6 +1821,46 @@ argGen adtDecls depth rt = case rt of
       VADT c <$> sequence gens
   _ -> Nothing
 
+-- | Batched disagreements of a filed family: the batched backend raised a
+-- message containing the needle where the interpreter answered. Matched on
+-- the message, so a new cause raising the same message hides behind its
+-- family; each family's ticket says how to tell. A wrong value (rather than
+-- a raise) is never listed here: it fails the property. Remove an entry when
+-- its ticket is fixed.
+knownBatchedFamilies :: [(String, String)]
+knownBatchedFamilies =
+  [ ("No match in field accessor", "batched-ctor-test-behind-eq-evaluates-accessor")
+  , ("where() received an invalid combination of arguments", "batched-guarded-select-over-tuple-result")
+  , ("'<' not supported between instances of 'str' and 'int'", "adt-cdf-through-tuple-answers")
+  ]
+
+knownBatchedFamily :: Disagreement -> Maybe String
+knownBatchedFamily d = case dBackendA d of
+  Raised msg | dBackend d == "batched" ->
+    case [ t | (needle, t) <- knownBatchedFamilies, needle `isInfixOf` msg ] of
+      (t : _) -> Just t
+      [] -> Nothing
+  _ -> Nothing
+
+-- | A compared case's batched form ('prepareBatchedCase'), or why batched mode
+-- does not take it, under the per-program bound.
+prepareAgreementBatched :: AgreementCase -> IO (Either String BatchedCase)
+prepareAgreementBatched c = fromMaybe (Left "batched compile timed out")
+  <$> timeout agreementPerProgramMicros (prepareBatchedCase (fuzzArgs (acProgram c)) c)
+
+-- | 'findTorchPython', looked up once per process: each lookup imports torch
+-- in a subprocess, about a second.
+{-# NOINLINE torchPythonCache #-}
+torchPythonCache :: MVar (Maybe (Maybe FilePath))
+torchPythonCache = unsafePerformIO (newMVar Nothing)
+
+cachedTorchPython :: IO (Maybe FilePath)
+cachedTorchPython = modifyMVar torchPythonCache $ \cached -> case cached of
+  Just r -> return (cached, r)
+  Nothing -> do
+    r <- findTorchPython
+    return (Just r, r)
+
 -- | Printed once per process: the Julia arm skips, visibly, where there is no
 -- @julia@ -- the same convention 'BatchedPython' follows for a missing torch.
 {-# NOINLINE notesAnnounced #-}
@@ -1844,16 +1887,40 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
           Nothing -> do
             noteOnce "prop_Fuzz_BackendsAgree: no julia on the PATH; the Julia arm is skipped (interpreter vs Python only)."
             return []
-        let ds = pyD ++ jlD
+        -- The batched arm (task backend-agreement-batched-arm): the cases
+        -- batched mode takes, all in one torch process. No torch is a
+        -- failure unless NEST_SKIP_TORCH=1 skips it, as for every other
+        -- torch-dependent check.
+        batchedPrep <- mapM prepareAgreementBatched cases
+        let bcases = rights batchedPrep
+        torch <- cachedTorchPython
+        (batchedArm, noTorchFailure, bD) <- case torch of
+          Just py -> (,,) "ran" Nothing <$> (if null bcases then return [] else runBatchedPythonBatch py bcases)
+          Nothing -> do
+            why <- noTorch "prop_Fuzz_BackendsAgree batched arm"
+            return (maybe "skipped (NEST_SKIP_TORCH=1)" (const "no torch python") why, why, [])
+        -- A batched disagreement of a filed family is tabulated, not failed
+        -- ('knownBatchedFamilies'), as 'knownOverPromises' does for the
+        -- admission oracle.
+        let (knownB, newB) = partition (isJust . knownBatchedFamily) bD
+            ds = pyD ++ jlD ++ newB
             nQueries = sum (map (length . acQueries) cases)
+            nBatched = sum [ length (bgQueries g) | b <- bcases, g <- bcGroups b ]
         return
           $ tabulate "julia arm" [maybe "skipped (no julia)" (const "ran") julia]
+          $ tabulate "batched arm" [batchedArm]
+          $ tabulate "known batched family (query; not a failure)" [ fromMaybe "" (knownBatchedFamily d) | d <- knownB ]
+          $ tabulate "batched eligibility of a compared program" [ either id (const "eligible") r | r <- batchedPrep ]
+          $ tabulate "batched query kind" [ kind q | b <- bcases, g <- bcGroups b, (q, _, _) <- bgQueries g ]
+          $ tabulate "IR construct in a batched-compared body" (concatMap (sort . nub . concatMap irConstructs . batchedComparedBodies) bcases)
+          $ maybe id (\msg -> const (counterexample msg False)) noTorchFailure
           $ tabulate "drawn program" [ either id (const "compared") r | r <- prepared ]
           $ tabulate "query kind" [ kind q | c <- cases, (q, _) <- acQueries c ]
           $ tabulate "body kind" [ bodyKind q | c <- cases, (q, _) <- acQueries c ]
           $ tabulate "IR construct in a compared body" (concatMap (filter (not . maskedConstruct) . sort . nub . concatMap irConstructs . comparedBodies) cases)
           $ counterexample (show (length ds) ++ " disagreement(s) over " ++ show (length cases)
-                            ++ " programs / " ++ show nQueries ++ " interpreter-answered queries; first:\n"
+                            ++ " programs / " ++ show nQueries ++ " interpreter-answered queries ("
+                            ++ show (length bcases) ++ " programs / " ++ show nBatched ++ " queries on the batched arm); first:\n"
                             ++ concatMap renderDisagreement (take 2 ds))
           $ null ds
   where

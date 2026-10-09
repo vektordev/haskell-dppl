@@ -59,7 +59,9 @@ import SPLL.Validator (validateProgram)
 import SPLL.ReservedNames (queryParamName, distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
-import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement)
+import End2EndTesting (findTorchPython, noTorch)
+import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
+                         prepareBatchedCase, runBatchedPythonBatch)
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -3660,6 +3662,31 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
       check runPythonBatch
       julia <- findJulia
       maybe (return ()) (check . runJuliaBatch) julia
+  , testCase "the batched arm round-trips structure-of-arrays and bucketed batches, and a wrong answer disagrees" $ do
+      -- Task backend-agreement-batched-arm. The prob points include ANY, so
+      -- they go through the bucketing wrapper; the integrate points are one
+      -- float32 structure-of-arrays literal, and 0.1 is not a float32, so
+      -- it is answered at the rounded point ('float32Point').
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorch "batched arm round trip" >>= maybe (return ()) assertFailure
+        Just py -> do
+          prog <- parseOrFail "main = if Uniform < 0.3 then Normal * 2.0 else Uniform + 3.0"
+          env <- either (\e -> assertFailure (show e)) return (compile defaultCompilerConfig prog)
+          let queries pts = [ (q, a) | q <- pts, Just a <- [interpreterAnswer prog env [] q] ]
+              exact = [QProb (VFloat 0.5), QProb (VFloat 3.5), QProb VAny, QInteg (VFloat 0.75), QInteg (VFloat 3.25)]
+              mk qs = do
+                r <- prepareBatchedCase [] (AgreementCase prog env [] [] qs)
+                either (\why -> assertFailure ("not batched-eligible: " ++ why)) return r
+          assertEqual "the interpreter answers every point" 6 (length (queries (QInteg (VFloat 0.1) : exact)))
+          agreeing <- mk (queries (QInteg (VFloat 0.1) : exact))
+          ds <- runBatchedPythonBatch py [agreeing]
+          assertBool (concatMap renderDisagreement ds) (null ds)
+          let nudge (q, Answered p d i) = (q, Answered (p + 0.25) d i)
+              nudge qa = qa
+          wrong <- mk (map nudge (queries exact))
+          dsWrong <- runBatchedPythonBatch py [wrong]
+          assertEqual "every nudged answer is a disagreement" (length exact) (length dsWrong)
   ]
 
 -- | A literal mock-NN parameter: the digit distribution, padded to the ten

@@ -1,0 +1,2 @@
+data S = Box | Grid
+main = head (fst (if Uniform < 0.74 then ([Box], (if Uniform < 0.5 then 2 else 1, -1)) else ([Grid], (10, -7))))

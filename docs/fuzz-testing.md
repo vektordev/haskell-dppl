@@ -808,6 +808,38 @@ the PATH the Julia arm is skipped with a one-line stderr note, and the run's
 `julia arm` table says so: on a machine without Julia the property checks
 interpreter vs Python only.
 
+**The batched arm** (task `backend-agreement-batched-arm`). Every compared
+program also goes to the batched Python backend (`--batched`,
+`pythonLibBatched.py`) when batched mode takes it, decided as the corpus
+decides it: a `batched = True` compile, a `generateFunctionsBatched`
+emission, and query points `End2EndTesting.batchSamples` can batch
+(`prepareBatchedCase`). A refusal is not a disagreement; the run's
+`batched eligibility of a compared program` table names it, normalised to its
+kind (`batchedRefusalReason`). A Haskell-side crash of the batched emitter is
+tabulated the same way (`batched codegen crashed: ...`) rather than failed:
+crash-freedom of codegen is `prop_Fuzz_TypedCompileNeverCrashes`'s job, and
+its known batched crashes (`no infix form for OpMod`/`OpIntDiv`) are filed
+there. Only `probability` and `integrate` queries go through this arm (the
+batched backend emits no normal or writeLogits bodies), and not the ones the
+interpreter answers with a NaN: every batched return goes through
+`check_result`, which raises on a NaN by design. Each program's points of one
+kind are **one** batched call, built as the corpus's `batched-vs-expected`
+builds them: one float32 structure-of-arrays literal, or the host bucketing
+wrapper when a point carries structure (an `ANY`, a list, an `Either`, an
+ADT). All batch-eligible programs of a property batch run in one
+torch-enabled Python process (`runBatchedPythonBatch`, a 20 s alarm per
+call). The comparison is `answersAgree`, exact on dim and the flag, and
+float32-aware where the literal is float32: an answer also agrees if it
+matches the interpreter at the point rounded to float32 (`float32Point`).
+A batched raise whose message names a filed family
+(`knownBatchedFamilies`: message needle to ticket) is tabulated under `known
+batched family` rather than failed, as `knownOverPromises` does for the
+admission oracle; a wrong value always fails. A call that raises reports
+every point in it, so one bad point fails its batch-mates too; a disagreement's minimal repro is a single point, as in
+the `known-issues/batched*` pins. Without a torch-enabled Python the arm fails
+the property, unless `NEST_SKIP_TORCH=1` skips it (noted on stderr and in the
+`batched arm` table), the same rule as every other torch-dependent check.
+
 Each run tabulates the IR constructs (`irConstructs`: `IRExpr` constructors,
 `Operand`s, `UnaryOperand`s, `Builtin`s, density/cumulative leaves,
 `ConTag`s, `Accessor`s) of the bodies it compared. The Slow unit test
@@ -824,6 +856,17 @@ sample is random), and count on neither side. A random draw inside a
 writeLogits body (the dead-arm noise, `IRSample`/`Sample:IRNormal`) is masked
 rather than compared, so the fuzz side drops it (`maskedConstruct`) and the
 exception list names it.
+
+The batched arm has its own census, the second case of
+`BackendAgreementCoverage`: over the corpus programs declaring `batched`,
+compiled with `batched = True` (so after the select pass), the constructs of
+their probability and integrate bodies, against the batched-compiled bodies of
+the sample's batch-eligible draws (`batchedComparedBodies`). The difference
+must be exactly `batchedFuzzCoverageExceptions`. It certifies the corpus's
+`batched-vs-expected` value check only: the batched gradient,
+generate-density, dense and topK checks compare nothing the fuzzer runs. Each
+run tabulates the batched arm's constructs too (`IR construct in a
+batched-compared body`).
 
 Measured when it landed: a run takes ~10-15 s, compares ~150 of its 240
 programs at ~1100 queries, and the corpus uses 59 constructs in inference

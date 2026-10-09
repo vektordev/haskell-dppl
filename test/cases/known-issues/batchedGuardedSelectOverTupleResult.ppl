@@ -1,0 +1,1 @@
+main = (\v0 -> sq (snd (left 0, if False then Uniform else 2.0))) ((if Uniform < 0.5 then 2 else 1) + (if False then (if Uniform < 0.5 then 2 else 1) else -1) * (if Uniform < 0.5 then 2 else 1))

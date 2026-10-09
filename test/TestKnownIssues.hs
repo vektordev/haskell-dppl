@@ -57,7 +57,8 @@ import TestCaseParser
   )
 import ScalingCheck (Point(..), Verdict(..), climb, expandTemplate)
 import TestTolerances (probTolerance)
-import End2EndTesting (networkMocks, pythonTestScript, resolveNeuralTestCase, shapeNeuralTestCase, programRuntimeFields)
+import End2EndTesting (networkMocks, pythonTestScript, resolveNeuralTestCase, shapeNeuralTestCase, programRuntimeFields,
+                       batchedEligibility, batchedDriver, findTorchPython, noTorch, BatchGroup)
 import ImpactManifest
 
 knownIssuesDir :: FilePath
@@ -130,7 +131,7 @@ knownIssueTest manifest baseName = testCaseInfo baseName $ do
 
 -- | Bump when the @broken@/@wrong-result@ checks' logic changes.
 knownIssueCheckVersion :: String
-knownIssueCheckVersion = "known-issue-v1"
+knownIssueCheckVersion = "known-issue-v2"
 
 -- | Key of a @broken@ or @wrong-result@ pin: the @expect-failure@ header and
 -- the backends it is checked on, the compiled 'IREnv' with the program's
@@ -154,9 +155,19 @@ knownIssueKey m prog backends ef tcs = do
                        [resolveNeuralTestCase prog (shapeNeuralTestCase prog tc)]
                    | tc <- queryRows tcs ])
     _ -> return []
-  return $ Just $ hashKey
+  -- The batched rows: the emitted module and batch groups each row runs, and
+  -- the torch runtime. No torch means no key: the pin runs, and says so.
+  batchedPart <- if Batched `notElem` checked then return (Just []) else do
+    mpy <- findTorchPython
+    case mpy of
+      Nothing -> return Nothing
+      Just py -> do
+        torch <- torchFingerprint py
+        rows <- mapM (\tc -> show <$> batchedEligibility prog [tc]) (queryRows tcs)
+        return (Just (torch : rows))
+  return $ fmap (\bPart -> hashKey
     ([knownIssueCheckVersion, h, src, i, show ef, show checked, show compiled, programRuntimeFields prog, show tcs
-     , show probTolerance] ++ pyPart)
+     , show probTolerance] ++ pyPart ++ bPart)) batchedPart
 
 checkExpectFailure :: String -> Program -> [Backend] -> ExpectFailure -> [TestCase] -> IO ()
 checkExpectFailure name _ _ ExpectGrowthAbove{} _ =
@@ -238,13 +249,17 @@ checkExpectFailure name prog backends ExpectBroken tcs = do
       Right env -> mapM_ (\b -> mapM_ (assertStillBroken b name prog env) (queryRows tcs)) checked
 
 -- | The backends a @broken@ or @wrong-result@ pin's rows can be run against
--- here: the interpreter in-process, and the Python backend through the same
--- emitted script End2End runs. Julia is not (it is not installed everywhere
--- the suite runs, and a missing binary would read as "still broken", i.e. a
--- silently green pin), nor are batched/dense. A pin declaring only those
--- fails loudly instead of passing vacuously.
+-- here: the interpreter in-process, the Python backend through the same
+-- emitted script End2End runs, and the batched backend through the corpus's
+-- own @batched-vs-expected@ driver (task backend-agreement-batched-arm, whose
+-- disagreements are pinned this way). Batched needs a torch-enabled Python:
+-- without one the row fails, unless @NEST_SKIP_TORCH=1@ skips it, as for
+-- every torch-dependent check. Julia is not checkable (it is not installed
+-- everywhere the suite runs, and a missing binary would read as "still
+-- broken", i.e. a silently green pin), nor is dense. A pin declaring only
+-- those fails loudly instead of passing vacuously.
 checkableBackends :: [Backend]
-checkableBackends = [Interpreter, Python]
+checkableBackends = [Interpreter, Python, Batched]
 
 -- | The declared backends this harness can evaluate, failing the pin when
 -- there are none (it would otherwise pass without checking anything).
@@ -285,6 +300,13 @@ assertStillBroken Python name prog env tc = do
              \idealized value -- this known issue may be fixed; if so, tighten or move this \
              \case out of known-issues")
     (not matched)
+assertStillBroken Batched name prog _ tc = do
+  matched <- batchedRowMatches name prog tc
+  assertBool
+    (name ++ "/" ++ rowName tc ++ " [batched]: the batched backend now matches the documented \
+             \idealized value -- this known issue may be fixed; if so, tighten or move this \
+             \case out of known-issues")
+    (matched /= Just True)
 assertStillBroken _ _ _ _ _ = return ()
 
 -- | One pinned (wrong) row on one backend: assert the result still matches
@@ -303,7 +325,48 @@ assertStillWrong Python name prog env tc = do
              \this known-issues case (move it to the corpus if fixed, re-pin if the wrong \
              \value changed)")
     matched
+assertStillWrong Batched name prog _ tc = do
+  matched <- batchedRowMatches name prog tc
+  assertBool
+    (name ++ "/" ++ rowName tc ++ " [batched]: no longer produces the pinned wrong value \
+             \(or was refused, or failed to run) -- the bug may be fixed or may have moved; \
+             \triage this known-issues case")
+    (matched /= Just False)
 assertStillWrong _ _ _ _ _ = return ()
+
+-- | Run one row through the batched backend, as the corpus's
+-- @batched-vs-expected@ does ('End2EndTesting.batchedEligibility' and
+-- 'End2EndTesting.batchedDriver'): @Just True@ iff the program is batched-
+-- eligible and the row matched within tolerance, @Just False@ for a
+-- mismatch, a refusal or a crash, and 'Nothing' where the row was skipped
+-- (no torch under @NEST_SKIP_TORCH=1@). No torch otherwise fails the pin. A
+-- row batched mode cannot express (an @impossible@ row, which carries no
+-- dimension, or a @VAnyExcept@ point) fails too: it would otherwise run
+-- nothing and read as a match.
+batchedRowMatches :: String -> Program -> TestCase -> IO (Maybe Bool)
+batchedRowMatches name prog tc = do
+  mpy <- findTorchPython
+  case mpy of
+    Nothing -> do
+      why <- noTorch (name ++ "/" ++ rowName tc ++ " [batched]")
+      maybe (return Nothing) assertFailure why
+    Just py -> do
+      eligible <- batchedEligibility prog [tc]
+      case eligible of
+        Left _ -> return (Just False)
+        Right (src, groups, nets)
+          | null (groups :: [BatchGroup]) -> assertFailure (name ++ "/" ++ rowName tc ++ " [batched]: the row \
+                                          \has no batched form (an impossible row, or a VAnyExcept point); \
+                                          \state a possible value or drop `batched` from the header")
+          | otherwise -> do
+              projectDir <- getCurrentDirectory
+              let script = "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n"
+                           ++ batchedDriver False [(name, src, groups, nets)]
+              withSystemTempFile "spll_known_issue_batched.py" $ \tmpPath h -> do
+                hPutStr h script
+                hClose h
+                (code, _, _) <- readProcessWithExitCode py [tmpPath] ""
+                return (Just (code == ExitSuccess))
 
 checkStillWrong :: String -> String -> Expectation -> Either CompilerError IRValue -> IO ()
 checkStillWrong name caseName expct er = do
