@@ -47,7 +47,7 @@ import Test.Tasty.HUnit (testCase, assertFailure)
 
 import SPLL.Prelude (compile)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig)
-import BackendAgreement (irConstructs, irEnvConstructs, deterministicBodies, comparedBodies)
+import BackendAgreement (irConstructs, irEnvConstructs, deterministicBodies, comparedBodies, maskedConstruct)
 import CorpusSweep
 import TestFuzz (prepareAgreementCase, genAgreementProgram, agreementFuzzSize)
 
@@ -60,13 +60,17 @@ fuzzCoverageExceptions =
   -- covers 54). BIndex joined 2026-10-06 (60 constructs). Re-measured
   -- 2026-10-09 over all deterministic bodies (writeLogits and normal added;
   -- 556 non-slow corpus programs, 545 of 1000 draws compared): the corpus
-  -- uses 62 constructs, the sample covers 56, and the list is unchanged.
+  -- uses 62 constructs, the sample reaches 56 of them; IRSample and
+  -- Sample:IRNormal, the writeLogits dead-arm noise, are masked rather than
+  -- compared and so listed (maskedConstruct), leaving 54 covered.
   [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (lambdaThetaInverse, affineChainEndpoint)")
   , ("Builtin:BIndex",     "agreement point query: needs the agreement fusion's `right v` arm over a contiguous Int domain (categoricalProductFusion)")
   , ("Builtin:BMapList",   "list map: the generator has no higher-order map over a list (map, mapMultList)")
   , ("Builtin:BZip OpMult", "agreement fusion: needs two independent categoricals compared with == (categoricalProductFusion)")
   , ("Operand:OpMax",      "max is forward-only and reaches an inference body only with enumerable operands (maxEnumerateBoth)")
+  , ("IRExpr:IRSample",    "writeLogits dead-arm noise: a random draw, whose slots the agreement property masks rather than compares (maskedConstruct)")
+  , ("Sample:IRNormal",    "writeLogits dead-arm noise: a random draw, whose slots the agreement property masks rather than compares (maskedConstruct)")
   ]
 
 -- | How many draws the fixed-seed sample takes, and from which seed. Large
@@ -87,7 +91,7 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
   [ testCase "corpus constructs the agreement fuzzer misses are exactly fuzzCoverageExceptions" $ do
       corpus <- corpusConstructs es
       fuzz <- fuzzConstructs
-      let fuzzSet = nub (concat fuzz)
+      let fuzzSet = filter (not . maskedConstruct) (nub (concat fuzz))
           used = sort (nub (concatMap snd corpus))
           uncovered = used \\ fuzzSet
           listed = map fst fuzzCoverageExceptions

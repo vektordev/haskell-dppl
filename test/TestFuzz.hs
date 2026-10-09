@@ -70,7 +70,7 @@ import System.Random (mkStdGen)
 import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer,
                          anyHoles, offSupport, bodyKind,
                          runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
-                         comparedBodies, irConstructs)
+                         comparedBodies, irConstructs, maskedConstruct)
 import Control.Monad.Random (Rand, getRandom, getRandomR)
 import System.Random (StdGen)
 import End2EndTesting (resolveNeuralParams, networkNames)
@@ -1851,7 +1851,7 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
           $ tabulate "drawn program" [ either id (const "compared") r | r <- prepared ]
           $ tabulate "query kind" [ kind q | c <- cases, (q, _) <- acQueries c ]
           $ tabulate "body kind" [ bodyKind q | c <- cases, (q, _) <- acQueries c ]
-          $ tabulate "IR construct in a compared body" (concatMap (sort . nub . concatMap irConstructs . comparedBodies) cases)
+          $ tabulate "IR construct in a compared body" (concatMap (filter (not . maskedConstruct) . sort . nub . concatMap irConstructs . comparedBodies) cases)
           $ counterexample (show (length ds) ++ " disagreement(s) over " ++ show (length cases)
                             ++ " programs / " ++ show nQueries ++ " interpreter-answered queries; first:\n"
                             ++ concatMap renderDisagreement (take 2 ds))

@@ -56,12 +56,13 @@ module BackendAgreement
   , inferenceBodies
   , deterministicBodies
   , comparedBodies
+  , maskedConstruct
   , allBodies
   ) where
 
 import Control.Exception (SomeException, try, evaluate)
 import Data.Char (toLower, isSpace)
-import Data.List (intercalate, nub, sort)
+import Data.List (intercalate, nub, sort, isPrefixOf)
 import Data.Maybe (fromMaybe)
 import System.Directory (getCurrentDirectory, findExecutable)
 import System.Exit (ExitCode(..))
@@ -564,6 +565,15 @@ comparedBodies c = inferenceBodies env ++
     env@(IREnv gs _ _) = acEnv c
     normals = [ g | (QNormal g _, _) <- acQueries c ]
     logits = [ g | (QWriteLogits g _, _) <- acQueries c ]
+
+-- | A construct a compared body contains but the property does not certify: a
+-- random draw in a writeLogits body (the noise of a dead arm, task
+-- @writelogits-dead-arm-nan@). The property finds its slots by the
+-- interpreter answering them differently under two seeds and leaves them out
+-- of the comparison, so a draw's lowering is never checked. 'BackendCoverage'
+-- removes it from the fuzz side, so it stays listed while the corpus uses it.
+maskedConstruct :: String -> Bool
+maskedConstruct c = c == "IRExpr:IRSample" || "Sample:" `isPrefixOf` c
 
 -- | Every emitted body, generate and writeLogits included: what a corpus
 -- program asks of the backends.

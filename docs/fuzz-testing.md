@@ -765,15 +765,27 @@ imposs)` wherever it answers. The property (Slow) draws batches of 60 programs
 (`genTypedProgram`, with the neural and named-helper generators weighted up),
 four batches a run, and for each program:
 
-1. compiles it at the default config, dropping it if there is no probability
-   function (the run's `drawn program` table says why each was dropped);
+1. compiles it at the default config, dropping it if it has neither a
+   probability function nor a normal or writeLogits body to compare (the run's
+   `drawn program` table says why each was dropped);
 2. draws three forward samples from the interpreter with a per-program seed,
    plus their `ANY`-holed variants (`anyHoles`: the whole point, and each tuple
    component or ADT field in turn) and off-support neighbours (`offSupport`: a
    nudged scalar, the other `Either` arm, a list grown by one), at most 12
    points;
 3. keeps the points the interpreter answers at, for `probability` and, on
-   wildcard-free points, `integrate`.
+   wildcard-free points, `integrate`;
+4. evaluates every top-level function's other two deterministic bodies, where
+   it has them (task `backend-agreement-writelogits-and-normal-functions`):
+   its normal-parameter function (`QNormal`, the `(mu, sigma)` of a Gaussian
+   result) and its writeLogits function (`QWriteLogits`, the logit vector).
+   `main` is evaluated at its own arguments (a neural `main`'s mock envelope);
+   any other function at three seeded draws of its parameter types and their
+   off-support neighbours, at most 6 argument tuples, and not at all when a
+   parameter type has no value to draw (an arrow, a symbol). A writeLogits
+   slot of a dead arm holds random noise (task `writelogits-dead-arm-nan`);
+   the interpreter is run under two seeds and a slot that differs is not
+   compared.
 
 All programs of a batch then go through **one** `python3` and **one** `julia
 --compile=min` process (`test/BackendAgreement.hs`; a subprocess costs 70 ms /
@@ -785,7 +797,8 @@ evaluated inside the program's namespace, since it names that program's ADT
 classes. Python additionally bounds each query with a 10 s alarm; both
 processes have a 300 s bound. Comparison: `probAgrees` on the probability
 (`probTolerance`, relative above 1; NaN equals NaN, infinities exactly), exact
-on dim and the flag. A backend that raises, a module that fails to load, or
+on dim and the flag. A body query's vector is compared slot by slot with
+`probAgrees`, and its length exactly. A backend that raises, a module that fails to load, or
 codegen throwing on the Haskell side, where the interpreter answered, is a
 disagreement.
 
@@ -802,12 +815,21 @@ Each run tabulates the IR constructs (`irConstructs`: `IRExpr` constructors,
 a fixed-seed sample of the property's draws and over the corpus, and requires
 the corpus-minus-fuzz difference to be exactly `fuzzCoverageExceptions`: the
 generator's to-do list, and the exception list for
-`emitted-code-test-impact-analysis` M2. Both sides count **inference bodies
-only**, because those are all the property compares. Generate bodies are
-never compared across backends (a sample is random), nor are writeLogits or
-normal functions.
+`emitted-code-test-impact-analysis` M2. The corpus side counts every
+probability, integrate, writeLogits and normal body (`deterministicBodies`);
+the fuzz side counts the bodies the property evaluates (`comparedBodies`:
+every group's inference bodies, and the normal and writeLogits bodies of the
+functions it queried). Generate bodies are never compared across backends (a
+sample is random), and count on neither side. A random draw inside a
+writeLogits body (the dead-arm noise, `IRSample`/`Sample:IRNormal`) is masked
+rather than compared, so the fuzz side drops it (`maskedConstruct`) and the
+exception list names it.
 
 Measured when it landed: a run takes ~10-15 s, compares ~150 of its 240
 programs at ~1100 queries, and the corpus uses 59 constructs in inference
-bodies of which the sample covers 54. Of the first 15 runs, 5 found a
+bodies of which the sample covers 54. With writeLogits and normal bodies
+added (2026-10-09), a run compares ~140 programs at ~1200 queries, of them
+~50-80 writeLogits and a handful of normal queries (the `body kind` table),
+and the corpus uses 62 constructs of which the sample covers 54; the two new
+ones are the masked dead-arm draw. Of the first 15 runs, 5 found a
 disagreement; the families are filed (see the task doc in the docs repo).
