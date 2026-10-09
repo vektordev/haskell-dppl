@@ -608,6 +608,7 @@ batchedRefusalReason msg0 = take 90 $ case breakOn "outside the tensor fragment:
     upTo (ch : rest)
       | ch `elem` "(.;" = []
       | ch == ':', take 1 rest == " " = []
+      | ch == ' ', "CallStack" `isPrefixOf` rest = []
       | otherwise = ch : upTo rest
     upTo [] = []
     trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
