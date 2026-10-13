@@ -35,7 +35,7 @@ import SPLL.Typing.RType
 import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
 import PredefinedFunctions
-import SPLL.Analysis (enumerableDomain, materializationDomain, withinMaterializationBudget)
+import SPLL.Analysis (enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (isRight, partitionEithers)
@@ -870,15 +870,10 @@ flattenApplySpine = go []
     go args (Expr _ (Apply l v)) = go (v : args) l
     go args e = (e, args)
 
-isEnumerableApplication :: Expr -> Expr -> Bool
-isEnumerableApplication l v =
-     IsConditional `elem` tags (getTypeInfo l)
-  && isEnumerable (tags (getTypeInfo v))
-  && pType (getTypeInfo v) /= Deterministic
-  && not (returnsFunction (rType (getTypeInfo l)))
-  where
-    returnsFunction (TArrow _ (TArrow _ _)) = True
-    returnsFunction _ = False
+-- | The enumeration engine's applicability ('SPLL.Analysis.enumerableApplication'),
+-- in this compile's program.
+isEnumerableApplication :: CompilerMetadata -> Expr -> Expr -> Bool
+isEnumerableApplication meta l v = isJust (enumerableApplication (fcData meta) (compilingProgram meta) l v)
 
 -- | Is the domain this enumerable application would materialize small enough to
 -- be worth materializing? Reads the same 'DiscreteValues' tag
@@ -3165,7 +3160,7 @@ toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (ge
 -- of-annotation-and-auto-derived-enumeration-divergence), this order -- dense
 -- first, plan above the budget -- holds for every neural read alike.
 toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
-  | isEnumerableApplication l v
+  | isEnumerableApplication meta l v
   , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v))
   , calleeBodyInScope meta l =
   -- The agreement fusion (task categorical-product-ov-fusion) is tried first
@@ -4439,8 +4434,8 @@ enumerateAppliedLambda meta cumulative l v sample = do
 -- equations that follow, exactly as before.
 curriedEnumerableCallee :: CompilerMetadata -> Expr -> Expr -> Maybe Expr
 curriedEnumerableCallee meta l v
-  | (Expr headTi (Var f), args@(_:_)) <- flattenApplySpine l'
-  , IsConditional `elem` tags headTi
+  | (hd@(Expr _ (Var f)), args@(_:_)) <- flattenApplySpine l'
+  , headIsConditional (fcData meta) (compilingProgram meta) hd
   , Just (TArrow _ _, True) <- lookup f (typeEnv meta)
   , all ((== Deterministic) . pType . getTypeInfo) args
   , isEnumerable (tags (getTypeInfo v))
@@ -4592,7 +4587,7 @@ agreementShape meta l v = do
       (_, vOuter, bodyACN, _) = equivalentLambda "agreementShape" fcd (chainName (getTypeInfo l))
       bodyA = findExprWithCN fExprs bodyACN
   (l2, v2) <- case node bodyA of
-    Apply a b | isEnumerableApplication a b -> Just (a, b)
+    Apply a b | isEnumerableApplication meta a b -> Just (a, b)
     _ -> Nothing
   let (_, vInner, bodyBCN, _) = equivalentLambda "agreementShape/inner" fcd (chainName (getTypeInfo l2))
       bodyB = findExprWithCN fExprs bodyBCN
@@ -4827,7 +4822,7 @@ toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PRe
 -- already in 'typeEnv' as locals, so P(application = sample) there is exactly
 -- the conditional this equation would otherwise have enumerated.
 toIREnumerate meta cumulative e@(Expr _ (Apply l v)) sample
-  | isEnumerableApplication l v =
+  | isEnumerableApplication meta l v =
   if not (enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)))
     then toIRInference meta cumulative (reinferRecovered meta (recoveredVars meta) e) sample
     else case agreementShape meta l v of

@@ -236,7 +236,7 @@ testLambdaChoice :: Program
 testLambdaChoice = Program [("main", apply (ifThenElse (bernoulli 0.5) ("x" #-># (normal #+# var "x")) ("y" #-># (uniform #+# var "y"))) (constF 1))] [] [] [] []
 
 -- Deterministic conditional function applied to a discrete float argument.
--- Triggers the IsConditional + toIREnumerate path in IRCompiler.
+-- Triggers the isConditional + toIREnumerate path in IRCompiler.
 -- The argument is a coin flip between 1.0 and 2.0 (2 discrete float values).
 -- selector maps the outcome: x>1.5 → 1.0, otherwise → 0.0.
 -- 2 discrete values, each iteration contributes bc=1 → expected BC = 2.

@@ -3530,8 +3530,6 @@ materializationGuardTests = testGroup "Cardinality guard for marginal materializ
       let bound = defaultMaterializationCardinality
       assertEqual "no DiscreteValues tag at all"
         Nothing (materializationDomain bound [])
-      assertEqual "a tag carrying no domain (IsConditional only)"
-        Nothing (materializationDomain bound [IsConditional])
       assertEqual "a continuous leaf has no finite enumeration"
         Nothing (materializationDomain bound [DiscreteValues MultiContinuous])
       assertEqual "a partly-continuous tuple enumerates only a discrete residue"

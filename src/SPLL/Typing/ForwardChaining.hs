@@ -915,7 +915,7 @@ mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
   , "Candidate occurrences that were tried and could not be witnessed: " ++ show candidateCNs
   , "This usually means the function is not algebraically invertible in this variable (e.g. it is"
   , "many-to-one, like a count/sum of conditional contributions) and the program shape did not"
-  , "qualify for enumeration-based inference instead (the IsConditional + toIREnumerate path in the"
+  , "qualify for enumeration-based inference instead (the isConditional + toIREnumerate path in the"
   , "IRCompiler). See docs/forward-chaining-recursion-constraint.md for the failure analysis."
   ]
 mergeExpr _ _ _ [x] = x

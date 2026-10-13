@@ -97,7 +97,7 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
 ```
 source → Parser → Validator → PerValue (helper expansion) → CalleeNormalize
   → RInfer (+ Monomorphize on failure) → Analysis (DiscreteValues) → DrawSinking
-  → ForwardChaining → ModalityInfer → Analysis (IsConditional)
+  → ForwardChaining → ModalityInfer
   → IRCompiler (generate / probability / integrate) → PerValue (install)
   → IRSelectPass (batched only) → IROptimizer → CodeGen{PyTorch,PyTorchBatched,Julia}
 ```
@@ -121,7 +121,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `Typing/Modality`, `Typing/ModalityInfer` — the capability lattice and its inference, projected to `PType`.
 - `Typing/Infer` — legacy all-in-one typing entry point, used by tests.
 - `InferenceRule` — `RType` schemes of the built-in expression forms, used by RInfer.
-- `Analysis` — `DiscreteValues`/`IsConditional` tags, enumeration domains and decomposability verdicts.
+- `Analysis` — `DiscreteValues` tags, enumeration domains and applicability, and decomposability verdicts.
 - `DrawSinking` — moves enumerable `draw`s into the operand that reads them.
 - `ObservationMask`, `MaskVariants` — which `ANY` query shapes a function answers, plus their per-mask variants and runtime dispatcher.
 - `PerValue` — per-value queries: a signature's `Enumerated` slot answered as one vector over its domain.

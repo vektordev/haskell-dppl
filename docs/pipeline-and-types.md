@@ -11,7 +11,7 @@ SPLL source (.spll/.ppl)
   → Typing/RInfer.hs (return types)
   → Analysis.hs (DiscreteValues tags) → DrawSinking.hs (per-operand draws)
   → Typing/ForwardChaining.hs (chain names)
-  → Typing/ModalityInfer.hs (PTypes) → Analysis.hs (IsConditional tags)
+  → Typing/ModalityInfer.hs (PTypes)
   → IRCompiler.hs → IR (IntermediateRepresentation.hs)
      Three compilation branches: generate, probability, integrate
   → IRSelectPass.hs (batched only) → IROptimizer.hs (const folding, CSE, let-in)
@@ -45,7 +45,7 @@ deterministic).
   (see `neural.md`, shaped neural inputs), etc.), `pType`
   (probabilistic: `Deterministic`, `PNormal`, `PLogNormal`, `Integrate`,
   `Bottom`, and `NotSetYet` before inference runs), `chainName`, and `tags`
-  (`DiscreteValues`, `IsConditional`). `PType`'s `PArr`/`TVar` are dead code.
+  (`DiscreteValues`). `PType`'s `PArr`/`TVar` are dead code.
 - **Value** (`= GenericValue Expr`): Runtime values — `VFloat`, `VInt`,
   `VBool`, `VSymbol`, `VUnit`, `VList`, `VTuple`, `VEither`, `VADT`,
   `VClosure`, `VThetaTree`, `VError`, plus `VAny`/`VAnyExcept` (used only for
@@ -111,7 +111,6 @@ fully-annotated AST after each pipeline stage to stderr via
 | After Draw Sinking | printed **only** when a `draw` was moved (see `enumeration.md`, "Stacked draws are sunk into their operands") |
 | After Forward Chaining | `chainName` fields filled |
 | After Modality Inference | `pType` populated; each node ends in `law: …`, the justification of its law (`dirac [value]`, `leaf <primitive>`, `<constructor>(…)` over the fields, or `unjustified`; `ModalityInfer.Law`) |
-| After Conditional Annotation | `IsConditional` tags appear on conditioned distributions |
 | After IR Compilation (pre-optimization) | Pseudo-code IR before any optimizer passes |
 | After Select Pass | `IRIf` → `IRSelect` retagging (a no-op unless `--batched`) |
 | After Optimization | Pseudo-code IR after constant folding, CSE, let-in optimization |

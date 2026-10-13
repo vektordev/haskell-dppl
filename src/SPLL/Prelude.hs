@@ -426,7 +426,7 @@ frontEnd conf p0 = do
   return rtyped
 
 -- | 'compile' from the post-RInfer seam onwards: enum annotation, chain naming,
--- the modality pass, conditional annotation, IR compilation, the select pass and
+-- the modality pass, IR compilation, the select pass and
 -- the optimizer.
 --
 -- Split out because a **pruned** program (design
@@ -531,18 +531,14 @@ typedStages conf rtyped = do
   -- the already-RType'd, chain-named program, feeding the modality pass, which
   -- consults its witnessed-binding verdict for the let rule
   -- (modality-witnessed-inference, milestone 2). The same FCData is returned
-  -- here and threaded to both remaining consumers (conditional annotation and
-  -- IR codegen).
+  -- here and threaded to IR codegen, whose enumeration predicate reads
+  -- 'SPLL.Analysis.isConditional' off it directly.
   (typed, fcData, laws) <- addModalityLaws forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
   printStageWith (lawColumn laws) conf "After Modality Inference (PType)" typed
 
-  let annotated = annotateConditionalProg fcData typed
-  printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
-  pPrintIfMoreVerbose conf annotated
-  printStage conf "After Conditional Annotation (IsConditional tags)" annotated
-  return (annotated, fcData, laws)
+  return (typed, fcData, laws)
 
 -- | The fully annotated program 'compile' hands to IR compilation, without
 -- compiling it: the modality engine's verdicts, read where IRCompiler reads
