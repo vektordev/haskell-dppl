@@ -11,6 +11,7 @@ module Utils
   , concatMapM
   , replaceAt
   , fixpoint
+  , reflexiveEq
   , Supply
   , MonadSupply
   , demandUniqueNumber
@@ -65,9 +66,24 @@ replaceAt (_:lst) 0 x = x:lst
 replaceAt (l:lst) n x = l:replaceAt lst (n-1) x
 replaceAt [] n _ = error ("replaceAt: index " ++ show n ++ " is past the end of the list")
 
-fixpoint :: Eq a => (a -> a) -> a -> a
-fixpoint f x = if fx == x then x else fixpoint f fx
+-- | Iterate @f@ from @x@ until the result stops changing, as decided by
+-- 'reflexiveEq'.
+fixpoint :: (Eq a, Show a) => (a -> a) -> a -> a
+fixpoint f x = if reflexiveEq fx x then x else fixpoint f fx
   where fx = f x
+
+-- | Equality that is reflexive on values containing a NaN, for convergence
+-- tests. @(==)@ on a structure holding @NaN@ is never 'True', since
+-- @NaN /= NaN@, so a fixpoint iteration whose state carries a NaN (a constant
+-- that folds to @0/0@, say) would never stop (docs-repo task
+-- nan-constant-hangs-enum-annotation-fixpoint). When @(==)@ says the two
+-- differ, the 'Show' forms decide: a derived 'Show' prints every field, and
+-- 'show' on a 'Double' round-trips, so equal renderings mean equal structures
+-- up to the NaN fields. The fallback costs a rendering only on a step that
+-- really changed something, and the comparison of two lazy strings stops at
+-- their first difference.
+reflexiveEq :: (Eq a, Show a) => a -> a -> Bool
+reflexiveEq a b = a == b || show a == show b
 
 -- ======== SUPPLY MONAD ========
 

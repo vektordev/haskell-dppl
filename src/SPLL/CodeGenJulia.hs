@@ -6,7 +6,7 @@ module SPLL.CodeGenJulia (
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.ReservedNames (juliaKeywords, isJuliaReserved, componentNormalName)
+import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
 import Data.List (intercalate, dropWhileEnd)
@@ -133,7 +133,7 @@ juliaMultiVal x = error ("unknown juliaMultiVal for " ++ show x)
 -- field name. See that function for why injectivity stops at this family.
 juliaMangle :: String -> String
 juliaMangle name
-  | isJuliaReserved (dropWhileEnd (== '_') name) = name ++ "_"
+  | juliaNeedsEscape (dropWhileEnd (== '_') name) = name ++ "_"
   | otherwise                                    = name
 
 -- | 'juliaMangle' for a constructor reference in a rendered value. The test

@@ -7,13 +7,9 @@ import SPLL.Parser
 import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
 import SPLL.Lang.Types (CompilerError, GenericValue (VError))
-import SPLL.Prelude (runProb, runInteg, runGen, compile, batchedRefusal, marginalReport, renderMarginalReport, marginalBudgetWarnings)
+import SPLL.Prelude (runProb, runInteg, runGen, batchedRefusal, CodeGenTarget(..), codeGenToLang, marginalReport, renderMarginalReport, marginalBudgetWarnings)
 import SPLL.Lang.Lang (adts)
 import Control.Monad.Random (evalRandIO)
-import qualified SPLL.CodeGenJulia
-import qualified SPLL.CodeGenPyTorch
-import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
-import Data.List (intercalate)
 import Text.Megaparsec (runParser)
 import Control.Monad.State (runStateT)
 import Data.Maybe (fromMaybe)
@@ -46,7 +42,7 @@ data GlobalOpts = GlobalOpts {
 data CommandOpts =
   CompileOpts {
     outputFile :: String,
-    language :: Language,
+    language :: CodeGenTarget,
     trunc :: Bool
   }
   | GenerateOpts {
@@ -61,17 +57,15 @@ data CommandOpts =
     paramsC :: [IRValue]
   } deriving Show
 
-data Language = Python | Julia deriving Show
-
-readLanguage :: ReadM Language
+readLanguage :: ReadM CodeGenTarget
 readLanguage = str >>= \s -> case map toLower s of
-  "python" -> return Python
-  "py" -> return Python
-  "p" -> return Python
-  "julia" -> return Julia
-  "jul" -> return Julia
-  "jl" -> return Julia
-  "j" -> return Julia
+  "python" -> return TargetPython
+  "py" -> return TargetPython
+  "p" -> return TargetPython
+  "julia" -> return TargetJulia
+  "jul" -> return TargetJulia
+  "jl" -> return TargetJulia
+  "j" -> return TargetJulia
   _ -> readerError "Only python or julia are supported as languages"
 
 verbosityParser :: Parser Int
@@ -302,19 +296,6 @@ parseProgram path = do
       putStrLn (errorBundlePretty err)
       exitFailure
     Right prog -> return prog
-
-codeGenToLang :: Language -> Bool -> CompilerConfig -> Program -> Either CompilerError String
-codeGenToLang lang truncOut conf prog = do
-  compiled <- compile conf prog
-  case lang of
-    Python
-      | batched conf -> intercalate "\n" <$> generateFunctionsBatched (not truncOut) compiled
-      | otherwise    -> do
-          anyExceptCodegenRefusal "Python" compiled
-          Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not truncOut) compiled)
-    Julia -> do
-      anyExceptCodegenRefusal "Julia" compiled
-      Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
 
 writeOutputFile :: String -> String -> IO()
 writeOutputFile = writeFile

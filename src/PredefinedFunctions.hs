@@ -13,13 +13,15 @@ propagateValues,
 propagateValuesLazily,
 parameterCount,
 hasAnyExcept,
+hasAnyExceptExpr,
 isHigherOrder,
 isFieldConstructor,
 isObsConstructor,
 getFunctionParamIdx,
 renameDecl,
 templateLocal,
-isTemplateLocal
+isTemplateLocal,
+anyOfType
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..), ClassConstraint(..))

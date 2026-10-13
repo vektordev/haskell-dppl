@@ -14,7 +14,7 @@ module SPLL.CodeGenPyTorch (
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, isPythonReserved, componentNormalName)
+import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, pythonNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
@@ -152,6 +152,9 @@ pyMultiVal x = error ("unresolved MultiValue in codegen: " ++ show x)
 -- every name the module already has in scope -- the runtime's classes, its
 -- other star-imported values (@randn@, @exp@, @pi@, ...) and Python's builtins,
 -- any of which a user definition or binder of the same spelling would shadow.
+-- A constructor is escaped also when the predicate it derives is one of these
+-- ('SPLL.ReservedNames.pythonNeedsEscape': @Any@ derives the runtime's
+-- @isAny@), so its predicate is spelled from the escaped name (@isAny_@).
 -- Applied to ADT names by
 -- 'renameADTIdentifiers' and to every other user name (function groups,
 -- parameters, binders) by 'mangleUserIdentifiers'.
@@ -175,7 +178,7 @@ pyMultiVal x = error ("unresolved MultiValue in codegen: " ++ show x)
 -- check instead, where the whole declaration set is in scope.
 pyMangle :: String -> String
 pyMangle name
-  | isPythonReserved (dropWhileEnd (== '_') name) = name ++ "_"
+  | pythonNeedsEscape (dropWhileEnd (== '_') name) = name ++ "_"
   | otherwise                                     = name
 
 -- | 'pyMangle' for a constructor reference in a rendered value, which the test

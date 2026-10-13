@@ -67,6 +67,10 @@ current list for whichever binary you run):
 - `test/BackendAgreement.hs` / `BackendCoverage.hs` — the batched backend
   drivers behind `prop_Fuzz_BackendsAgree`, and the corpus-minus-fuzz construct
   exception list (see `fuzz-testing.md`, "Backend agreement")
+- `test/GenerateCensus.hs` — `Slow.GenerateCensus`: every non-sampling
+  construct of a corpus generate body also occurs in a corpus inference body
+  (exact list `generateOnlyConstructs`), the generate half of the
+  corpus-minus-fuzz argument
 - `test/AdmissionOracle.hs` — the ModalityInfer ↔ IRCompiler admission
   contract (see `modality-and-admission.md`, "The admission contract"), driven by the `Slow` property
   `prop_Fuzz_AdmissionTotality`
@@ -130,6 +134,9 @@ eligibility, asserted by the `BatchedPython` group rather than filtered)
 and `dense` (declares a finite query domain, presupposes `batched`); and,
 for a `test/cases/known-issues/` file only, `expect-failure: <shape>`
 (design testcases-corpus-restructure — see "Known-issues corpus" below).
+The interpreter answers every ordinary corpus program's rows whatever the
+header says: `End2End.Interpreter serves unrouted` covers the programs it
+leaves out, bar `End2EndTesting.interpreterServesExempt` (empty).
 Comments are only allowed as a leading/trailing block, not interleaved
 between test cases; an unparseable line is a hard parse failure naming
 the file and line. Beware CRLF files when adding a token by script —
@@ -232,14 +239,19 @@ wrong value pinned down by hand). The rows below the header instead state the
 *idealized* value -- what the fixed compiler should produce -- and
 `TestKnownIssues.hs` runs each row on every backend the `backends:` header
 declares (read as everywhere else: no header means interpreter, julia,
-python) that it can evaluate -- the interpreter in-process, and Python through
-End2End's own emitted-module script -- and asserts the compiled program does
+python) that it can evaluate -- the interpreter in-process, Python through
+End2End's own emitted-module script, and batched through the corpus's own
+`batched-vs-expected` driver -- and asserts the compiled program does
 **not yet** match it on any of them, within the ordinary `probTolerance`; a runtime crash, a refused compile, a missing variant, or a
 merely different number are all "still broken" and pass, while an exact match
 fails loudly ("may be fixed now"), naming the backend. The header says where
 the bug is pinned: a Python-only bug (e.g. the emitted module failing to load)
 is spelled `backends: python`, so the interpreter already giving the right
-answer is not misreported as a fix. Julia, batched and dense are not evaluated
+answer is not misreported as a fix, and a batched-only bug (one the batched
+agreement arm found) is spelled `backends: batched`. A batched row needs a
+torch-enabled Python: without one it fails, unless `NEST_SKIP_TORCH=1` skips
+it, and a row batched mode cannot express (an `impossible` row, a `VAnyExcept`
+point) fails rather than running nothing. Julia and dense are not evaluated
 here (a missing `julia` binary would read as "still broken", a silently green
 pin), and a `broken` or `wrong-result` pin declaring *only* those fails
 loudly rather than passing vacuously. This trades away the free "which exact
@@ -318,9 +330,8 @@ that are already fixed stay `TestInternals` growth tests, as before. The
 known-issues folder holds only open bugs.
 
 The pins today, together about 1.2 s of the default suite:
-`nestedEqualityChainGrowth` (alloc at `-O2`, about 8x per level),
-`gaussianTrajectoryUnprunedModuleSize` and
-`shortGaussianTrajectoryModuleSize` (code size). The harness's own tests are
+`nestedEqualityChainGrowth` (alloc at `-O2`, about 8x per level) and
+`gaussianTrajectoryUnprunedModuleSize` (code size). The harness's own tests are
 `KnownIssuesScaling` (templates, slopes, the climb) and `KnownIssuesHarness`
 (both caps, header parsing).
 
@@ -364,6 +375,18 @@ callee's parameter around the argument's own measure, so `h b` called under an
 enumerated `draw b` measured `b == b` and lost the draw's weight (29 corpus
 programs; `let-bindings/helperParamShadowsEnumeratedDraw`).
 
+`Corpus.TopKOperandOrder` (Slow, task
+`transformation-differential-testing-m1-config-differencing`) applies one more
+rewrite, `Rewrites.commuteSites`: swap the operands of one call of a
+commutative built-in (`plus`, `mult`, `and`, `or`, `max`, `eq` and the int
+forms). Each swapped program gets its own topK compile and answers the
+original's `p()` rows at threshold 0 (must agree with the original: hard) and
+0.1 (a divergence is logged as `ORDER-DEPENDENT`). Programs known to diverge are
+listed in `knownOperandOrderDependent` with their tracking task, and an entry
+that stops diverging fails. At landing, 393 sites over 247 programs agreed at
+both thresholds; only the constructed pin `topk-pruning/topKOperandOrder`
+diverges (see `semiring-presult-internals.md`, "topK Branch Pruning").
+
 ## Slow and Aspirational tests
 
 Three tiers, each opt-in by environment variable:
@@ -371,7 +394,7 @@ Three tiers, each opt-in by environment variable:
 | tier | how to run | expected | run it |
 |---|---|---|---|
 | default | `stack test` | **green** | after every step; the gate |
-| `Slow` | `NEST_SLOW_TESTS=1 NEST_FULL_TESTS=1 stack test` | **green** | before a merge or a push |
+| `Slow` | `NEST_SLOW_TESTS=1 stack test` | **green** | before a merge or a push |
 | `Aspirational` | `NEST_ASPIRATIONAL_TESTS=1 stack test` | red/flaky, by definition | when working on what it pins |
 
 (`SuperSlow`, `NEST_SUPERSLOW_TESTS=1`, is the sampling-vs-PDF fuzz tier; see
@@ -436,7 +459,8 @@ Impact analysis -- End2End.Interpreter: 499 unchanged, 0 run; ...; End2End.Pytho
 version constant (`End2EndTesting.*CheckVersion`) and the harness
 fingerprint, which is the source of `End2EndTesting.hs`, `CorpusSweep.hs`,
 `ImpactManifest.hs`, `TestCaseParser.hs` and `TestTolerances.hs`. Any edit to those files reruns
-everything.
+everything. A sweep defined in another module adds that module's source to
+its own key (`sourcesFingerprint`), so editing it reruns that sweep only.
 
 | sweep | key, besides version and harness |
 |---|---|
@@ -444,6 +468,14 @@ everything.
 | `End2End.Julia` (per program, inside each shard) | the program's module and row checks as `juliaBatchTestCode` renders them under a fixed module name, `juliaLib.jl`, `julia --version`, and the flags. An all-unchanged shard starts no julia |
 | `End2End.Interpreter`, `Interpreter Unoptimized` | `show` of the compiled `IREnv` (at -O2 or -O0), the parsed program's networks, writeLogits registry and ADTs, the rows, the values `testInterpreter` derives from them, the tolerances, and the interpreter fingerprint |
 | `End2End.Normalization` | the `IREnv`, the same program fields, the seeded draws (`normalizationDraws`), the tolerance, and the interpreter fingerprint |
+| `End2End.Python Unoptimized`, `End2End.Julia Unoptimized` | as `End2End.Python` and `End2End.Julia`, on the -O0 compile |
+| `End2End.Python WriteLogits` | the exact script `testPythonWriteLogits` runs (the emitted module, the mocks, the row checks), `pythonLib.py`, and `python3`'s path and version |
+| `End2End.Julia WriteLogits` (per program, inside the batch) | the program's module and row checks as `juliaWriteLogitsBody` renders them alone, `juliaLib.jl` and `julia --version` |
+| `SelectPassNoOp`, `PlanEngineMatchesDense`, `BudgetZeroMatchesDefault`, `PlanEngineLogSpaceMatchesLinear` | `show` of both compiles the differential compares (scalar and select-passed; budget 0 and dense; budget 0 and default; budget-0 linear and log space), a refusal included, the program fields, the rows, the tolerance, and the interpreter fingerprint (`differentialKey`) |
+| `BatchedPython.<differential>` (per program, inside each of the four torch batches) | the program's name, batched source, query groups and network mocks as the driver renders them, and the torch fingerprint: `pythonLibBatched.py`, and the torch python's path, Python version and torch version. An all-unchanged differential starts no python |
+| `KnownIssues` (`broken` and `wrong-result` pins) | the `expect-failure` header, the backends checked, the `IREnv` with the program fields and rows, the interpreter fingerprint, and on Python each row's exact script and the Python runtime; `TestKnownIssues.hs` joins the harness |
+| `Corpus.LogSpaceMatchesLinear` (one test per program) | the program's log-space `IREnv`, its fields, its p() rows and the tolerance, and the interpreter fingerprint; `TestCorpus.hs` joins the harness |
+| `Slow.RewriteInvarianceCorpus` | the rows, and for the original and every variant (family and site) its program fields and its compile, a refusal's message included, and the interpreter fingerprint; `TestRewrites.hs` and `Rewrites.hs` join the harness. A variant whose compile timed out or crashed leaves the program unkeyed |
 
 The **interpreter fingerprint** (M1 of the task) is the source of every
 `src/` module that `IRInterpreter` transitively imports (13 of 39, read off the
@@ -461,37 +493,38 @@ recorded. A failing Julia shard records none of its programs, because the
 failure cannot be attributed to one of them.
 
 **The manifest** is `.stack-work/nest-impact-manifest`, one per checkout and
-so one per worktree. It is never committed. It maps each slot to its last
+so one per worktree. The corpus binary keeps its own,
+`.stack-work/nest-impact-manifest-corpus`, since the two processes may run at
+once and each writes its manifest back whole. It is never committed. It maps each slot to its last
 passing key, so it does not grow without bound, and a `-p` run leaves the
 other slots alone. A missing or unreadable manifest means a full run.
 `NEST_FULL_TESTS=1` ignores the manifest, executes every check, and records
-each pass. **Run timings and the pre-merge `Slow` run with
-`NEST_FULL_TESTS=1`** (see below).
+each pass. Neither the pre-merge `Slow` run nor the timings need it (see
+below); use it when a change touches the manifest keys or the harness that
+computes them, since a wrong key is exactly what a cached run cannot see.
 
 **Adding a check, or changing one.** Wrap the property in `cachedProperty`
-(or `cachedBatch` for a shared process) and give it a key that covers
+(or `cachedBatch` for a shared process, or `cachedAction` for an HUnit
+assertion) and give it a key that covers
 *everything the check reads*. A value the check consumes but the key leaves
 out lets a pass survive a change that should have invalidated it. When a
 check's logic changes, bump its version constant; the harness hash only
-backstops a forgotten bump. Not yet covered: `SelectPassNoOp`, the plan-engine
-differentials, the writeLogits and `-O0` codegen groups, `BatchedPython`, the
-`Corpus` properties (they draw programs at random, so they have no
-per-program slot) and the `Slow` rewrite sweep.
+backstops a forgotten bump.
+
+**Not covered, deliberately.** Checks whose verdict is the compile itself have
+nothing to skip: the `KnownIssues` crash, diagnostic, refused, no-code,
+code-size, hang and growth pins, `BatchedPython`'s eligibility properties,
+and `Julia free names are escaped`. Their key could only be the compiler's
+source, which every compiler commit changes. The other `Corpus` properties
+are one property over the whole pool, so they have no per-program slot until
+each is split per program, as `Corpus.LogSpaceMatchesLinear` was. The `Slow`
+batched topK differentials are not covered either.
 
 ## Test suite time
 
-**Every commit message that reports a test result also reports the default
-suite's wall time against the base it was measured from**: not just
-`1484/1484 green` but `1484/1484 green (45s -> 50s)`. Measure both numbers the
-same way, on the same machine, with a warm build and **`NEST_FULL_TESTS=1`**:
-`stack test` end to end, or both test binaries run directly and their times
-added. Say which. Without `NEST_FULL_TESTS` the time depends on how many
-programs the commit changed (the impact analysis above), which is not the
-number the audit tracks. A change
-that moves tests between tiers reports the tier times it affected too. The
-log this produces is how a slowdown gets traced to the commit that caused it.
-The suite has had to be trimmed back repeatedly because nobody saw it grow.
-There is no hard gate yet; the delta is for the audit.
+Commit messages no longer report the suite's wall time (user decision,
+2026-10-09): with impact analysis on, a timed run measures how much the change
+touched, not the suite. How to track the suite's growth instead is open.
 
 The default suite runs in about a minute on 4 cores (main ~50 s, corpus
 ~17 s). What keeps it there, so a regression is recognisable: the test

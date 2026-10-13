@@ -22,6 +22,7 @@ import TestInternals (internalsTests, slowInternalsTests)
 import TestObservationMask (observationMaskTests)
 import TestPerValue (perValueTests)
 import TestMonomorphize (monomorphizeTests)
+import TestIRTypeCheck (irTypeCheckTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestModalityInfer (modalityInferTests)
@@ -35,6 +36,7 @@ import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestCLI (cliTests)
 import BackendCoverage (backendCoverageTests)
+import GenerateCensus (generateCensusTests)
 import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests)
@@ -527,32 +529,33 @@ main = do
   observationMask <- observationMaskTests corpus
   modalityInfer <- modalityInferTests corpus
   e2e <- end2endTests corpus manifest
-  selectDiff <- selectPassDifferentialTests corpus
-  planDiff <- planEngineDifferentialTests corpus
-  budgetZeroDiff <- budgetZeroDifferentialTests corpus
-  planLog <- planEngineLogSpaceTests corpus
-  batchedPy <- batchedPythonTests corpus
+  selectDiff <- selectPassDifferentialTests corpus manifest
+  planDiff <- planEngineDifferentialTests corpus manifest
+  budgetZeroDiff <- budgetZeroDifferentialTests corpus manifest
+  planLog <- planEngineLogSpaceTests corpus manifest
+  batchedPy <- batchedPythonTests corpus manifest
   branchCountBackends <- branchCountBackendTests
   detTests <- determinismTests corpus
   showcase <- showcaseTests
   writeLogitsRoundtrip <- writeLogitsRoundtripTests corpus
-  knownIssues <- knownIssuesTests
+  knownIssues <- knownIssuesTests manifest
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
   -- regressions outside the code they pin. They're skipped unless
   -- NEST_SLOW_TESTS is set, e.g. `NEST_SLOW_TESTS=1 stack test --ta '-p Slow'`.
   -- The corpus sweeps in it gate themselves on their Slow tier.
-  slowInternals <- slowInternalsTests corpus
+  let slowInternals = slowInternalsTests
   slowE2e <- slowEnd2EndTests corpus manifest
   slowBatchedPy <- slowBatchedPythonTests corpus
   -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
   -- programs, each compiled and queried) was a quarter of the default run's
   -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
-  rewriteCorpus <- rewriteCorpusTests corpus
+  rewriteCorpus <- rewriteCorpusTests corpus manifest
   backendCoverage <- backendCoverageTests corpus
+  generateCensus <- generateCensusTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
-        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests, backendCoverage]
+        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests, backendCoverage, generateCensus]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it
@@ -591,6 +594,7 @@ main = do
     , injFCatalogTests
     , rejectionTests
     , monomorphizeTests
+    , irTypeCheckTests
     , modalityTests
     , modalityInfer
     , detTests

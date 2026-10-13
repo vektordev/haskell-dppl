@@ -1,0 +1,2 @@
+data Box = Any | Possible | Nil
+main = if Uniform < 0.3 then Any else (if Uniform < 0.5 then Possible else Nil)

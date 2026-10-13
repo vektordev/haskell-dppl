@@ -1,0 +1,8 @@
+main = draw h = Normal in fst (0, h == 1.0)
+-- Task fuzz-unconsumed-vanyexcept-reaches-codegen. The observation says
+-- nothing about `h == 1.0`: fst's inverse fills that slot with ANY, and the
+-- tuple's snd handed the bare ANY to =='s inverse, whose condition it is. The
+-- interpreter died on `if ANY`, and the inverse's VAnyExcept arm survived
+-- into the emitted code, so neither text backend compiled the program. A step
+-- handed a wildcard the chain made up now recovers a wildcard, which leaves
+-- `h` unconstrained: p(0) = 1.

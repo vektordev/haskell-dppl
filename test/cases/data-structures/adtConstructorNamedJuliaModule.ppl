@@ -1,0 +1,2 @@
+data Base = Base | Core x::Float | Main
+main = if Uniform < 0.4 then Base else (if Uniform < 0.5 then Core Normal else Main)

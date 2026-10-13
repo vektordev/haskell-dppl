@@ -1,0 +1,2 @@
+twice f x = f (f x)
+main = twice (\y -> y + 1.0) Normal

@@ -1,0 +1,4 @@
+x = if Uniform < 0.3 then 1 else 0
+y = if Uniform < 0.3 then 1 else 0
+z = if Uniform < 0.3 then 1 else 0
+main = (x + y) + z

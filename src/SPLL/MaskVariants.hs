@@ -29,6 +29,7 @@ import SPLL.ObservationMask (Accessor(..), Slot, Mask, prettyMask)
 import Data.List (intercalate)
 import Data.Maybe (isJust, catMaybes)
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 
 -- | One non-empty mask of a function, and what its masked program offers per
 -- mode.
@@ -121,7 +122,7 @@ withDispatcher decls slots variants g =
     -- a function of the right arity to call.
     realise modeWord m base vmode = case (base, vmode) of
       (Just (baseBody, _), Just compiled) -> Just $ case compiled of
-        Right d   -> d
+        Right (d, doc) -> (assumeObserved decls (observedPaths m) d, doc)
         Left why  -> ( spineOf baseBody (IRError (refusal modeWord m ("NeST refused to compile it: " ++ why)))
                      , "Refused per-mask variant" )
       _ -> Nothing
@@ -182,6 +183,12 @@ withDispatcher decls slots variants g =
     spineOf (IRLambda n b) e = IRLambda n (spineOf b e)
     spineOf _ e = e
 
+    -- What the dispatcher has established when it calls mask m's variant: the
+    -- root is not ANY, and neither is any node on the path to a slot m leaves
+    -- concrete (that slot's flag tested each of them, outer node first).
+    observedPaths m = Set.fromList ([] : [ take n s | s <- slots, not (s `Set.member` m)
+                                                     , n <- [1 .. length s] ])
+
     falseIR = IRConst (VBool False)
     trueIR = IRConst (VBool True)
     orAll [] = falseIR
@@ -203,7 +210,7 @@ maskedAtIR _ v [] = IRUnaryOp OpIsAny v
 maskedAtIR decls v (Accessor c i : rest) =
   IRIf (IRUnaryOp OpIsAny v)
        (IRConst (VBool True))
-       (guarded (maskedAtIR decls (project c i v) rest))
+       (guarded (maskedAtIR decls (projectIR decls c i v) rest))
   where
     guarded k = case tagTest c v of
       Nothing -> k
@@ -214,20 +221,93 @@ maskedAtIR decls v (Accessor c i : rest) =
       "left"  -> Just (IRDestruct AcIsLeft x)
       "right" -> Just (IRDestruct AcIsRight x)
       _       -> Just (IRApply (IRVar ("is" ++ ctor)) x)
-    project ctor idx x = case (ctor, idx) of
-      ("TCons", 0) -> IRDestruct AcFst x
-      ("TCons", _) -> IRDestruct AcSnd x
-      ("Cons", 0)  -> IRDestruct AcHead x
-      ("Cons", _)  -> IRDestruct AcTail x
-      ("left", _)  -> IRDestruct AcFromLeft x
-      ("right", _) -> IRDestruct AcFromRight x
-      _            -> IRApply (IRVar (adtField ctor idx)) x
-    adtField ctor idx =
+
+-- | Fold the @isAny@ tests a variant body makes on query nodes the dispatcher
+-- has already shown are not @ANY@ (task
+-- @short-gaussian-trajectory-module-larger-than-long@).
+--
+-- A variant is compiled from an ordinary (pruned) program, so it guards every
+-- slot it still observes against a wildcard, and each guard's @ANY@ arm is
+-- another copy of the inference for that slot unobserved. The dispatcher only
+-- calls the variant once those tests came out false, so the arms are dead: on a
+-- 4-step Gaussian trajectory the -O2 module was 293 KB, against 53 KB for the
+-- 5-step one, which is over budget and has no variants; with the fold it is
+-- 123 KB.
+--
+-- @known@ holds accessor paths from the query parameter (the body's first
+-- lambda). A test folds when its operand denotes one of them: read directly
+-- (@fst (snd sample)@), through a @let@ or a beta-redex that binds such a path
+-- (how the compiler names a slot's value), or projected back out of a tuple
+-- built from such paths. A binder that shadows the query parameter stops the
+-- rewrite below it.
+assumeObserved :: [ADTDecl] -> Set.Set Slot -> IRExpr -> IRExpr
+assumeObserved decls known body = case body of
+  IRLambda q b -> IRLambda q (go q Map.empty b)
+  _ -> body
+  where
+    knownPaths q = [ foldl (\x (Accessor c i) -> projectIR decls c i x) (IRVar q) p
+                   | p <- Set.toList known ]
+
+    go q env x = case x of
+      IRUnaryOp OpIsAny e
+        | Just (SymPath pe) <- symOf q env e, pe `elem` knownPaths q -> IRConst (VBool False)
+      IRLetIn n v b
+        | n == q -> IRLetIn n (go q env v) b
+        | otherwise -> IRLetIn n (go q env v) (go q (bindSym q env n v) b)
+      IRApply (IRLambda n b) a
+        | n == q -> IRApply (IRLambda n b) (go q env a)
+        | otherwise -> IRApply (IRLambda n (go q (bindSym q env n a) b)) (go q env a)
+      IRLambda n b
+        | n == q -> x
+        | otherwise -> IRLambda n (go q (Map.delete n env) b)
+      _ -> irDescend (go q env) x
+
+    bindSym q env n v = maybe (Map.delete n env) (\sv -> Map.insert n sv env) (symOf q env v)
+
+    -- What an expression denotes, as far as query paths go.
+    symOf q env e = case e of
+      IRVar v | v == q -> Just (SymPath e)
+              | otherwise -> Map.lookup v env
+      IRConstruct t es -> Just (SymCon t (map (symOf q env) es))
+      IRDestruct a x -> symOf q env x >>= \sx -> case (sx, a) of
+        (SymPath p, _) | a `elem` [AcFst, AcSnd, AcHead, AcTail, AcFromLeft, AcFromRight]
+                         -> Just (SymPath (IRDestruct a p))
+        (SymCon TgTuple [l, _], AcFst) -> l
+        (SymCon TgTuple [_, r], AcSnd) -> r
+        (SymCon TgCons [h, _], AcHead) -> h
+        (SymCon TgCons [_, t], AcTail) -> t
+        (SymCon TgLeft [v], AcFromLeft) -> v
+        (SymCon TgRight [v], AcFromRight) -> v
+        _ -> Nothing
+      IRApply (IRLambda n b) a | n /= q -> symOf q (bindSym q env n a) b
+      IRLetIn n v b | n /= q -> symOf q (bindSym q env n v) b
+      IRApply f@(IRVar fld) x | fld `Set.member` fieldNames -> symOf q env x >>= \sx -> case sx of
+        SymPath p -> Just (SymPath (IRApply f p))
+        _ -> Nothing
+      _ -> Nothing
+    fieldNames = Set.fromList [ fst f | d <- decls, (_, fs) <- constructors d, f <- fs ]
+
+-- | A value 'assumeObserved' can follow: a path from the query parameter, or a
+-- structure built from such values ('Nothing' for a part it cannot follow).
+data Sym = SymPath IRExpr | SymCon ConTag [Maybe Sym]
+
+-- | The IR that reads field @idx@ of a value built by constructor @ctor@.
+projectIR :: [ADTDecl] -> String -> Int -> IRExpr -> IRExpr
+projectIR decls ctor idx x = case (ctor, idx) of
+    ("TCons", 0) -> IRDestruct AcFst x
+    ("TCons", _) -> IRDestruct AcSnd x
+    ("Cons", 0)  -> IRDestruct AcHead x
+    ("Cons", _)  -> IRDestruct AcTail x
+    ("left", _)  -> IRDestruct AcFromLeft x
+    ("right", _) -> IRDestruct AcFromRight x
+    _            -> IRApply (IRVar adtField) x
+  where
+    adtField =
       case catMaybes [ if idx < length fields then Just (fst (fields !! idx)) else Nothing
                      | d <- decls, (cName, fields) <- constructors d, cName == ctor ] of
         (name : _) -> name
-        [] -> error ("maskedAtIR: constructor " ++ ctor ++ " has no field " ++ show idx
-                     ++ " (invariant: slots come from this program's own observation tree)")
+        [] -> error ("projectIR: constructor " ++ ctor ++ " has no field " ++ show idx
+                       ++ " (invariant: slots come from this program's own observation tree)")
 
 -- | The doc note and warning text for a function over the slot budget.
 overBudgetNote :: String -> Int -> Int -> String

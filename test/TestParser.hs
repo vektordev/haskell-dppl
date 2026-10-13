@@ -32,12 +32,24 @@ rTypeToString TFloat = "Float"
 rTypeToString TSymbol = "Symbol"
 rTypeToString TInt = "Int"
 rTypeToString TBool = "Bool"
-rTypeToString (TArrow rt1 rt2) = rTypeToString rt1 ++ " -> " ++ rTypeToString rt2
+rTypeToString TUnit = "()"
+rTypeToString (TADT name) = name
+-- The parser reads an arrow or a pair only inside parentheses ('pCompoundType').
+rTypeToString (TArrow rt1 rt2) = "(" ++ rTypeToString rt1 ++ " -> " ++ rTypeToString rt2 ++ ")"
+rTypeToString (Tuple rt1 rt2) = "(" ++ rTypeToString rt1 ++ ", " ++ rTypeToString rt2 ++ ")"
+rTypeToString (TEither rt1 rt2) = "Either " ++ rTypeToString rt1 ++ " " ++ rTypeToString rt2
 rTypeToString rt = error ("TestParser.rTypeToString has no rendering for " ++ show rt)
 
+-- The concrete syntax of an @of@ clause ('pNeuralMultiValue').
 multiValueToString :: MultiValue -> String
-multiValueToString (MultiDiscretes vals) = "[" ++ intercalate ", " (map show vals) ++ "]"
-multiValueToString _ = undefined
+multiValueToString MultiAuto = "_"
+multiValueToString MultiContinuous = "Real"
+multiValueToString (MultiDiscretes vals) = "[" ++ intercalate ", " (map valToString vals) ++ "]"
+multiValueToString (MultiTuple l r) = "(" ++ multiValueToString l ++ ", " ++ multiValueToString r ++ ")"
+multiValueToString (MultiEither l r) = "(" ++ multiValueToString l ++ " | " ++ multiValueToString r ++ ")"
+multiValueToString (MultiADT constrs) =
+    "{" ++ intercalate " | " [unwords (c : map multiValueToString ps) | (c, ps) <- constrs] ++ "}"
+multiValueToString mv = error ("TestParser.multiValueToString has no rendering for " ++ show mv)
 
 valToString :: Value -> String
 valToString (VBool x) = show x
@@ -77,14 +89,49 @@ neuralDeclToString (name, rty, Nothing) = "neural " ++ name ++ " :: " ++ rTypeTo
 neuralDeclToString (name, rty, Just tag) =
     "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ multiValueToString tag
 
--- Renders only functions and neural declarations. That is enough because
--- 'Arbitrary Program' always builds its programs with an empty ADT list, so
--- the roundtrip properties never see one; a generator that starts emitting
--- ADTs has to grow a renderer for them here, or the roundtrip will silently
--- compare against a program with its `data` declarations dropped.
+-- | @data T = C1 | C2 f::Ty, g::Ty depth N@, as 'pADT' reads it.
+adtDeclToString :: ADTDecl -> String
+adtDeclToString (ADTDecl name constrs depth) =
+    "data " ++ name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs)
+      ++ maybe "" (\d -> " depth " ++ show d) depth
+
+adtConstructorToString :: ADTConstructorDecl -> String
+adtConstructorToString (cName, []) = cName
+adtConstructorToString (cName, fields) =
+    cName ++ " " ++ intercalate ", " [f ++ "::" ++ rTypeToString ty | (f, ty) <- fields]
+
+-- | The neural declarations and the @writeLogits@ registry, in the order that
+-- re-parses to the same two lists.
+--
+-- A neural declaration with an @of@ clause also registers its @(target,
+-- MultiValue)@ into 'writeLogitsDecls' (the sugar, see
+-- 'SPLL.Parser.aggregateDefinitions'), so a registry entry is rendered as a
+-- standalone @neural writeLogits :: T of M@ only when it is not the one the
+-- next pending neural's @of@ clause implies. Rendering every entry would
+-- register the sugar twice on re-parse. The registry is not deduplicated when
+-- comparing either: a parser that registered an entry twice must fail there.
+neuralsAndWriteLogitsToString :: [NeuralDecl] -> [(RType, MultiValue)] -> [String]
+neuralsAndWriteLogitsToString = go
+  where
+    go (n : ns) ws
+      | Nothing <- sugarOf n = neuralDeclToString n : go ns ws
+    go (n : ns) (w : ws)
+      | sugarOf n == Just w = neuralDeclToString n : go ns ws
+    go ns (w : ws) = writeLogitsToString w : go ns ws
+    -- A neural whose sugar is missing from the registry: render it anyway, and
+    -- let the re-parse's extra entry fail the comparison.
+    go (n : ns) [] = neuralDeclToString n : go ns []
+    go [] [] = []
+    sugarOf (_, ty, mtag) = (,) <$> neuralValueType ty <*> mtag
+    writeLogitsToString (ty, mv) = "neural writeLogits :: " ++ rTypeToString ty ++ " of " ++ multiValueToString mv
+
+-- | Renders data declarations, functions, neural declarations and the
+-- @writeLogits@ registry. Type signatures have no renderer: a program with
+-- one does not round-trip, and 'matchProg' says so.
 programToString :: Program -> String
-programToString (Program fnDecls neuralDecls _adts _enc _) =
-    unlines (map fnDeclToString fnDecls ++ map neuralDeclToString neuralDecls)
+programToString (Program fnDecls neuralDecls adtDecls wlDecls _sigs) =
+    unlines (map adtDeclToString adtDecls ++ map fnDeclToString fnDecls
+             ++ neuralsAndWriteLogitsToString neuralDecls wlDecls)
 
 testParse :: StateT Int (Parsec Void String) a -> String -> Either (ParseErrorBundle String Void) a
 testParse parser src = do
@@ -167,7 +214,47 @@ examples = [
   testList,
   simpleTuple,
   constantProg,
-  simpleCall]
+  simpleCall,
+  adtRecursiveProg,
+  adtFlatProg,
+  writeLogitsProg]
+
+-- Nullary, single-field and multi-field constructors, named fields of base and
+-- ADT type, and a recursive type with a default @depth@.
+adtRecursiveProg :: Program
+adtRecursiveProg = (functionsOnly uniformProg)
+  { adts =
+      [ ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])] Nothing
+      , ADTDecl "Object" [("Obj", [("color", TADT "Color"), ("size", TInt)])] Nothing
+      , ADTDecl "Scene" [("Nil", []), ("Cons", [("hd", TADT "Object"), ("tl", TADT "Scene")])] (Just 3)
+      ] }
+
+-- A non-recursive type: a single-field constructor first, then a pair-typed field.
+adtFlatProg :: Program
+adtFlatProg = (functionsOnly normalProg)
+  { adts =
+      [ ADTDecl "Shape" [("Circle", [("radius", TFloat)]), ("Rect", [("dims", Tuple TFloat TFloat)]), ("Dot", [])] Nothing
+      ] }
+
+-- A standalone @neural writeLogits@ before and after neural declarations with
+-- and without an @of@ clause, whose sugar interleaves with it in the registry.
+writeLogitsProg :: Program
+writeLogitsProg = (functionsOnly uniformProg)
+  { adts = [ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])] Nothing]
+  , neurals =
+      [ ("digit", TArrow TSymbol TInt, Just (MultiDiscretes [VInt 0, VInt 1, VInt 2]))
+      , ("gauge", TArrow TSymbol TFloat, Nothing)
+      , ("paint", TArrow TSymbol (TADT "Color"), Just (MultiADT [("Red", []), ("Green", []), ("Blue", [])]))
+      ]
+  , writeLogitsDecls =
+      [ (TBool, MultiAuto)
+      , (TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])
+      , (TADT "Color", MultiADT [("Red", []), ("Green", []), ("Blue", [])])
+      , (TEither TInt TBool, MultiEither (MultiDiscretes [VInt 0, VInt 1]) MultiAuto)
+      ] }
+
+functionsOnly :: Program -> Program
+functionsOnly p = Program (functions p) [] [] [] []
 
 showExamples :: IO ()
 showExamples = do
@@ -273,9 +360,14 @@ matchProg p1 p2
     | p1 ~= p2 = property True
 
     -- Sort lists by names and match using matchNeural and matchFn
-    | otherwise = conjoin [
+    -- Not structurally equal: whatever the diagnostics below find, this fails.
+    | otherwise = counterexample "programs are not structurally equivalent" $ conjoin [
         matchList "functions" matchFn sortedFns1 sortedFns2,
-        matchList "neurals" matchNeural sortedNeurals1 sortedNeurals2
+        matchList "neurals" matchNeural sortedNeurals1 sortedNeurals2,
+        counterexample "Mismatch in data declarations" (adts p1 === adts p2),
+        counterexample "Mismatch in writeLogits registry" (writeLogitsDecls p1 === writeLogitsDecls p2),
+        counterexample "Mismatch in signatures" (signatures p1 === signatures p2),
+        property False
         ]
   where
     -- Sorting functions and neurals by their names
@@ -308,11 +400,13 @@ matchExpr expr1 expr2
   | toStub expr1 /= toStub expr2 =
     counterexample ("Constructor mismatch: " ++ show (toStub expr1) ++ " /= " ++ show (toStub expr2)) False
   -- expressions are now of same constructor. Check each subexpression individually first.
-  | getSubExprs expr1 /= getSubExprs expr2 =
-    conjoin (zipWith matchExpr (getSubExprs expr1) (getSubExprs expr1)) .&&. expr1 === expr2
+  -- Structural ('=~='), not '==': a parsed expression carries source spans
+  -- the hand-built one does not.
+  | not (getSubExprs expr1 ~= getSubExprs expr2) =
+    conjoin (zipWith matchExpr (getSubExprs expr1) (getSubExprs expr2)) .&&. expr1 =~= expr2
   -- all subexpressions match, we're only dealing with top-level information.
   -- Could hide the subexpressions here from the printout.
-  | otherwise = expr1 === expr2
+  | otherwise = expr1 =~= expr2
 
 -- Blank line between two function definitions parses, same AST as without
 prop_blankLineBetweenDefs :: Property

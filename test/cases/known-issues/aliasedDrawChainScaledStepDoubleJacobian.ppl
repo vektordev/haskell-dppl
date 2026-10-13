@@ -1,0 +1,1 @@
+main = draw y = Normal in draw s1 = y in draw s2 = s1 + 0.5 * Normal in draw s3 = s2 + 0.5 * Normal in (s1, (s2, s3))

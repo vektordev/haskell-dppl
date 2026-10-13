@@ -26,6 +26,8 @@ import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.ForwardChaining (annotateProg, progToFCData)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.RInfer (addRTypeInfo)
+import SPLL.CalleeNormalize (normalizeCallees)
+import Data.Maybe (fromMaybe)
 import SPLL.Typing.Determinism (knownAnchors)
 import SPLL.Typing.ModalityInfer (perNodeOuterGrounds)
 import SPLL.Typing.Modality (GroundMod(gCap), CapabilitySet(..))
@@ -589,8 +591,15 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
   -- broken was downstream, in 'SPLL.IRCompiler' -- so these assertions are the
   -- half of the regression net that guards the *verdict* while the
   -- @test/cases/higher-order/arrowApply*@ corpus pairs guard the compiled answer. Row 7
-  -- (@\x -> x + x@) is a wontfix precision gap and is pinned as a refusal in
-  -- 'TestRejection' instead.
+  -- (@\x -> x + x@) was once a refusal; affine marginalisation now answers it
+  -- (corpus @higher-order/arrowApplySelfSum@).
+  --
+  -- The rows after the eight are the 2026-10-08 rerun's probes (same
+  -- investigation): function values reaching an application through a named
+  -- higher-order function, a function-returning function, and a let-bound or
+  -- draw-gated random choice. Every verdict is sound; where the compiled
+  -- answer is not yet there, the comment names the open ticket and its
+  -- known-issues pin.
   , testGroup "arrow space: a function value reaching an application"
       [ testCase "row 1: a named function applied to a Normal is PNormal" $
           assertEqual "" PNormal $
@@ -621,6 +630,43 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           -- measurable but carries no family.
           assertEqual "" Integrate $
             mainPType "main = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) 3.0"
+      , testCase "a named higher-order function applying its argument is PNormal" $
+          -- and IRCompiler answers it (corpus higher-order/namedHofForwardsRandomArg,
+          -- task binding-resolver-one-application-rule)
+          assertEqual "" PNormal $
+            mainPType "app f x = f x\nmain = app (\\x -> x + 1.0) Normal"
+      , testCase "twice applied to a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "twice f x = f (f x)\nmain = twice (\\y -> y + 1.0) Normal"
+      , testCase "compose applied to a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "compose f g z = f (g z)\nmain = compose (\\a -> a * 2.0) (\\b -> b + 1.0) Normal"
+      , testCase "a random function passed to a named higher-order function is Integrate" $
+          -- Miscompiled downstream: known-issues/namedHofRandomFunctionArg,
+          -- ticket named-hof-random-function-argument-miscompiled
+          assertEqual "" Integrate $
+            mainPType "app f x = f x\nmain = app (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) 3.0"
+      , testCase "a random function passed as the only argument is Integrate" $
+          assertEqual "" Integrate $
+            mainPType "app f = f 3.0\nmain = app (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0))"
+      , testCase "a returned closure applied to a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "shift a = \\x -> x + a\nmain = (shift 2.0) Normal"
+      , testCase "a returned closure capturing a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "shift a = \\x -> x + a\nmain = (shift Normal) 1.0"
+      , testCase "a randomly selected function applied to a Normal is Integrate" $
+          -- a two-Gaussian mixture: measurable, no family
+          assertEqual "" Integrate $
+            mainPType "main = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
+      , testCase "a draw-gated function choice applied to a Normal is Integrate" $
+          -- the interpreter stops at query time: ticket enumerated-sum-over-density-body
+          assertEqual "" Integrate $
+            mainPType "main = draw b = Uniform < 0.5 in (if b then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
+      , testCase "a draw-bound random function applied to a Normal is Integrate" $
+          -- refused (generate-backed guard): ticket arrow-lifted-mixture-for-function-values
+          assertEqual "" Integrate $
+            mainPType "main = draw f = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) in f Normal"
       , testCase "a let-chained PNormal variable keeps the family" $
           -- The no-function-value reach of the same IRCompiler fallthrough
           -- (bug A, 2026-09-13): the verdict is right, the shortcut was not.
@@ -681,7 +727,8 @@ knownPartialSetExceptions =
   ]
 
 -- | Every corpus @.ppl@ program under 'corpusRoot' (minus
--- 'knownPartialSetExceptions'), walked through the same RType inference ->
+-- 'knownPartialSetExceptions'), walked through the same callee normalization ->
+-- RType inference ->
 -- enum annotation -> chain naming -> FCData sequence 'SPLL.Prelude.compile'
 -- uses (deliberately NOT 'typeProg''s order above, which runs enum/chain
 -- annotation before RType inference for test convenience --
@@ -705,7 +752,7 @@ corpusPartialSetTests corpus = corpusSweepAll corpus SweepSpec
 -- found in one corpus program, keyed by the offending chain name.
 filePartialSetViolations :: FilePath -> Program -> IO [(FilePath, ChainName, CapabilitySet)]
 filePartialSetViolations fp p =
-  case addRTypeInfo p of
+  case addRTypeInfo (fromMaybe p (normalizeCallees p)) of
     Left e -> error ("addRTypeInfo failed on " ++ fp ++ ": " ++ e)
     Right rtyped ->
       let preAnnotated   = annotateEnumsProg rtyped

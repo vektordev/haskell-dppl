@@ -60,7 +60,7 @@ import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.Modality
-import SPLL.Typing.ForwardChaining (FCData, isWitnessedLambda)
+import SPLL.Typing.ForwardChaining (FCData(..), isWitnessedLambda)
 import PredefinedFunctions (isFieldConstructor)
 
 -- ---------------------------------------------------------------------------
@@ -483,7 +483,7 @@ inferE ctx env expr = case expr of
          -- own slot) is untouched. The capability gate (@gCap /= Exact@) skips
          -- the FC query for deterministic and function-valued bindings.
          Expr lti (Lambda x body) ->
-           let boundMod = letBoundMod ctx lti argMod
+           let boundMod = letBoundMod ctx (chainName lti) argMod
                (bodyMod, body', ba) = inferE ctx (Map.insert x boundMod env) body
                -- The applied lambda node carries the body's pType (its result),
                -- matching @PInfer2@ and what @IRCompiler@ reads, not the outer
@@ -491,9 +491,16 @@ inferE ctx env expr = case expr of
                f' = Expr (setPType lti (projectI bodyMod)) (Lambda x body')
            in done bodyMod (Expr (setPType ti (projectNode (rType ti) bodyMod)) (Apply f' arg'))
                    (laccLambda lti ++ ba ++ aa)
+         -- Any other head -- a named function, a function parameter, a
+         -- partial application -- binds its parameter by the same rule: the
+         -- witness question is asked of the lambda forward chaining resolves
+         -- the head to, for this invocation (task
+         -- binding-resolver-one-application-rule). The callee's closure then
+         -- sees its parameter witnessed exactly as a literal lambda's body
+         -- does. A head that resolves to no lambda is answered unwitnessed.
          _ ->
            let (fMod, f', fa) = inferE ctx env f
-               m = applyI fMod argMod
+               m = applyI fMod (letBoundMod ctx (cnOf f) argMod)
            in done m (Expr (setPType ti (projectNode (rType ti) m)) (Apply f' arg')) (fa ++ aa)
 
   where
@@ -511,14 +518,18 @@ inferE ctx env expr = case expr of
                                (outerI ma) (outerI mb))
       in done (IG g) (Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])) (aacc ++ bacc)
 
--- | The law a directly-applied lambda (a @let@) binds its parameter to, given
--- the argument's law: witnessed when the binding is random and forward
+-- | The law an application binds its parameter to, given the argument's law
+-- and the chain name of the head (a literal lambda, or a callee forward
+-- chaining resolves to one): witnessed when the binding is random and forward
 -- chaining certifies it recoverable from the observation (see the 'Apply' rule
 -- of 'inferE'). Shared with 'envAt', which must bind exactly as 'inferE' does.
-letBoundMod :: ICtx -> TypeInfo -> IMod -> IMod
-letBoundMod ctx lti argMod
+-- A head forward chaining never saw -- a node 'reinferGiven' synthesized --
+-- is not asked.
+letBoundMod :: ICtx -> ChainName -> IMod -> IMod
+letBoundMod ctx headCN argMod
   | gCap (outerI argMod) /= Exact
-  , isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) (chainName lti) = iwit argMod
+  , isJust (lookup headCN (chainNameInfo (icFC ctx)))
+  , isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) headCN = iwit argMod
   | otherwise = argMod
 
 -- | The law a free-standing lambda binds its parameter to: the representative
@@ -979,7 +990,7 @@ envAt ctx pins env cn e
         firstJust
           [ envAt ctx pins env cn arg
           , if cnOf f == cn then Just env else Nothing
-          , envAt ctx pins (Map.insert x (bind x (letBoundMod ctx lti (argLaw arg))) env) cn body ]
+          , envAt ctx pins (Map.insert x (bind x (letBoundMod ctx (chainName lti) (argLaw arg))) env) cn body ]
       Expr ti (Lambda x body) ->
         envAt ctx pins (Map.insert x (bind x (lambdaParamMod ti)) env) cn body
       Expr _ (IfThenElse c t f) ->

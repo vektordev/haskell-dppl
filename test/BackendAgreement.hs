@@ -20,16 +20,41 @@
 -- @try@, and results are flushed line by line, so one broken program
 -- reports against itself and never takes its batch-mates down with it.
 --
+-- Besides @main@'s probability and integrate functions, the property also
+-- evaluates the other two deterministic bodies of a group (task
+-- @backend-agreement-writelogits-and-normal-functions@): a Gaussian function's
+-- normal-parameter function (@QNormal@, its @(mu, sigma)@) and a
+-- logit-representable function's writeLogits function (@QWriteLogits@, its
+-- logit vector). Both answer a vector ('AnsweredVec'), compared element-wise
+-- with 'probAgrees'. They take the function's own arguments rather than a
+-- query point, so a query of either kind carries its arguments.
+--
+-- Generate bodies (task @backend-agreement-generate-support@) are checked
+-- value-free: a 'QGen' query calls @main@'s generate function once per
+-- backend, under a fixed seed, and the sample comes back as a token stream
+-- ('decodeSample', typed by @main@'s return type). The backend must not raise
+-- where the interpreter's generate does not, and the interpreter's
+-- probability function must not call the sample impossible
+-- ('supportCheck'). That covers the generate-only lowerings an inference body
+-- never reaches: a let-bound draw read twice must stay one draw, and a spilled
+-- deep generate line must still run.
+--
 -- Also here: 'irConstructs', the construct inventory of emitted IR that the
 -- coverage table and the corpus-minus-fuzz exception list are built from.
 module BackendAgreement
   ( Query(..)
   , queryPoint
+  , bodyKind
   , Answer(..)
   , AgreementCase(..)
+  , decodeSample
+  , supportCheck
+  , runPythonBatchWith
+  , runJuliaBatchWith
   , Disagreement(..)
   , renderDisagreement
   , interpreterAnswer
+  , interpreterBodyAnswer
   , probAgrees
   , answersAgree
   , anyHoles
@@ -37,18 +62,28 @@ module BackendAgreement
   , runPythonBatch
   , runJuliaBatch
   , findJulia
+  , BatchedCase(..)
+  , BatchedGroup(..)
+  , prepareBatchedCase
+  , runBatchedPythonBatch
+  , batchedComparedBodies
+  , batchedRefusalReason
+  , float32Point
   , parseAnswerLine
   , pythonDriver
   , juliaDriver
   , irConstructs
   , irEnvConstructs
   , inferenceBodies
+  , deterministicBodies
+  , comparedBodies
+  , maskedConstruct
   , allBodies
   ) where
 
-import Control.Exception (SomeException, try, evaluate)
+import Control.Exception (SomeException, SomeAsyncException(..), try, evaluate, fromException, throwIO)
 import Data.Char (toLower, isSpace)
-import Data.List (intercalate, nub, sort)
+import Data.List (intercalate, nub, sort, isPrefixOf, find)
 import Data.Maybe (fromMaybe)
 import System.Directory (getCurrentDirectory, findExecutable)
 import System.Exit (ExitCode(..))
@@ -61,30 +96,84 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
-import SPLL.Prelude (runProbC, runIntegC)
+import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC, compile)
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
+import SPLL.ReservedNames (componentNormalName)
+import IRInterpreter (generateDet)
+import SPLL.Typing.RType (RType(..))
+import Control.Monad.Random (evalRand)
+import System.Random (mkStdGen)
 import qualified SPLL.CodeGenPyTorch as Py
 import qualified SPLL.CodeGenJulia as Jl
 import PrettyPrint (pPrintProg)
 import TestTolerances (probTolerance)
-import End2EndTesting (qualifyConstructors, juliaTestFlags)
+import End2EndTesting (qualifyConstructors, juliaTestFlags, SampleBatch(..), batchSamples,
+                       batchSymColumn, networkMocks, batchedMockExpr, netMockName)
 
 -- ---------------------------------------------------------------------------
 -- Queries and answers
 
 -- | A point to evaluate @main@'s probability function (@QProb@) or its
--- integrate function (@QInteg@) at.
+-- integrate function (@QInteg@) at; or a group's normal-parameter function
+-- (@QNormal@) or writeLogits function (@QWriteLogits@), named by the group,
+-- with the arguments the text backends take (a neural @main@'s mock envelope
+-- already resolved, as 'acBackendArgs' is).
+--
+-- @QGen seed rt interpArgs@ calls @main@'s generate function with the case's
+-- backend arguments, the backend's RNG seeded with @seed@; @rt@ is @main@'s
+-- return type (what the sample is decoded as) and @interpArgs@ are the
+-- arguments the interpreter's probability function takes for @main@, to
+-- judge the sample with.
 data Query = QProb IRValue | QInteg IRValue
+           | QNormal String [IRValue] | QWriteLogits String [IRValue]
+           | QGen Int RType [IRValue]
   deriving (Show, Eq)
 
+-- | The argument list a backend calls the query's function with, given the
+-- case's backend arguments for @main@.
+callArgs :: [IRValue] -> Query -> [IRValue]
+callArgs args (QProb v) = v : args
+callArgs args (QInteg v) = v : args
+callArgs _ (QNormal _ as) = as
+callArgs _ (QWriteLogits _ as) = as
+callArgs args (QGen {}) = args
+
+-- | The query point of an inference query. A body query has none; its first
+-- argument stands in (only used for labelling).
 queryPoint :: Query -> IRValue
 queryPoint (QProb v) = v
 queryPoint (QInteg v) = v
+queryPoint q = case callArgs [] q of
+  (v : _) -> v
+  [] -> VAny
+
+-- | Which body a query evaluates: @prob@, @integ@, @normal@ or @writeLogits@.
+bodyKind :: Query -> String
+bodyKind (QProb _) = "prob"
+bodyKind (QInteg _) = "integ"
+bodyKind (QNormal _ _) = "normal"
+bodyKind (QWriteLogits _ _) = "writeLogits"
+bodyKind (QGen {}) = "generate"
 
 -- | What one engine said at one point. 'Raised' is any failure to produce a
 -- number: an exception in the backend, a module that did not load, codegen
 -- throwing on the Haskell side, or (for the interpreter) a 'Left'.
+--
+-- 'AnsweredVec' is a body query's vector: @[mu, sigma]@ or the logit vector.
+-- A 'Nothing' slot is not compared: a writeLogits slot of a dead arm holds iid
+-- noise (task @writelogits-dead-arm-nan@), recognised by the interpreter
+-- answering it differently under two seeds.
+--
+-- A 'QGen' query's interpreter answer is 'Generates' (its own generate ran
+-- without raising); a backend answers it 'Sampled' (the sample's tokens, see
+-- 'decodeSample'), and a sample 'supportCheck' rejects is reported as
+-- 'BadSample' with the reason.
 data Answer = Answered Double Double Bool   -- ^ probability, dim, impossible
+            | AnsweredVec [Maybe Double]
             | Raised String
+            | Generates
+            | Sampled [String]
+            | BadSample String
   deriving (Show, Eq)
 
 -- | One compiled program and the points the interpreter answered at, with its
@@ -119,15 +208,19 @@ renderDisagreement d = unlines
 
 -- | The interpreter's answer at a query, or 'Nothing' where it does not
 -- answer (a refusal, a missing variant, a malformed result). Pure; the
--- caller forces it under its own timeout.
+-- caller forces it under its own timeout. @args@ are @main@'s; a body query
+-- takes its own and is answered by 'interpreterBodyAnswer' instead.
 interpreterAnswer :: Program -> IREnv -> [IRValue] -> Query -> Maybe Answer
 interpreterAnswer p env args q = case run of
-  Right r@(VProbDim pr d) -> Just (Answered pr d (fromMaybe False (resultImpossible r)))
+  Just (Right r@(VProbDim pr d)) -> Just (Answered pr d (fromMaybe False (resultImpossible r)))
   _ -> Nothing
   where
     run = case q of
-      QProb v  -> runProbC p env args v
-      QInteg v -> runIntegC p env args v
+      QProb v  -> Just (runProbC p env args v)
+      QInteg v -> Just (runIntegC p env args v)
+      QNormal _ _ -> Nothing
+      QWriteLogits _ _ -> Nothing
+      QGen {} -> Nothing
 
 -- | Probabilities agree when both are NaN, both are the same infinity, or
 -- they are within 'probTolerance', relative above 1 (a density can be large,
@@ -140,7 +233,37 @@ probAgrees a b
 
 answersAgree :: Answer -> Answer -> Bool
 answersAgree (Answered p1 d1 i1) (Answered p2 d2 i2) = probAgrees p1 p2 && d1 == d2 && i1 == i2
+answersAgree (AnsweredVec xs) (AnsweredVec ys) = length xs == length ys && and (zipWith slot xs ys)
+  where slot (Just a) (Just b) = probAgrees a b
+        slot _ _ = True
 answersAgree _ _ = False
+
+-- | The interpreter's answer to a body query ('QNormal', 'QWriteLogits'),
+-- given the arguments the interpreter takes (for a neural @main@ the mock
+-- envelope, not the resolved vector the query carries). 'Nothing' where it
+-- does not answer: no such body, a 'Left', or a result that is not a flat
+-- vector of floats. Pure, like 'interpreterAnswer'.
+interpreterBodyAnswer :: Program -> IREnv -> [IRValue] -> Query -> Maybe Answer
+interpreterBodyAnswer p env args q = case q of
+  QNormal g _ -> do
+    (body, _) <- normalFun (lookupIREnv g env)
+    case generateDet (neurals p) (writeLogitsDecls p) env (map IRConst args) body of
+      Right (VTuple (VFloat m) (VFloat s)) -> Just (AnsweredVec [Just m, Just s])
+      _ -> Nothing
+  QWriteLogits g _ -> do
+    xs <- floatsAt g 0
+    ys <- floatsAt g 1
+    if length xs /= length ys then Nothing else
+      Just (AnsweredVec [ if x == y || (isNaN x && isNaN y) then Just x else Nothing | (x, y) <- zip xs ys ])
+  _ -> Nothing
+  where
+    floatsAt g seed = case evalRand (runWriteLogitsRandC p env g args) (mkStdGen seed) of
+      Right (VList l) -> mapM asFloat (listItems l)
+      _ -> Nothing
+    asFloat (VFloat x) = Just x
+    asFloat _ = Nothing
+    listItems (ListCont x xs) = x : listItems xs
+    listItems _ = []
 
 -- ---------------------------------------------------------------------------
 -- Query points beyond the drawn samples
@@ -191,11 +314,14 @@ oneLine = take 400 . map (\c -> if c == '\n' then ' ' else c)
 -- | The Python driver. @programs@ holds, per program, the path of its emitted
 -- module (already prefixed with its identity mocks), the backend arguments
 -- and the queries. Output lines: @R i j prob dim imposs@, @E i j message@,
--- @L i message@ (the module did not load).
+-- @L i message@ (the module did not load), @V i j x ...@ (a body query's
+-- vector), @S i j token ...@ (a generate query's sample, as 'decodeSample'
+-- reads it).
 pythonDriver :: FilePath -> [(FilePath, [IRValue], [Query])] -> String
 pythonDriver projectDir programs = unlines $
-  [ "import sys, signal"
+  [ "import sys, signal, random as _random"
   , "sys.path.insert(0, " ++ show projectDir ++ ")"
+  , "import pythonLib as _pl"
   , "sys.setrecursionlimit(20000)"
   , "class _Timeout(Exception): pass"
   , "def _alarm(signum, frame): raise _Timeout('query exceeded its time limit')"
@@ -204,6 +330,31 @@ pythonDriver projectDir programs = unlines $
   , "    sys.stdout.write(s + '\\n'); sys.stdout.flush()"
   , "def _msg(e):"
   , "    return (type(e).__name__ + ': ' + str(e)).replace('\\n', ' ')[:400]"
+  , "def _vals(r):"
+  , "    if hasattr(r, 't1') and hasattr(r, 't2'): return [r.t1, r.t2]"
+  , "    return list(r)"
+  -- A sample as prefix tokens ('decodeSample'). An ADT value is an instance
+  -- of a class the module defined (so its name is bound to it in the
+  -- module's namespace); its field values are in '_fields', in order.
+  , "def _ser(v, ns):"
+  , "    out = []"
+  , "    def go(v):"
+  , "        if isinstance(v, bool): out.append('b1' if v else 'b0')"
+  , "        elif isinstance(v, int): out.append('i' + repr(v))"
+  , "        elif isinstance(v, float): out.append('f' + repr(v))"
+  , "        elif v is None: out.append('u')"
+  , "        elif isinstance(v, _pl.T): out.append('t'); go(v.t1); go(v.t2)"
+  , "        elif isinstance(v, _pl.Left): out.append('l'); go(v.val)"
+  , "        elif isinstance(v, _pl.Right): out.append('r'); go(v.val)"
+  , "        elif isinstance(v, _pl.ConsInferenceList): out.append('c'); go(v.value); go(v.next)"
+  , "        elif isinstance(v, _pl.EmptyInferenceList): out.append('n')"
+  , "        elif ns.get(type(v).__name__) is type(v):"
+  , "            fs = getattr(v, '_fields', [])"
+  , "            out.append('a' + type(v).__name__); out.append(str(len(fs)))"
+  , "            for f in fs: go(f)"
+  , "        else: out.append('?' + type(v).__name__)"
+  , "    go(v)"
+  , "    return ' '.join(out)"
   ] ++ concat (zipWith program [0 :: Int ..] programs)
   where
     program i (path, args, qs) =
@@ -220,17 +371,34 @@ pythonDriver projectDir programs = unlines $
     query i args j q =
       [ "    try:"
       , "        signal.setitimer(signal.ITIMER_REAL, 10.0)"
+      ] ++ seedLine q ++
       -- Evaluated inside the program's namespace: a query point names the
       -- program's own ADT constructor classes.
-      , "        _r = eval(" ++ show ("main." ++ method q ++ "(" ++ intercalate ", " (map Py.pyVal (queryPoint q : args)) ++ ")") ++ ", _ns)"
+      [ "        _r = eval(" ++ show (target q ++ "." ++ method q ++ "(" ++ intercalate ", " (map Py.pyVal (callArgs args q)) ++ ")") ++ ", _ns)"
       , "        signal.setitimer(signal.ITIMER_REAL, 0)"
-      , "        _out('R " ++ show i ++ " " ++ show j ++ " ' + repr(float(_r[0])) + ' ' + repr(float(_r[1][0])) + ' ' + str(bool(_r[1][1])))"
+      , "        _out(" ++ output i j q ++ ")"
       , "    except BaseException as _e:"
       , "        signal.setitimer(signal.ITIMER_REAL, 0)"
       , "        _out('E " ++ show i ++ " " ++ show j ++ " ' + _msg(_e))"
       ]
     method (QProb _) = "forward"
     method (QInteg _) = "integrate"
+    method (QNormal _ _) = "normal_params"
+    method (QWriteLogits _ _) = "writeLogits"
+    method (QGen {}) = "generate"
+    -- The runtime samples through the @random@ module's global generator
+    -- (@from random import random, gauss@).
+    seedLine (QGen seed _ _) = ["        _random.seed(" ++ show seed ++ ")"]
+    seedLine _ = []
+    target (QNormal g _) = g
+    target (QWriteLogits g _) = g
+    target _ = "main"
+    output i j q = case q of
+      QProb _ -> rLine
+      QInteg _ -> rLine
+      QGen {} -> "'S " ++ show i ++ " " ++ show j ++ " ' + _ser(_r, _ns)"
+      _ -> "'V " ++ show i ++ " " ++ show j ++ " ' + ' '.join(repr(float(x)) for x in _vals(_r))"
+      where rLine = "'R " ++ show i ++ " " ++ show j ++ " ' + repr(float(_r[0])) + ' ' + repr(float(_r[1][0])) + ' ' + str(bool(_r[1][1]))"
 
 -- | The Julia driver; same output protocol as 'pythonDriver'. Each program is
 -- a @module ProgN@ in its own file, @include@d inside a @try@ so a module
@@ -240,7 +408,27 @@ juliaDriver :: FilePath -> [(FilePath, [IRValue], [Query])] -> String
 juliaDriver projectDir programs = unlines $
   [ "include(" ++ show (projectDir </> "juliaLib.jl") ++ ")"
   , "using .JuliaSPPLLib"
+  , "using Random"
   , "_msg(e) = first(replace(sprint(showerror, e), '\\n' => ' '), 400)"
+  , "_vals(r) = r isa JuliaSPPLLib.T ? [r.t1, r.t2] : collect(r)"
+  -- 'pythonDriver''s @_ser@: an ADT value is a struct of a program module.
+  , "function _ser(v, out)"
+  , "  if v isa Bool; push!(out, v ? \"b1\" : \"b0\")"
+  , "  elseif v isa Integer; push!(out, \"i\" * string(v))"
+  , "  elseif v isa AbstractFloat; push!(out, \"f\" * repr(Float64(v)))"
+  , "  elseif v === nothing; push!(out, \"u\")"
+  , "  elseif v isa JuliaSPPLLib.T; push!(out, \"t\"); _ser(v.t1, out); _ser(v.t2, out)"
+  , "  elseif v isa JuliaSPPLLib.Left; push!(out, \"l\"); _ser(v.val, out)"
+  , "  elseif v isa JuliaSPPLLib.Right; push!(out, \"r\"); _ser(v.val, out)"
+  , "  elseif v isa JuliaSPPLLib.ConsInferenceList; push!(out, \"c\"); _ser(v.value, out); _ser(v.next, out)"
+  , "  elseif v isa JuliaSPPLLib.EmptyInferenceList; push!(out, \"n\")"
+  , "  elseif isstructtype(typeof(v)) && startswith(string(nameof(parentmodule(typeof(v)))), \"Prog\")"
+  , "    push!(out, \"a\" * string(nameof(typeof(v)))); push!(out, string(nfields(v)))"
+  , "    for k in 1:nfields(v); _ser(getfield(v, k), out); end"
+  , "  else; push!(out, \"?\" * replace(string(typeof(v)), ' ' => '_'))"
+  , "  end"
+  , "  return out"
+  , "end"
   ] ++ concat (zipWith program [0 :: Int ..] programs)
   where
     program i (path, args, qs) =
@@ -251,9 +439,9 @@ juliaDriver projectDir programs = unlines $
          , "catch e"
          , "  println(\"L " ++ show i ++ " \", _msg(e)); flush(stdout)"
          , "end"
-         ] ++ concat [ [ "try"
-                       , "  r = Base.invokelatest(" ++ modName ++ "." ++ fn q ++ ", " ++ intercalate ", " (map jv (queryPoint q : args)) ++ ")"
-                       , "  println(\"R " ++ show i ++ " " ++ show j ++ " \", repr(Float64(r[1])), \" \", repr(Float64(r[2][1])), \" \", Bool(r[2][2])); flush(stdout)"
+         ] ++ concat [ [ "try" ] ++ seedLine q ++
+                       [ "  r = Base.invokelatest(" ++ intercalate ", " ((modName ++ "." ++ fn q) : map jv (callArgs args q)) ++ ")"
+                       , "  " ++ output i j q ++ "; flush(stdout)"
                        , "catch e"
                        , "  println(\"E " ++ show i ++ " " ++ show j ++ " \", _msg(e)); flush(stdout)"
                        , "end"
@@ -261,8 +449,20 @@ juliaDriver projectDir programs = unlines $
                      | (j, q) <- zip [0 :: Int ..] qs ]
     fn (QProb _) = "main_prob"
     fn (QInteg _) = "main_integ"
+    fn (QNormal g _) = g ++ "_normal"
+    fn (QWriteLogits g _) = g ++ "_writeLogits"
+    fn (QGen {}) = "main_gen"
+    seedLine (QGen seed _ _) = ["  Random.seed!(" ++ show seed ++ ")"]
+    seedLine _ = []
+    output i j q = case q of
+      QProb _ -> rLine
+      QInteg _ -> rLine
+      QGen {} -> "println(\"S " ++ show i ++ " " ++ show j ++ " \", join(_ser(r, String[]), \" \"))"
+      _ -> "println(\"V " ++ show i ++ " " ++ show j ++ " \", join([repr(Float64(x)) for x in _vals(r)], \" \"))"
+      where rLine = "println(\"R " ++ show i ++ " " ++ show j ++ " \", repr(Float64(r[1])), \" \", repr(Float64(r[2][1])), \" \", Bool(r[2][2]))"
 
--- | One line of driver output: @(program, Just query, answer)@ for a query,
+-- | One line of driver output (@R@ an inference answer, @V@ a body query's
+-- vector): @(program, Just query, answer)@ for a query,
 -- @(program, Nothing, Raised msg)@ for a module that did not load.
 parseAnswerLine :: String -> Maybe (Int, Maybe Int, Answer)
 parseAnswerLine l = case words l of
@@ -270,6 +470,13 @@ parseAnswerLine l = case words l of
     i' <- readMaybe i; j' <- readMaybe j
     p' <- readNum p; d' <- readNum d; b <- readBool imp
     return (i', Just j', Answered p' d' b)
+  ("V" : i : j : xs) -> do
+    i' <- readMaybe i; j' <- readMaybe j
+    vs <- mapM readNum xs
+    return (i', Just j', AnsweredVec (map Just vs))
+  ("S" : i : j : toks) -> do
+    i' <- readMaybe i; j' <- readMaybe j
+    return (i', Just j', Sampled toks)
   ("E" : i : j : _) -> do
     i' <- readMaybe i; j' <- readMaybe j
     return (i', Just j', Raised (dropFields 3 l))
@@ -308,14 +515,17 @@ readNum s0 = case map toLower s0 of
 -- | Run one batch through a backend: emit every program's source, run the
 -- driver once, and pair every interpreter answer with the backend's.
 -- A query with no output line (the process died or timed out before it) is
--- 'Raised' with the process's own stderr tail.
+-- 'Raised' with the process's own stderr tail. A generate query is judged by
+-- 'supportCheck' instead of compared; the second result lists every generate
+-- query's outcome, for tabulation.
 runBatch :: String
+         -> (String -> String)                            -- ^ the backend's name mangling (an ADT constructor's class name)
          -> (AgreementCase -> IO (Either String String))   -- ^ emitted module text
          -> String                                        -- ^ module file extension
          -> (FilePath -> [(FilePath, [IRValue], [Query])] -> String)
          -> (FilePath -> IO (ExitCode, String, String))    -- ^ run the driver file
-         -> [AgreementCase] -> IO [Disagreement]
-runBatch backend emit ext driver runDriver cases =
+         -> [AgreementCase] -> IO ([Disagreement], [String])
+runBatch backend mangle emit ext driver runDriver cases =
   withSystemTempDirectory ("nest-" ++ backend) $ \dir -> do
     projectDir <- getCurrentDirectory
     sources <- mapM emit cases
@@ -340,11 +550,110 @@ runBatch backend emit ext driver runDriver cases =
         fromRun = [ Disagreement backend (acProgram c) q ia ba
                   | (i, c) <- zip [0 ..] emitted
                   , (j, (q, ia)) <- zip [0 ..] (acQueries c)
+                  , not (isGen q)
                   , let ba = answerFor i j
                   , not (answersAgree ia ba) ]
-        fromGen = [ Disagreement backend (acProgram c) q ia (Raised ("codegen threw: " ++ e))
-                  | (c, e) <- failedGen, (q, ia) <- acQueries c ]
-    return (fromGen ++ fromRun)
+        fromCodegen = [ Disagreement backend (acProgram c) q ia (Raised ("codegen threw: " ++ e))
+                      | (c, e) <- failedGen, (q, ia) <- acQueries c ]
+    judged <- sequence [ judgeSample c q ia (answerFor i j)
+                       | (i, c) <- zip [0 ..] emitted
+                       , (j, (q, ia)) <- zip [0 ..] (acQueries c)
+                       , isGen q ]
+    return ( fromCodegen ++ fromRun ++ [ d | (Just d, _) <- judged ]
+           , [ "codegen threw" | (c, _) <- failedGen, (q, _) <- acQueries c, isGen q ] ++ map snd judged )
+  where
+    isGen (QGen {}) = True
+    isGen _ = False
+    judgeSample c q ia ba = case (q, ba) of
+      (QGen _ rt iargs, Sampled toks) -> do
+        verdict <- supportCheck mangle c rt iargs toks
+        return $ case verdict of
+          Left why -> (Just (Disagreement backend (acProgram c) q ia (BadSample why)), takeWhile (/= ':') why)
+          Right outcome -> (Nothing, outcome)
+      _ -> return (Just (Disagreement backend (acProgram c) q ia ba), "backend raised")
+
+-- | Decode a backend's sample (the drivers' @_ser@ tokens) as a value of the
+-- given type, or 'Nothing' where the tokens do not spell one: a @?@ token (a
+-- runtime value with no 'IRValue' form), a scalar of the wrong kind (a float
+-- where an @Int@ is due), an ADT constructor the type does not have, or
+-- tokens left over. @mangle@ is the backend's name mangling, which an ADT
+-- value's class name carries; the decoded 'VADT' takes the declaration's name.
+-- A type with no sample form here (a symbol, a tensor, an arrow) decodes
+-- nothing, so the caller does not ask for one.
+decodeSample :: (String -> String) -> [ADTDecl] -> RType -> [String] -> Maybe IRValue
+decodeSample mangle decls rt0 toks0 = case go rt0 toks0 of
+  Just (v, []) -> Just v
+  _ -> Nothing
+  where
+    go _ [] = Nothing
+    go rt (t : ts) = case (rt, t) of
+      (TFloat, 'f' : x) -> (\d -> (VFloat d, ts)) <$> readNum x
+      (TInt, 'i' : x) -> (\n -> (VInt n, ts)) <$> readMaybe x
+      (TBool, "b1") -> Just (VBool True, ts)
+      (TBool, "b0") -> Just (VBool False, ts)
+      (TUnit, "u") -> Just (VUnit, ts)
+      (Tuple a b, "t") -> do
+        (x, r1) <- go a ts
+        (y, r2) <- go b r1
+        return (VTuple x y, r2)
+      (TEither a _, "l") -> do
+        (x, r) <- go a ts
+        return (VEither (Left x), r)
+      (TEither _ b, "r") -> do
+        (y, r) <- go b ts
+        return (VEither (Right y), r)
+      (ListOf _, "n") -> Just (VList EmptyList, ts)
+      (ListOf a, "c") -> do
+        (x, r1) <- go a ts
+        (rest, r2) <- go rt r1
+        case rest of
+          VList xs -> return (VList (ListCont x xs), r2)
+          _ -> Nothing
+      (TADT n, 'a' : cls) -> do
+        decl <- find ((== n) . dataName) decls
+        (ctor, fields) <- find ((== cls) . mangle . fst) (constructors decl)
+        (k, r0) <- case ts of
+          (kt : r) -> (\k -> (k, r)) <$> (readMaybe kt :: Maybe Int)
+          [] -> Nothing
+        if k /= length fields then Nothing else do
+          (vs, r) <- fieldsFrom (map snd fields) r0
+          return (VADT ctor vs, r)
+      _ -> Nothing
+    fieldsFrom [] r = Just ([], r)
+    fieldsFrom (ft : fts) r = do
+      (v, r1) <- go ft r
+      (vs, r2) <- fieldsFrom fts r1
+      return (v : vs, r2)
+
+-- | Wall clock for the interpreter's probability function at one backend
+-- sample.
+sampleCheckMicros :: Int
+sampleCheckMicros = 2 * 1000 * 1000
+
+-- | Judge one backend sample of @main@ ('QGen'): 'Left' with the reason when
+-- the tokens do not decode ('decodeSample') or the interpreter's probability
+-- function calls the decoded value impossible (the backend sampled off the
+-- support); otherwise 'Right' an outcome label. The interpreter not
+-- answering at the sample (a refusal, a 'Left', a timeout) is not a
+-- disagreement: support is only checked where the interpreter can judge it.
+supportCheck :: (String -> String) -> AgreementCase -> RType -> [IRValue] -> [String] -> IO (Either String String)
+supportCheck mangle c rt iargs toks = case decodeSample mangle decls rt toks of
+  Nothing -> return (Left ("undecodable sample: " ++ unwords toks ++ " as " ++ show rt))
+  Just v -> do
+    r <- try (timeout sampleCheckMicros (evaluate (forced (interpreterAnswer (acProgram c) env iargs (QProb v)))))
+    case r of
+      -- An enclosing timeout's cancellation is not the interpreter's answer.
+      Left (e :: SomeException) | Just (SomeAsyncException _) <- fromException e -> throwIO e
+      _ -> return ()
+    return $ case r of
+      Left _ -> Right "interpreter raised at the sample"
+      Right Nothing -> Right "interpreter timed out at the sample"
+      Right (Just Nothing) -> Right "interpreter does not answer at the sample"
+      Right (Just (Just (Answered _ _ True))) -> Left ("off the interpreter's support: " ++ show v)
+      Right (Just (Just _)) -> Right "in support"
+  where
+    env@(IREnv _ decls _) = acEnv c
+    forced a = length (show a) `seq` a
 
 -- | A whole-process bound on top of the Python driver's per-query alarm:
 -- a hang in a module's top level, or in Julia (which has no per-query bound),
@@ -361,7 +670,11 @@ runBounded exe args = do
 -- @Module@ stubbed out (the scalar backend never uses torch), plus an identity
 -- mock per declared network.
 runPythonBatch :: [AgreementCase] -> IO [Disagreement]
-runPythonBatch = runBatch "python" emit ".py" pythonDriver (\f -> runBounded "python3" [f])
+runPythonBatch = fmap fst . runPythonBatchWith
+
+-- | 'runPythonBatch', with every generate query's outcome ('runBatch').
+runPythonBatchWith :: [AgreementCase] -> IO ([Disagreement], [String])
+runPythonBatchWith = runBatch "python" Py.pyMangle emit ".py" pythonDriver (\f -> runBounded "python3" [f])
   where
     emit c = fmap (fmap (\src -> mocks c ++ stubTorch src))
                   (forcedSource (return (Py.generateFunctions True (acEnv c))))
@@ -374,7 +687,11 @@ findJulia :: IO (Maybe FilePath)
 findJulia = findExecutable "julia"
 
 runJuliaBatch :: FilePath -> [AgreementCase] -> IO [Disagreement]
-runJuliaBatch julia cases = runBatch "julia" emit ".jl" juliaDriver (\f -> runBounded julia (juliaTestFlags ++ [f])) cases
+runJuliaBatch julia = fmap fst . runJuliaBatchWith julia
+
+-- | 'runJuliaBatch', with every generate query's outcome ('runBatch').
+runJuliaBatchWith :: FilePath -> [AgreementCase] -> IO ([Disagreement], [String])
+runJuliaBatchWith julia cases = runBatch "julia" Jl.juliaMangle emit ".jl" juliaDriver (\f -> runBounded julia (juliaTestFlags ++ [f])) cases
   where
     indexed = zip [0 :: Int ..] cases
     emit c = do
@@ -387,6 +704,224 @@ runJuliaBatch julia cases = runBatch "julia" emit ".jl" juliaDriver (\f -> runBo
     -- Cases have no identity of their own; programs in one batch are
     -- distinct draws, so their printed forms are distinct enough to index by.
     sameCase a b = show (acProgram a) == show (acProgram b) && map fst (acQueries a) == map fst (acQueries b)
+
+-- ---------------------------------------------------------------------------
+-- The batched arm (task backend-agreement-batched-arm)
+
+-- | One batched call: all of a program's answered points of one inference
+-- kind (@forward@ or @integrate@), handed over as one batch, the way the
+-- corpus's @batched-vs-expected@ hands over a @.tst@ file's points
+-- ('End2EndTesting.batchSamples': one structure-of-arrays tensor, or the host
+-- bucketing wrapper when a point carries structure). Each query carries the
+-- interpreter's answer and, for a point a float32 batch literal rounds, the
+-- interpreter's answer at the rounded point ('float32Point').
+data BatchedGroup = BatchedGroup
+  { bgCumul   :: Bool
+  , bgBatch   :: SampleBatch
+  , bgQueries :: [(Query, Answer, Maybe Answer)]
+  }
+
+-- | A compared case that batched mode takes: its batched compile, the emitted
+-- module and its groups.
+data BatchedCase = BatchedCase
+  { bcCase   :: AgreementCase
+  , bcEnv    :: IREnv
+  , bcSource :: String
+  , bcGroups :: [BatchedGroup]
+  }
+
+-- | Batched eligibility, decided as the corpus decides it
+-- ('End2EndTesting.batchedEligibility'): a @batched = True@ compile, a
+-- 'generateFunctionsBatched' emission, and batchable query points. 'Left' is
+-- the reason it is not eligible, normalised for tabulation
+-- ('batchedRefusalReason'); a refusal is not a disagreement.
+--
+-- Only the inference queries go through this arm (the batched backend emits
+-- no @normal_params@ or @writeLogits@), and of those not the ones the
+-- interpreter answers with a NaN: every batched return goes through
+-- @check_result@, which raises on a NaN by design (task
+-- batched-adt-cdf-refusal-becomes-nan), and it would take the whole batch
+-- with it. @interpArgs@ are what the interpreter takes for @main@.
+prepareBatchedCase :: [IRValue] -> AgreementCase -> IO (Either String BatchedCase)
+prepareBatchedCase interpArgs c = do
+  compiled <- try (evaluate (forceEither (compile defaultCompilerConfig{batched = True} (acProgram c))))
+  case compiled of
+    Left (e :: SomeException) -> return (Left ("batched compile crashed: " ++ batchedRefusalReason (show e)))
+    Right (Left msg) -> return (Left ("batched compile failed: " ++ batchedRefusalReason msg))
+    Right (Right env) -> do
+      emitted <- try (evaluate (forceEither (generateFunctionsBatched True env)))
+      case emitted of
+        Left (e :: SomeException) -> return (Left ("batched codegen crashed: " ++ batchedRefusalReason (show e)))
+        Right (Left msg) -> return (Left (batchedRefusalReason msg))
+        Right (Right src) -> do
+          let kinds = [ (cumul, qs) | cumul <- [False, True], let qs = inference cumul, not (null qs) ]
+          if null kinds then return (Left "no non-NaN inference answer") else
+            case mapM (\(cumul, qs) -> (,,) cumul qs <$> batchSamples (map (queryPoint . fst) qs)) kinds of
+              Nothing -> return (Left "query points not batchable")
+              Just gs -> do
+                groups <- mapM (\(cumul, qs, sb) -> BatchedGroup cumul sb <$> mapM (withRounded sb) qs) gs
+                return (Right (BatchedCase c env (intercalate "\n" src) groups))
+  where
+    inference cumul = [ (q, a) | (q, a@(Answered pr _ _)) <- acQueries c, isCumul q == Just cumul, not (isNaN pr) ]
+    isCumul (QProb _) = Just False
+    isCumul (QInteg _) = Just True
+    isCumul _ = Nothing
+    forceEither :: Show a => Either String a -> Either String a
+    forceEither r = length (show r) `seq` r
+    -- Only a structure-of-arrays literal is float32 ('batchLiteral' leaves
+    -- torch's default dtype); the bucketing wrapper packs at the runtime's
+    -- float64.
+    withRounded (SoA _) (q, a) =
+      let v = queryPoint q
+          v' = float32Point v
+      in if v' == v then return (q, a, Nothing) else do
+           r <- try (evaluate (forceShow (interpreterAnswer (acProgram c) (acEnv c) interpArgs (retarget q v'))))
+           return (q, a, either (\(_ :: SomeException) -> Nothing) id r)
+    withRounded _ (q, a) = return (q, a, Nothing)
+    retarget (QInteg _) v = QInteg v
+    retarget _ v = QProb v
+    forceShow x = length (show x) `seq` x
+
+-- | A query point as a float32 batch literal delivers it: every float leaf
+-- rounded to the nearest float32. The corpus's structure-of-arrays literals
+-- are float32 too, so this arm compares under the corpus's own float32
+-- awareness: a batched answer agrees if it matches the interpreter at the
+-- point, or at the rounded point.
+float32Point :: IRValue -> IRValue
+float32Point v = case v of
+  VFloat x -> VFloat (realToFrac (realToFrac x :: Float))
+  VTuple a b -> VTuple (float32Point a) (float32Point b)
+  _ -> v
+
+-- | A batched refusal, stripped of the program-specific names in it (group
+-- names, generated identifiers), so the eligibility table groups refusals by
+-- kind: the construct named after "fragment:" where there is one, else the
+-- message with every word containing an underscore or a digit, and the
+-- function name a message starts with, dropped.
+batchedRefusalReason :: String -> String
+batchedRefusalReason msg0 = take 90 $ case breakOn "outside the tensor fragment: " msg of
+  Just rest -> "outside the tensor fragment: " ++ clause rest
+  Nothing -> clause (unwords (filter generic (words msg)))
+  where
+    -- The kind of refusal, not its instance: up to a parenthesised detail
+    -- (the offending constant) or the next sentence.
+    clause = trim . upTo
+    upTo (ch : rest)
+      | ch `elem` "(.;" = []
+      | ch == ':', take 1 rest == " " = []
+      | ch == ' ', "CallStack" `isPrefixOf` rest = []
+      | otherwise = ch : upTo rest
+    upTo [] = []
+    trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+    msg = dropPrefix "batched PyTorch codegen: " $ dropPrefix "batched mode: " $ (map (\ch -> if ch == '\n' then ' ' else ch) msg0)
+    dropPrefix pre s = if pre `isPrefixOf` s then drop (length pre) s else s
+    breakOn pat s
+      | null s = Nothing
+      | pat `isPrefixOf` s = Just (drop (length pat) s)
+      | otherwise = breakOn pat (tail s)
+    generic w = not (any (`elem` "_0123456789'") w)
+
+-- | The bodies a batched case puts through the batched backend: every group's
+-- probability and integrate body, from the batched compile (so after the
+-- select pass: @IRSelect@ rather than @IRIf@ where it applied).
+batchedComparedBodies :: BatchedCase -> [IRExpr]
+batchedComparedBodies = inferenceBodies . bcEnv
+
+-- | The batched driver: every case in one torch process, each module in its
+-- own namespace with its network mocks ('End2EndTesting.batchedMockExpr'),
+-- each group one call under a 20 s alarm. Same output protocol as
+-- 'pythonDriver'; a group that raises reports every one of its queries.
+batchedDriver :: FilePath -> [BatchedCase] -> String
+batchedDriver projectDir cases = unlines $
+  [ "import sys, signal"
+  , "sys.path.insert(0, " ++ show projectDir ++ ")"
+  , "import torch"
+  , "from pythonLibBatched import bucketed"
+  , "sys.setrecursionlimit(20000)"
+  , "class _Timeout(Exception): pass"
+  , "def _alarm(signum, frame): raise _Timeout('batch exceeded its time limit')"
+  , "signal.signal(signal.SIGALRM, _alarm)"
+  , "def _out(s):"
+  , "    sys.stdout.write(s + '\\n'); sys.stdout.flush()"
+  , "def _msg(e):"
+  , "    return (type(e).__name__ + ': ' + str(e)).replace('\\n', ' ')[:400]"
+  , "def _leaf(x, k):"
+  , "    if torch.is_tensor(x):"
+  , "        return x[k].item() if x.dim() > 0 else x.item()"
+  , "    return x"
+  ] ++ concat (zipWith program [0 :: Int ..] cases)
+  where
+    program i bc =
+      let c = bcCase bc
+          nets = networkMocks (acProgram c)
+          offsets = scanl (+) 0 (map (length . bgQueries) (bcGroups bc))
+      in [ "_ns = {}"
+         , "try:"
+         , "    exec(compile(" ++ show (bcSource bc) ++ ", " ++ show ("prog" ++ show i) ++ ", 'exec'), _ns)"
+         ] ++ [ "    _ns[" ++ show (netMockName nm) ++ "] = " ++ batchedMockExpr nm | nm <- nets ] ++
+         [ "    _ns['bucketed'] = bucketed"
+         , "    _loaded = True"
+         , "except BaseException as _e:"
+         , "    _out('L " ++ show i ++ " ' + _msg(_e))"
+         , "    _loaded = False"
+         , "if _loaded:"
+         ] ++ concat (zipWith (group i (not (null nets)) (acBackendArgs c)) offsets (bcGroups bc))
+         ++ [ "    pass" ]
+    group i neural args off g =
+      let n = length (bgQueries g)
+          method = if bgCumul g then "integrate" else "forward"
+          params = concatMap ((", " ++) . paramExpr neural n) args
+          (setup, call) = case bgBatch g of
+            SoA lit -> ([], "main." ++ method ++ "(" ++ lit ++ params ++ ")")
+            -- Evaluated inside the program's namespace: a sample may name
+            -- the program's own ADT constructors.
+            Bucketed lit _ -> ( [ "        _ns['_samples'] = eval(" ++ show lit ++ ", _ns)" ]
+                              , "bucketed(main." ++ method ++ ", _samples" ++ params ++ ")" )
+          ix = "str(" ++ show off ++ " + _k)"
+      in [ "    try:"
+         , "        signal.setitimer(signal.ITIMER_REAL, 20.0)"
+         ] ++ setup ++
+         [ "        _r = eval(" ++ show call ++ ", _ns)"
+         , "        signal.setitimer(signal.ITIMER_REAL, 0)"
+         , "        for _k in range(" ++ show n ++ "):"
+         , "            try:"
+         , "                _out('R " ++ show i ++ " ' + " ++ ix ++ " + ' ' + repr(float(_leaf(_r[0], _k))) + ' ' + repr(float(_leaf(_r[1][0], _k))) + ' ' + str(bool(_leaf(_r[1][1], _k))))"
+         , "            except BaseException as _e:"
+         , "                _out('E " ++ show i ++ " ' + " ++ ix ++ " + ' ' + _msg(_e))"
+         , "    except BaseException as _e:"
+         , "        signal.setitimer(signal.ITIMER_REAL, 0)"
+         , "        for _k in range(" ++ show n ++ "):"
+         , "            _out('E " ++ show i ++ " ' + " ++ ix ++ " + ' ' + _msg(_e))"
+         ]
+    -- A neural @main@'s argument is one logit vector shared by every point;
+    -- batched, it is a @[B, n]@ column of it, as the corpus passes per-point
+    -- symbols. Any other argument broadcasts.
+    paramExpr neural n v
+      | neural, VList _ <- v, Just col <- batchSymColumn (replicate n (VTuple (VInt 2) v)) = col
+      | otherwise = Py.pyVal v
+
+-- | Run every batched case through one torch-enabled Python process and pair
+-- each query with the interpreter's answer. A batched answer agrees if it
+-- agrees with the interpreter at the point or, for a float32-rounded point,
+-- at the rounded point.
+runBatchedPythonBatch :: FilePath -> [BatchedCase] -> IO [Disagreement]
+runBatchedPythonBatch py cases = withSystemTempDirectory "nest-batched" $ \dir -> do
+  projectDir <- getCurrentDirectory
+  let driverPath = dir </> "driver.py"
+  writeFile driverPath (batchedDriver projectDir cases)
+  (_, out, err) <- runBounded py [driverPath]
+  let parsed = [ x | Just x <- map parseAnswerLine (lines out) ]
+      tailErr = oneLine (reverse (take 400 (reverse err)))
+      answerFor i j = case [ a | (i', Just j', a) <- parsed, i' == i, j' == j ] of
+        (a : _) -> a
+        [] -> case [ a | (i', Nothing, a) <- parsed, i' == i ] of
+          (a : _) -> a
+          [] -> Raised ("no answer from the batched process; stderr: " ++ tailErr)
+  return [ Disagreement "batched" (acProgram (bcCase bc)) q ia ba
+         | (i, bc) <- zip [0 ..] cases
+         , (j, (q, ia, rounded)) <- zip [0 ..] (concatMap bgQueries (bcGroups bc))
+         , let ba = answerFor i j
+         , not (answersAgree ia ba || maybe False (`answersAgree` ba) rounded) ]
 
 -- ---------------------------------------------------------------------------
 -- Construct inventory
@@ -436,6 +971,37 @@ valueExprs v = case v of
 -- 'prop_Fuzz_BackendsAgree' actually evaluates in both backends.
 inferenceBodies :: IREnv -> [IRExpr]
 inferenceBodies (IREnv gs _ _) = [ b | g <- gs, Just (b, _) <- [probFun g, integFun g] ]
+
+-- | The probability, integrate, writeLogits and normal bodies of every group:
+-- every body that has a value the backends can agree on. The corpus side of
+-- 'BackendCoverage''s census.
+deterministicBodies :: IREnv -> [IRExpr]
+deterministicBodies (IREnv gs _ _) =
+  [ b | g <- gs, Just (b, _) <- [probFun g, integFun g, writeLogitsFun g, normalFun g] ]
+
+-- | The bodies a compared case puts through the backends: every group's
+-- inference bodies (as 'inferenceBodies'; a helper's are reached through
+-- @main@'s), the normal and writeLogits body of each group a query of that
+-- kind was answered for, and, when any writeLogits query was, the per-tuple-
+-- component normal functions a writeLogits body calls.
+comparedBodies :: AgreementCase -> [IRExpr]
+comparedBodies c = inferenceBodies env ++
+  [ b | g <- gs, Just (b, _) <- [normalFun g], groupName g `elem` normals ] ++
+  [ b | g <- gs, Just (b, _) <- [writeLogitsFun g], groupName g `elem` logits ] ++
+  [ b | not (null logits), g <- gs, Just _ <- [componentNormalName (groupName g)], Just (b, _) <- [normalFun g] ]
+  where
+    env@(IREnv gs _ _) = acEnv c
+    normals = [ g | (QNormal g _, _) <- acQueries c ]
+    logits = [ g | (QWriteLogits g _, _) <- acQueries c ]
+
+-- | A construct a compared body contains but the property does not certify: a
+-- random draw in a writeLogits body (the noise of a dead arm, task
+-- @writelogits-dead-arm-nan@). The property finds its slots by the
+-- interpreter answering them differently under two seeds and leaves them out
+-- of the comparison, so a draw's lowering is never checked. 'BackendCoverage'
+-- removes it from the fuzz side, so it stays listed while the corpus uses it.
+maskedConstruct :: String -> Bool
+maskedConstruct c = c == "IRExpr:IRSample" || "Sample:" `isPrefixOf` c
 
 -- | Every emitted body, generate and writeLogits included: what a corpus
 -- program asks of the backends.

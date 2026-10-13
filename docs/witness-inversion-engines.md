@@ -392,9 +392,17 @@ refusals, all falling through to `setWitnessApply` exactly as before:
 - uses spread over two consumers: `(x + Normal, x + Normal)` needs a joint
   density (design M2), and so does `draw y = x + Normal in x + y`, since `y`
   may be witnessed and then `x`'s latents would be counted twice;
-- a tagged or higher-order application, or one returning a function;
+- a binding whose body cannot be compiled inline (`bindInline`: a top-level
+  callee's own body), or one returning a function;
 - anything non-Gaussian or gated -- a chain gated on its own state is `Bottom`
   in ModalityInfer and never reaches here.
+
+A saturated call of a non-recursive top-level function is affine when its
+arguments are, and its body is affine over the parameters they bind
+(`affineCall`, `affineCallForm`): constant arguments are let-bound, the others
+enter `affineEnv`. The latents the body draws are keyed by the call site too,
+so two calls of one helper draw independent latents, while a latent reaching
+the body through an argument keeps its key and stays shared.
 
 Witnessed variables mix in for free: after an inversion `reinferRecovered` makes
 them `Deterministic`, which the algebra treats as constants. That is what
@@ -403,31 +411,54 @@ answers a partial observation like `(s1, s3)` of a three-step chain, as
 `let-bindings/affineChain*`, `affineSelfSum`, `unwitnessedGaussianLetChain`,
 `higher-order/arrowApplySelfSum`.
 
-## A named function's parameter is witnessed through its own probability function
+## One application rule: `Binding`
 
-Forward chaining inverts through a call `f v` by a per-invocation *tagged* copy
-of f's body (`constructEquivalenceClauses`, `getDependentGroups`). That copy
-used to stop at a field constructor (its clause group has no forward clause),
-so a parameter returned as a list head or tuple field (`f x = x : [x + Normal]`)
-had no point inverse and reached the set-witness engine, which refuses tagged
-invocations. `getDependentGroups` now follows inverse-only groups into their
-fields. Two consumers then had to stop dropping the sibling fields that
-inverse never reads (task `named-function-list-head-witness-not-recovered`):
+Every probabilistic application `l v` is resolved to a `Binding`, whatever its
+head: a lambda in place (a `draw`), a named function, a function parameter, a
+let-bound lambda (`resolveBinding`; task `binding-resolver-one-application-rule`,
+design `law-carrying-modality` §C). It names the resolved lambda, its
+parameter, body and occurrences, forward chaining's invocation tag, and two
+facts the engines decide on instead of the head's syntax:
 
-- `toIRInference`'s probabilistic `Apply` arm folds the body back in for a
-  saturated call of a top-level function with deterministic leading arguments
-  (`namedCall`): the body factor is the callee's own `_prob` called at the
-  recovered witness (inside the closure when the call returns a function). Any
-  other tagged application whose variable sits under a field constructor is
-  denied point inversion (`fieldWitnessUnfolded`), which is what it got before.
-- The set-witness `transportDirect` adds its residue factor when the spine
-  crosses a call (`isNamedCallNode`), not only a syntactic constructor
-  (`higher-order/namedFunctionTupleUnderIf`).
+- `bindScope`: how the body is made meaningful at the call site. A curried
+  callee's leading parameters are let-bound under fresh names when their
+  arguments are deterministic (`enterBindingScope`); a lambda bound that way to
+  a function parameter is recorded in `boundLambdas`, so a call through the
+  parameter is a binding too.
+- `bindTopLevel`: a top-level callee's body is never compiled inline as a body
+  factor, because it may be recursive. Its body factor is the callee's own
+  `_prob` at the recovered witness (`namedCall`), or nothing.
 
-Corpus `higher-order/namedFunction*`, `rewriteProbeHelperTuple*`. Still open:
-`known-issues/ouChainRecursive` (an `if` over list arms, in any spelling) and
-`namedFunctionTwoRandomArgs`; and ModalityInfer gives a top-level parameter no
-`IWit`, so a helper feeding its parameter to a neural net stays `Bottom`.
+The modality engine asks the witness question of the same resolved lambda for
+every head (`ModalityInfer.letBoundMod`), so a helper's parameter is `IWit`
+like a `draw`'s. The engines:
+
+- **point inversion** folds the body inline where `bindInline`, else uses
+  `namedCall` where the variable reaches a field, else the single witness. The
+  field test follows `draw` binders (`occursUnderFieldCtor`). A cumulative query
+  through a binding read more than once is refused for every head.
+- **set-valued witnesses** invert through a call the way they invert through a
+  nested `draw` (`callBindingAt`, `invertThroughBinding`): a saturated
+  non-recursive top-level call binds whichever parameter x reaches, the others
+  being deterministic; a call through a bound lambda or a resolved in-scope
+  lambda binds its parameter. A `draw` whose body hides a field constructor
+  carries the residue factor (`letHidesField`).
+- **a random leading argument** (`pair Uniform Uniform`, `obs b p`) is bound
+  first, in parameter order, as a curried lambda in place binds
+  (`leadingArgBinding`): its witness is read from the call's forward-chaining
+  copy, and its body factor is the call with the argument replaced by the
+  recovered variable. `ANY` in that witness slot is a runtime refusal, and the
+  cumulative variant is refused.
+
+Corpus `higher-order/namedFunction*`, `rewriteProbeHelper*`,
+`helperCallsHelperRandomArg`, `namedHof*`, `set-witness/absNTopLevelSetWitness`,
+`either-maybe/observePredicateParameterLambda`.
+
+Forward chaining still copies one level of a callee's body per invocation:
+`getDependentGroups` does not follow equivalence groups, so a `draw` inside a
+callee, or an application of a function parameter, has no point inverse in the
+tagged copy. Those shapes reach the set-witness engine, which enters them
+through the binding instead.
 
 ## Forward chaining never re-derives a chain name it already has
 

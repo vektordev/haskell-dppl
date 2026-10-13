@@ -28,7 +28,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, structural)
-import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
+import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
@@ -50,7 +50,7 @@ import System.Random (StdGen, mkStdGen)
 import Control.Monad.Random (Rand, evalRand)
 import Control.Monad (forM, forM_, when)
 import Data.Number.Erf (erf)
-import Utils (splitByString)
+import Utils (splitByString, reflexiveEq)
 import Data.Maybe (isJust)
 import TestSupport (expectVariantRefused)
 import Data.Functor.Identity (runIdentity)
@@ -59,7 +59,10 @@ import SPLL.Validator (validateProgram)
 import SPLL.ReservedNames (queryParamName, distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
-import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement)
+import End2EndTesting (findTorchPython, noTorch)
+import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
+                         runPythonBatchWith, runJuliaBatchWith, Disagreement(..),
+                         prepareBatchedCase, runBatchedPythonBatch)
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -1756,6 +1759,41 @@ test_gaussianChainIRNotExponential = testGroup "gaussianChainIRNotExponential"
                   ++ " (" ++ show small ++ " -> " ++ show large ++ ")")
         (ratio < 8)
 
+-- | Task short-gaussian-trajectory-module-larger-than-long: a function with at
+-- most @--marginalSlots@ correlated slots gets a probability variant per mask,
+-- each compiled from the program with the masked slots unobserved. The
+-- dispatcher calls one only after testing that every slot it leaves concrete
+-- is not ANY, yet each variant re-guarded those slots, and every guard's ANY
+-- arm was another copy of the inference with that slot unobserved too. So the
+-- 15 variants of the 4-step Gaussian trajectory were 5.6x the size of the base
+-- function's own dispatcher and body, as optimized IR (the -O2 module was 293
+-- KB, against 53 KB at five steps, which has no variants).
+-- 'MaskVariants.assumeObserved' folds those tests; the variants are now 2.1x
+-- the base, about 5 KB of Python each. The bound of 3.5x fails on the old shape.
+test_shortGaussianTrajectoryVariantsCompact :: TestTree
+test_shortGaussianTrajectoryVariantsCompact = testCase "shortGaussianTrajectoryVariantsCompact" $
+  case tryParseProgram "trajectory4" src of
+    Left err -> assertFailure ("parse error: " ++ show err)
+    Right prog -> case compile defaultCompilerConfig prog of
+      Left e -> assertFailure ("compile error: " ++ show e)
+      Right ir@(IREnv groups _ _) -> do
+        let probSize g = maybe 0 (length . show . fst) (probFun g)
+            variants = [ g | g <- groups, maskVariantOf g == Just "main" ]
+            base = probSize (lookupIREnv "main" ir)
+            total = sum (map probSize variants)
+            ratio = fromIntegral total / fromIntegral base :: Double
+        assertEqual "variants of main" 15 (length variants)
+        assertBool ("the 15 variants are " ++ show ratio ++ "x the base probability function ("
+                    ++ show total ++ " vs " ++ show base ++ ")")
+          (ratio < 3.5)
+  where
+    src = unlines $
+      ["main thetas ="]
+      ++ [ "  draw s" ++ show i ++ " = (" ++ prev i ++ " - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in"
+         | i <- [1 .. 4 :: Int] ]
+      ++ ["  (s1, (s2, (s3, s4)))"]
+    prev i = if i == 1 then "3.0" else "s" ++ show (i - 1)
+
 -- | Task anyexcept-any-arm-compiled-instead-of-constant: a query of an InjF
 -- whose inverse yields "any value except c" (here @==@) is measured as the
 -- marginal minus the point. The marginal is the constant (1, dim 0) and must
@@ -1956,6 +1994,35 @@ test_mixtureNegativeLogNormalScaleCompiles = testCase "mixtureNegativeLogNormalS
       \within 10s -- this is the NaN-poisons-the-optimizer-fixpoint non-termination \
       \bug task mixture-combination-rules-compile-hang fixed"
     Just n -> assertBool ("unexpectedly empty compiled IR (" ++ show n ++ " chars)") (n > 0)
+
+-- | A constant that folds to NaN compiles (docs-repo task
+-- nan-constant-hangs-enum-annotation-fixpoint). Its 'DiscreteValues' tag
+-- holds @VFloat NaN@, and 'annotateEnumsProg' iterated its tag environment
+-- with a @(==)@ convergence test, which never holds once a NaN is in it, so
+-- the compile ran (and allocated) forever before the first stage dump.
+-- 'Utils.reflexiveEq' is the fix. The shapes: the task's @0.0 / 0.0@,
+-- @Infinity - Infinity@, and the Slow fuzz draw's
+-- @mult 0.0 (recip 0.0)@ (prop_Fuzz_MixtureFollowsCombinationRules,
+-- replay 117031) as a mixture arm.
+test_nanConstantCompiles :: TestTree
+test_nanConstantCompiles = testGroup "NaN-valued constant compiles"
+  [ testCase "reflexiveEq is reflexive on NaN and still tells values apart" $ do
+      let nan = 0 / 0 :: Double
+      assertBool "[NaN] /= [NaN] under reflexiveEq" (reflexiveEq [nan] [nan])
+      assertBool "[0] == [1] under reflexiveEq" (not (reflexiveEq [0, nan] [1, nan :: Double]))
+  , compiles "0.0 / 0.0" (constF 0 #/# constF 0)
+  , compiles "Infinity - Infinity" (constF inf #+# negF (constF inf))
+  , compiles "mixture arm mult 0.0 (recip 0.0)"
+      (ifThenElse (uniform #<# constF 0.5) (constF 0 #*# recipF (constF 0)) (constF 1))
+  ]
+  where
+    inf = 1 / 0
+    compiles name expr = testCase name $ do
+      let prog = Program [("main", expr)] [] [] [] []
+      annotated <- timeout (10 * 1000000) (evaluate (length (show (annotateEnumsProg prog))))
+      assertBool "annotateEnumsProg did not finish within 10s (NaN-poisoned fixpoint)" (isJust annotated)
+      compiled <- timeout (10 * 1000000) (evaluate (length (show (compile defaultCompilerConfig prog))))
+      assertBool "compile did not finish within 10s" (isJust compiled)
 
 -- | A right-nested tuple of @n@ independent coin flips compiles and answers
 -- in milliseconds (docs-repo task tuple-probability-exponential-in-arity).
@@ -3569,6 +3636,109 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
         Just jl -> do
           jlD <- runJuliaBatch jl acs
           assertBool (concatMap renderDisagreement jlD) (null jlD)
+  , testCase "normal and writeLogits body queries round-trip through every scalar backend, and a wrong vector disagrees" $ do
+      -- Task backend-agreement-writelogits-and-normal-functions: the body
+      -- queries' "V" output lines are parsed and compared slot by slot. The
+      -- wrong-vector half keeps the comparison from passing vacuously.
+      let rows = [ ("main = Normal * 3.0 + 1.0", [QNormal "main" [], QWriteLogits "main" []])
+                 , ("main = Uniform < 0.3", [QWriteLogits "main" []]) ]
+      acs <- forM rows $ \(src, qs) -> do
+        prog <- parseOrFail src
+        env <- either (\e -> assertFailure (src ++ ": " ++ show e)) return (compile defaultCompilerConfig prog)
+        answered <- forM qs $ \q -> case interpreterBodyAnswer prog env [] q of
+          Just a -> return (q, a)
+          Nothing -> assertFailure (src ++ ": the interpreter does not answer " ++ show q)
+        return (AgreementCase prog env [] [] answered)
+      case acQueries (head acs) of
+        ((_, a) : _) -> assertBool ("main_normal of Normal * 3 + 1 is (1, 3), got " ++ show a)
+                          (answersAgree a (AnsweredVec [Just 1.0, Just 3.0]))
+        [] -> assertFailure "no answered query"
+      let wrong = [ c { acQueries = [ (q, AnsweredVec [Just 1.0, Just 4.0]) | (q@(QNormal _ _), _) <- acQueries c ] }
+                  | c <- take 1 acs ]
+          check run = do
+            ds <- run acs
+            assertBool (concatMap renderDisagreement ds) (null ds)
+            dsWrong <- run wrong
+            assertEqual "a wrong (mu, sigma) is one disagreement" 1 (length dsWrong)
+      check runPythonBatch
+      julia <- findJulia
+      maybe (return ()) (check . runJuliaBatch) julia
+  , testCase "generate samples round-trip through every scalar backend and land in the interpreter's support, and an off-support or mistyped sample disagrees" $ do
+      -- Task backend-agreement-generate-support. Each row's samples are
+      -- decoded as its return type and judged by the interpreter's
+      -- probability function. The ADT rows name constructors the backends
+      -- mangle (Any, Nil); the shared-draw row is the sharing class the
+      -- check exists for: a re-evaluated let would give (True, False).
+      let rows = [ ("main = Normal * 2.0 + 1.0", TFloat)
+                 , ("main = if Uniform < 0.3 then 1 else 2", TInt)
+                 , ("main = draw x = Uniform < 0.5 in (x, x)", Tuple TBool TBool)
+                 , ("main = if Uniform < 0.4 then left Uniform else right (Uniform < 0.5)", TEither TFloat TBool)
+                 , ("main = if Uniform < 0.5 then [1, 2] else [3]", ListOf TInt)
+                 , ("data Box = Any | Possible | Nil\nmain = if Uniform < 0.3 then Any else (if Uniform < 0.5 then Possible else Nil)", TADT "Box")
+                 , ("data Mix = Zero | Two ma::Int, mb::Bool\nmain = if Uniform < 0.5 then Zero else Two 1 (Uniform < 0.5)", TADT "Mix") ]
+          gens rt = [ (QGen k rt [], Generates) | k <- [1 .. 4] ]
+      acs <- forM rows $ \(src, rt) -> do
+        prog <- parseOrFail src
+        env <- either (\e -> assertFailure (src ++ ": " ++ show e)) return (compile defaultCompilerConfig prog)
+        return (AgreementCase prog env [] [] (gens rt))
+      shared <- parseOrFail "main = draw x = Uniform < 0.5 in (x, x)"
+      sharedEnv <- either (\e -> assertFailure (show e)) return (compile defaultCompilerConfig shared)
+      case interpreterAnswer shared sharedEnv [] (QProb (VTuple (VBool True) (VBool False))) of
+        Just (Answered _ _ True) -> return ()
+        other -> assertFailure ("the interpreter must call (True, False) impossible for a shared draw, got " ++ show other)
+      -- An env whose generate is another program's: Uniform + 5 sampled,
+      -- Uniform's probability function judging.
+      unitProg <- parseOrFail "main = Uniform"
+      unitEnv <- either (\e -> assertFailure (show e)) return (compile defaultCompilerConfig unitProg)
+      shiftedEnv <- parseOrFail "main = Uniform + 5.0" >>= either (\e -> assertFailure (show e)) return . compile defaultCompilerConfig
+      let IREnv ugs ud uc = unitEnv
+          IREnv sgs _ _ = shiftedEnv
+          shiftedGen = genFun (head [ g | g <- sgs, groupName g == "main" ])
+          offEnv = IREnv [ if groupName g == "main" then g { genFun = shiftedGen } else g | g <- ugs ] ud uc
+          offCase = AgreementCase unitProg offEnv [] [] (gens TFloat)
+          mistyped = AgreementCase unitProg unitEnv [] [] (gens TInt)
+          check run = do
+            (ds, outcomes) <- run acs
+            assertBool (concatMap renderDisagreement ds) (null ds)
+            assertEqual "every sample decodes and lies in the support" (replicate (4 * length rows) "in support") outcomes
+            (dsOff, _) <- run [offCase]
+            assertBool ("Uniform + 5 sampled, Uniform judging: 4 off-support samples, got " ++ concatMap renderDisagreement dsOff)
+              (length dsOff == 4 && all (offSupportAnswer . dBackendA) dsOff)
+            (dsTy, _) <- run [mistyped]
+            assertBool ("a Float decoded as an Int: 4 undecodable samples, got " ++ concatMap renderDisagreement dsTy)
+              (length dsTy == 4 && all (undecodable . dBackendA) dsTy)
+          offSupportAnswer (BadSample why) = "off the interpreter's support" `isPrefixOf` why
+          offSupportAnswer _ = False
+          undecodable (BadSample why) = "undecodable sample" `isPrefixOf` why
+          undecodable _ = False
+      check runPythonBatchWith
+      julia <- findJulia
+      maybe (return ()) (check . runJuliaBatchWith) julia
+  , testCase "the batched arm round-trips structure-of-arrays and bucketed batches, and a wrong answer disagrees" $ do
+      -- Task backend-agreement-batched-arm. The prob points include ANY, so
+      -- they go through the bucketing wrapper; the integrate points are one
+      -- float32 structure-of-arrays literal, and 0.1 is not a float32, so
+      -- it is answered at the rounded point ('float32Point').
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorch "batched arm round trip" >>= maybe (return ()) assertFailure
+        Just py -> do
+          prog <- parseOrFail "main = if Uniform < 0.3 then Normal * 2.0 else Uniform + 3.0"
+          env <- either (\e -> assertFailure (show e)) return (compile defaultCompilerConfig prog)
+          let queries pts = [ (q, a) | q <- pts, Just a <- [interpreterAnswer prog env [] q] ]
+              exact = [QProb (VFloat 0.5), QProb (VFloat 3.5), QProb VAny, QInteg (VFloat 0.75), QInteg (VFloat 3.25)]
+              mk qs = do
+                r <- prepareBatchedCase [] (AgreementCase prog env [] [] qs)
+                either (\why -> assertFailure ("not batched-eligible: " ++ why)) return r
+          assertEqual "the interpreter answers every point" 6 (length (queries (QInteg (VFloat 0.1) : exact)))
+          agreeing <- mk (queries (QInteg (VFloat 0.1) : exact))
+          ds <- runBatchedPythonBatch py [agreeing]
+          assertBool (concatMap renderDisagreement ds) (null ds)
+          let nudge (q, Answered p d i) = (q, Answered (p + 0.25) d i)
+              nudge qa = qa
+          wrong <- mk (map nudge (queries exact))
+          dsWrong <- runBatchedPythonBatch py [wrong]
+          assertEqual "every nudged answer is a disagreement" (length exact) (length dsWrong)
   ]
 
 -- | A literal mock-NN parameter: the digit distribution, padded to the ten
@@ -4957,62 +5127,95 @@ structuralPropagationTests corpus = corpusSweepAll corpus SweepSpec
   , sweepNote = "each structural enum rule agrees with listing at every listable corpus node" } $ \es ->
   return $ testGroup "structural enum propagation agrees with listing"
   [ testCase "every corpus node a structural rule answers" $ do
-      compared <- compareStructuralWithListing es (<= structuralListingBound)
-      -- Non-vacuity: the corpus must exercise the rules.
+      (compared, wide, direct) <- compareStructuralWithListing es
+      -- Non-vacuity: the corpus must exercise the rules, and the direct
+      -- listing must be pinned against 'listedTag' somewhere before it
+      -- stands in for it on a wide node.
       assertBool ("structural rules answered only " ++ show compared ++ " corpus nodes") (compared > 100)
+      assertBool ("the direct listing agreed with listedTag at only " ++ show direct ++ " corpus nodes") (direct > 100)
+      -- The wide half: if the corpus stops holding a node above the bound,
+      -- the direct-listing path is unreached and this guard should go.
+      assertBool "no corpus node lists above the bound" (wide > 0)
   ]
 
--- | The wide half of 'structuralPropagationTests': the corpus nodes whose
--- listing is above 'structuralListingBound'. Today that is one node, the
--- 20-field @Face@ constructor of drawProductReadPerField20 (2^20 tuples, each
--- one an interpreter run: ~55 s on its own, the main binary's wall-clock
--- floor while it ran in the default suite).
-slowStructuralPropagationTests :: Corpus -> IO TestTree
-slowStructuralPropagationTests corpus = corpusSweepAll corpus SweepSpec
-  { sweepName = "Slow.Internals (slow).structural enum propagation agrees with listing (wide)"
-  , sweepTier = Slow, sweepSlow = IgnoreSlow, sweepSelect = const True
-  , sweepNote = "the structural rules against listing at the corpus nodes above the listing bound" } $ \es ->
-  return $ testGroup "structural enum propagation agrees with listing (wide)"
-  [ testCase "every corpus node a structural rule answers, listing above the bound" $ do
-      compared <- compareStructuralWithListing es (> structuralListingBound)
-      -- Non-vacuity: if the corpus stops holding a wide node, this half
-      -- checks nothing and should be removed rather than pass.
-      assertBool "no corpus node lists above the bound" (compared > 0)
-  ]
-
--- | How many tuples the default suite's listing may evaluate per node: the
--- product of the operands' value counts. Listing evaluates the forward
--- function once per tuple, ~50 us each, so this is ~3 s at worst. Every node
--- of the corpus but one is at or below 2^14 (task
--- structural-enum-propagation-test-is-the-critical-path).
+-- | How many tuples 'listedTag' may evaluate per node: the product of the
+-- operands' value counts. It evaluates the forward function once per tuple
+-- through the IR interpreter, ~50 us each, so this is ~3 s at worst. Above it
+-- the reference is 'directListing' instead (task
+-- structural-enum-propagation-test-is-the-critical-path). Every corpus node
+-- but one is at or below 2^14; the exception is the 20-field @Face@
+-- constructor of drawProductReadPerField20 (2^20 tuples, ~53 s through the
+-- interpreter, ~1 s directly).
 structuralListingBound :: Integer
 structuralListingBound = 65536
 
--- | Compare each structural rule against listing ('listedTag') at every
--- corpus InjF node whose operands are listable and whose listing size passes
--- the filter, returning the number of nodes compared.
-compareStructuralWithListing :: [CorpusEntry] -> (Integer -> Bool) -> IO Int
-compareStructuralWithListing entries sizeOk = do
-  compared <- forM entries $ \entry -> do
+-- | Listing without the interpreter, for the ADT implicit functions
+-- (constructors, constructor tests, field accessors): the same cross product,
+-- filtered by 'implicitFunctionApplicable' and evaluated by
+-- 'implicitFunctionImpl' -- which is what the interpreter itself dispatches
+-- an implicit function to -- then put in canonical form exactly as
+-- 'listedTag' (uncapped) does. 'Nothing' for any other InjF. Pinned equal to
+-- 'listedTag' at every corpus node within the bound where it answers.
+directListing :: [ADTDecl] -> String -> [MultiValue] -> Maybe (Maybe MultiValue)
+directListing ds name operands
+  | name `elem` implicitFunctionNames ds = Just $
+      -- Without the whole-value 'nubValues' 'listedTag' applies first: it
+      -- cannot change 'valueListToMultiValue''s answer, which de-duplicates
+      -- every leaf, and over 2^20 values it would be most of the cost.
+      case [ implicitFunctionImpl ds name t
+           | t <- mapM multiValueToValueList operands
+           , implicitFunctionApplicable ds name t ] of
+        [] -> Nothing
+        vals -> Just (valueListToMultiValue vals)
+  | otherwise = Nothing
+
+-- | Compare each structural rule against listing at every corpus InjF node
+-- whose operands are listable. The reference is 'listedTag' within
+-- 'structuralListingBound' and 'directListing' above it; within the bound,
+-- 'directListing' is also checked against 'listedTag' wherever it answers.
+-- Returns the nodes compared, the nodes above the bound, and the nodes where
+-- the two listings were checked against each other.
+compareStructuralWithListing :: [CorpusEntry] -> IO (Int, Int, Int)
+compareStructuralWithListing entries = do
+  counts <- forM entries $ \entry -> do
     let path = cePpl entry
     case rtypedProgram (ceProgram entry) of
-      Left _ -> return 0
+      Left _ -> return (0, 0, 0)
       Right rtyped -> do
         let annotated = annotateEnumsProg rtyped
             ds = adts rtyped
-            cases = [ (name, operands, structural', listed)
+            nodes = [ (name, operands, structural', size)
                     | Expr _ (InjF (Named name) params) <- allNodes annotated
                     , Just rule <- [structuralTag ds name]
                     , Just operands <- [mapM tagOf params]
                     , all listable operands
-                    , sizeOk (product (mapMaybe enumeratedCount operands))
-                    , Just structural' <- [rule operands]
-                    , Just listed <- [listedTag ds Nothing name operands] ]
-        forM_ cases $ \(name, operands, s, l) ->
-          assertEqual (path ++ ": " ++ name ++ " " ++ show operands) (Just l) s
-        return (length cases)
-  return (sum compared)
+                    , let size = product (mapMaybe enumeratedCount operands)
+                    , Just structural' <- [rule operands] ]
+            label name operands = path ++ ": " ++ name ++ " " ++ show operands
+        results <- forM nodes $ \(name, operands, s, size) ->
+          if size <= structuralListingBound
+            then case listedTag ds Nothing name operands of
+              Nothing -> return (0, 0, 0)
+              Just l -> do
+                assertEqual (label name operands) (Just l) s
+                case directListing ds name operands of
+                  Nothing -> return (1, 0, 0)
+                  Just d -> do
+                    assertEqual ("direct listing vs listedTag at " ++ label name operands) (Just l) d
+                    return (1, 0, 1)
+            else case directListing ds name operands of
+              -- Listing answers nothing here; as within the bound, not compared.
+              Just Nothing -> return (0, 1, 0)
+              Just (Just d) -> do
+                assertEqual (label name operands) (Just d) s
+                return (1, 1, 0)
+              Nothing -> assertFailure
+                ("no listing within the bound for a non-implicit InjF: " ++ label name operands
+                 ++ " lists " ++ show size ++ " tuples; raise structuralListingBound or list it directly")
+        return (sum3 results)
+  return (sum3 counts)
   where
+    sum3 = foldr (\(a, b, c) (x, y, z) -> (a + x, b + y, c + z)) (0, 0, 0)
     tagOf e = case [mv | DiscreteValues mv <- tags (getTypeInfo e)] of
       [mv] -> Just mv
       _ -> Nothing
@@ -5278,12 +5481,14 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_gaussianChainIRNotExponential
+  , test_shortGaussianTrajectoryVariantsCompact
   , test_nestedEqualityChainAnyArmConstant
   , test_wideConstructorPruneGuardLinear
   , test_witnessFoldOpenBodyShared
   , test_recursiveListMissedCSE
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
+  , test_nanConstantCompiles
   , test_wideTupleCompilesFast
   , test_wideProductSceneAccessorCompilesFast
   , test_wideProductSceneBatchedCompilesFast
@@ -5330,17 +5535,14 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
 -- `stack test` used to take. 'test_planEnumBoolCtorPolynomial' stays in the fast
 -- group -- its depth pair (8/12) was deliberately chosen to fail in about a
 -- minute rather than OOM (see its own comment), and it is cheap (well under 1s).
-slowInternalsTests :: Corpus -> IO TestTree
-slowInternalsTests corpus = do
-  wide <- slowStructuralPropagationTests corpus
-  return $ testGroup "Internals (slow)"
+slowInternalsTests :: TestTree
+slowInternalsTests = testGroup "Internals (slow)"
     [ test_planEnumRecTopKAndBC
     , test_planEnumM4Polynomial
     , test_planEnumFusedJointStatePolynomial
     , test_planEnumStructuralGrouped
     , test_planHelperOnFoldResultMatchesDense
     , test_planSharedFoldValueMatchesDense
-    , wide
     ]
 
 -- ===========================================================================

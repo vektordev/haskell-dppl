@@ -17,13 +17,11 @@ import Control.Monad.Random
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Statistics.Distribution.Normal (normalDistr)
 import Data.Number.Erf
-import Data.Maybe (fromJust, fromMaybe, isJust, catMaybes)
+import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.List (isSuffixOf)
 import qualified Data.Map.Strict as Map
-import SPLL.ReservedNames (componentNormalName)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
-import Data.Functor ((<&>))
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Vector.Internal.Check (HasCallStack)
 
@@ -81,7 +79,7 @@ data RandomFunctions m a = RandomFunctions
   , raise :: forall b. String -> m b
   }
 
--- Name, Body
+-- Name, Body ('reduceIREnv', from "SPLL.IntermediateRepresentation").
 type ReducedIREnv = [(String, IRExpr)]
 
 -- | The program's top-level names (its functions, the standard library, the
@@ -711,20 +709,6 @@ reduceStep ROpLogSumExp (VFloat a) (VFloat b)
 reduceStep ROpMax (VFloat a) (VFloat b) = VFloat (max a b)
 reduceStep op a b =
   error ("BReduce " ++ show op ++ ": non-numeric terms: " ++ show (a, b))
-
--- Reduces the complex data structure of an IREnv to a simpler reduced form
--- Does this by creating a list of Maybe IRExpressions for each triple of gen, prob, and integ functions and then removes the Nothings
-reduceIREnv :: IREnv -> ReducedIREnv
-reduceIREnv (IREnv funcs _ consts) =
-  map (\(name, val) -> (name, IRConst val)) consts ++
-  concatMap (\(IRFunGroup name gen prob integ writeLogits normal _ _ _ _) ->
-    -- A per-component normal group registers its normal function under the bare
-    -- component name, with no suffix (SPLL.ReservedNames.componentNormalName).
-    case componentNormalName name of
-     Just componentName -> catMaybes [normal <&> \(expr, _) -> (componentName, expr)]
-     Nothing ->
-      catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", writeLogits <&> red name "_writeLogits", normal <&> red name "_normal"]) funcs
-  where red name suffix (expr, _) = (name ++ suffix, expr)
 
 irSample :: (RandomGen g) => Distribution -> Rand g IRValue
 irSample IRUniform = do

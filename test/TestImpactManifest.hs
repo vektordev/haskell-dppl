@@ -4,7 +4,7 @@
 module TestImpactManifest (impactManifestTests) where
 
 import Control.Monad (forM_)
-import Control.Exception (evaluate)
+import Control.Exception (SomeException, evaluate, throwIO, try)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import System.Directory (getTemporaryDirectory, removeFile, doesFileExist)
@@ -27,6 +27,7 @@ impactManifestTests = testGroup "ImpactManifest"
   , testCase "a failing check is not recorded" failureNotRecorded
   , testCase "NEST_FULL_TESTS mode executes a recorded check" fullModeExecutes
   , testCase "a batch executes only its changed members" batchRunsMisses
+  , testCase "an action is skipped on a hit, and recorded only when it returns" actionPassThenSkip
   , testCase "an unreadable manifest is an empty one" corruptManifest
   , testCase "the interpreter closure is the interpreter, not the compiler" closureIsNarrow
   ]
@@ -149,6 +150,29 @@ batchRunsMisses = withManifest $ \file -> do
   _ <- batch m2 [("a", "1"), ("b", "2"), ("c", "1")]
   _ <- batch m2 [("a", "1"), ("c", "1")]
   readIORef seen >>= (@?= [["b"], ["a", "b", "c"]])
+
+-- 'cachedAction', the HUnit-shaped twin of 'cachedProperty': an assertion
+-- fails by throwing, and a throw is not recorded.
+actionPassThenSkip :: IO ()
+actionPassThenSkip = withManifest $ \file -> do
+  ran <- newIORef (0 :: Int)
+  let act ok = do
+        modifyIORef' ran (+ 1)
+        if ok then return "ran" else throwIO (userError "deliberate failure")
+      key = return (Just (hashKey ["a"]))
+      failing m = try (cachedAction m "A" "bad" key (act False)) :: IO (Either SomeException (Either String String))
+  m1 <- openManifest file False
+  r1 <- cachedAction m1 "A" "prog" key (act True)
+  r1 @?= Right "ran"
+  f1 <- failing m1
+  assertBool "the failing action throws" (either (const True) (const False) f1)
+  writeManifest m1
+  m2 <- openManifest file False
+  r2 <- cachedAction m2 "A" "prog" key (act True)
+  assertBool "a recorded pass is skipped" (either (const True) (const False) r2)
+  _ <- failing m2
+  readIORef ran >>= (@?= 3)
+  manifestStats m2 >>= (@?= Map.fromList [("A", (1, 1))])
 
 corruptManifest :: IO ()
 corruptManifest = withManifest $ \file -> do

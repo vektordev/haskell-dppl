@@ -304,9 +304,15 @@ multiValueCardinality (MultiADT constrs)
 -- | The value set a list of values describes, as a 'MultiValue' shaped after
 -- the values themselves (tuples split into their components, and so on).
 --
--- Every level is a /set/: the input is de-duplicated before it is split, and
--- because the components recurse through this same function, so is each
--- component list. Without that, a tuple's component lists carry one copy of a
+-- Every level is a /set/: each leaf list ('MultiDiscretes') is de-duplicated,
+-- and every component list recurses through this same function down to one.
+-- De-duplicating a structured list before splitting it would change nothing:
+-- a component's distinct values, in first-occurrence order, are the same with
+-- or without the repeated rows, and so is each constructor's first occurrence.
+-- It would only cost a whole-value 'nubValues' per level, which over the 2^20
+-- values of a 20-field constructor was most of a test's time (task
+-- structural-enum-propagation-test-is-the-critical-path). Without the leaf
+-- de-duplication, a tuple's component lists carry one copy of a
 -- component per tuple it occurs in -- the four distinct values of
 -- @(Bool, Bool)@ split into @[T,T,F,F]@ and @[T,F,T,F]@ -- and since
 -- 'multiValueToValueList' enumerates a 'MultiTuple' as the product of its
@@ -319,7 +325,7 @@ multiValueCardinality (MultiADT constrs)
 -- @2^(n^2/2)@ values and 'SPLL.Analysis' spent seconds, then minutes,
 -- evaluating them (task structured-accessor-compile-blowup).
 valueListToMultiValue :: [Value] -> MultiValue
-valueListToMultiValue = byShape . nubValues
+valueListToMultiValue = byShape
   where
   byShape lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals
     where
@@ -339,7 +345,7 @@ valueListToMultiValue = byShape . nubValues
             transposed_fields = if null field_lists then [] else transpose field_lists
         in (cn, map valueListToMultiValue transposed_fields)
   byShape ((VADT _ _):_) = error "Not all elements in the list are ADTs"
-  byShape lst = MultiDiscretes lst
+  byShape lst = MultiDiscretes (nubValues lst)
 
 -- | 'nub' for values, in O(n log n) rather than O(n^2).
 --

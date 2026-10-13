@@ -63,7 +63,9 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   use a module-scoped `OPTIONS_GHC` with a comment explaining why (today:
   `test/ArbitrarySPLL.hs` `-Wno-orphans`, `IRCompiler` `-fmax-pmcheck-models`).
 - **Test tiers.** Default `stack test` must be green after every step.
-  `NEST_SLOW_TESTS=1 NEST_FULL_TESTS=1` must be green before a merge or push.
+  `NEST_SLOW_TESTS=1` must be green before a merge or push. Impact analysis
+  stays on for both; `NEST_FULL_TESTS=1` is not required (use it when a change
+  touches the manifest keys or the harness that computes them).
   `NEST_ASPIRATIONAL_TESTS=1` holds tests known to be red. A test your change
   broke is a regression and does not go into Aspirational. A fix that makes
   an aspirational test pass moves it back to Slow in the same commit.
@@ -71,10 +73,6 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   torch-enabled python is found (`NEST_TORCH_PYTHON`); `NEST_SKIP_TORCH=1`
   skips them deliberately, and a run with it set is not a green run.
   Details: `docs/testing.md`.
-- **Report suite time in commits.** A commit message that reports a test
-  result also reports the default suite's wall time against its base,
-  measured the same way on a warm build with `NEST_FULL_TESTS=1`, e.g.
-  `3203/3203 green (90s -> 97s)`.
 - **Static refusals use `Semiring.refuse`, not `error`.** A shape an engine
   can't handle becomes an absent variant with a recorded reason. `error` is
   for internal invariants only (`docs/modality-and-admission.md`).
@@ -130,6 +128,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `IRCompiler` — AST to IR for all three variants, holding all the inference engines.
 - `Semiring` — `PResult` combinators over the linear/log/max-product semirings.
 - `IntermediateRepresentation` — `IRExpr` and `IRFunGroup`.
+- `IRTypeCheck` — the IR's type contract: `IRType` and an inference checker over an `IREnv`.
 - `IRSelectPass` — `IRIf` → `IRSelect` for batched mode.
 - `IROptimizer` — constant folding, CSE and let-in optimization.
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.
@@ -151,7 +150,7 @@ stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
 | `pipeline-and-types.md` | stage order, `Expr`/`TypeInfo`/`Value`/`MultiValue`/`CompilerConfig`, the `PType` order, the `-d` dump |
 | `language-frontend.md` | `draw` vs `define`, `observe`, type signatures, reserved names and mangling, type-error provenance, monomorphization |
 | `modality-and-admission.md` | the Modality layer, conditioning inside `if` arms, re-inferring recovered variables, refusals as absent variants, the admission contract |
-| `witness-inversion-engines.md` | plan-guided enumeration, set-valued witnesses, affine Gaussian marginalisation, witnessing a named function's parameter, forward-chaining acyclicity |
+| `witness-inversion-engines.md` | plan-guided enumeration, set-valued witnesses, affine Gaussian marginalisation, the one application rule (`Binding`), forward-chaining acyclicity |
 | `callee-normalization.md` | callee rewrites, pointwise lifting of arrow-typed `if` mixtures |
 | `enumeration.md` | enumerated branches, enumerability across calls, draw sinking, marginal materialization, the dense budget gate, agreement fusion, tensors in the IR |
 | `semiring-presult-internals.md` | `PResult` combinators, log space, dims, the impossibility flag, branch counting, `anySafeShared`, topK and lower bounds, the query-type guard |

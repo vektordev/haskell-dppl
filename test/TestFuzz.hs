@@ -44,7 +44,7 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, prepareAgreementCase, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+module TestFuzz (fuzzTests, prepareAgreementCase, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests) where
 
@@ -67,11 +67,17 @@ import Data.Maybe (isJust, fromMaybe)
 import Data.Either (rights)
 import Control.Monad.Random (evalRand)
 import System.Random (mkStdGen)
-import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, anyHoles, offSupport,
-                         runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
-                         irEnvConstructs, inferenceBodies)
-import End2EndTesting (resolveNeuralParams, networkNames)
-import Data.List (sort, nub, intersect, find, isInfixOf, isPrefixOf)
+import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer,
+                         anyHoles, offSupport, bodyKind,
+                         runPythonBatchWith, runJuliaBatchWith, findJulia, renderDisagreement,
+                         comparedBodies, irConstructs, maskedConstruct,
+                         BatchedCase(..), BatchedGroup(..), prepareBatchedCase,
+                         runBatchedPythonBatch, batchedComparedBodies,
+                         Disagreement(..), Answer(..))
+import Control.Monad.Random (Rand, getRandom, getRandomR)
+import System.Random (StdGen)
+import End2EndTesting (resolveNeuralParams, networkNames, findTorchPython, noTorch)
+import Data.List (sort, nub, intersect, find, isInfixOf, isPrefixOf, partition)
 import PrettyPrint (pPrintProg)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.PType (PType(Bottom))
@@ -93,7 +99,7 @@ import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
                       InjFSig(..), injFCatalog, injFExcluded, InjFExclusion(..),
                       injFNamesOf, injFLeafApp, tyOfTypedExpr,
                       shrinkTypedProgram, shrinkTypedExpr,
-                      tyGeneralizes,
+                      tyGeneralizes, tyJoin,
                       typedExprSize, typedExprDepth,
                       LetShape(..), letShapeOf, uniquifyBindersFrom,
                       ArrowShape(..), arrowShapeOf, arrowShapeOfProgram,
@@ -563,7 +569,7 @@ withinBudgetScaled name factor act = do
 -- and queries its own probability, exercising the generate/probability code
 -- paths too, not just the compile pipeline itself.
 prop_Fuzz_CompileNeverCrashes :: Property
-prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize fuzzSize genRawFuzzProgram) $ \p -> ioProperty $ withinBudget "prop_Fuzz_CompileNeverCrashes" $ do
+prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize fuzzSize genRawFuzzProgram) $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_CompileNeverCrashes" 2 $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -571,12 +577,12 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize f
       sample <- drawSample p irEnv
       unless (isRuntimeFailure sample) $
         void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
-      return $ property True
+      emitEveryBackend defaultCompilerConfig p irEnv
 
 -- | Well-typed scalar programs: a stronger, unguarded crash-freedom check
 -- (see module header for why this differs from the invariant properties).
 prop_Fuzz_TypedCompileNeverCrashes :: Property
-prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_TypedCompileNeverCrashes" $ do
+prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_TypedCompileNeverCrashes" 2 $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -584,7 +590,27 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrin
       sample <- drawSample p irEnv
       unless (isRuntimeFailure sample) $
         void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
-      return $ property True
+      emitEveryBackend defaultCompilerConfig p irEnv
+
+-- | Crash-freedom through codegen, for a program that compiled to @irEnv@
+-- under @conf@: emit it for every backend the CLI's @compile@ subcommand
+-- reaches ('codeGenToLang') and force the emitted source in full. Scalar Python
+-- and Julia reuse @irEnv@ ('emitCompiled'); batched Python needs its own
+-- compile under @batched = True@, which is why the callers budget two compiles
+-- per draw. A refusal ('Left') passes; a Haskell exception fails, naming the
+-- backend. Nothing is executed, so no Python or Julia install is involved.
+emitEveryBackend :: CompilerConfig -> Program -> IREnv -> IO Property
+emitEveryBackend conf p irEnv = conjoin <$> mapM emitOne
+  [ ("Python", emitCompiled TargetPython False conf irEnv)
+  , ("Julia", emitCompiled TargetJulia False conf irEnv)
+  , ("batched Python", codeGenToLang TargetPython False conf{batched = True} p)
+  ]
+  where
+    emitOne (backend, out) = do
+      r <- trySync (evaluate (either length length out))
+      return $ case r of
+        Right _ -> property True
+        Left e -> counterexample (backend ++ " codegen threw: " ++ show e) False
 
 -- | 'compile' never hands back an 'IREnv' whose probability/integrate/
 -- normal/writeLogits bodies draw randomness (task
@@ -1424,6 +1450,7 @@ showTy TyFloat         = "Float"
 showTy TyInt           = "Int"
 showTy TyBool          = "Bool"
 showTy TyAny           = "?"
+showTy TyUnrecovered   = "<unrecovered>"
 showTy (TyTuple a b)   = "(" ++ showTy a ++ ", " ++ showTy b ++ ")"
 showTy (TyEither a b)  = "Either " ++ showTy a ++ " " ++ showTy b
 showTy (TyList a)      = "[" ++ showTy a ++ "]"
@@ -1643,34 +1670,53 @@ shrinkAgreementBatch xs = map (: []) xs
 
 -- | Compile a program, draw its query points from its own generator, and keep
 -- the points the interpreter answers at, with its answers. 'Left' says why a
--- program has nothing to compare (no compile, no probability function, a
--- timeout, or no point the interpreter answers).
+-- program has nothing to compare (no compile, no body to compare, a timeout,
+-- or no point the interpreter answers).
 --
 -- Points: three forward samples, their @ANY@-holed variants and their
 -- off-support neighbours ('anyHoles', 'offSupport'), at most 'maxAgreementPoints'
 -- of them, at @main@'s probability function -- and at its integrate function
 -- for the ones without a wildcard, where it has one.
+--
+-- Then the normal-parameter and writeLogits bodies ('bodyQueries') of every
+-- top-level function that has them: @main@ at its own arguments, any other
+-- function at seeded draws of its parameter types and their off-support
+-- neighbours.
 prepareAgreementCase :: (Program, Int) -> IO (Either String AgreementCase)
 prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout agreementPerProgramMicros $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return (Left "no compile")
-    Just env | not (hasProbFun env) -> return (Left "no probability function")
     Just env -> do
       let args = fuzzArgs p
-      drawn <- trySync (evaluate (forceShow (evalRand (replicateM 3 (runGenC p env args)) (mkStdGen seed))))
-      let samples = [ s | Right ss <- [drawn], s <- ss, queryable s ]
+          backendArgs = resolveNeuralParams p args
+      -- 'agreementGenReference' draws; the first three are the query points'
+      -- samples (a longer run of one generator shares its prefix).
+      drawn <- if hasProbFun env
+                 then trySync (evaluate (forceShow (evalRand (replicateM agreementGenReference (runGenC p env args)) (mkStdGen seed))))
+                 else return (Right [])
+      let samples = [ s | Right ss <- [drawn], s <- take 3 ss, queryable s ]
           points = take maxAgreementPoints (nub (samples ++ concatMap anyHoles samples ++ concatMap offSupport samples))
-          queries = map QProb points
+          queries = if not (hasProbFun env) then [] else
+                    map QProb points
                     ++ (if hasIntegFun env then [ QInteg v | v <- points, not (hasWildcard v) ] else [])
-      answered <- fmap concat $ mapM (\q -> do
-                    r <- trySync (evaluate (forceShow (interpreterAnswer p env args q)))
-                    return [ (q, a) | Right (Just a) <- [r] ]) queries
-      return $ if null answered then Left "interpreter answered no point" else Right AgreementCase
-        { acProgram = p, acEnv = env
-        , acBackendArgs = resolveNeuralParams p args
-        , acNets = networkNames p
-        , acQueries = answered }
+          bodies = bodyQueries p env seed args backendArgs
+      gens <- genQueries p env seed args (case drawn of
+                                            Right ss | all queryable ss -> Just ss
+                                            _ -> Nothing)
+      if null queries && null bodies && null gens then return (Left "no body to compare") else do
+        answered <- fmap concat $ mapM (\q -> do
+                      r <- trySync (evaluate (forceShow (interpreterAnswer p env args q)))
+                      return [ (q, a) | Right (Just a) <- [r] ]) queries
+        answeredBodies <- fmap concat $ mapM (\(q, iargs) -> do
+                      r <- trySync (evaluate (forceShow (interpreterBodyAnswer p env iargs q)))
+                      return [ (q, a) | Right (Just a) <- [r] ]) bodies
+        let allAnswered = answered ++ answeredBodies ++ [ (q, Generates) | q <- gens ]
+        return $ if null allAnswered then Left "interpreter answered no point" else Right AgreementCase
+          { acProgram = p, acEnv = env
+          , acBackendArgs = backendArgs
+          , acNets = networkNames p
+          , acQueries = allAnswered }
   where
     queryable v = not (isRuntimeFailure v) && renderable v
     -- A sample is rendered into both backends' source; a closure or a symbol
@@ -1703,6 +1749,181 @@ prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout a
 maxAgreementPoints :: Int
 maxAgreementPoints = 12
 
+-- | How many times the interpreter runs @main@'s generate for a program
+-- (the first three also give the query points), and how many generate
+-- queries ('QGen') each backend answers.
+agreementGenReference, agreementGenQueries :: Int
+agreementGenReference = 10
+agreementGenQueries = 3
+
+-- | The generate queries of a compiled program (task
+-- backend-agreement-generate-support): 'agreementGenQueries' seeded calls of
+-- @main@'s generate function, each sample to be judged by the interpreter's
+-- probability function ('BackendAgreement.supportCheck'). Only asked where
+-- that judgement means something, which the interpreter's own run shows:
+--
+-- * every one of its 'agreementGenReference' samples is a renderable value
+--   (none raised or failed), so a backend raising is a disagreement and not
+--   a rare failing path the reference happened to miss;
+-- * its probability function answers at every one of them and calls none
+--   impossible -- otherwise it cannot judge a backend's sample either;
+-- * @main@'s return type has a decodable sample form
+--   ('BackendAgreement.decodeSample').
+--
+-- @reference@ is the interpreter's run, 'Nothing' where it raised or a
+-- sample is not a renderable value.
+genQueries :: Program -> IREnv -> Int -> [IRValue] -> Maybe [IRValue] -> IO [Query]
+genQueries p env seed args reference = case (reference, mainSampleType p) of
+  (Just ss@(_ : _), Just rt)
+    | hasProbFun env, isJust (genFun (lookupIREnv "main" env)), decodable rt -> do
+        own <- mapM (\s -> trySync (evaluate (forceShow (interpreterAnswer p env args (QProb s))))) ss
+        return $ if all possible own
+          -- Julia's seed! takes no negative seed.
+          then [ QGen ((seed `mod` 1000003) * (agreementGenQueries + 1) + k) rt args | k <- [1 .. agreementGenQueries] ]
+          else []
+  _ -> return []
+  where
+    possible (Right (Just (Answered _ _ False))) = True
+    possible _ = False
+    decodable rt = case rt of
+      TFloat -> True
+      TInt -> True
+      TBool -> True
+      TUnit -> True
+      Tuple a b -> decodable a && decodable b
+      TEither a b -> decodable a && decodable b
+      ListOf a -> decodable a
+      TADT _ -> True
+      _ -> False
+
+-- | @main@'s return type: its 'rType' past the arrows of its parameters (a
+-- neural @main@ takes its network input).
+mainSampleType :: Program -> Maybe RType
+mainSampleType p = do
+  typed <- either (const Nothing) (Just . fst) (addTypeInfo (annotateProg (annotateEnumsProg p)))
+  binding <- lookup "main" (functions typed)
+  return (result (rType (getTypeInfo binding)))
+  where
+    result (TArrow _ b) = result b
+    result t = t
+
+-- | The normal-parameter ('QNormal') and writeLogits ('QWriteLogits') queries
+-- of a compiled program, each with the arguments the interpreter takes for it
+-- (the query itself carries the backends'). One per top-level function that
+-- has the body, at each of its argument points:
+--
+-- * @main@ at the program's own arguments ('fuzzArgs', resolved for the
+--   backends), the one point a neural @main@'s mock envelope gives;
+-- * any other function at up to 'maxBodyPoints' argument tuples: three
+--   seeded draws of its parameter types ('argGen') and their off-support
+--   neighbours ('offSupport'), like an inference query's points. A function
+--   with a parameter of no generatable type (an arrow, a symbol, a type
+--   variable) is skipped. Its parameters take no network input (only a
+--   neural @main@ reads one), so its interpreter and backend arguments
+--   coincide.
+bodyQueries :: Program -> IREnv -> Int -> [IRValue] -> [IRValue] -> [(Query, [IRValue])]
+bodyQueries p (IREnv gs _ _) seed mainArgs mainBackendArgs =
+  [ (mk (groupName g) bargs, iargs)
+  | (gi, g) <- zip [0 :: Int ..] gs
+  , groupName g `elem` map fst (functions p)
+  , (iargs, bargs) <- pointsFor gi (groupName g)
+  , (present, mk) <- [(isJust (normalFun g), QNormal), (isJust (writeLogitsFun g), QWriteLogits)]
+  , present ]
+  where
+    pointsFor gi name
+      | name == "main" = [(mainArgs, mainBackendArgs)]
+      | otherwise = case paramTypes name >>= mapM (argGen (adts p) 3) of
+          Nothing -> []
+          Just gens ->
+            let drawn = evalRand (replicateM 3 (sequence gens)) (mkStdGen (seed + 7919 * (gi + 1)))
+                neighbours xs = [ take k xs ++ [x'] ++ drop (k + 1) xs | (k, x) <- zip [0 ..] xs, x' <- offSupport x ]
+            in [ (xs, xs) | xs <- take maxBodyPoints (nub (drawn ++ concatMap neighbours drawn)) ]
+    paramTypes name = do
+      typed <- either (const Nothing) (Just . fst) (addTypeInfo (annotateProg (annotateEnumsProg p)))
+      binding <- lookup name (functions typed)
+      return (lambdaParams binding)
+    lambdaParams (Expr ti (Lambda _ b)) = case rType ti of
+      TArrow a _ -> a : lambdaParams b
+      _ -> []
+    lambdaParams _ = []
+
+maxBodyPoints :: Int
+maxBodyPoints = 6
+
+-- | A seeded draw of a value of a type, or 'Nothing' for a type with no value
+-- to draw (an arrow, a symbol, a type variable, an ADT nested past @depth@).
+-- Small values, so a recursive function's counter stays cheap.
+argGen :: [ADTDecl] -> Int -> RType -> Maybe (Rand StdGen IRValue)
+argGen adtDecls depth rt = case rt of
+  TFloat -> Just (VFloat <$> getRandomR (-3, 3))
+  TInt -> Just (VInt <$> getRandomR (0, 4))
+  TBool -> Just (VBool <$> getRandom)
+  Tuple a b -> do
+    ga <- argGen adtDecls depth a
+    gb <- argGen adtDecls depth b
+    Just (VTuple <$> ga <*> gb)
+  TEither a b -> do
+    ga <- argGen adtDecls depth a
+    gb <- argGen adtDecls depth b
+    Just $ do
+      isLeft <- getRandom
+      if isLeft then VEither . Left <$> ga else VEither . Right <$> gb
+  ListOf a -> do
+    ga <- argGen adtDecls depth a
+    Just $ do
+      n <- getRandomR (0, 2)
+      xs <- replicateM n ga
+      return (VList (foldr ListCont EmptyList xs))
+  TADT n | depth > 0 -> do
+    decl <- find ((== n) . dataName) adtDecls
+    let ctors = [ (c, gens) | (c, fields) <- constructors decl
+                            , Just gens <- [mapM (argGen adtDecls (depth - 1) . snd) fields] ]
+    if null ctors then Nothing else Just $ do
+      k <- getRandomR (0, length ctors - 1)
+      let (c, gens) = ctors !! k
+      VADT c <$> sequence gens
+  _ -> Nothing
+
+-- | Batched disagreements of a filed family: the batched backend raised a
+-- message containing the needle where the interpreter answered. Matched on
+-- the message, so a new cause raising the same message hides behind its
+-- family; each family's ticket says how to tell. A wrong value (rather than
+-- a raise) is never listed here: it fails the property. Remove an entry when
+-- its ticket is fixed.
+knownBatchedFamilies :: [(String, String)]
+knownBatchedFamilies =
+  [ ("No match in field accessor", "batched-ctor-test-behind-eq-evaluates-accessor")
+  , ("where() received an invalid combination of arguments", "batched-guarded-select-over-tuple-result")
+  , ("'<' not supported between instances of 'str' and", "cdf-fst-of-nested-tuple-indexes-any")
+  ]
+
+knownBatchedFamily :: Disagreement -> Maybe String
+knownBatchedFamily d = case dBackendA d of
+  Raised msg | dBackend d == "batched" ->
+    case [ t | (needle, t) <- knownBatchedFamilies, needle `isInfixOf` msg ] of
+      (t : _) -> Just t
+      [] -> Nothing
+  _ -> Nothing
+
+-- | A compared case's batched form ('prepareBatchedCase'), or why batched mode
+-- does not take it, under the per-program bound.
+prepareAgreementBatched :: AgreementCase -> IO (Either String BatchedCase)
+prepareAgreementBatched c = fromMaybe (Left "batched compile timed out")
+  <$> timeout agreementPerProgramMicros (prepareBatchedCase (fuzzArgs (acProgram c)) c)
+
+-- | 'findTorchPython', looked up once per process: each lookup imports torch
+-- in a subprocess, about a second.
+{-# NOINLINE torchPythonCache #-}
+torchPythonCache :: MVar (Maybe (Maybe FilePath))
+torchPythonCache = unsafePerformIO (newMVar Nothing)
+
+cachedTorchPython :: IO (Maybe FilePath)
+cachedTorchPython = modifyMVar torchPythonCache $ \cached -> case cached of
+  Just r -> return (cached, r)
+  Nothing -> do
+    r <- findTorchPython
+    return (Just r, r)
+
 -- | Printed once per process: the Julia arm skips, visibly, where there is no
 -- @julia@ -- the same convention 'BatchedPython' follows for a missing torch.
 {-# NOINLINE notesAnnounced #-}
@@ -1722,27 +1943,55 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
       prepared <- mapM prepareAgreementCase batch
       let cases = rights prepared
       if null cases then return discardVacuous else do
-        pyD <- runPythonBatch cases
+        (pyD, pyGen) <- runPythonBatchWith cases
         julia <- findJulia
-        jlD <- case julia of
-          Just j -> runJuliaBatch j cases
+        (jlD, jlGen) <- case julia of
+          Just j -> runJuliaBatchWith j cases
           Nothing -> do
             noteOnce "prop_Fuzz_BackendsAgree: no julia on the PATH; the Julia arm is skipped (interpreter vs Python only)."
-            return []
-        let ds = pyD ++ jlD
+            return ([], [])
+        -- The batched arm (task backend-agreement-batched-arm): the cases
+        -- batched mode takes, all in one torch process. No torch is a
+        -- failure unless NEST_SKIP_TORCH=1 skips it, as for every other
+        -- torch-dependent check.
+        batchedPrep <- mapM prepareAgreementBatched cases
+        let bcases = rights batchedPrep
+        torch <- cachedTorchPython
+        (batchedArm, noTorchFailure, bD) <- case torch of
+          Just py -> (,,) "ran" Nothing <$> (if null bcases then return [] else runBatchedPythonBatch py bcases)
+          Nothing -> do
+            why <- noTorch "prop_Fuzz_BackendsAgree batched arm"
+            return (maybe "skipped (NEST_SKIP_TORCH=1)" (const "no torch python") why, why, [])
+        -- A batched disagreement of a filed family is tabulated, not failed
+        -- ('knownBatchedFamilies'), as 'knownOverPromises' does for the
+        -- admission oracle.
+        let (knownB, newB) = partition (isJust . knownBatchedFamily) bD
+            ds = pyD ++ jlD ++ newB
             nQueries = sum (map (length . acQueries) cases)
+            nBatched = sum [ length (bgQueries g) | b <- bcases, g <- bcGroups b ]
         return
           $ tabulate "julia arm" [maybe "skipped (no julia)" (const "ran") julia]
+          $ tabulate "batched arm" [batchedArm]
+          $ tabulate "known batched family (query; not a failure)" [ fromMaybe "" (knownBatchedFamily d) | d <- knownB ]
+          $ tabulate "batched eligibility of a compared program" [ either id (const "eligible") r | r <- batchedPrep ]
+          $ tabulate "batched query kind" [ kind q | b <- bcases, g <- bcGroups b, (q, _, _) <- bgQueries g ]
+          $ tabulate "IR construct in a batched-compared body" (concatMap (sort . nub . concatMap irConstructs . batchedComparedBodies) bcases)
+          $ maybe id (\msg -> const (counterexample msg False)) noTorchFailure
           $ tabulate "drawn program" [ either id (const "compared") r | r <- prepared ]
           $ tabulate "query kind" [ kind q | c <- cases, (q, _) <- acQueries c ]
-          $ tabulate "IR construct in a compared body" (concatMap (irEnvConstructs inferenceBodies . acEnv) cases)
+          $ tabulate "body kind" [ bodyKind q | c <- cases, (q, _) <- acQueries c ]
+          $ tabulate "generate sample (python)" pyGen
+          $ tabulate "generate sample (julia)" jlGen
+          $ tabulate "IR construct in a compared body" (concatMap (filter (not . maskedConstruct) . sort . nub . concatMap irConstructs . comparedBodies) cases)
           $ counterexample (show (length ds) ++ " disagreement(s) over " ++ show (length cases)
-                            ++ " programs / " ++ show nQueries ++ " interpreter-answered queries; first:\n"
+                            ++ " programs / " ++ show nQueries ++ " interpreter-answered queries ("
+                            ++ show (length bcases) ++ " programs / " ++ show nBatched ++ " queries on the batched arm); first:\n"
                             ++ concatMap renderDisagreement (take 2 ds))
           $ null ds
   where
     kind (QProb v) = "prob" ++ wildcardTag v
     kind (QInteg _) = "integ"
+    kind q = bodyKind q
     wildcardTag :: IRValue -> String
     wildcardTag v = if v == VAny then " ANY" else if "VAny" `isInfixOf` show v then " partial ANY" else ""
 
@@ -1767,7 +2016,9 @@ aspirationalFuzzNames =
   [ ("prop_Fuzz_TypedCompileNeverCrashes",
      "3/3 runs, a different compiler crash each time (getProbIndex's \"More \
      \than one probabilistic argument\", \"found no way to convert to IR\", an \
-     \enumerated conditional meeting a density)")
+     \enumerated conditional meeting a density); since it reaches codegen \
+     \(2026-10-08) also the batched emitter's missing infix form for OpIntDiv/OpMax \
+     \(task batched-int-mult-inverse-no-intdiv)")
   , ("prop_Fuzz_ProbNeverGenerateBacked",
      "3/3 runs: gives up on its discard rate within the wall-clock budget, \
      \or is falsified")
@@ -1832,6 +2083,14 @@ minimizeBy :: (Expr -> Bool) -> Expr -> Expr
 minimizeBy p e = case filter p (shrinkTypedExpr e) of
   (e' : _) -> minimizeBy p e'
   []       -> e
+
+-- | 'minimizeBy' at program level: QuickCheck's greedy loop over
+-- 'shrinkTypedProgram', which is what a property pinned to the failure @p@
+-- shrinks along.
+minimizeProgramBy :: (Program -> Bool) -> Program -> Program
+minimizeProgramBy p q = case filter p (shrinkTypedProgram q) of
+  (q' : _) -> minimizeProgramBy p q'
+  []       -> q
 
 mainBody :: Program -> Maybe Expr
 mainBody p = lookup "main" (functions p)
@@ -1962,6 +2221,28 @@ arrowGeneratorTests = testGroup "Arrow generator"
       -- this the whole function-value surface would generate but never shrink.
       assertEqual "" (Just TyFloat)
         (tyOfTypedExpr (letIn "v0" incLam (apply (var "v0") (constF 1.0))))
+  , testCase "a let-bound function value with a polymorphic body is recoverable" $ do
+      -- Task adt-generator-core-type-recoverable-flake: 'genFunctionLet'
+      -- binds a lambda and applies it in the body. Read as a value, the
+      -- lambda's parameter is free, and @neg@ over a free argument matches
+      -- both its Float and its Int catalog row, so it recovers nothing; the
+      -- parameter is taken from the call site instead.
+      let negLam = "v1" #-># injF "neg" [ifThenElse (constB False) (var "v1") (var "v1")]
+      assertEqual "standalone, the lambda is unrecoverable" Nothing (tyOfTypedExpr negLam)
+      assertEqual "applied in a let body" (Just TyFloat)
+        (tyOfTypedExpr (letIn "v0" negLam (apply (var "v0") normal)))
+      assertEqual "applied to an Int" (Just TyInt)
+        (tyOfTypedExpr (letIn "v0" ("v1" #-># injF "neg" [var "v1"]) (apply (var "v0") (constI 1))))
+  , testCase "a let-bound function value is typed at its call site even when it recovers alone" $
+      -- The neural-draw twin of the above (replay 913155 of "a neural draw's
+      -- core type is recoverable"): @(\\a -> \\b -> b) e@ recovers alone, but
+      -- only as @? -> ?@, which leaves the @neg@ around its call ambiguous.
+      assertEqual "" (Just TyFloat)
+        (tyOfTypedExpr (injF "neg" [letIn "v0" (apply ("a" #-># ("b" #-># var "b")) (constB True))
+                                              (apply (var "v0") normal)]))
+  , testCase "a curried literal lambda has both parameters pushed in" $
+      assertEqual "" (Just TyInt)
+        (tyOfTypedExpr (apply (apply ("a" #-># ("b" #-># injF "neg" [var "b"])) (constB True)) (constI 2)))
   , testCase "a function value shrinks to a constant function, not from within" $
       -- The soundness rule the 'Shrinker' group's type-preservation property
       -- caught the violation of: at a bare lambda nothing says what the
@@ -1979,6 +2260,16 @@ arrowGeneratorTests = testGroup "Arrow generator"
          -- At least: the helper's body and the argument are ordinary draws and
          -- may contain a computed callee of their own.
          .&&. property (arrowShapeOfProgram p >= AppliedFun)
+  , testCase "a helper called only through a let alias is typed at the alias's call" $ do
+      -- replay 272312 of the property below, shrunk by hand: the direct call's
+      -- argument mentions the helper itself, so only the alias's call site
+      -- (@v0 1.0@) pins the parameter, and @mult h0 h0@ over a free parameter
+      -- is ambiguous between Float and Int.
+      let helper = "h0" #-># injF "mult" [var "h0", var "h0"]
+          mainE = apply (var "helper")
+                    (injF "neg" [letIn "v0" (var "helper") (apply (var "v0") (constF 1.0))])
+      assertEqual "" (Just TyFloat)
+        (typedMainCoreTy (Program [("helper", helper), ("main", mainE)] [] [] [] []))
   , testProperty "a helper draw's main type is recoverable" $
       forAll (resize fuzzSize genHelperProgram) $ \p ->
         counterexample (show p) (property (isJust (typedMainCoreTy p)))
@@ -2023,6 +2314,21 @@ adtRecursionGeneratorTests = testGroup "ADT and recursion generator"
       -- replaced by a value of another type: a constructor node's own type
       -- says nothing about its arguments.
       assertEqual "" Nothing (tyOfTypedExpr (injF "MkPt" [constB True, constB True]))
+  , testCase "an ADT draw binding a polymorphic function value is recoverable (seed 890826)" $ do
+      -- The minimal counterexample of --quickcheck-replay=890826 on the
+      -- property below (task adt-generator-core-type-recoverable-flake),
+      -- verbatim: its ADT was incidental, the unrecoverable part was the
+      -- let-bound @\v3 -> neg (...)@ whose parameter only the call site pins.
+      let more = injF "More" [injF "left" [injF "lt" [uniform, constF 0.46678494200011444]]]
+          inner = injF "TCons" [injF "TCons" [cons normal (constL []), constF 0.0], cons (constF (-8.50593741805913)) (constL [])]
+          pick3 = injF "plus" [constI 1, ifThenElse (injF "lt" [uniform, constF (1/3)]) (constI 3)
+                     (ifThenElse (injF "lt" [uniform, constF 0.5]) (constI 2) (constI 1))]
+          negLam = "v3" #-># injF "neg" [ifThenElse (constB False) (var "v3") (var "v3")]
+          body = apply ("v0" #-># injF "fst" [apply ("v1" #-># injF "snd" [injF "TCons" [more, inner]]) pick3])
+                       (apply ("v2" #-># apply (var "v2") normal) negLam)
+          p = Program [("main", body)] [] [ADTDecl "More" [("More", [("idx", TEither TBool TBool)])] Nothing] [] []
+      assertEqual "validates" (Right ()) (validateProgram p)
+      assertEqual "core type" (Just (TyTuple (TyList TyFloat) TyFloat)) (typedMainCoreTy p)
   , testProperty "an ADT draw validates and its core type is recoverable" $
       forAll (resize fuzzSize genTypedProgram) $ \p ->
         not (null (adts p)) ==>
@@ -2434,10 +2740,13 @@ liveLet = letIn "v0" uniform (Expr makeTypeInfo (Var "v0") #+# constF 1.0)
 -- pinned here deterministically.
 --
 -- 'TyAny' read as "free" where it only meant "not recovered": the argument of
--- @sq@ applies a variable bound to a function value, which recovers as '?'.
--- @sq@ is Float-only, so @sq a@ is Float and collapsing it to @a@ passes the
+-- @sq@ applies a variable bound to a function value, which recovered as '?'.
+-- @sq@ is Float-only, so @sq a@ is Float and collapsing it to @a@ passed the
 -- site-local test -- but the enclosing @neg@ is polymorphic, and @neg a@
--- recovers as 'Nothing'.
+-- recovers as 'Nothing'. (Since task adt-generator-core-type-recoverable-flake
+-- the call site types @f@ and this exact shape recovers as Float throughout;
+-- 'notRecoveredUnderSq' keeps the class reachable by applying @f@ through a
+-- selection, which the call-site push does not see.)
 shrinkUnderPolymorphicParent :: Expr
 shrinkUnderPolymorphicParent =
   negF (injF "sq" [letIn "f" ("y" #-># var "y") (apply (var "f") (constF 1.0))])
@@ -2452,6 +2761,82 @@ shrinkChangesParentRule :: Expr
 shrinkChangesParentRule =
   tuple (apply (letIn "a" (constF 0.0) ("b" #-># var "b")) (cons (constB True) nul))
         (constF 0.0)
+
+-- | The function value of 'shrinkUnderPolymorphicParent', applied through an
+-- @if@ so that its parameter is not typed at a call site: @f@ keeps its
+-- value reading, @\y -> y@ at an unrecovered parameter, and the application
+-- recovers as 'TyUnrecovered'.
+notRecoveredArg :: Expr
+notRecoveredArg =
+  letIn "f" ("y" #-># var "y")
+    (apply (ifThenElse (constB True) (var "f") (var "f")) (constF 1.0))
+
+notRecoveredUnderSq :: Expr
+notRecoveredUnderSq = injF "sq" [notRecoveredArg]
+
+-- | Task fuzz-tyany-conflates-free-and-unrecovered: recovery tells "no node
+-- commits this position" ('TyAny') from "some node does, recovery could not
+-- tell to what" ('TyUnrecovered'), and the consumers read the second as
+-- "cannot conclude".
+freeVsUnrecoveredTests :: TestTree
+freeVsUnrecoveredTests = testGroup "free vs not recovered"
+  [ testCase "a free position recovers as TyAny" $ do
+      assertEqual "left pins only its own side" (Just (TyEither TyFloat TyAny))
+        (tyOfTypedExpr (left (constF 1.0)))
+      assertEqual "a constant function's parameter is free" (Just (TyArrow TyAny TyFloat))
+        (tyOfTypedExpr ("p" #-># constF 0.0))
+  , testCase "the first shrinker counterexample's function value is not recovered" $ do
+      -- 'shrinkUnderPolymorphicParent''s @f@, read as a value.
+      assertEqual "the bound value" (Just (TyArrow TyUnrecovered TyUnrecovered))
+        (tyOfTypedExpr ("y" #-># var "y"))
+      assertEqual "applied where the call site cannot type it" (Just TyUnrecovered)
+        (tyOfTypedExpr notRecoveredArg)
+  , testCase "the second shrinker counterexample's callee is not recovered" $
+      -- 'shrinkChangesParentRule''s callee, read on its own.
+      assertEqual "" (Just (TyArrow TyUnrecovered TyUnrecovered))
+        (tyOfTypedExpr (letIn "a" (constF 0.0) ("b" #-># var "b")))
+  , testCase "a not-recovered argument is rejected at its own site" $ do
+      -- Without the split this collapse passed the site-local test, and only
+      -- the per-level re-check one node up caught it.
+      assertBool "sq x does not shrink to x"
+        (notRecoveredArg `notElem` shrinkTypedExpr notRecoveredUnderSq)
+      assertBool "the callee does not collapse onto the bare lambda"
+        (("b" #-># var "b") `notElem` shrinkTypedExpr (letIn "a" (constF 0.0) ("b" #-># var "b")))
+  , testCase "TyUnrecovered generalizes nothing, and only TyAny generalizes it" $ do
+      assertBool "not itself" (not (tyGeneralizes TyUnrecovered TyUnrecovered))
+      assertBool "not a concrete type" (not (tyGeneralizes TyUnrecovered TyFloat))
+      assertBool "no concrete type generalizes it" (not (tyGeneralizes TyFloat TyUnrecovered))
+      assertBool "nor one nested in a structure"
+        (not (tyGeneralizes (TyEither TyFloat TyFloat) (TyEither TyFloat TyUnrecovered)))
+      assertBool "but a free position nested in one does"
+        (tyGeneralizes (TyEither TyFloat TyAny) (TyEither TyFloat TyUnrecovered))
+      assertBool "a free position does" (tyGeneralizes TyAny TyUnrecovered)
+  , testCase "joining a not-recovered reading unfrees the other side's free positions" $ do
+      assertEqual "" (Just (TyEither TyFloat TyUnrecovered))
+        (tyJoin (TyEither TyFloat TyAny) TyUnrecovered)
+      assertEqual "" (Just TyUnrecovered) (tyJoin TyAny TyUnrecovered)
+  , testProperty "a shrink is re-typed under a polymorphic parent (not-recovered argument)" $ once $
+      shrinkPreservesTy (negF notRecoveredUnderSq)
+  , testCase "a main shrink may not drop the call site that types a helper (replay 520205)" $ do
+      -- The helper's parameter is typed at its call in @main@, whose argument
+      -- recovers only through the @if@'s else-arm. Collapsing the @if@ onto
+      -- its then-arm is type-preserving in the scope the *original* program
+      -- recovers, but leaves the helper at its value reading -- parameter not
+      -- recovered -- and @main@ with it.
+      let helper = "h0" #-># injF "head" [injF "Cons" [var "h0", nul]]
+          selected = ifThenElse (constB False) (var "helper") (var "helper")
+          mainE  = apply (var "helper")
+                     (apply (ifThenElse (constB True) selected ("v1" #-># constI 1)) (constI 2))
+          p = Program [("helper", helper), ("main", mainE)] [] [] [] []
+          collapsed = apply (var "helper") (apply selected (constI 2))
+      assertEqual "the original recovers" (Just TyInt) (typedMainCoreTy p)
+      assertEqual "the collapse alone does not"
+        (Just TyUnrecovered) (typedMainCoreTy p { functions = [("helper", helper), ("main", collapsed)] })
+      assertBool "and is not offered"
+        (collapsed `notElem` [ e | p' <- shrinkTypedProgram p, Just e <- [lookup "main" (functions p')] ])
+      assertBool "every offered shrink keeps the core type"
+        (and [ compatibleTys (typedMainCoreTy p') (typedMainCoreTy p) | p' <- shrinkTypedProgram p ])
+  ]
 
 shrinkerTests :: TestTree
 shrinkerTests = testGroup "Shrinker"
@@ -2507,17 +2892,31 @@ shrinkerTests = testGroup "Shrinker"
       -- the first listed is the one shrinking is pinned to, so every run must
       -- end on a program that still breaks it. A shrink that kept only the
       -- second broken (a big program with its Normal gone) is exactly what an
-      -- unpinned shrink would take. Not every draw has a shrink keeping its
-      -- Normal (@head(Cons(Normal, []))@ has none), so the runs only need
-      -- some draw to shrink past the second invariant altogether -- which
-      -- also shows a pinned shrink does make progress.
+      -- unpinned shrink would take.
+      --
+      -- Not every draw has a shrink keeping its Normal below the size bound
+      -- (@head(Cons(Normal, []))@ and @fst(TCons(Normal, 0))@ have none), and
+      -- an earlier version asked only that *some* of 20 random draws got
+      -- there, which no draw did about once in 60 runs (task
+      -- shared-draw-shrink-test-statistical-flake). The draws are now filtered
+      -- on the greedy program-level minimization under "main has a Normal"
+      -- reaching the bound: 'shrinking' takes the first candidate that still
+      -- fails the target, so a pinned shrink of such a draw provably walks the
+      -- same path and ends breaking only the first invariant. That makes the
+      -- last clause hold for *every* run, deterministically, while the draws
+      -- stay random for the first two.
       let holdsOnMain f = maybe False f . mainBody . icProgram
+          bigBound = 3
+          hasNormal = maybe False containsNormal . mainBody
           gaussian = Invariant "fake-gaussian-leaf" [] $ \c ->
             return (if holdsOnMain containsNormal c then Broken "has a Normal leaf" else Holds)
           big = Invariant "fake-big" [] $ \c ->
-            return (if holdsOnMain ((> 3) . typedExprSize) c then Broken "is big" else Holds)
+            return (if holdsOnMain ((> bigBound) . typedExprSize) c then Broken "is big" else Holds)
+          shrinksSmall p = maybe False ((<= bigBound) . typedExprSize)
+                             (mainBody (minimizeProgramBy hasNormal p))
           gen = resize fuzzSize genTypedProgram `suchThat` \p ->
-            maybe False (\b -> containsNormal b && typedExprSize b > 3) (mainBody p)
+            maybe False (\b -> containsNormal b && typedExprSize b > bigBound) (mainBody p)
+            && shrinksSmall p
           onlyGaussian = "all failures on this program: " ++ show [Breaks "fake-gaussian-leaf"]
       rs <- replicateM 20 $ quickCheckWithResult stdArgs { chatty = False }
               (invariantsPropertyOn gen "shrinker-test-shared-draw" 1 [gaussian, big] 100)
@@ -2528,8 +2927,9 @@ shrinkerTests = testGroup "Shrinker"
         .&&. conjoin [ counterexample "a run's final program does not name the first invariant" $
                          "invariant fake-gaussian-leaf broken: has a Normal leaf" `elem` ls
                      | (ls, _) <- finals ]
-        .&&. counterexample "no run shrank to a program breaking only the first invariant"
-               (any (\(ls, k) -> k > 0 && onlyGaussian `elem` ls) finals)
+        .&&. conjoin [ counterexample "a run did not shrink to a program breaking only the first invariant" $
+                         k > 0 && onlyGaussian `elem` ls
+                     | (ls, k) <- finals ]
   , localOption (QuickCheckMaxRatio 30) $
     testProperty "minimization keeps the failing feature and never grows" $
       -- The guard below ("this draw contains a Normal") is satisfied by about
@@ -2549,6 +2949,7 @@ shrinkerTests = testGroup "Shrinker"
             let m = minimizeBy containsNormal b
             in counterexample (show m)
                  (containsNormal m .&&. typedExprSize m <= typedExprSize b)
+  , freeVsUnrecoveredTests
   ]
 
 -- ---------------------------------------------------------------------------

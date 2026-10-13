@@ -26,6 +26,15 @@ rather than `property True`, so QuickCheck's own discard-ratio accounting
 reports this honestly instead of it being invisible inside an inflated
 success count.
 
+The two crash-freedom properties (`prop_Fuzz_CompileNeverCrashes` on raw
+draws, `prop_Fuzz_TypedCompileNeverCrashes` on typed ones) go all the way
+through codegen: a draw that compiles is also emitted as scalar Python, Julia
+and batched Python along the CLI's own path (`SPLL.Prelude.codeGenToLang` /
+`emitCompiled`, refusal guard included), and the emitted source is forced. A
+codegen refusal passes; an exception fails, naming the backend. Nothing is
+executed, so neither needs Python or Julia. Batched Python costs a second
+compile, which is why both budget two compiles per draw.
+
 The five inference invariants share draws (`invariantsProperty`): one draw is
 compiled once per config its invariants read (default, topK, branch
 counting; topK 0 and 0.1 share one compile, since the cutoff is a runtime
@@ -678,8 +687,8 @@ it from the program's own `adts`, and the expression-level exports
 (`genTypedExpr`, `tyOfTypedExpr`, `shrinkTypedExpr`, `typedLeaves`, `genTy`)
 run against the pool, so standalone-expression properties are unchanged.
 
-**Two shapes the generator can build are switched off, because each re-finds
-a filed bug** (the M4 rule for the diverging scalar recursion, above):
+**One shape the generator can build is switched off, because it re-finds a
+filed bug** (the M4 rule for the diverging scalar recursion, above):
 
 - **Mutually recursive pairs** (`generateMutualPairs = False`). A program
   using one does not finish compiling. `data A = A0 | A1 ab::B; data B = B0 |
@@ -688,14 +697,14 @@ a filed bug** (the M4 rule for the diverging scalar recursion, above):
   probe hit it 18 times in 1,500 draws). The pair generator stays and is
   pinned by `a mutually recursive pair validates, is mutual, and has finite
   leaves`.
-- **Constructors named `Any` or `Base`** (`knownCollidingNames`). `Any`'s
-  `isAny` test shadows the runtimes' own `isAny`: Python recurses forever and
-  Julia overflows its stack. `Base` redefines Julia's `Base` module, so the
-  module does not load (internal-docs `adt-constructor-name-shadows-runtime`).
-  `prop_Fuzz_BackendsAgree` failed on one of them in 3 of its first 6 runs.
-  A deterministic sweep of every target-language name in the generator's
-  lists, as a constructor, a type and a field, through both backends found
-  these two and nothing else. Afterwards 6 of 6 fresh-seed runs were green.
+
+Target-language names a backend breaks on go in `knownCollidingNames`, which
+is empty. It held the constructors `Any` (whose `isAny` test shadowed the
+runtimes' own) and `Base` (which redefined Julia's `Base` module) until
+internal-docs `adt-constructor-name-shadows-runtime` escaped them; they were
+found by `prop_Fuzz_BackendsAgree` in 3 of its first 6 runs, and a
+deterministic sweep of every name in the generator's hazard lists, as a
+constructor, a type and a field, through both backends found nothing else.
 
 Measured over 200 draws at `fuzzSize = 12` when M4 landed, with the pool
 only: 46.5% of draws declare an ADT, 10.5% have an ADT target, 16% contain a
@@ -756,15 +765,42 @@ imposs)` wherever it answers. The property (Slow) draws batches of 60 programs
 (`genTypedProgram`, with the neural and named-helper generators weighted up),
 four batches a run, and for each program:
 
-1. compiles it at the default config, dropping it if there is no probability
-   function (the run's `drawn program` table says why each was dropped);
+1. compiles it at the default config, dropping it if it has neither a
+   probability function nor a normal or writeLogits body to compare (the run's
+   `drawn program` table says why each was dropped);
 2. draws three forward samples from the interpreter with a per-program seed,
    plus their `ANY`-holed variants (`anyHoles`: the whole point, and each tuple
    component or ADT field in turn) and off-support neighbours (`offSupport`: a
    nudged scalar, the other `Either` arm, a list grown by one), at most 12
    points;
 3. keeps the points the interpreter answers at, for `probability` and, on
-   wildcard-free points, `integrate`.
+   wildcard-free points, `integrate`;
+4. evaluates every top-level function's other two deterministic bodies, where
+   it has them (task `backend-agreement-writelogits-and-normal-functions`):
+   its normal-parameter function (`QNormal`, the `(mu, sigma)` of a Gaussian
+   result) and its writeLogits function (`QWriteLogits`, the logit vector).
+   `main` is evaluated at its own arguments (a neural `main`'s mock envelope);
+   any other function at three seeded draws of its parameter types and their
+   off-support neighbours, at most 6 argument tuples, and not at all when a
+   parameter type has no value to draw (an arrow, a symbol). A writeLogits
+   slot of a dead arm holds random noise (task `writelogits-dead-arm-nan`);
+   the interpreter is run under two seeds and a slot that differs is not
+   compared;
+5. calls `main`'s generate function three times per backend (`QGen`, task
+   `backend-agreement-generate-support`), each call under its own seed
+   (`random.seed`, `Random.seed!`). A sample has no value to agree on, so the
+   check is on support: the driver prints it as prefix tokens (`_ser`), the
+   harness decodes them as `main`'s return type (`decodeSample`; a float where
+   an `Int` is due, an unknown constructor or a runtime value with no
+   `IRValue` form is a disagreement), and the interpreter's probability
+   function must not call the decoded value impossible (`supportCheck`). A
+   backend raising is a disagreement. The check is only asked where the
+   interpreter can judge it: all of its own ten generate samples are
+   renderable, and its probability function answers at each and calls none
+   impossible. The interpreter not answering at a backend's sample is not a
+   disagreement; the `generate sample (python|julia)` tables count each
+   outcome. This is what reaches the generate-only lowerings (a let-bound
+   draw read twice must stay one draw, the spill of a deep generate line).
 
 All programs of a batch then go through **one** `python3` and **one** `julia
 --compile=min` process (`test/BackendAgreement.hs`; a subprocess costs 70 ms /
@@ -776,7 +812,8 @@ evaluated inside the program's namespace, since it names that program's ADT
 classes. Python additionally bounds each query with a 10 s alarm; both
 processes have a 300 s bound. Comparison: `probAgrees` on the probability
 (`probTolerance`, relative above 1; NaN equals NaN, infinities exactly), exact
-on dim and the flag. A backend that raises, a module that fails to load, or
+on dim and the flag. A body query's vector is compared slot by slot with
+`probAgrees`, and its length exactly. A backend that raises, a module that fails to load, or
 codegen throwing on the Haskell side, where the interpreter answered, is a
 disagreement.
 
@@ -786,6 +823,40 @@ the PATH the Julia arm is skipped with a one-line stderr note, and the run's
 `julia arm` table says so: on a machine without Julia the property checks
 interpreter vs Python only.
 
+**The batched arm** (task `backend-agreement-batched-arm`). Every compared
+program also goes to the batched Python backend (`--batched`,
+`pythonLibBatched.py`) when batched mode takes it, decided as the corpus
+decides it: a `batched = True` compile, a `generateFunctionsBatched`
+emission, and query points `End2EndTesting.batchSamples` can batch
+(`prepareBatchedCase`). A refusal is not a disagreement; the run's
+`batched eligibility of a compared program` table names it, normalised to its
+kind (`batchedRefusalReason`). A Haskell-side crash of the batched emitter is
+tabulated the same way (`batched codegen crashed: ...`) rather than failed:
+crash-freedom of codegen is `prop_Fuzz_TypedCompileNeverCrashes`'s job, and
+its known batched crashes (`no infix form for OpMod`/`OpIntDiv`) are filed
+there. Only `probability` and `integrate` queries go through this arm (the
+batched backend emits no normal or writeLogits bodies), and not the ones the
+interpreter answers with a NaN: every batched return goes through
+`check_result`, which raises on a NaN by design. Each program's points of one
+kind are **one** batched call, built as the corpus's `batched-vs-expected`
+builds them: one float32 structure-of-arrays literal, or the host bucketing
+wrapper when a point carries structure (an `ANY`, a list, an `Either`, an
+ADT). All batch-eligible programs of a property batch run in one
+torch-enabled Python process (`runBatchedPythonBatch`, a 20 s alarm per
+call). The comparison is `answersAgree`, exact on dim and the flag, and
+float32-aware where the literal is float32: an answer also agrees if it
+matches the interpreter at the point rounded to float32 (`float32Point`).
+A batched raise whose message names a filed family
+(`knownBatchedFamilies`: message needle to ticket; `'<' not supported between
+instances of 'str'` is the marginalised `ANY` being indexed, see
+`known-issues/cdfFstOfNestedTupleIndexesAny`) is tabulated under `known
+batched family` rather than failed, as `knownOverPromises` does for the
+admission oracle; a wrong value always fails. A call that raises reports
+every point in it, so one bad point fails its batch-mates too; a disagreement's minimal repro is a single point, as in
+the `known-issues/batched*` pins. Without a torch-enabled Python the arm fails
+the property, unless `NEST_SKIP_TORCH=1` skips it (noted on stderr and in the
+`batched arm` table), the same rule as every other torch-dependent check.
+
 Each run tabulates the IR constructs (`irConstructs`: `IRExpr` constructors,
 `Operand`s, `UnaryOperand`s, `Builtin`s, density/cumulative leaves,
 `ConTag`s, `Accessor`s) of the bodies it compared. The Slow unit test
@@ -793,12 +864,35 @@ Each run tabulates the IR constructs (`irConstructs`: `IRExpr` constructors,
 a fixed-seed sample of the property's draws and over the corpus, and requires
 the corpus-minus-fuzz difference to be exactly `fuzzCoverageExceptions`: the
 generator's to-do list, and the exception list for
-`emitted-code-test-impact-analysis` M2. Both sides count **inference bodies
-only**, because those are all the property compares. Generate bodies are
-never compared across backends (a sample is random), nor are writeLogits or
-normal functions.
+`emitted-code-test-impact-analysis` M2. The corpus side counts every
+probability, integrate, writeLogits and normal body (`deterministicBodies`);
+the fuzz side counts the bodies the property evaluates (`comparedBodies`:
+every group's inference bodies, and the normal and writeLogits bodies of the
+functions it queried). Generate bodies are only support-checked, never
+compared by value, and count on neither side. A random draw inside a
+writeLogits body (the dead-arm noise, `IRSample`/`Sample:IRNormal`) is masked
+rather than compared, so the fuzz side drops it (`maskedConstruct`) and the
+exception list names it.
+
+The batched arm has its own census, the second case of
+`BackendAgreementCoverage`: over the corpus programs declaring `batched`,
+compiled with `batched = True` (so after the select pass), the constructs of
+their probability and integrate bodies, against the batched-compiled bodies of
+the sample's batch-eligible draws (`batchedComparedBodies`). The difference
+must be exactly `batchedFuzzCoverageExceptions`. It certifies the corpus's
+`batched-vs-expected` value check only: the batched gradient,
+generate-density, dense and topK checks compare nothing the fuzzer runs. Each
+run tabulates the batched arm's constructs too (`IR construct in a
+batched-compared body`).
 
 Measured when it landed: a run takes ~10-15 s, compares ~150 of its 240
 programs at ~1100 queries, and the corpus uses 59 constructs in inference
-bodies of which the sample covers 54. Of the first 15 runs, 5 found a
-disagreement; the families are filed (see the task doc in the docs repo).
+bodies of which the sample covers 54. With writeLogits and normal bodies
+added (2026-10-09), a run compares ~140 programs at ~1200 queries, of them
+~50-80 writeLogits and a handful of normal queries (the `body kind` table),
+and the corpus uses 62 constructs of which the sample covers 54; the two new
+ones are the masked dead-arm draw. Of the first 15 runs, 5 found a
+disagreement; the families are filed (see the task doc in the docs repo). With generate added
+(2026-10-13), a run asks ~280-290 generate queries per backend, and in three
+runs 99-100% of the samples were judged in support (the rest: the interpreter
+raised at the sample); none disagreed.

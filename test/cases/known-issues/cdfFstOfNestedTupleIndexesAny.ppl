@@ -1,0 +1,1 @@
+main = fst (if Uniform < 0.15 then (2, (False, 3)) else (0, (False, 1)))

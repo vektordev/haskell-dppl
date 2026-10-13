@@ -1,0 +1,2 @@
+loop r = if r < 1 then 0.0 else if False then loop (r - 1) else fst (snd (head [(0.0 - 1.0, (Normal, 0))]))
+main = loop (if Uniform < 0.5 then 2 else 1)
