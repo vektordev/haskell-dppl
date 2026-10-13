@@ -785,7 +785,22 @@ four batches a run, and for each program:
    parameter type has no value to draw (an arrow, a symbol). A writeLogits
    slot of a dead arm holds random noise (task `writelogits-dead-arm-nan`);
    the interpreter is run under two seeds and a slot that differs is not
-   compared.
+   compared;
+5. calls `main`'s generate function three times per backend (`QGen`, task
+   `backend-agreement-generate-support`), each call under its own seed
+   (`random.seed`, `Random.seed!`). A sample has no value to agree on, so the
+   check is on support: the driver prints it as prefix tokens (`_ser`), the
+   harness decodes them as `main`'s return type (`decodeSample`; a float where
+   an `Int` is due, an unknown constructor or a runtime value with no
+   `IRValue` form is a disagreement), and the interpreter's probability
+   function must not call the decoded value impossible (`supportCheck`). A
+   backend raising is a disagreement. The check is only asked where the
+   interpreter can judge it: all of its own ten generate samples are
+   renderable, and its probability function answers at each and calls none
+   impossible. The interpreter not answering at a backend's sample is not a
+   disagreement; the `generate sample (python|julia)` tables count each
+   outcome. This is what reaches the generate-only lowerings (a let-bound
+   draw read twice must stay one draw, the spill of a deep generate line).
 
 All programs of a batch then go through **one** `python3` and **one** `julia
 --compile=min` process (`test/BackendAgreement.hs`; a subprocess costs 70 ms /
@@ -853,8 +868,8 @@ generator's to-do list, and the exception list for
 probability, integrate, writeLogits and normal body (`deterministicBodies`);
 the fuzz side counts the bodies the property evaluates (`comparedBodies`:
 every group's inference bodies, and the normal and writeLogits bodies of the
-functions it queried). Generate bodies are never compared across backends (a
-sample is random), and count on neither side. A random draw inside a
+functions it queried). Generate bodies are only support-checked, never
+compared by value, and count on neither side. A random draw inside a
 writeLogits body (the dead-arm noise, `IRSample`/`Sample:IRNormal`) is masked
 rather than compared, so the fuzz side drops it (`maskedConstruct`) and the
 exception list names it.
@@ -877,4 +892,7 @@ added (2026-10-09), a run compares ~140 programs at ~1200 queries, of them
 ~50-80 writeLogits and a handful of normal queries (the `body kind` table),
 and the corpus uses 62 constructs of which the sample covers 54; the two new
 ones are the masked dead-arm draw. Of the first 15 runs, 5 found a
-disagreement; the families are filed (see the task doc in the docs repo).
+disagreement; the families are filed (see the task doc in the docs repo). With generate added
+(2026-10-13), a run asks ~280-290 generate queries per backend, and in three
+runs 99-100% of the samples were judged in support (the rest: the interpreter
+raised at the sample); none disagreed.
