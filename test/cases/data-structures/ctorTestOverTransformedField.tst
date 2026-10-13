@@ -1,2 +1,3 @@
 slow
+batched
 p(True)=(1.0, 0.0)

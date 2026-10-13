@@ -1,4 +1,5 @@
 slow
+batched
 p(0.3, 0.1)=(1.0, 0.0)
 p(0.4, 0.1) is impossible
 -- The same deterministic sum compared with the query, inline and behind a

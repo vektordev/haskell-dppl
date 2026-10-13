@@ -3,5 +3,6 @@
 -- known-issues wrong-result pin (the indicator was dropped, so x = 9.0
 -- answered phi(0) at dim 1).
 slow
+batched
 p((9.0, 0.0)) is impossible
 p((1.0, 0.0))=(0.39894228, 1.0)

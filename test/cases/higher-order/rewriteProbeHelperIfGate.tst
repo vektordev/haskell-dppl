@@ -3,6 +3,7 @@
 --   main = draw x = Uniform in if x < 0.5 then x else x * 3.0
 -- Was a known issue ("tagged invocation") until task
 -- binding-resolver-one-application-rule.
+batched
 p(0.3)=(1.0, 1.0, False)
 p(0.6) is impossible
 p(2.0)=(0.33333333, 1.0, False)

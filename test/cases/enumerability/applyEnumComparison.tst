@@ -1,3 +1,4 @@
 slow
+batched
 p(True)=(0.75, 0.0, False)
 p(False)=(0.25, 0.0, False)

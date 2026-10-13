@@ -3061,7 +3061,7 @@ runBatchedGenerate py eligible
              , let points = [ (pyVal s, ep, ed)
                             | g <- groups, not (bgIsCumul g)
                             , (s, ep, ed) <- zip3 (bgSamples g) (bgExpProb g) (bgExpDim g)
-                            , isScalarSample s ]
+                            , isScalarSample s, densityLivesOnScalar s ed ]
              , not (null points) ]
     neuralProbes = [ (name, src, netNames, bgParamExprs g, points)
              | (name, src, groups, netNames) <- eligible
@@ -3069,8 +3069,19 @@ runBatchedGenerate py eligible
              , (g:_) <- [[gr | gr <- groups, not (bgIsCumul gr)]]
              , let points = [ (pyVal s, ep, ed, i)
                             | (i, s, ep, ed) <- zip4 [0 :: Int ..] (bgSamples g) (bgExpProb g) (bgExpDim g)
-                            , isScalarSample s ]
+                            , isScalarSample s, densityLivesOnScalar s ed ]
              , not (null points) ]
+
+-- | The scalar twin of @TestCorpus.densityLivesOnSamples@: a window over drawn
+-- samples can only estimate a density with as many dimensions as the sample
+-- has continuous coordinates (one for a float, none for an int or bool). A
+-- larger dim is the density of a null-probability event of a continuous latent
+-- (@x == 0.0@ observed True; task
+-- sampling-matches-pdf-continuous-equality-density, by design), which sampling
+-- cannot reach, so the generate differential does not probe it.
+densityLivesOnScalar :: IRValue -> Double -> Bool
+densityLivesOnScalar (VFloat _) ed = round ed <= (1 :: Int)
+densityLivesOnScalar _ ed = round ed <= (0 :: Int)
 
 -- | Is this sample a bare scalar leaf (not a tuple)? 'isNum'/'isBoolV' already
 -- cover exactly float/int/bool between them (see 'batchLiteral').

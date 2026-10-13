@@ -1,4 +1,5 @@
 slow
+batched
 p(5.0)=(1.0, 0.0)
 p(-9.0) is impossible
 cdf(5.0)=(1.0, 0.0)

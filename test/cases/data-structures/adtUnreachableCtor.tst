@@ -1,4 +1,5 @@
 slow
+batched
 p(Present 0.5)=(1.0, 1.0, False)
 p(Present 0.9)=(1.0, 1.0, False)
 p(Absent) is impossible
