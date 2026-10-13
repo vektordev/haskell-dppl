@@ -1484,6 +1484,18 @@ batchedRefusalTable =
   , ("either_arith_inv",          "main's forward uses a construct outside the tensor fragment: inner lambda (IRLambda)")
   , ("injApply",                  "main's integrate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
   , ("twiceApplication",          "main's generate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
+  -- Refusals pinned as open bugs under universal batched admission (task
+  -- batched-admission-universal), one row per refusal class without a row
+  -- above. Each fails, as every row here does, the day batched mode accepts
+  -- the program; the row then leaves the table with its ticket.
+  -- task batched-prob-path-calls-helper-normal-params
+  , ("normalThroughFunctionNested", "a prob/integ path calls shifted_normal, which is not a forward/integrate method")
+  -- task batched-refuses-unit-constant
+  , ("observeKeyword",            "main's forward uses a construct outside the tensor fragment: constant with no batched representation (VUnit)")
+  -- task batched-refuses-any-list-constant-in-mask-variant
+  , ("andInsideListOverDraws",    "main__m1's forward uses a construct outside the tensor fragment: constant with no batched representation (VList (ListCont VAny EmptyList))")
+  -- task batched-recursion-entry-call-needs-descent
+  , ("nestedIfEmptyListIntCdf",   "main_prob calls rec_prob recursively without descending into the tail of a list argument")
   ]
 
 -- ===========================================================================
