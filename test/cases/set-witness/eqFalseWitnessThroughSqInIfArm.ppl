@@ -1,0 +1,1 @@
+main = draw v1 = Normal in if True then not (sq v1 == 1.0) else False

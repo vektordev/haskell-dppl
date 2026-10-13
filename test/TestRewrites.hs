@@ -117,6 +117,11 @@ knownDivergences =
   -- ouChainUnrolled joined the corpus.
   , Known "ouChainUnrolled" DrawIntro "draw-intro Normal" aliasDoubleJacobian
   , Known "ouChainUnrolled" AliasIntro "" aliasDoubleJacobian
+  -- The same through a helper's parameter, `rwh0 x0 x1 = draw x2 = 0.9 * x1 +
+  -- 0.5 * Normal in [x0, x1, x2]`: refused until task
+  -- binding-resolver-one-application-rule let forward chaining copy the
+  -- helper's `draw` into the call's per-invocation clauses.
+  , Known "ouChainUnrolled" HelperExtract "draw x2" aliasDoubleJacobian
   -- `draw y = Normal in draw s1 = y in draw s2 = s1 + 0.5 * Normal in draw s3 =
   -- s2 + 0.5 * Normal in (s1, (s2, s3))`: an aliased first step doubles the
   -- third step's Jacobian (25x at four steps), and an aliased third step

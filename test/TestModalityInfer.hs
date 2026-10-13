@@ -26,6 +26,8 @@ import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.ForwardChaining (annotateProg, progToFCData)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.RInfer (addRTypeInfo)
+import SPLL.CalleeNormalize (normalizeCallees)
+import Data.Maybe (fromMaybe)
 import SPLL.Typing.Determinism (knownAnchors)
 import SPLL.Typing.ModalityInfer (perNodeOuterGrounds)
 import SPLL.Typing.Modality (GroundMod(gCap), CapabilitySet(..))
@@ -629,8 +631,8 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" Integrate $
             mainPType "main = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) 3.0"
       , testCase "a named higher-order function applying its argument is PNormal" $
-          -- IRCompiler refuses it ("tagged invocation"): pinned as
-          -- known-issues/namedHofForwardsRandomArg, ticket helper-calls-helper-random-arg
+          -- and IRCompiler answers it (corpus higher-order/namedHofForwardsRandomArg,
+          -- task binding-resolver-one-application-rule)
           assertEqual "" PNormal $
             mainPType "app f x = f x\nmain = app (\\x -> x + 1.0) Normal"
       , testCase "twice applied to a Normal is PNormal" $
@@ -725,7 +727,8 @@ knownPartialSetExceptions =
   ]
 
 -- | Every corpus @.ppl@ program under 'corpusRoot' (minus
--- 'knownPartialSetExceptions'), walked through the same RType inference ->
+-- 'knownPartialSetExceptions'), walked through the same callee normalization ->
+-- RType inference ->
 -- enum annotation -> chain naming -> FCData sequence 'SPLL.Prelude.compile'
 -- uses (deliberately NOT 'typeProg''s order above, which runs enum/chain
 -- annotation before RType inference for test convenience --
@@ -749,7 +752,7 @@ corpusPartialSetTests corpus = corpusSweepAll corpus SweepSpec
 -- found in one corpus program, keyed by the offending chain name.
 filePartialSetViolations :: FilePath -> Program -> IO [(FilePath, ChainName, CapabilitySet)]
 filePartialSetViolations fp p =
-  case addRTypeInfo p of
+  case addRTypeInfo (fromMaybe p (normalizeCallees p)) of
     Left e -> error ("addRTypeInfo failed on " ++ fp ++ ": " ++ e)
     Right rtyped ->
       let preAnnotated   = annotateEnumsProg rtyped
