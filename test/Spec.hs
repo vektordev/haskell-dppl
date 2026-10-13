@@ -35,6 +35,7 @@ import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
 import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
+import TestSamplingPrimitives (samplingPrimitiveTests)
 import TestCLI (cliTests)
 import BackendCoverage (backendCoverageTests, irGeneratorCoverageTests)
 import GenerateCensus (generateCensusTests)
@@ -628,6 +629,7 @@ main = do
     , batchedNestedSelectTests
     , normalTailPrecisionTests
     , pythonPreludeTests
+    , samplingPrimitiveTests
     , cliTests
     , batchedEnumBucketingTests
     , branchCountBackends

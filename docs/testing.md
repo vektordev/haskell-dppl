@@ -83,6 +83,32 @@ current list for whichever binary you run):
   `.tst` parser, QuickCheck generators, shared numeric tolerances
 - `test/CorpusSweep.hs` — the registry every whole-corpus check is built
   through (see "Corpus sweeps" below)
+- `test/TestSamplingPrimitives.hs` — `SamplingPrimitives`: the scalar Python
+  and Julia sampling primitives checked one at a time (see "Sampling
+  primitives" below)
+
+### Sampling primitives
+
+A generate body reaches its runtime only through `rand` (`IRSample
+IRUniform`), `randn` (`IRSample IRNormal`) and `categorical_index`
+(`BCategoricalIndex`). Each backend has a check of each:
+
+| primitive | interpreter | scalar Python | Julia | batched Python |
+|---|---|---|---|---|
+| `rand` | `Corpus.SamplingMatchesPDF` | `SamplingPrimitives.Python` | `SamplingPrimitives.Julia` (`Base.rand`) | `generate-density-matches-expected` |
+| `randn` | same | same | same (`Base.randn`) | same |
+| `categorical_index` | exact CDF-boundary tests (`Internals.categorical index`) | `SamplingPrimitives.Python`: list, `InferenceList` and the `cumsum` path (numpy array) | `SamplingPrimitives.Julia`: `Array` and `InferenceList` | one-hot (`wide neural domain`) plus the generate density check |
+
+`SamplingPrimitives` runs one subprocess per backend (`python3`, and `julia`
+when it is on the PATH; the Julia checks are skipped with a note otherwise).
+`categorical_index` is compared exactly with the interpreter on the
+`Internals.categorical index` fixture, which is where an offset or a `<`/`<=`
+slip shows. `rand` and `randn` are checked on 10^5 draws at a fixed seed:
+range, mean and variance within 5 standard errors, and a Kolmogorov-Smirnov
+distance below its 0.1% critical value. The cumsum check is skipped with a
+note when `python3` cannot import numpy. `test/prelude_numerics_probe.py`
+classifies all three as not on the float path, so the prelude probes leave
+them to this group.
 
 ## Corpus sweeps
 
