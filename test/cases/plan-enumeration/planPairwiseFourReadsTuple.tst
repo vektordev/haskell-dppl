@@ -6,6 +6,7 @@
 -- A wildcard slot marginalises its pair out.
 -- Task plan-pairwise-across-separate-neural-reads.
 slow
+batched
 p((True, True), (2, [0.0, 1.0]), (2, [1.0, 2.0]), (2, [2.0, 1.0]), (2, [0.0, 1.0]))=(0.052903, 0.0)
 p((False, False), (2, [0.0, 1.0]), (2, [1.0, 2.0]), (2, [2.0, 1.0]), (2, [0.0, 1.0]))=(0.301614, 0.0)
 p((True, False), (2, [0.0, 1.0]), (2, [1.0, 2.0]), (2, [2.0, 1.0]), (2, [0.0, 1.0]))=(0.619737, 0.0)

@@ -3,6 +3,7 @@
 -- that interval minus the point -- a `WExcept` over an interval, whose mass
 -- is the interval's (task sampling-matches-pdf-continuous-equality-density).
 slow
+batched
 p(0)=(0.15865525393145707, 0.0)
 p(1)=(0.3989422804014327, 1.0)
 p(2)=(0.8413447460685429, 0.0)

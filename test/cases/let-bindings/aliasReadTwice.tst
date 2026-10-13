@@ -1,4 +1,5 @@
 slow
+batched
 p((0.5, 1.5))=(1.0, 1.0, False)
 p((0.25, 1.25))=(1.0, 1.0, False)
 p((0.5, 1.4)) is impossible

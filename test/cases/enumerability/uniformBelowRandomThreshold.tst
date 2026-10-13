@@ -1,4 +1,5 @@
 slow
+batched
 p(True)=(0.34, 0.0)
 p(False)=(0.66, 0.0)
 cdf(False)=(0.66, 0.0)

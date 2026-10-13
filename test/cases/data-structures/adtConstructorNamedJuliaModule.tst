@@ -1,3 +1,4 @@
+batched
 p(Base)=(0.4, 0.0, False)
 p(Main)=(0.3, 0.0, False)
 p(Core 0.0)=(0.1196826841204298, 1.0, False)

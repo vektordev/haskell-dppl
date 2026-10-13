@@ -1,4 +1,5 @@
 slow
+batched
 p((0.5, (1.1, 0.2)))=(1.1483826789389478e-2, 3.0, False)
 -- Task let-alias-of-random-binding-crashes-toirnormalparams, the accumulator
 -- shape, fixed by task reinfer-body-under-recovered-bindings

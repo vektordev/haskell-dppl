@@ -1,6 +1,7 @@
 -- The mirror of setWitnessSiblingConst: the bound variable in the second
 -- field, the constant sibling in the first.
 slow
+batched
 p((1.0, 0.3)) is impossible
 p((0.0, 0.7)) is impossible
 p((1.0, 0.7))=(1.0, 1.0)
