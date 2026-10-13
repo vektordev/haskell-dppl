@@ -5,5 +5,6 @@
 -- this crashes the same way but doesn't requote this exact program's message,
 -- so the mechanism is left unpinned (`broken`) rather than guessing a
 -- diagnostic substring.
+slow
 expect-failure: broken
 p(4.0)=(1.0, 0.0)

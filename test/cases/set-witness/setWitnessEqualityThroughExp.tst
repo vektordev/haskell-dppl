@@ -7,5 +7,6 @@
 -- null event, so main is 0.0 almost surely. The True arm's density
 -- convention (p(1.0)) is task sampling-matches-pdf-continuous-equality-density
 -- and deliberately not pinned here.
+slow
 p(0.0)=(1.0, 0.0, False)
 p(2.0) is impossible

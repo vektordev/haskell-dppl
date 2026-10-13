@@ -106,7 +106,8 @@ all.
   environment variable the sweep needs. With its tier off it builds an empty
   group. `sweepSlow` applies the `.tst` `slow` header: `SkipSlow` (the usual
   policy), `OnlySlow` (the `End2End (slow)` twins) or `IgnoreSlow` (static
-  checks that neither compile nor run the program).
+  checks that neither compile nor run the program, and the population checks
+  in `Slow`, below).
 - **The cost table.** Every test of a sweep runs under a clock. After the run,
   each binary prints one line per sweep that ran a test: tier, programs
   selected, tests run, build time (the `IO` that built the tree, e.g.
@@ -409,8 +410,30 @@ by `known-issues/` pins too), a `TestInternals.hs` case placed in
 properties not listed as aspirational. The depth-4 plan-enumeration stress
 programs (`planHelperOnFoldResult*`, `planFoldDisjunction*`, ~10 s per compile)
 and `planEnumRecJointState` are `slow`; their correctness is pinned at small
-depth by the default suite's polynomial-growth tests. A full `Slow` run takes
-about 4 minutes on 4 cores.
+depth by the default suite's polynomial-growth tests.
+
+Most of the corpus is `slow` too: 527 programs whose every HPC tick the
+default tier also executes were demoted (docs-repo task
+`demote-tick-redundant-corpus-programs-to-slow`, from the report of
+"Coverage-informed tiering" below). About 100 of 630 corpus programs stay
+default.
+A demoted program still runs its interpreter rows in `End2End (slow)`, but
+leaves the Julia and Python row checks, the batched value differentials and
+the `Corpus` binary's sweeps, which are all `SkipSlow` with no `Slow` twin.
+
+**Population checks live in `Slow`.** A check that asserts a floor on how
+much of the corpus it saw, or names programs that must be in it, needs the
+whole corpus, so it is a `Slow` sweep with `IgnoreSlow`: the three
+`ObservationMask (slow)` variant sweeps (at least 30 programs with variants,
+300 masked queries, 30 slot marginals), `Julia free names are escaped` (more
+than 100 Julia-routed programs), `PlanEngineMatchesDense (slow)` (every
+`planEngineCorpus` name present, and the differential on the `slow`
+programs), and `BatchedPython (slow)`'s `declared-dense-eligible` and
+`dense-matches-expected` (every `dense`-declaring program is `slow`). The
+default suite does not run them. They leave out the 13 programs that are
+`slow` for their own compile cost (`CorpusSweep.slowForCompileCost`; a name
+there that is no `slow` program fails the tree build), which cost minutes
+each in these sweeps.
 
 **`Aspirational` holds what we want to guarantee but cannot yet**: tests that
 fail or flake at HEAD. Today that is three `Fuzz` properties
@@ -570,7 +593,10 @@ runs anything. `haskell-dppl-exe` subprocesses are covered through a shim on
 `pythonLib.py`/`pythonLibBatched.py` they execute. Julia is not covered, so
 units holding Julia checks are always kept. The report states the other
 caveats. Tick coverage is not value coverage, and coverage moves with the
-code, so re-run it when the suite has grown materially.
+code, so re-run it when the suite has grown materially. Nor does it see
+population assertions: a check with a floor on the corpus it reads goes red
+when its programs are demoted, though no tick is lost ("Population checks
+live in `Slow`" above).
 
 ## Benchmarks
 

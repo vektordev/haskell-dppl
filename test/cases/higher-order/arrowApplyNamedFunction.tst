@@ -1,6 +1,7 @@
 -- Row 1 of investigation modality-function-space-test-coverage's probe table:
 -- the shape that always worked, kept as the control the four broken ones are
 -- one syntactic step away from. f Normal ~ N(1, 1).
+slow
 backends: interpreter, julia, python, batched
 p(0.5)=(0.3520653, 1.0, False)
 p(1.0)=(0.3989423, 1.0, False)

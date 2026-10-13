@@ -5,6 +5,7 @@
 -- left with an `if` in callee position, which crashed forward chaining with
 -- "should resolve to a lambda". The condition is deterministic, so the answer
 -- is the then arm's 1.0 + Normal ~ N(1, 1), the same family as its siblings.
+slow
 backends: interpreter, julia, python, batched
 p(0.5)=(0.3520653, 1.0, False)
 p(1.0)=(0.3989423, 1.0, False)

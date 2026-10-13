@@ -19,7 +19,7 @@ import Control.Monad.Random.Lazy (evalRandIO)
 import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests, slowInternalsTests)
-import TestObservationMask (observationMaskTests)
+import TestObservationMask (observationMaskTests, slowVariantCorpusTests)
 import TestPerValue (perValueTests)
 import TestMonomorphize (monomorphizeTests)
 import TestIRTypeCheck (irTypeCheckTests)
@@ -29,7 +29,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedNestedSelectTests, normalTailPrecisionTests, batchedEnumBucketingTests, branchCountBackendTests, topKRuntimeCutoffTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedNestedSelectTests, normalTailPrecisionTests, batchedEnumBucketingTests, branchCountBackendTests, topKRuntimeCutoffTests)
 import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
 import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
@@ -526,7 +526,6 @@ main = do
   -- (CorpusSweep). Each sweep checks its own tier's environment variable.
   corpus <- loadCorpus
   internals <- internalsTests corpus
-  observationMask <- observationMaskTests corpus
   modalityInfer <- modalityInferTests corpus
   e2e <- end2endTests corpus manifest
   selectDiff <- selectPassDifferentialTests corpus manifest
@@ -546,7 +545,13 @@ main = do
   -- The corpus sweeps in it gate themselves on their Slow tier.
   let slowInternals = slowInternalsTests
   slowE2e <- slowEnd2EndTests corpus manifest
-  slowBatchedPy <- slowBatchedPythonTests corpus
+  slowBatchedPy <- slowBatchedPythonTests corpus manifest
+  -- Checks that assert a floor on, or name members of, the corpus they read:
+  -- they read the whole corpus, `slow` programs included, so they live here
+  -- (docs-repo task demote-tick-redundant-corpus-programs-to-slow).
+  slowPlanDiff <- slowPlanEngineDifferentialTests corpus manifest
+  slowVariants <- slowVariantCorpusTests corpus
+  juliaFreeNames <- juliaFreeNamesTests corpus
   -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
   -- programs, each compiled and queried) was a quarter of the default run's
   -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
@@ -555,7 +560,7 @@ main = do
   generateCensus <- generateCensusTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
-        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests, backendCoverage, generateCensus]
+        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, fuzzTests, backendCoverage, generateCensus]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it
@@ -582,7 +587,7 @@ main = do
     [ specTests
     , parserTests
     , internals
-    , observationMask
+    , observationMaskTests
     , perValueTests
     , shrinkerTests
     , neuralGeneratorTests

@@ -1,5 +1,6 @@
 -- Row 2: the same N(1, 1) reached through a curried call whose *first*
 -- argument is the probabilistic one. Control, like arrowApplyNamedFunction.
+slow
 backends: interpreter, julia, python, batched
 p(0.5)=(0.3520653, 1.0, False)
 p(1.0)=(0.3989423, 1.0, False)

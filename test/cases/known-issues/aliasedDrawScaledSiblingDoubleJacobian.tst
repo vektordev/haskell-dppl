@@ -7,6 +7,7 @@
 -- compiler answers 0.63661977. Found by the rewrite-invariance sweep over
 -- distributions/ouChainUnrolled (TestRewrites.knownDivergences). Docs task
 -- aliased-draw-scaled-sibling-double-jacobian.
+slow
 expect-failure: broken
 p((0.0, 0.0))=(0.31830989, 2.0)
 p((1.0, 0.5))=(0.11709966, 2.0)

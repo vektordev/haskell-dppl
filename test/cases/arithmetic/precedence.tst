@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched, dense
 p(11.0)=(1.0, 0.0)
 p(5.0)=(0.0, 0.0)	-- This is with left to right precedence

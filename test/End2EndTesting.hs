@@ -97,25 +97,50 @@ shapedCases e = map (shapeNeuralTestCase (ceProgram e)) (ceCases e)
 --
 -- Non-neural programs are 'budgetZeroDifferentialTests'' instead: budget 0
 -- reaches no plan engine there, so the name would mislead.
+--
+-- The default group skips the @slow@-headered programs, which include most of
+-- 'planEngineCorpus' since the tick-redundant corpus programs were demoted
+-- (docs-repo task demote-tick-redundant-corpus-programs-to-slow). Their
+-- differentials, and the check that every 'planEngineCorpus' name is in the
+-- corpus at all, are 'slowPlanEngineDifferentialTests'.
 planEngineDifferentialTests :: Corpus -> Manifest -> IO TestTree
 planEngineDifferentialTests corpus manifest = corpusSweepAll corpus SweepSpec
   { sweepName = "PlanEngineMatchesDense", sweepTier = Default, sweepSlow = SkipSlow
-  , sweepSelect = \e -> interpreterRouted e && not (null (neurals (ceProgram e)))
-  , sweepNote = "budget 0 (the plan engine) agrees with dense enumeration wherever it answers" } $ \entries -> do
+  , sweepSelect = planEngineSelect
+  , sweepNote = "budget 0 (the plan engine) agrees with dense enumeration wherever it answers" } $ \entries ->
+  return $ testGroup "PlanEngineMatchesDense" (map (planEngineDifferential manifest) entries)
+
+-- | The Slow twin of 'planEngineDifferentialTests': the same differential on
+-- the @slow@-headered programs, and the check that the programs that must
+-- reach the plan engine are in the corpus, which reads the whole corpus
+-- ('IgnoreSlow') so that it holds whichever tier a program is in. The
+-- programs `slow` for their own compile cost stay out
+-- ('notSlowForCompileCost'), as before: at budget 0 they cost minutes each.
+slowPlanEngineDifferentialTests :: Corpus -> Manifest -> IO TestTree
+slowPlanEngineDifferentialTests corpus manifest = corpusSweepAll corpus SweepSpec
+  { sweepName = "Slow.PlanEngineMatchesDense (slow)", sweepTier = Slow, sweepSlow = IgnoreSlow
+  , sweepSelect = \e -> planEngineSelect e && notSlowForCompileCost e
+  , sweepNote = "the plan-engine differential on the slow programs, and every planEngineCorpus name present" } $ \entries -> do
   let missing = filter (`notElem` map ceName entries) planEngineCorpus
-  return $ testGroup "PlanEngineMatchesDense" $
+  return $ testGroup "PlanEngineMatchesDense (slow)" $
     [ testProperty "the programs that must reach the plan engine are in the corpus" $
         counterexample ("not found: " ++ show missing) (null missing) ]
-    ++
-    [ testProperty n (once $ cachedProperty manifest "PlanEngineMatchesDense" n
-                               (differentialKey manifest planEngineCheckVersion p [planEnv, denseEnv] tcs)
-                               (conjoin (map (planMatchesDense n p planEnv denseEnv) tcs)))
-    | e <- entries
-    , let n = ceName e
-    , let p = ceProgram e
-    , let tcs = shapedCases e
-    , let planEnv  = compile defaultCompilerConfig{materializationCardinality = 0} p
-    , let denseEnv = compile defaultCompilerConfig p ]
+    ++ map (planEngineDifferential manifest) (filter ceSlow entries)
+
+planEngineSelect :: CorpusEntry -> Bool
+planEngineSelect e = interpreterRouted e && not (null (neurals (ceProgram e)))
+
+planEngineDifferential :: Manifest -> CorpusEntry -> TestTree
+planEngineDifferential manifest e =
+  testProperty n (once $ cachedProperty manifest "PlanEngineMatchesDense" n
+                           (differentialKey manifest planEngineCheckVersion p [planEnv, denseEnv] tcs)
+                           (conjoin (map (planMatchesDense n p planEnv denseEnv) tcs)))
+  where
+    n = ceName e
+    p = ceProgram e
+    tcs = shapedCases e
+    planEnv  = compile defaultCompilerConfig{materializationCardinality = 0} p
+    denseEnv = compile defaultCompilerConfig p
 
 -- | The non-neural sibling of 'planEngineDifferentialTests' (task
 -- materialization-budget-zero-observe-any-wrong): @--materializationBudget 0@
@@ -232,9 +257,9 @@ readLogitsLinearOnly =
 -- | The corpus programs whose default compile took the plan engine until every
 -- read was tagged, and which now enumerate densely by default. They were
 -- written to exercise the plan engine, so at budget 0 they must answer. Three
--- more moved but are `slow` and so outside this group's pool:
--- planEnumRecJointState, planEnumRecWeightedCount and
--- planEnumRecAlternatingWeightCount.
+-- more moved but are not listed, as they were `slow` for their compile cost
+-- when the list was drawn up: planEnumRecJointState, planEnumRecWeightedCount
+-- and planEnumRecAlternatingWeightCount.
 planEngineCorpus :: [String]
 planEngineCorpus =
   [ "adtNeuralSingleCtorNested", "planEnumInline", "planEnumInlineADT", "planEnumInlineBool"
@@ -852,6 +877,22 @@ testJuliaAll programCases = ioProperty $ do
 -- String literals and comments (diagnostics quoting @p(main)@, doc lines) are
 -- stripped first. Programs whose Julia codegen refuses are skipped: that
 -- refusal is the Julia group's business, not this one's.
+-- The sweep runs without julia installed: it only reads the emitted text. It
+-- lives in Slow and reads the `slow`-headered programs too ('IgnoreSlow')
+-- (docs-repo task demote-tick-redundant-corpus-programs-to-slow): the check
+-- needs more than 100 Julia-routed programs, so as not to go vacuous, and the
+-- default corpus left after the tick-redundant programs were demoted has
+-- fewer. Its long-run home is backend agreement over synthetic IR (docs-repo
+-- task ir-fuzz-generator), which can draw adversarial names.
+juliaFreeNamesTests :: Corpus -> IO TestTree
+juliaFreeNamesTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "Slow.Julia free names are escaped", sweepTier = Slow, sweepSlow = IgnoreSlow
+  , sweepSelect = \e -> Julia `elem` ceBackends e && notSlowForCompileCost e
+  , sweepNote = "no free name of an emitted Julia module collides with a Julia builtin" } $ \es ->
+    return $ testProperty "Julia free names are escaped"
+      (once $ testJuliaFreeNamesEscaped
+         [ (ceName e, c, networkMocks (ceProgram e)) | e <- es, Right c <- [compile defaultCompilerConfig (ceProgram e)] ])
+
 testJuliaFreeNamesEscaped :: [(String, IREnv, [NetMock])] -> Property
 testJuliaFreeNamesEscaped programs = ioProperty $ do
   results <- forM programs $ \(n, c, nets) -> do
@@ -1277,11 +1318,14 @@ batchedPythonFixtures corpusEntries' = do
   return (declared, gained, eligible, denseDeclared, topkEligible, denseTopK, mpy)
 
 -- | The cheap, always-on half of the batched-mode differential: pure-Haskell
--- eligibility bookkeeping (no torch, no subprocess) plus the two value
+-- eligibility bookkeeping (no torch, no subprocess) plus the value
 -- differentials cheap enough to run on every `stack test`
--- ('runBatchedPython'/'runBatchedGradients'/'runBatchedGenerate'/
--- 'runBatchedDense' False -- each well under 5s). The topK-threshold
+-- ('runBatchedPython'/'runBatchedGradients'/'runBatchedGenerate' -- each
+-- well under 5s). The topK-threshold
 -- differentials live in 'slowBatchedPythonTests' instead -- see there for why.
+-- So do the two dense checks: every dense-declaring program is `slow` since the
+-- tick-redundant corpus programs were demoted (docs-repo task
+-- demote-tick-redundant-corpus-programs-to-slow), and this group skips them.
 batchedPythonTests :: Corpus -> Manifest -> IO TestTree
 batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
   { sweepName = "BatchedPython", sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
@@ -1290,14 +1334,11 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
   mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
   let refused  = [ (n, msg) | (n, Left msg) <- declared ]
       denseNames = map (\(n, _, _, _) -> n) denseDeclared
-      denseRefused = [ n | n <- denseNames
-                         , n `notElem` [ m | (m, src, _, _) <- eligible, not (null (denseEntryPoints src)) ] ]
       denseGained = [ n | (n, src, _, _) <- eligible
                         , n `notElem` denseNames, not (null (denseEntryPoints src)) ]
   return $ testGroup "BatchedPython" $
     [ testProperty "declared-batched-eligible" (once (declaredEligibleProp (length declared) refused))
     , testProperty "eligibility-gain-note" (once (gainNoteProp gained))
-    , testProperty "declared-dense-eligible" (once (declaredDenseProp (length denseNames) denseRefused))
     , testProperty "dense-eligibility-gain-note" (once (denseGainNoteProp denseGained))
     , testProperty "dense-domain-boundary" (once (denseBoundaryProp eligible))
     ] ++ case mtorch of
@@ -1305,20 +1346,21 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
         [ testProperty "torch-python-found" $ once $ ioProperty $
             noTorchProperty "BatchedPython value differential" ]
       Just (py, torch) ->
-        [ testProperty "batched-vs-expected" (once (cachedTorch torch "batched-vs-expected" eligible (runBatchedPython py)))
-        , testProperty "gradients-nan-free" (once (cachedTorch torch "gradients-nan-free" eligible (runBatchedGradients py)))
+        [ testProperty "batched-vs-expected" (once (cachedTorch manifest torch "batched-vs-expected" eligible (runBatchedPython py)))
+        , testProperty "gradients-nan-free" (once (cachedTorch manifest torch "gradients-nan-free" eligible (runBatchedGradients py)))
         , testProperty "generate-density-matches-expected"
-            (once (cachedTorch torch "generate-density-matches-expected" eligible (runBatchedGenerate py)))
-        , testProperty "dense-matches-expected" (once (cachedTorch torch "dense-matches-expected" denseDeclared (runBatchedDense False py))) ]
-  where
-    -- Each value differential runs every program in one torch process, so it
-    -- is a batch: only the programs whose key changed are run, and an
-    -- all-unchanged differential starts no python. An empty selection runs
-    -- as it is, so the differential's own "nothing eligible" failure stands.
-    cachedTorch torch name entries run
-      | null entries = run entries
-      | otherwise = cachedBatch manifest ("BatchedPython." ++ name)
-                      [ (n, batchedKey manifest torch name x, x) | x@(n, _, _, _) <- entries ] run
+            (once (cachedTorch manifest torch "generate-density-matches-expected" eligible (runBatchedGenerate py))) ]
+
+-- | Each value differential runs every program in one torch process, so it
+-- is a batch: only the programs whose key changed are run, and an
+-- all-unchanged differential starts no python. An empty selection runs
+-- as it is, so the differential's own "nothing eligible" failure stands.
+cachedTorch :: Manifest -> String -> String -> [(String, String, [BatchGroup], [NetMock])]
+            -> ([(String, String, [BatchGroup], [NetMock])] -> Property) -> Property
+cachedTorch manifest torch name entries run
+  | null entries = run entries
+  | otherwise = cachedBatch manifest ("BatchedPython." ++ name)
+                  [ (n, batchedKey manifest torch name x, x) | x@(n, _, _, _) <- entries ] run
 
 -- | The topK-threshold half of the M5 differential ('topk-is-per-element',
 -- 'dense-inherits-topk'): each recompiles every batched-declaring program at
@@ -1331,18 +1373,35 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
 -- itself, so -- same tradeoff as 'test_planEnumRecTopKAndBC' in
 -- TestInternals.hs -- they move to the opt-in Slow group
 -- (NEST_SLOW_TESTS=1) rather than taxing every default run.
-slowBatchedPythonTests :: Corpus -> IO TestTree
-slowBatchedPythonTests corpus = corpusSweepAll corpus SweepSpec
-  { sweepName = "Slow.BatchedPython (slow)", sweepTier = Slow, sweepSlow = SkipSlow, sweepSelect = const True
-  , sweepNote = "the batched topK differentials, recompiling every batched program per threshold" } $ \entries -> do
-  (_, _, _, _, topkEligible, denseTopK, mpy) <- batchedPythonFixtures entries
-  return $ testGroup "BatchedPython (slow)" $ case mpy of
-    Nothing ->
-      [ testProperty "torch-python-found" $ once $ ioProperty $
-          noTorchProperty "BatchedPython (slow) topK differentials" ]
-    Just py ->
-      [ testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
-      , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
+--
+-- The dense checks live here too, 'declared-dense-eligible' and
+-- 'dense-matches-expected': every dense-declaring program is `slow` since the
+-- tick-redundant corpus programs were demoted (docs-repo task
+-- demote-tick-redundant-corpus-programs-to-slow). This group reads the
+-- `slow`-headered programs ('IgnoreSlow'), so that a declaration is checked
+-- whichever tier its program is in. Only the programs declaring `batched` or
+-- `dense` are selected; none of the programs `slow` for their compile cost
+-- declares either.
+slowBatchedPythonTests :: Corpus -> Manifest -> IO TestTree
+slowBatchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
+  { sweepName = "Slow.BatchedPython (slow)", sweepTier = Slow, sweepSlow = IgnoreSlow
+  , sweepSelect = \e -> Batched `elem` ceBackends e || Dense `elem` ceBackends e
+  , sweepNote = "dense eligibility and values, and the batched topK differentials, recompiling every batched program per threshold" } $ \entries -> do
+  (_, _, eligible, denseDeclared, topkEligible, denseTopK, mpy) <- batchedPythonFixtures entries
+  mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
+  let denseNames = map (\(n, _, _, _) -> n) denseDeclared
+      denseRefused = [ n | n <- denseNames
+                         , n `notElem` [ m | (m, src, _, _) <- eligible, not (null (denseEntryPoints src)) ] ]
+  return $ testGroup "BatchedPython (slow)" $
+    testProperty "declared-dense-eligible" (once (declaredDenseProp (length denseNames) denseRefused))
+    : case mtorch of
+        Nothing ->
+          [ testProperty "torch-python-found" $ once $ ioProperty $
+              noTorchProperty "BatchedPython (slow) dense and topK differentials" ]
+        Just (py, torch) ->
+          [ testProperty "dense-matches-expected" (once (cachedTorch manifest torch "dense-matches-expected" denseDeclared (runBatchedDense False py)))
+          , testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
+          , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
 -- | Everything the batched differential needs from one corpus program, or a
 -- diagnostic saying why batched mode cannot take it: the three eligibility
@@ -3589,13 +3648,8 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
                           , k `mod` juliaShards == i ]
                           testJuliaAll)
             | i <- [0 .. juliaShards - 1] ]
-    -- Runs without julia installed: it only reads the emitted text.
-    , corpusSweepAll corpus SweepSpec
-        { sweepName = path ++ ".Julia free names are escaped", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = routed Julia
-        , sweepNote = "no free name of an emitted Julia module collides with a Julia builtin" } $ \es ->
-          return $ testProperty "Julia free names are escaped"
-            (once $ testJuliaFreeNamesEscaped [ (ceName e, c, networkMocks (ceProgram e)) | e <- es, Right c <- [opt e] ])
+    -- "Julia free names are escaped" is not here: it is
+    -- 'juliaFreeNamesTests', in Slow.
     , corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Python", sweepTier = tier, sweepSlow = slowH
         , sweepSelect = \e -> routed Python e && hasQueries e

@@ -1,3 +1,4 @@
+slow
 backends: interpreter, batched
 p(2.5, ThetaTree [2.0, 0.0, 0.0, 0.0] [])=(1.0, 1.0)
 p(0.5, ThetaTree [2.0, 0.0, 0.0, 0.0] [])=(0.0, 1.0)

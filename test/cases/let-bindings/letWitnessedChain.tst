@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched
 p((0.5, (1.0, 1.5)))=(1.0, 3.0)
 p((0.5, (1.0, 2.8)))=(0.0, 3.0)

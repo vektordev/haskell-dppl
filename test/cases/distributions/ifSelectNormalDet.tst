@@ -5,6 +5,7 @@
 -- rest of the pipeline could not cash. A conditional is a mixture, so it now
 -- keeps its own handler; here the else arm's weight is zero and the answer is
 -- the then arm's N(1, 1).
+slow
 backends: interpreter, julia, python, batched
 p(0.5)=(0.3520653, 1.0, False)
 p(1.0)=(0.3989423, 1.0, False)

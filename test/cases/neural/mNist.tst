@@ -1,3 +1,4 @@
+slow
 argmax_p(0)=0
 argmax_p(1)=1
 argmax_p(2)=2  

@@ -7,6 +7,7 @@
 -- curried helper call `match c (readC s)` used to have no enumeration path at
 -- all ("found no way to convert to IR"). Its hoisted twin is
 -- sharedLatentPerSlotHoisted, which must agree row for row.
+slow
 backends: interpreter, julia, python, batched
 p(0, (2, [0.5, 0.3, 0.2]), (2, [0.6, 0.3, 0.1]), (2, [0.2, 0.5, 0.3]), (2, [0.1, 0.1, 0.8]))=(0.2637, 0.0)
 p(1, (2, [0.5, 0.3, 0.2]), (2, [0.6, 0.3, 0.1]), (2, [0.2, 0.5, 0.3]), (2, [0.1, 0.1, 0.8]))=(0.5279, 0.0)

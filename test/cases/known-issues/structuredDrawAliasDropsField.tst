@@ -4,5 +4,6 @@
 -- the rewrite-invariance net (alias and draw introduction on
 -- drawDestructuredShared, tupleRoundtrip). Task
 -- structured-draw-reread-through-binder-drops-field.
+slow
 expect-failure: broken
 p((True, False))=(0.25, 0.0)

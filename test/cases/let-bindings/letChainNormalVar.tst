@@ -3,6 +3,7 @@
 -- is a *local* Var labelled PNormal, which the Normal shortcut has no (mu,
 -- sigma) to read off. The Uniform twin always compiled, because point
 -- inversion never asks. y ~ N(1, 1).
+slow
 backends: interpreter, julia, python, batched
 p(0.5)=(0.3520653, 1.0, False)
 p(1.0)=(0.3989423, 1.0, False)

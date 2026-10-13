@@ -10,6 +10,7 @@
 -- deterministic comparison whose failure raises it. The Uniform twin
 -- (`draw x = Uniform in draw y = x + 1.0 in (y > 1.5, y)`) changed with it
 -- and still answers identically.
+slow
 backends: interpreter, julia, python, batched
 p((True, 0.5))=(0.3520653, 1.0, False)
 p((True, 1.0))=(0.3989423, 1.0, False)

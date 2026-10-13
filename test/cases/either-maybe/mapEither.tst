@@ -1,3 +1,4 @@
+slow
 p(Left 2.0, Left 1.0)=(1.0, 0.0)
 p(Right 0.0, Right 1.0)=(1.0, 0.0)
 p(Right 2.0, Right 1.0)=(0.0, 0.0)

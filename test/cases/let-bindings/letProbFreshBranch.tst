@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python
 p(0.2)=(0.19552134698772794, 1.0)
 p(0.7)=(1.1561269666833807, 1.0)

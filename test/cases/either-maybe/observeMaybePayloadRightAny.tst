@@ -7,6 +7,7 @@
 -- ANY failing the two witnesses' equality guard). Point queries were always
 -- right. The discrete-payload twin (`right 1.0` instead of `right v`) is
 -- known-issues/fuzzUnionMultiValuesOppositeEither.
+slow
 p(Right Right 0.5)=(0.35206533, 1.0)
 p(Left ())=(0.5, 0.0)
 p(Right ANY)=(0.5, 0.0)

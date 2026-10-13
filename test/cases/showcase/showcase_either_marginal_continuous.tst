@@ -1,3 +1,4 @@
+slow
 backends: interpreter, julia, python, batched
 p(Left ANY)=(0.3, 0.0)
 p(Right ANY)=(0.7, 0.0)

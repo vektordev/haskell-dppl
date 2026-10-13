@@ -7,6 +7,7 @@
 -- of that fix: the negative factor flips the CDF (v * -6 <= s is v >= s/-6),
 -- the flip keeps the atom at the bound (P(v >= 2), not P(v > 2)), and a
 -- non-multiple bound rounds up instead of being "impossible" (-7 -> v >= 2).
+slow
 p(-6)=(0.5, 0.0)
 p(-12)=(0.5, 0.0)
 p(-7) is impossible
