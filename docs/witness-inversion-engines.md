@@ -379,12 +379,15 @@ have one (`affineInjF`, `affineOf`). A point mass is a constant, and any other
 `PNormal` exactly when that form exists; `tryNormalClosure` keeps only the
 log-normal rows. `bindParam` binds a Gaussian argument at its form, keyed by
 the argument's chain name, so every read of the variable carries the same
-latent (`draw x = Normal in x + x` is one latent). A witnessed binding whose
-argument has a single `Marginal` latent marks it `Recovered`. A field
-constructor whose fields share a `Marginal` latent is `JSharedLatent`, and is
-floored to sample-only: `draw x = Normal in (x + Normal, x + Normal)` types
-`Bottom`. Its joint law is a bivariate Gaussian, which needs the multivariate
-density (design M2).
+latent (`draw x = Normal in x + x` is one latent). A witnessed binding is one
+`Recovered` latent to whatever reads it, and records its own density factor:
+the `Marginal` latents its argument integrates (`acFactors`). A field
+constructor's density is the product of those binding factors (each counted
+once) and each field's residual; where two factors integrate the same
+`Marginal` latent it is `JSharedLatent`, floored to sample-only:
+`draw x = Normal in (x + Normal, x + Normal)` and `draw x = Normal in draw a =
+x + Normal in draw b = x + Normal in (a, b)` type `Bottom`. Their joint law is
+a bivariate Gaussian, which needs the multivariate density (design M2).
 
 **The compiler.** `CompilerMetadata.affineEnv` holds the IR of such a variable's
 form, `c + sum a_i * eps_i` over independent standard normals, keyed the same
