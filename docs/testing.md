@@ -564,10 +564,14 @@ tests (`PythonPrelude`, `SamplingPrimitives`). That holds for a program only
 when the fuzzers put every construct it emits through both backends. So
 `buildEnd2EndTree` takes each default-tier program's census
 (`CertifiedCensus.programCensus`): the `irConstructs` of every body, generate
-included, under every config of `corpusCensusConfigs` (the six beyond -O2 and
--O0 cost about a second over the default corpus, and are compiled in
-parallel before the tree is built), the sampling primitives included (the IR
-fuzz generator compares generate bodies since its M4). A program
+included, of the compiles the text backends run (-O2 and -O0, already shared
+with the sweeps), the sampling primitives included (the IR fuzz generator
+compares generate bodies since its M4). The census is not taken per compiler
+config: certification is a statement about the backends alone, and a construct
+is certified if the IR generator reaches it whichever config emitted it. A
+Slow guard (`BackendCoverage.generatorGuardConfigs`, `irGeneratorDeferred`,
+empty) holds that the generator reaches everything the corpus compiles to
+under log space, budget 0, branch counts and topK too. A program
 with a construct outside `certifiedConstructs` keeps its `End2End.Python` and
 `End2End.Julia` checks (and the WriteLogits ones), keyed with the runtime as in
 the table above. `certifiedConstructs` is a static list of what the IR fuzz

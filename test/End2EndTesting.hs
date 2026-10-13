@@ -43,7 +43,7 @@ import IRInterpreter (generateRand, generateDet)
 import MockNN (evaluateMockNN, mockInputFor)
 import ImpactManifest
 import CorpusSweep
-import CertifiedCensus (programCensus, uncertifiedConstructs, corpusCensusConfigs, batchedProgramCensus, batchedUncertifiedConstructs)
+import CertifiedCensus (programCensus, uncertifiedConstructs, batchedProgramCensus, batchedUncertifiedConstructs)
 import qualified Data.Map as Map
 
 -- | M1 differential test (design pytorch-tensorizer): the IR select pass is a
@@ -3764,15 +3764,14 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- interpreter never saw it (it is dynamically typed and forgiving), so the
     -- pre-existing "Interpreter Unoptimized" group could not catch the class.
     unoptEnvs = Map.fromList [ (ceName e, compile defaultCompilerConfig{optimizerLevel = 0} (ceProgram e)) | e <- entries ]
-    -- Every config the corpus checks a program under ('corpusCensusConfigs'),
-    -- the -O2 and -O0 compiles shared with the sweeps. A compile that raises
+    -- The compiles the text backends run (-O2 and -O0, shared with the
+    -- sweeps); not one per config (IR fuzz generator M5). A compile that raises
     -- leaves the program uncertified: its text-backend checks then run, and
     -- report it.
     programUncertified e = do
-      let census = uncertifiedConstructs (programCensus (opt e : unopt e : [ compile conf (ceProgram e) | conf <- otherCensusConfigs ]))
+      let census = uncertifiedConstructs (programCensus [opt e, unopt e])
       r <- try (evaluate (length (concat census) `seq` census))
       return (ceName e, either (\ex -> ["(census raised: " ++ takeWhile (/= '\n') (show (ex :: SomeException)) ++ ")"]) id r)
-    otherCensusConfigs = [ conf | (name, conf) <- corpusCensusConfigs, name `notElem` ["default", "-O0"] ]
     shaped = Map.fromList [ (ceName e, shapedCases e) | e <- entries ]
     opt e = optEnvs Map.! ceName e
     unopt e = unoptEnvs Map.! ceName e

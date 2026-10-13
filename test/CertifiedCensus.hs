@@ -15,8 +15,13 @@
 -- The census is taken over every body a program emits, generate included
 -- (since the IR fuzz generator's M4 its generate bodies, draws and all, are
 -- compared on both backends by replaying each backend's draws through the
--- interpreter), and over every config the corpus checks it under
--- ('corpusCensusConfigs').
+-- interpreter), of the compiles the text backends are run on (-O2 and -O0).
+-- It is not taken per compiler config (IR fuzz generator M5): certification
+-- is a statement about the backends alone, a construct is certified if the
+-- IR generator reaches it whichever config emitted it, and the other configs
+-- are only checked on the interpreter. That the generator reaches everything
+-- the compiler emits under them is a guard of its own
+-- ('BackendCoverage.generatorGuardConfigs').
 --
 -- This is a leaf module: "End2EndTesting" needs it and the fuzz modules import
 -- "End2EndTesting", so it cannot live with them.
@@ -27,7 +32,6 @@ module CertifiedCensus
   , deterministicBodies
   , allBodies
   , samplingConstructs
-  , corpusCensusConfigs
   , certifiedConstructs
   , programCensus
   , uncertifiedConstructs
@@ -114,24 +118,6 @@ samplingConstructs :: [String]
 samplingConstructs =
   [ "IRExpr:IRSample", "Sample:IRNormal", "Sample:IRUniform", "Builtin:BCategoricalIndex" ]
 
--- | The compiler configs the corpus checks a program under (default, log
--- space, the plan engine at materialization budget 0 in both spaces, branch
--- counting, topK in both spaces, the unoptimized pipeline). Each emits
--- different IR, so a census meant to cover what the corpus checks is taken
--- over all of them: the IR fuzz generator's ('BackendCoverage') and M2's
--- per-program one ('programCensus').
-corpusCensusConfigs :: [(String, CompilerConfig)]
-corpusCensusConfigs =
-  [ ("default", defaultCompilerConfig)
-  , ("log space", defaultCompilerConfig { logSpace = True })
-  , ("budget 0", defaultCompilerConfig { materializationCardinality = 0 })
-  , ("budget 0, log space", defaultCompilerConfig { materializationCardinality = 0, logSpace = True })
-  , ("branch counts", defaultCompilerConfig { countBranches = True })
-  , ("topK", defaultCompilerConfig { topKThreshold = Just 0.05 })
-  , ("topK, log space", defaultCompilerConfig { topKThreshold = Just 0.05, logSpace = True })
-  , ("-O0", defaultCompilerConfig { optimizerLevel = 0 })
-  ]
-
 -- | The constructs the agreement fuzzers compare across the interpreter,
 -- scalar Python and Julia: what the IR fuzz generator's fixed-seed sample
 -- reaches ('IRFuzz.irGeneratorConstructs', the sample
@@ -176,8 +162,8 @@ certifiedConstructs =
     "Sample:IRNormal", "Sample:IRUniform"
   ]
 
--- | A program's census: the constructs of every body of each of its compiles
--- (one per config it is checked under; a compile the compiler refuses
+-- | A program's census: the constructs of every body of each of the compiles
+-- the text backends run (-O2 and -O0; a compile the compiler refuses
 -- contributes nothing, since nothing of it is run).
 programCensus :: [Either e IREnv] -> [String]
 programCensus envs =

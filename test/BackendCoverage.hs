@@ -31,7 +31,7 @@
 -- generator's census ('irGeneratorCoverageTests') does count them: since its
 -- M4 it compares generate bodies on both backends by replaying each backend's
 -- draws through the interpreter.
-module BackendCoverage (backendCoverageTests, irGeneratorCoverageTests, fuzzCoverageExceptions, batchedFuzzCoverageExceptions, irGeneratorDeferred, corpusCensusConfigs) where
+module BackendCoverage (backendCoverageTests, irGeneratorCoverageTests, fuzzCoverageExceptions, batchedFuzzCoverageExceptions, irGeneratorDeferred) where
 
 import Control.Exception (SomeException, try, evaluate)
 import Control.Monad (forM)
@@ -50,7 +50,7 @@ import SPLL.Prelude (compile)
 import Control.Concurrent.MVar (newMVar, modifyMVar)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv, IRExpr)
 import BackendAgreement (AgreementCase, comparedBodies, maskedConstruct, batchedComparedBodies)
-import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies, corpusCensusConfigs,
+import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies,
                         certifiedConstructs, allBodies, batchedCertifiedConstructs)
 import CorpusSweep
 import TestCaseParser (Backend(Batched))
@@ -167,10 +167,28 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
           ++ (if null stale then [] else "Listed, but no batched arm reaches them any more (remove them):" : map ("  " ++) stale)
     ]
 
+-- | The compiler configs the corpus checks a program under (default, log
+-- space, the plan engine at materialization budget 0 in both spaces, branch
+-- counting, topK in both spaces, the unoptimized pipeline). Each emits
+-- different IR. Not part of the certified census (IR fuzz generator M5); the
+-- guard that the IR generator reaches everything the compiler emits under any
+-- of them, so that no config can emit an uncertifiable construct.
+generatorGuardConfigs :: [(String, CompilerConfig)]
+generatorGuardConfigs =
+  [ ("default", defaultCompilerConfig)
+  , ("log space", defaultCompilerConfig { logSpace = True })
+  , ("budget 0", defaultCompilerConfig { materializationCardinality = 0 })
+  , ("budget 0, log space", defaultCompilerConfig { materializationCardinality = 0, logSpace = True })
+  , ("branch counts", defaultCompilerConfig { countBranches = True })
+  , ("topK", defaultCompilerConfig { topKThreshold = Just 0.05 })
+  , ("topK, log space", defaultCompilerConfig { topKThreshold = Just 0.05, logSpace = True })
+  , ("-O0", defaultCompilerConfig { optimizerLevel = 0 })
+  ]
+
 -- | The IR fuzz generator's census (docs-repo design @ir-fuzz-generator@):
 -- the constructs every body (generate included, since M4) of the whole corpus (bar the
 -- programs slow for their own compile cost) compile to under any of
--- 'corpusCensusConfigs', that the generator's fixed-seed sample
+-- 'generatorGuardConfigs', that the generator's fixed-seed sample
 -- ('IRFuzz.irGeneratorConstructs') does not reach, are exactly
 -- 'irGeneratorDeferred'.
 irGeneratorCoverageTests :: Corpus -> IO TestTree
@@ -191,7 +209,7 @@ irGeneratorCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
         ++ (if null missing then [] else "Reached by the IR generator, not listed (add them):" : map ("  " ++) missing)
         ++ (if null stale then [] else "Listed, but the IR generator no longer reaches them (remove them):" : map ("  " ++) stale)
   , testCase "corpus constructs under every corpus config the IR generator misses are exactly irGeneratorDeferred" $ do
-      perConfig <- forM corpusCensusConfigs $ \(cname, conf) -> do
+      perConfig <- forM generatorGuardConfigs $ \(cname, conf) -> do
         cs <- corpusConstructsWith conf allBodies es
         return [ (n ++ " [" ++ cname ++ "]", c) | (n, c) <- cs ]
       -- No construct is masked here: the IR generator compares its draws

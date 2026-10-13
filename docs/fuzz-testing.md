@@ -1016,7 +1016,7 @@ emits, this property draws `IREnv`s directly, within the IR type contract
   compiles to under any corpus config (default, log space, budget 0 in both
   spaces, branch counts, topK in both spaces, `-O0`) that the generator's
   fixed-seed sample does not reach must be exactly
-  `BackendCoverage.irGeneratorDeferred`, which is empty since M4. The same
+  `BackendCoverage.irGeneratorDeferred`, which is empty since M4 (the config list is `generatorGuardConfigs`, a guard only; the per-program census no longer takes it, M5). The same
   sweep holds `CertifiedCensus.certifiedConstructs`, which gates impact
   analysis's per-program Python and Julia checks, exactly equal to the
   generator's reach, the sampling primitives included since M4.
