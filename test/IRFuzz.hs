@@ -2,9 +2,11 @@
 
 -- | The IR fuzz generator (docs-repo design @ir-fuzz-generator@), milestones
 -- M1 (deterministic-value IR), M2 ('PResult' bodies in every semiring, see
--- "PResult bodies" below) and M3 (builtins, tensors, ADTs and function groups,
--- see "Function groups" below) on the scalar Python and Julia backends, with
--- the interpreter as the oracle.
+-- "PResult bodies" below), M3 (builtins, tensors, ADTs and function groups,
+-- see "Function groups" below) and M4 (generate bodies judged by replaying
+-- the backends' draws, see "Generate bodies"; and the batched arm, see "The
+-- batched arm") on the scalar Python and Julia backends and the batched
+-- PyTorch one, with the interpreter as the oracle.
 --
 -- 'prop_Fuzz_BackendsAgree' reaches the backends only through what the SPLL
 -- compiler emits from programs its generator can draw. This module draws
@@ -90,7 +92,7 @@ import Test.QuickCheck.Gen (unGen)
 import Test.QuickCheck.Random (mkQCGen)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck (testProperty)
-import Test.Tasty.HUnit (testCase, testCaseInfo, assertEqual, assertFailure)
+import Test.Tasty.HUnit (testCase, testCaseInfo, assertEqual, assertFailure, assertBool)
 import Text.Read (readMaybe)
 import Data.Text (pack, unpack, replace)
 
@@ -510,7 +512,9 @@ genExpr sc t n
   where
     -- A draw (M4), only where the body may draw: a float, transformed by
     -- whatever the context makes of it.
-    sampling draws = [ (3, drawG) | draws, t == ITFloat ]
+    sampling draws = [ (6, drawG) | draws, t == ITFloat ]
+                  -- a coin flip, the shape a Bernoulli draw compiles to
+                  ++ [ (4, ltE (IRSample IRUniform) <$> genExpr sc ITFloat (n - 1)) | draws, t == ITBool ]
     half = n `div` 2
     third = n `div` 3
     general =
@@ -756,7 +760,7 @@ genExpr sc t n
 leaf :: Scope -> IRType -> G IRExpr
 leaf sc t = do
   draws <- gets gsDraws
-  let drawn = [ (2, drawG) | draws, t == ITFloat ]
+  let drawn = [ (4, drawG) | draws, t == ITFloat ]
   case [ v | (v, t') <- sc, t' == t ] of
     [] -> frequencyG ((2, build) : drawn)
     vs -> frequencyG ([(3, IRVar <$> liftG (elements vs)), (1, build)] ++ drawn)
@@ -977,7 +981,12 @@ genBodyCase kind = do
   nc <- frequency [(3, return 0), (1, choose (1, 2))]
   ctys <- vectorOf nc (genValueType ds 1)
   cvals <- mapM (genValue ds) ctys
-  rt <- genValueType ds 2
+  -- A generate body's result leans to holding a float, where draws are
+  -- produced.
+  rt <- if kind == GenBody
+          then frequency [ (2, return ITFloat), (1, ITTuple ITFloat <$> genValueType ds 1)
+                         , (1, ITList <$> elements [ITFloat, ITBool]), (3, genValueType ds 2) ]
+          else genValueType ds 2
   size <- choose (2, caseSize)
   let params = zip [ "a" ++ show i | i <- [0 :: Int ..] ] ptys
       consts = zip [ "k" ++ show i | i <- [0 :: Int ..] ] cvals
@@ -1539,6 +1548,13 @@ knownDisagreements =
   , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
       (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
       (repro [] ITFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList))) [])
+  -- The same ticket (found in M4): Julia's @prod@ multiplies left to right,
+  -- the standard library right to left, which differs where an underflow
+  -- meets an infinity.
+  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
+      (ByAnswer (\c o a -> isValue o && isSampled a && not (null [ () | IRVar "listProd" <- caseUniverse c ])))
+      (repro [] ITFloat (IRApply (IRVar "listProd")
+         (IRConst (VList (ListCont (VFloat (-1 / 0)) (ListCont (VFloat 1e300) (ListCont (VFloat (-0.29)) (ListCont (VFloat 5e-324) EmptyList))))))) [])
   -- The same ticket, Python's side (found in M4): its empty product is the
   -- int 1, which only a type-tag check tells from 1.0. Julia raises as above.
   , KnownFamily "julia-listprod-of-an-empty-list-raises" ["python", "julia"]
@@ -1585,14 +1601,16 @@ knownDisagreements =
       (AsIf (const (irMap consHeadFirst)))
       (genRepro [] (ITList ITFloat)
          (IRConstruct TgCons [IRSample IRUniform, IRConstruct TgCons [IRSample IRUniform, IRConst (VList EmptyList)]]))
-  -- Python's codegen floats a let-binding nested in an expression out to a
-  -- statement before it, so its draw comes before the draws of whatever
-  -- precedes it in the expression. Only the order of the draws differs.
-  -- Recognised by the construct: a generate body where Python took as many
-  -- draws as the interpreter and has a let-bound draw under another node.
+  -- Python's codegen floats a let-binding, or an 'IRIf' it spills, nested in
+  -- an expression out to a statement before it, so its draws come before the
+  -- draws of whatever precedes it in the expression. Only the order of the
+  -- draws differs, but that can steer a branch elsewhere. Recognised by the
+  -- construct alone (a reorder can shift every later draw, so any answer
+  -- can follow): a generate body with a drawing let or if under another
+  -- node.
   , KnownFamily "python-let-hoisting-reorders-draws" ["python"]
-      (ByAnswer (\c o a -> icKind c == GenBody && sameCount o a
-                           && not (null [ () | x <- caseUniverse c, d <- nestedLetDecls x, not (isPure d) ])))
+      (ByAnswer (\c _ _ -> icKind c == GenBody
+                           && not (null [ () | x <- caseUniverse c, d <- hoistedEffects x, not (isPure d) ])))
       (genRepro [] ITFloat (IROp OpSub (IRSample IRUniform) (IRLetIn "l" (IRSample IRUniform) (IRVar "l"))))
   -- M4, the batched arm (PResult bodies through the select pass and the
   -- batched backend).
@@ -1634,12 +1652,24 @@ knownDisagreements =
   , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
       (AsIf (const (irMap (batchedLog . batchedDivision))))
       (batchedRepro (IRUnaryOp OpLog (IRVar "a0")) (VFloat (-1)))
-  -- A rank-1 tensor of booleans is built as a float tensor, so an element
-  -- read out of it is no condition for @torch.where@.
-  , KnownFamily "batched-bool-tensor-is-built-as-floats" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a))
+  -- A rank-1 tensor's elements are read as floats: a tensor of booleans is
+  -- built as a float tensor (so an element read out of it is no condition
+  -- for @torch.where@), and one of tuples fails.
+  , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
+      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
+                         || raisedWith "float() argument must be a string or a real number, not '" a))
       (batchedRepro (IRIf (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VBool False)], IRConst (VInt 0)])
                           (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
+  , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
+      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
+                         || raisedWith "float() argument must be a string or a real number, not '" a))
+      (batchedRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRConst (VInt 0)])) (VFloat 1))
+  -- The batched type-tag check of a number literal renders a method call on
+  -- it (@0.is_floating_point()@), which Python cannot parse.
+  , KnownFamily "batched-conformsto-of-a-literal-fails-to-parse" ["batched"]
+      (ByAnswer (\c _ a -> raisedWith "module did not load" a && raisedWith "SyntaxError" a
+                         && not (null [ () | IRConformsTo _ (IRConst _) <- caseUniverse c ])))
+      (batchedRepro (IRIf (IRConformsTo TFloat (IRConst (VInt 0))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
   -- A reduction stacks its elements, which fails when a constant (a 0-d
   -- tensor) sits next to a batched ([B]) one.
   , KnownFamily "batched-reduction-over-constant-and-batched-elements-fails" ["batched"]
@@ -1661,7 +1691,7 @@ knownDisagreements =
   -- The batched backend evaluates both arms of a conditional it lowers to a
   -- @torch.where@, so a partial destructor in the arm not taken raises.
   , KnownFamily "batched-conditional-evaluates-a-partial-arm" ["batched"]
-      (ByAnswer (\c _ a -> any (`raisedWith` a) ["IndexError", "fromLeft", "fromRight"]
+      (ByAnswer (\c _ a -> any (`raisedWith` a) ["IndexError", "fromLeft", "fromRight", "Item is not a Left", "Item is not a Right"]
                          && not (null [ () | x <- caseUniverse c, arms <- conditionalArms x, any partialExpr arms ])))
       (batchedRepro (IRIf (IROp OpLessThan (IRVar "a0") (IRConst (VFloat 2))) (IRConst (VFloat 0.5))
                           (IRUnaryOp OpAbs (IRLetIn "l" (IRDestruct AcHead (IRConst (VList EmptyList))) (IRVar "a0")))) (VFloat 1))
@@ -1679,14 +1709,16 @@ knownDisagreements =
     isVar (IRVar _) = True
     isVar _ = False
     -- The draw counts agree (the first token after the tuple's).
-    sameCount o a = case (o, a) of
-      (Interpreted (VTuple (VInt k) _), Sampled ("t" : ('i' : n) : _)) -> readMaybe n == Just k
+    -- What Python floats out of an expression to a statement before it: the
+    -- declaration of a let-binding, or a whole conditional, under a node
+    -- that is not itself a statement (a let or an if).
+    hoistedEffects x
+      | isStatement x = []
+      | otherwise = [ d | IRLetIn _ d _ <- getIRSubExprs x ] ++ [ y | y@IRIf{} <- getIRSubExprs x ]
+    isStatement y = case y of
+      IRLetIn{} -> True
+      IRIf{} -> True
       _ -> False
-    -- The declarations of let-bindings that sit under another node (not at
-    -- the head of a let spine), which Python floats out to a statement.
-    nestedLetDecls x = [ d | y <- getIRSubExprs x, not (isLet x), IRLetIn _ d _ <- [y] ]
-    isLet (IRLetIn _ _ _) = True
-    isLet _ = False
     conditionalArms x = case x of
       IRIf _ a b -> [[a, b]]
       IRSelect _ a b -> [[a, b]]
@@ -2273,6 +2305,13 @@ batchedIRDriver projectDir cases = unlines $
       in [ "_ns = {}"
          , "try:"
          , "    exec(compile(" ++ show (bicSource bc) ++ ", " ++ show ("prog" ++ show i) ++ ", 'exec'), _ns)"
+         , "    _loaded = True"
+         , "except BaseException as _e:"
+         , "    _loaded = False"
+         , "    for _k in range(" ++ show n ++ "):"
+         , "        _out('E " ++ show i ++ " ' + str(_k) + ' module did not load: ' + _msg(_e))"
+         , "if _loaded:"
+         , "  try:"
          , "    signal.setitimer(signal.ITIMER_REAL, 20.0)"
          , "    _r = eval(" ++ show (call points) ++ ", _ns)"
          , "    signal.setitimer(signal.ITIMER_REAL, 0)"
@@ -2281,7 +2320,7 @@ batchedIRDriver projectDir cases = unlines $
          , "            _out('S " ++ show i ++ " ' + str(_k) + ' ' + _bser(_r, _k))"
          , "        except BaseException as _e:"
          , "            _out('E " ++ show i ++ " ' + str(_k) + ' ' + _msg(_e))"
-         , "except BaseException as _e:"
+         , "  except BaseException as _e:"
          , "    signal.setitimer(signal.ITIMER_REAL, 0)"
          ] ++ concat
          [ [ "    try:"
@@ -2396,6 +2435,8 @@ noProduction =
   , ("Builtin:BZip OpIntDiv, BZip OpMod",
      "the value precondition of OpIntDiv/OpMod (an exact, nonzero divisor; IRTypeCheck.inferExpr) cannot be drawn elementwise; the compiler never zips them")
   , ("ITSymbol values", "neither text backend can render a VSymbol constant (pyVal/juliaVal have no case); symbols reach the backends only as network inputs")
+  , ("generate bodies on the batched arm",
+     "the batched backend draws a whole batch with torch's own rand(n)/randn(n), which the replayed stream (icDraws) does not reach; generate bodies are compared on the text backends")
   , ("function-typed parameters, results and constants of main",
      "the driver has no way to pass a closure to a backend or serialise one back; function types are drawn inside bodies and at helpers' parameters and results")
   ]
@@ -2581,6 +2622,19 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
           wanted = [ "Builtin:BMapList", "Builtin:BIndex", "Builtin:BListIndex" ]
       assertEqual "unreached (semiring, builtin)" []
         [ (sr, l) | sr <- [minBound .. maxBound], let r = inside sr, l <- wanted, l `notElem` r ]
+  -- M4: the batched arm sees select-shaped IR: selects the generator drew,
+  -- and selects the select pass made out of drawn ifs, in bodies the batched
+  -- backend emits.
+  , testCase "a fixed-seed sample puts drawn and select-pass selects through the batched backend" $ do
+      let emitted = [ (c, env) | c <- fixedSample, icKind c `elem` [ProbBody, IntegBody]
+                               , let env = selectPassEnv (irCaseEnv c)
+                               , either (const False) (const True) (generateFunctionsBatched True env) ]
+          selects e = length [ () | IRSelect{} <- universe e ]
+          drawn = [ c | (c, _) <- emitted, any ((> 0) . selects) (caseBodies c) ]
+          made = [ c | (c, IREnv gs _ _) <- emitted
+                     , sum [ selects b | g <- gs, Just (b, _) <- [probFun g, integFun g] ] > sum (map selects (caseBodies c)) ]
+      assertBool ("batched-emitted PResult cases with a drawn select: " ++ show (length drawn)) (length drawn >= 5)
+      assertBool ("batched-emitted PResult cases with a select the pass made: " ++ show (length made)) (length made >= 5)
   , testCase "a fixed-seed sample reaches both densities and cumulatives in both spaces" $ do
       let reached = nub (concatMap checkedIRConstructs fixedSample)
           wanted = [ k ++ ":" ++ d ++ " " ++ ls | k <- ["Density", "Cumulative"], d <- ["IRNormal", "IRUniform"], ls <- ["Linear", "Log"] ]
