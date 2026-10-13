@@ -5,5 +5,6 @@
 -- binding-resolver-one-application-rule: the witness question is asked of the
 -- named callee's binding, and the call binds its random leading argument
 -- first.
+batched
 p((0.3, 0.7))=(1.0, 2.0, False)
 p((0.3, 1.5)) is impossible

@@ -3,6 +3,7 @@
 -- independent standard-normal densities at dim 2. Formerly a known-issues
 -- wrong-result pin (always phi(y) at dim 1, ignoring x).
 slow
+batched
 p((0.0, 0.0))=(0.15915494, 2.0)
 p((5.0, 0.0))=(5.9311527e-7, 2.0)
 p((-100.0, 0.0))=(0.0, 2.0)

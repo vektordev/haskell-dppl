@@ -3,6 +3,7 @@
 -- be the marginal wildcard. memberGuard's point case is wildcard-aware for
 -- this row (a static OpEq on a bare VAny answers False, i.e. 0 mass).
 slow
+batched
 p((ANY, 0.0))=(0.5, 0.0)
 p((ANY, 0.7))=(1.0, 1.0)
 p((True, 0.7))=(1.0, 1.0)

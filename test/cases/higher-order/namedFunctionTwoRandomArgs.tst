@@ -5,6 +5,7 @@
 -- argument first, in parameter order, as a curried lambda in place does.
 -- (ANY, _) is refused at run time: a leading argument's witness is read as an
 -- argument of the rest of the call, not in a slot of the observation.
+batched
 p((0.0, 0.0))=(0.15915494, 2.0, False)
 p((0.5, -1.0))=(0.08518950, 2.0, False)
 p((0.0, ANY))=(0.39894228, 1.0, False)

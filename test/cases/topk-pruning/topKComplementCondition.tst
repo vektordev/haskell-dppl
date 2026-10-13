@@ -3,6 +3,7 @@
 -- threshold 0.1, and the else-weight is the complement of it. Before the fix
 -- p(2.0) answered 1.0 under topK; Corpus.TopKNeverInflates pins <= 0.95.
 slow
+batched
 p(1.0)=(0.05, 0.0)
 p(2.0)=(0.95, 0.0)
 p(3.0) is impossible
