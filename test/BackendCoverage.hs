@@ -37,7 +37,7 @@ import Control.Exception (SomeException, try, evaluate)
 import Control.Monad (forM)
 import Data.Either (rights)
 import Data.List (sort, nub, (\\), intercalate)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, catMaybes)
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 import Test.QuickCheck (arbitrary, resize, vectorOf)
@@ -55,7 +55,7 @@ import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, infe
 import CorpusSweep
 import TestCaseParser (Backend(Batched))
 import IRFuzz (irGeneratorConstructs, irGeneratorBatchedConstructs)
-import TestFuzz (prepareAgreementCase, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize)
+import TestFuzz (prepareAgreementCase, prepareAgreementNeighbour, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize)
 
 -- | Corpus constructs the agreement property does not reach, each with why.
 -- See the module header for what this list means and why it must be exact.
@@ -268,7 +268,11 @@ sampleCases :: IO [AgreementCase]
 sampleCases = do
   let draws = unGen (vectorOf coverageDraws ((,) <$> resize agreementFuzzSize genAgreementProgram <*> arbitrary))
                     (mkQCGen coverageSeed) agreementFuzzSize
-  rights <$> mapM prepareAgreementCase draws
+  primary <- rights <$> mapM prepareAgreementCase draws
+  -- As 'prop_Fuzz_BackendsAgree' does: a parameterised main is also compared
+  -- at an off-support neighbour of its argument.
+  neighbours <- rights . catMaybes <$> mapM prepareAgreementNeighbour draws
+  return (primary ++ neighbours)
 
 -- | The constructs of each batched-compared program in the fixed-seed sample:
 -- the compared cases batched mode takes, over their batched compile's

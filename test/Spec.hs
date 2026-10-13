@@ -40,7 +40,7 @@ import TestCLI (cliTests)
 import BackendCoverage (backendCoverageTests, irGeneratorCoverageTests)
 import GenerateCensus (generateCensusTests)
 import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
-                 neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
+                 neuralGeneratorTests, arrowGeneratorTests, paramMainGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests)
 import TestCaseParser (parseProgram, corpusPplPath)
 import TestSupport (topKConf, topKBCConf, bcConf, irDensity, reasonablyClose, expectCompiled)
@@ -598,6 +598,7 @@ main = do
     , shrinkerTests
     , neuralGeneratorTests
     , arrowGeneratorTests
+    , paramMainGeneratorTests
     , adtRecursionGeneratorTests
     , errorChannelTests
     , admissionOracleTests
