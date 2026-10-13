@@ -373,22 +373,25 @@ tyDepth = 2
 
 -- | A well-typed "main" program of a randomly chosen type.
 --
--- Three shapes. Three draws in five are nullary. One in five (milestone M3)
--- instead declares a neural network and reads it:
--- @main sym = let s = nn sym in \<observations of s\>@. Those draws are the
--- only way the plan-guided enumeration engine is reached at all, and they
--- cost the properties nothing extra -- the same invariants apply unchanged.
--- See 'genNeuralProgram'. The remaining one in five declares a named
--- top-level function and calls it (task fuzz-arrow-generator-coverage); see
--- 'genHelperProgram'.
+-- Five shapes, one draw in six each except the nullary one, which takes two.
 --
--- A neural draw's @main@ takes an argument, so a caller running it has to
--- supply a mock-network symbol rather than the empty argument list every other
--- draw wants. TestFuzz's @fuzzArgs@ derives that from the program.
+-- * Nullary, @main = \<expr\>@ ('genPlainProgramIn').
+-- * Parameterised, @main p0 [p1] = \<expr\>@ (task
+--   fuzz-parameterised-main-generation): a conditional distribution, run at
+--   argument tuples drawn from its parameter types. See 'genParamMainProgram'.
+-- * Neural (milestone M3): @main sym = let s = nn sym in \<observations of s\>@,
+--   the only way the plan-guided enumeration engine is reached at all. See
+--   'genNeuralProgram'.
+-- * A named top-level function and a call to it (task
+--   fuzz-arrow-generator-coverage). See 'genHelperProgram'.
+-- * A recursive top-level function (milestone M4). See 'genRecursiveProgram'.
 --
--- Milestone M4 adds a fourth, 'genRecursiveProgram' (a recursive top-level
--- function), and ADT declarations to all of them: every draw first draws a
--- declaration context ('genADTDecls': some pool seeds plus generated
+-- A caller running a parameterised or neural @main@ has to supply its
+-- arguments; TestFuzz's @fuzzArgSets@ derives them from the program
+-- ('mainParamRTypes') and a seed.
+--
+-- Milestone M4 also adds ADT declarations to all of them: every draw first
+-- draws a declaration context ('genADTDecls': some pool seeds plus generated
 -- declarations), any node may build or take apart a value of a type in it,
 -- and the program declares exactly the ones it uses ('declareHere').
 genTypedProgram :: Gen Program

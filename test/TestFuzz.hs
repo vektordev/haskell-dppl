@@ -1156,7 +1156,9 @@ invariantsPropertyOn gen name factor invs n =
     return $ case caseFailures o of
       [] -> case o of
         Ran vs | not (all (isVacuous . snd) vs) ->
-          tabulate "invariant verdicts" [ n' ++ ": " ++ verdictKind v | (n', v) <- vs ] (property True)
+          tabulate "invariant verdicts" [ n' ++ ": " ++ verdictKind v | (n', v) <- vs ]
+            $ tabulate "main argument tuples checked" [show (length (fuzzArgSets p))]
+            $ property True
         _ -> discardVacuous
       fs@(target : _) ->
         counterexample ("the drawn program failed " ++ show fs ++ "; shrinking against " ++ show target) $
@@ -1672,11 +1674,15 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ tabulate "boundary constant" (dsBoundaryConsts s)
       $ tabulate "division"         [dsDivision s]
       $ tabulate "main arity"       [dsMainArity s]
-      -- Cross-tabulated, and only over the neural draws. At one draw in five
+      -- Cross-tabulated, and only over the neural draws. At one draw in six
       -- the neural surface's own outcome split is invisible in the aggregate
       -- "outcome" row above, and that split is the thing M3 is actually about:
       -- whether a generated plan-enumeration program reaches a probability
       -- function or is refused.
+      -- The same for the parameterised draws: whether a conditional
+      -- distribution reaches a probability function at all.
+      $ tabulate "parameterised main outcome"
+          [ dsMainArity s ++ " -> " ++ show outcome | dsMainArity s `notElem` ["0", "neural", "<no main>", crashedAxis] ]
       $ tabulate "neural outcome"
           [ dsNeuralLabel s ++ " -> " ++ show outcome | dsNeuralLabel s /= "none" ]
       $ tabulate "node count"       [bucket (dsSize s)]
@@ -1706,7 +1712,7 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
                  "witness-shaped let reaches a probability function"
       -- The arrow axis's acceptance criterion (task
       -- fuzz-arrow-generator-coverage), same observe-first shape as the
-      -- others. One draw in five is a 'genHelperProgram', which applies a
+      -- others. One draw in six is a 'genHelperProgram', which applies a
       -- named function by construction, so the first bound fires on the
       -- arrow productions disappearing entirely rather than on drift (a third
       -- of draws carry a function value: 33.5% and 35% on two 200-draw runs).
@@ -1719,7 +1725,7 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ cover 8  (dsArrowShape s /= NoArrow)      "applies a function value"
       $ cover 3  (dsArrowShape s >= SelectedFun)  "applies a computed function value"
       -- M3's acceptance criterion, same observe-first shape as the two above.
-      -- 'genTypedProgram' draws a neural program one time in five, and the two
+      -- 'genTypedProgram' draws a neural program one time in six, and the two
       -- materializing annotations are 4/7 of those, so both bounds are set
       -- well under the nominal rate. A miss means the neural production has
       -- stopped firing, which no other axis would show.

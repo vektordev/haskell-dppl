@@ -11,8 +11,9 @@ structured) with `let`-bindings (most draws carry one — see "how many draws
 carry a `let`" below, and read the figure the coverage property prints for the
 run in front of you rather than any number written down here) and function
 values (about a third of draws — see "The arrow surface" below), one draw in
-five declaring and reading a neural network and one in five declaring a named
-top-level function, and drive the
+six declaring and reading a neural network, one in six declaring a named
+top-level function and one in six a parameterised `main` (see "Parameterised
+`main`" below), and drive the
 real invariants (programs validate, P(ANY)=1,
 probability is never negative, topK at threshold 0 reproduces exact
 inference and at a real threshold never inflates it, branch counting
@@ -620,6 +621,52 @@ that a helper draw validates and applies its helper, and the one soundness
 rule the shrinker has to respect here: a function value reduces to the
 constant function as a whole and is never minimized from within, because
 nothing at a bare lambda says what its parameter was bound at.
+
+## Parameterised `main` (task `fuzz-parameterised-main-generation`)
+
+`main x = e` is the conditional distribution `p(a | x)`, so
+`genParamMainProgram` (one draw in six, taken from the plain share) draws a
+`main` of one or two parameters at `genTyIn` types, never an arrow, with the
+body generated in a scope holding exactly them. Half the draws carry a
+signature `main :: T0 -> [T1 ->] R`. The corpus never writes one, but where the
+body does not pin a parameter, the signature is the only place the drawn types
+survive into the `Program`.
+
+`ArbitrarySPLL.mainParamRTypes` gives the shrinker and the argument draws a
+single answer to "what does `main` take". It reads the signature, or for an
+unsigned draw what `RInfer` infers. An inferred type variable (a parameter that
+is never read, or one read only through polymorphic nodes) is grounded at the
+first of Float, Int, Bool under which the program still types with that
+instance as a trial signature, so the compiler's own checker, class constraints
+included, decides the instance.
+
+Every property that runs `main` does it at the draw's argument tuples
+(`TestFuzz.fuzzArgSets`): up to three distinct seeded draws of those types
+(`argGen`). A nullary `main` has the one empty tuple, and a neural one its mock
+envelope. The seed travels with the program as a `Draw = (Program, Int)`, and
+`shrinkDraw` keeps it, so a shrink is queried at the same values as the draw it
+came from. Declaration shrinks leave alone an ADT that `main` takes an argument
+of, for the same reason. The invariants (`runInvariantCase`) share their
+compiles across the tuples. Each tuple then gets its own sample from
+`generate(x)` and its own `p(. | x)` at that `x`, so nothing is pooled across
+tuples. A `Broken` verdict names the tuple it was found at. The crash
+properties, `prop_Fuzz_AdmissionTotality` (`admissionCheckAt`) and
+`prop_Fuzz_SamplingMatchesPDF` check every tuple. The per-case timeout grows by
+one budget per extra tuple (`argsBudget`) and the property budget does not grow.
+
+`prop_Fuzz_BackendsAgree` compares a program at one tuple `x` picked by its
+seed. It also compares an off-support neighbour `x'` of `x`
+(`prepareAgreementNeighbour`) at the samples drawn from `x`, so it asks
+`p(a | x')` for `a ~ generate(x)`. That happens only where the neighbour is
+still a value of the parameter's type (`valueOfType`): a nudged Float is one,
+but the other arm of an `Either` usually is not.
+
+Coverage: a `main arity` row (`0`, `neural`, `k (signed|unsigned)`), a
+`parameterised main outcome` cross-tab and a `cover 8` floor. The invariants
+property tabulates `main argument tuples checked`. The two pair-drawing
+properties (`MixtureFollowsCombinationRules`, `NeuralMaterializedTwinAgrees`)
+draw from `genTypedExpr` and `genNeuralTwinProgram`, which this production does
+not touch, so their power is unchanged.
 
 ## ADTs and recursion (milestone M4)
 

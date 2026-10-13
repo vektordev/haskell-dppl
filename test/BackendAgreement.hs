@@ -726,8 +726,12 @@ runJuliaBatchWith julia cases = runBatch "julia" Jl.juliaMangle emit ".jl" julia
                            ++ src ++ "\nend\n"))
            (forcedSource (return (Jl.generateFunctions (acEnv c))))
     -- Cases have no identity of their own; programs in one batch are
-    -- distinct draws, so their printed forms are distinct enough to index by.
-    sameCase a b = show (acProgram a) == show (acProgram b) && map fst (acQueries a) == map fst (acQueries b)
+    -- distinct draws, so their printed forms are distinct enough to index by
+    -- -- with the arguments, since one parameterised program is compared at
+    -- two argument tuples, over the same points (TestFuzz's
+    -- prepareAgreementNeighbour).
+    sameCase a b = show (acProgram a) == show (acProgram b) && acBackendArgs a == acBackendArgs b
+                   && map fst (acQueries a) == map fst (acQueries b)
 
 -- ---------------------------------------------------------------------------
 -- The batched arm (task backend-agreement-batched-arm)
