@@ -65,6 +65,7 @@ module IRFuzz
   , checkedIRConstructs
   , caseFeatures
   , irGeneratorConstructs
+  , irGeneratorBatchedConstructs
   , noProduction
   , valueAgrees
   , irFuzzGeneratorTests
@@ -109,7 +110,8 @@ import qualified SPLL.CodeGenJulia as Jl
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.IRSelectPass (selectPassEnv)
 import BackendAgreement (Answer(..), parseAnswerLine, pythonSerializer, juliaSerializer, batchedRefusalReason,
-                         readNum, runBounded, forcedSource, oneLine, probAgrees, irConstructs)
+                         readNum, runBounded, forcedSource, oneLine, probAgrees, irConstructs, irEnvConstructs)
+import CertifiedCensus (inferenceBodies)
 import End2EndTesting (juliaTestFlags, qualifyConstructors, findTorchPython, noTorch)
 import Data.Either (rights)
 
@@ -2474,6 +2476,19 @@ checkedIRConstructs c = sort (nub (concatMap irConstructs (irCaseFunction c : ma
 -- 'BackendCoverage' measures the corpus census under every config against.
 irGeneratorConstructs :: [String]
 irGeneratorConstructs = sort (nub (concatMap checkedIRConstructs fixedSample))
+
+-- | Every construct the batched arm compares in the generator's fixed-seed
+-- sample: the probability and integrate bodies, after the select pass, of
+-- the cases 'prepareBatchedIRCase' takes (so the batched backend emitted them
+-- and the interpreter answers at least one point). Helper bodies are not
+-- counted: the batched backend emits no normal functions, so a case whose
+-- body calls a helper is refused, and an uncalled helper never runs. What
+-- 'CertifiedCensus.batchedCertifiedConstructs' lists, held exact by
+-- @Slow.IRGeneratorCoverage@. Pure Haskell and the interpreter; no torch.
+irGeneratorBatchedConstructs :: IO [String]
+irGeneratorBatchedConstructs = do
+  prepared <- mapM prepareBatchedIRCase fixedSample
+  return (sort (nub [ l | Right bc <- prepared, l <- irEnvConstructs inferenceBodies (bicEnv bc) ]))
 
 -- | Constructs of 'irConstructs'' inventory, or shapes of them, with no
 -- production, and why.

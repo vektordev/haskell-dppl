@@ -880,9 +880,13 @@ The batched arm has its own census, the second case of
 compiled with `batched = True` (so after the select pass), the constructs of
 their probability and integrate bodies, against the batched-compiled bodies of
 the sample's batch-eligible draws (`batchedComparedBodies`). The difference
-must be exactly `batchedFuzzCoverageExceptions`. It certifies the corpus's
-`batched-vs-expected` value check only: the batched gradient,
-generate-density, dense and topK checks compare nothing the fuzzer runs. Each
+must be exactly `batchedFuzzCoverageExceptions`; the IR generator's batched
+arm (`IRFuzz.irGeneratorBatchedConstructs`) counts on the fuzz side too. The
+third case holds `CertifiedCensus.batchedCertifiedConstructs` equal to what the
+two arms reach together, and that list gates the corpus's
+`batched-vs-expected` value check (`docs/testing.md`, "Batched reference
+compliance"). Only that check: the batched gradient, generate-density, dense
+and topK checks compare nothing either arm runs. Each
 run tabulates the batched arm's constructs too (`IR construct in a
 batched-compared body`).
 

@@ -51,10 +51,10 @@ import Control.Concurrent.MVar (newMVar, modifyMVar)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv, IRExpr)
 import BackendAgreement (AgreementCase, comparedBodies, maskedConstruct, batchedComparedBodies)
 import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies, corpusCensusConfigs,
-                        certifiedConstructs, allBodies)
+                        certifiedConstructs, allBodies, batchedCertifiedConstructs)
 import CorpusSweep
 import TestCaseParser (Backend(Batched))
-import IRFuzz (irGeneratorConstructs)
+import IRFuzz (irGeneratorConstructs, irGeneratorBatchedConstructs)
 import TestFuzz (prepareAgreementCase, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize)
 
 -- | Corpus constructs the agreement property does not reach, each with why.
@@ -79,15 +79,15 @@ fuzzCoverageExceptions =
   , ("Sample:IRNormal",    "writeLogits dead-arm noise: a random draw, whose slots the agreement property masks rather than compares (maskedConstruct)")
   ]
 
--- | The batched arm's counterpart of 'fuzzCoverageExceptions' (task
--- @backend-agreement-batched-arm@): constructs of the probability and
--- integrate bodies of the corpus programs that declare @batched@, compiled
--- for batched mode, that the agreement property never puts through the
--- batched backend. Exact, like the scalar list: it says which
--- @batched-vs-expected@ checks the fuzzer certifies (a program none of whose
--- batched constructs is listed). Only the value check: the corpus's batched
--- gradient, generate-density, dense and topK checks are not compared by the
--- fuzzer at all.
+-- | The batched arms' counterpart of 'fuzzCoverageExceptions' (tasks
+-- @backend-agreement-batched-arm@, @batched-backend-reference-compliance@):
+-- constructs of the probability and integrate bodies of the corpus programs
+-- that declare @batched@, compiled for batched mode, that neither batched arm
+-- (the typed fuzzer's, the IR generator's) puts through the batched backend.
+-- Exact, like the scalar list. The programs using one are the ones that keep
+-- their @batched-vs-expected@ check ('CertifiedCensus.batchedCertifiedConstructs').
+-- Only the value check: the corpus's batched gradient, generate-density,
+-- dense and topK checks are not compared by either arm at all.
 batchedFuzzCoverageExceptions :: [(String, String)]
 batchedFuzzCoverageExceptions =
   -- Measured 2026-10-09 (the same 1000-draw sample: 337 of its 548 compared
@@ -131,16 +131,40 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
         Nothing -> do
           cs <- sampleCases
           return (Just cs, cs)
+  -- The batched arm's constructs, shared the same way by the two batched cases.
+  bcache <- newMVar Nothing
+  let batchedSample = modifyMVar bcache $ \c -> case c of
+        Just cs -> return (c, cs)
+        Nothing -> do
+          cs <- batchedFuzzConstructs sample
+          return (Just cs, cs)
   return $ testGroup "BackendAgreementCoverage"
     [ testCase "corpus constructs the agreement fuzzer misses are exactly fuzzCoverageExceptions" $ do
         corpus <- corpusConstructs es
         fuzz <- fuzzConstructs sample
         checkExceptions "scalar" "fuzzCoverageExceptions" "deterministic bodies" Nothing maskedConstruct corpus fuzz fuzzCoverageExceptions
-    , testCase "batched corpus constructs the agreement fuzzer misses are exactly batchedFuzzCoverageExceptions" $ do
+    , testCase "batched corpus constructs the agreement fuzzers miss are exactly batchedFuzzCoverageExceptions" $ do
         corpus <- corpusConstructsWith (defaultCompilerConfig { batched = True }) inferenceBodies
                     [ e | e <- es, Batched `elem` ceBackends e ]
-        fuzz <- batchedFuzzConstructs sample
-        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of `batched`-declaring programs," Nothing maskedConstruct corpus fuzz batchedFuzzCoverageExceptions
+        fuzz <- batchedSample
+        ir <- irGeneratorBatchedConstructs
+        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of `batched`-declaring programs," Nothing maskedConstruct corpus (ir : fuzz) batchedFuzzCoverageExceptions
+    , testCase "batchedCertifiedConstructs is exactly what the two batched arms reach" $ do
+        -- Batched reference compliance (CertifiedCensus): a `batched`
+        -- corpus program whose batched census lies in this list has no
+        -- batched-vs-expected check.
+        fuzz <- batchedSample
+        ir <- irGeneratorBatchedConstructs
+        let reached = sort (filter (not . maskedConstruct) (nub (concat (ir : fuzz))))
+            listed = sort (nub batchedCertifiedConstructs)
+            missing = reached \\ listed
+            stale = listed \\ reached
+        hPutStrLn stderr ("batched arms: the typed fuzzer's sample reaches " ++ show (length (nub (concat fuzz)))
+                          ++ " constructs, the IR generator's " ++ show (length ir) ++ ", together " ++ show (length reached))
+        if null missing && null stale then return () else assertFailure $ unlines $
+          [ "batchedCertifiedConstructs is out of date." ]
+          ++ (if null missing then [] else "Reached by a batched arm, not listed (add them):" : map ("  " ++) missing)
+          ++ (if null stale then [] else "Listed, but no batched arm reaches them any more (remove them):" : map ("  " ++) stale)
     ]
 
 -- | The IR fuzz generator's census (docs-repo design @ir-fuzz-generator@):
