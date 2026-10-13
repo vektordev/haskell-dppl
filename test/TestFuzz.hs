@@ -44,8 +44,8 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, prepareAgreementCase, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
-                 neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
+module TestFuzz (fuzzTests, prepareAgreementCase, prepareAgreementNeighbour, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+                 neuralGeneratorTests, arrowGeneratorTests, paramMainGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests) where
 
 import Test.QuickCheck hiding (sample)
@@ -53,7 +53,7 @@ import Test.Tasty (TestTree, testGroup, localOption)
 import Test.Tasty.QuickCheck (testProperties, testProperty, QuickCheckMaxRatio(..))
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
 import Control.Exception (try, evaluate, throwIO, fromException, SomeException, SomeAsyncException(..))
-import Control.Monad (replicateM, unless, void)
+import Control.Monad (replicateM, unless, void, forM_)
 import Control.Monad.Random (evalRandIO)
 import System.Timeout (timeout)
 import System.Environment (lookupEnv)
@@ -63,7 +63,7 @@ import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Text.Read (readMaybe)
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (isJust, fromMaybe, catMaybes)
 import Data.Either (rights)
 import Control.Monad.Random (evalRand)
 import System.Random (mkStdGen)
@@ -82,7 +82,7 @@ import Data.List (sort, nub, intersect, find, isInfixOf, isPrefixOf, partition)
 import PrettyPrint (pPrintProg)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.PType (PType(Bottom))
-import AdmissionOracle (Outcome(..), admissionCheck, AdmissionReport(..), Check(..), Mode(..), admitted, violations, overPromises, outcomeBucket, renderViolation)
+import AdmissionOracle (Outcome(..), admissionCheck, admissionCheckAt, AdmissionReport(..), Check(..), Mode(..), admitted, violations, overPromises, outcomeBucket, renderViolation)
 import Data.Number.Erf (erf)
 import IRFuzz (IRCase(..), InterpOutcome(..), genIRCase, shrinkIRCase, irCaseWellTyped, renderIRCase,
                interpretIRCase, refusalKey, knownRefusal, knownDisagreement, renderIRDisagreement, IRDisagreement(..),
@@ -90,13 +90,13 @@ import IRFuzz (IRCase(..), InterpOutcome(..), genIRCase, shrinkIRCase, irCaseWel
                BatchedIRCase(..), prepareBatchedIRCase, runIRCasesBatched)
 
 import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.RType (RType(..), TVarR(..))
 import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler (generateBackedSites)
 import SPLL.Prelude
 import SPLL.Validator (validateProgram)
 import PredefinedFunctions (globalFEnv, parameterCount, FPair(..), applicability)
-import SPLL.Lang.Lang (toStub, getTypeInfo)
+import SPLL.Lang.Lang (toStub, getTypeInfo, prettyRType)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.Infer (addTypeInfo)
@@ -114,7 +114,7 @@ import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genExtremeProgram, gen
                       RecShape(..), recShapeOfProgram, boundaryConstsOfProgram, divisionOfProgram, genRecursiveProgram,
                       withADTs, adtPool, adtPoolNames, mentionsVar, recursionSafe,
                       unguardedProjections, genADTDecls, adtShapes, adtDeclSize, adtLeaf,
-                      genMutualADTPair)
+                      genMutualADTPair, genParamMainProgram, mainParamRTypes)
 
 -- | `show`ing a value forces every field, catching lazily-hidden crashes
 -- (partial functions/undefined) that a bare WHNF `seq` would miss.
@@ -182,8 +182,69 @@ fuzzArgs p = case neurals p of
 mockSeed :: String -> Int
 mockSeed = foldl (\acc c -> (acc * 33 + fromEnum c) `mod` 100003) 7
 
+-- | A typed draw and the seed its @main@'s arguments are drawn with
+-- ('fuzzArgSets'). The seed travels beside the program, and 'shrinkDraw'
+-- keeps it, so a shrink candidate is queried at the same argument values as
+-- the draw it came from -- the reason 'fuzzArgs' derives a neural draw's
+-- mock seed from the declaration.
+type Draw = (Program, Int)
+
+genDraw :: Gen Program -> Gen Draw
+genDraw g = (,) <$> g <*> choose (0, 1000000)
+
+shrinkDraw :: Draw -> [Draw]
+shrinkDraw (p, seed) = [ (p', seed) | p' <- shrinkTypedProgram p ]
+
+-- | 'genTypedProgram' at 'fuzzSize', with its argument seed.
+typedDraw :: Gen Draw
+typedDraw = genDraw (resize fuzzSize genTypedProgram)
+
+-- | The argument tuples @main@ is run at (task
+-- fuzz-parameterised-main-generation): @main x = e@ is the conditional
+-- distribution @p(a | x)@, so every invariant is a statement at each @x@.
+--
+-- A nullary @main@ has the one empty tuple and a neural one its mock-network
+-- envelope ('fuzzArgs'). A parameterised one has up to 'fuzzArgDraws'
+-- distinct tuples, seeded draws of its parameter types ('mainParamRTypes',
+-- which grounds a parameter the body leaves polymorphic, and 'argGen'). None
+-- where the types cannot be read or a parameter has no drawable value: such
+-- a draw has nothing to check.
+fuzzArgSets :: Draw -> [[IRValue]]
+fuzzArgSets (p, seed)
+  | hasNeural p = [fuzzArgs p]
+  | otherwise = case mainParamRTypes p of
+      Just [] -> [[]]
+      Just ts | Just gens <- mapM (argGen (adts p) 3) ts ->
+        nub (evalRand (replicateM fuzzArgDraws (sequence gens)) (mkStdGen seed))
+      _ -> []
+
+fuzzArgDraws :: Int
+fuzzArgDraws = 3
+
+-- | A per-case budget factor of @base@, widened for a draw checked at more
+-- than one argument tuple: the compiles are shared, but the sampling and the
+-- queries are paid once per tuple. The property budget is not widened.
+argsBudget :: Int -> [[IRValue]] -> Int
+argsBudget base sets = base + max 0 (length sets - 1)
+
+-- | 'pPrintProg', plus the type signatures it has no renderer for: a
+-- parameterised draw carries one half the time ('genParamMainProgram').
+pPrintDraw :: Program -> String
+pPrintDraw p = concat [ sigName sig ++ " :: " ++ prettyRType (sigType sig) ++ "\n" | sig <- signatures p ]
+               ++ pPrintProg p
+
+-- | The conditioning value a check ran at, for a counterexample; empty for a
+-- nullary @main@.
+showArgs :: [IRValue] -> String
+showArgs [] = ""
+showArgs xs = " at main args " ++ show xs
+
 drawSample :: Program -> IREnv -> IO IRValue
-drawSample p compiled = evalRandIO (runGenC p compiled (fuzzArgs p))
+drawSample p compiled = drawSampleAt p (fuzzArgs p) compiled
+
+-- | A forward sample of @main@ at the given arguments.
+drawSampleAt :: Program -> [IRValue] -> IREnv -> IO IRValue
+drawSampleAt p args compiled = evalRandIO (runGenC p compiled args)
 
 -- | A draw on which the sampled program itself failed at run time -- a
 -- partial destructor out of its domain, e.g. @head (tail [x])@, which is
@@ -207,9 +268,13 @@ hasProbFun :: IREnv -> Bool
 hasProbFun compiled = isJust (probFun (lookupIREnv "main" compiled))
 
 irProb :: Program -> IREnv -> IRValue -> Maybe IRValue
-irProb p compiled sample
+irProb p = irProbAt p (fuzzArgs p)
+
+-- | 'irProb' at the given arguments: @p(sample | args)@.
+irProbAt :: Program -> [IRValue] -> IREnv -> IRValue -> Maybe IRValue
+irProbAt p args compiled sample
   | not (hasProbFun compiled) = Nothing
-  | otherwise = either (const Nothing) Just (runProbC p compiled (fuzzArgs p) sample)
+  | otherwise = either (const Nothing) Just (runProbC p compiled args sample)
 
 -- | Draw a sample from @genEnv@ and force the probability computation @k@ at
 -- it, both inside the caller's per-case 'timeout' and behind a
@@ -258,10 +323,10 @@ hasIntegFun compiled = isJust (integFun (lookupIREnv "main" compiled))
 
 -- | The CDF at a point, i.e. P(X <= x), used by 'windowP0' below to compute
 -- an exact window-hit probability instead of a density*width approximation.
-irInteg :: Program -> IREnv -> IRValue -> Maybe Double
-irInteg p compiled x
+irInteg :: Program -> [IRValue] -> IREnv -> IRValue -> Maybe Double
+irInteg p args compiled x
   | not (hasIntegFun compiled) = Nothing
-  | otherwise = case runIntegC p compiled (fuzzArgs p) x of
+  | otherwise = case runIntegC p compiled args x of
       Right (VProbDim c _) -> Just c
       _ -> Nothing
 
@@ -587,14 +652,15 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize f
 -- | Well-typed scalar programs: a stronger, unguarded crash-freedom check
 -- (see module header for why this differs from the invariant properties).
 prop_Fuzz_TypedCompileNeverCrashes :: Property
-prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_TypedCompileNeverCrashes" 2 $ do
+prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (genDraw (resize fuzzSize genTypedProgram)) shrinkDraw $ \d@(p, _) -> ioProperty $ withinBudgetScaled "prop_Fuzz_TypedCompileNeverCrashes" (argsBudget 2 (fuzzArgSets d)) $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
     Right irEnv -> do
-      sample <- drawSample p irEnv
-      unless (isRuntimeFailure sample) $
-        void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
+      forM_ (fuzzArgSets d) $ \args -> do
+        sample <- drawSampleAt p args irEnv
+        unless (isRuntimeFailure sample) $
+          void (evaluate (fmap forceShow (runProbC p irEnv args sample)))
       emitEveryBackend defaultCompilerConfig p irEnv
 
 -- | 'prop_Fuzz_TypedCompileNeverCrashes' over programs whose float constants
@@ -603,14 +669,15 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrin
 -- every backend's emission; no value comparison, since these inputs fail the
 -- value-level invariants by IEEE design.
 prop_Fuzz_ExtremeMagnitudeNeverCrashes :: Property
-prop_Fuzz_ExtremeMagnitudeNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genExtremeProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_ExtremeMagnitudeNeverCrashes" 2 $ do
+prop_Fuzz_ExtremeMagnitudeNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (genDraw (resize fuzzSize genExtremeProgram)) shrinkDraw $ \d@(p, _) -> ioProperty $ withinBudgetScaled "prop_Fuzz_ExtremeMagnitudeNeverCrashes" (argsBudget 2 (fuzzArgSets d)) $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
     Right irEnv -> do
-      sample <- drawSample p irEnv
-      unless (isRuntimeFailure sample) $
-        void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
+      forM_ (fuzzArgSets d) $ \args -> do
+        sample <- drawSampleAt p args irEnv
+        unless (isRuntimeFailure sample) $
+          void (evaluate (fmap forceShow (runProbC p irEnv args sample)))
       emitEveryBackend defaultCompilerConfig p irEnv
 
 -- | Crash-freedom through codegen, for a program that compiled to @irEnv@
@@ -702,11 +769,11 @@ prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess (fuzzCases 3000) $
 -- then: about half of the admitted inference evaluations are over-promises.
 prop_Fuzz_AdmissionTotality :: Property
 prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
-  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_AdmissionTotality" 4 $ do
+  forAllShrink typedDraw shrinkDraw $ \d@(p, _) -> ioProperty $ withinBudgetScaled "prop_Fuzz_AdmissionTotality" (argsBudget 4 (fuzzArgSets d)) $ do
     -- Forced inside the timeout so the whole check runs under the budget (see
     -- 'forcedProbAt' for why an unforced result would escape it).
-    checked <- timeout (2 * perCaseBudgetMicros) $ do
-      r <- admissionCheck defaultCompilerConfig p (fuzzArgs p)
+    checked <- timeout (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros) $ do
+      r <- admissionCheckAt defaultCompilerConfig p (fuzzArgSets d)
       _ <- evaluate (length (show r))
       return r
     case checked of
@@ -719,7 +786,7 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
         compiles <- timeout perCaseBudgetMicros (trySync (evaluate (forceShow (compile defaultCompilerConfig p))))
         return $ case compiles of
           Nothing -> label "compile did not terminate (structured-accessor-compile-blowup)" True
-          Just _  -> counterexample ("admission check did not terminate within " ++ show (2 * perCaseBudgetMicros)
+          Just _  -> counterexample ("admission check did not terminate within " ++ show (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros)
                                      ++ "us, though the program compiles in time\nPROGRAM:\n" ++ pPrintProg p) False
   where
    judge p report =
@@ -742,7 +809,7 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
      $ counterexample (unlines (concat
          [ "ADMISSION CONTRACT VIOLATED:" : map renderViolation new | not (null new) ]
          ++ concat [ "LATTICE OVER-PROMISE (admitted, variant refused):" : map renderViolation newOver | not (null newOver) ]
-         ++ ["PROGRAM:", pPrintProg p]))
+         ++ ["PROGRAM:", pPrintDraw p]))
      $ null new && null newOver
 
 -- | Crash families already filed, matched by a substring of the violation's
@@ -898,11 +965,20 @@ rethreshold _        = id
 -- requested config ('Nothing' for one not requested or that did not compile),
 -- and one point drawn from the exact compile ('Nothing' when there is no exact
 -- compile or the draw failed or raised).
+--
+-- A case is one argument tuple of @main@ ('fuzzArgSets'), so every invariant
+-- is checked at one @x@ at a time: the sample is drawn from @generate(x)@ and
+-- every probability is @p(. | x)@ at that same @x@, never pooled across them.
 data InvariantCase = InvariantCase
   { icProgram :: Program
+  , icMainArgs :: [IRValue]
   , icEnv     :: FuzzConfig -> Maybe IREnv
   , icSample  :: Maybe IRValue
   }
+
+-- | @p(sample | x)@ under a case's own arguments.
+icProb :: InvariantCase -> IREnv -> IRValue -> Maybe IRValue
+icProb c = irProbAt (icProgram c) (icMainArgs c)
 
 -- | An invariant's verdict on one case. 'Vacuous' is "nothing to check here"
 -- (no probability function, a draw that raised, ...), the per-invariant form
@@ -933,7 +1009,7 @@ probPairAt a b c = do
   s <- icSample c
   ea <- icEnv c a
   eb <- icEnv c b
-  return (s, irProb (icProgram c) ea s, irProb (icProgram c) eb s)
+  return (s, icProb c ea s, icProb c eb s)
 
 -- | P(ANY) = 1 for every well-typed generated program that has a probability
 -- function at all (some scalar shapes -- e.g. an If condition built from a
@@ -942,7 +1018,7 @@ probPairAt a b c = do
 -- 'prop_Fuzz_TypedCompileNeverCrashes' instead -- both are vacuous here).
 marginalAnyIsOne :: Invariant
 marginalAnyIsOne = Invariant "MarginalAnyIsOne" [CfgExact] $ \c ->
-  judgeForced (icEnv c CfgExact >>= \e -> irProb (icProgram c) e VAny) $ \r -> case r of
+  judgeForced (icEnv c CfgExact >>= \e -> icProb c e VAny) $ \r -> case r of
     Nothing -> Vacuous
     Just result -> case probDim result of
       Just (pr, _) -> holdsIf (abs (pr - 1) < 1e-6) ("P(ANY) = " ++ show pr ++ ", expected ~1")
@@ -954,7 +1030,7 @@ marginalAnyIsOne = Invariant "MarginalAnyIsOne" [CfgExact] $ \c ->
 -- or mixture-combination arithmetic somewhere in IRCompiler has a sign bug).
 probabilityNeverNegative :: Invariant
 probabilityNeverNegative = Invariant "ProbabilityNeverNegative" [CfgExact] $ \c ->
-  judgeForced (icSample c >>= \s -> icEnv c CfgExact >>= \e -> Just (s, irProb (icProgram c) e s)) $ \r -> case r of
+  judgeForced (icSample c >>= \s -> icEnv c CfgExact >>= \e -> Just (s, icProb c e s)) $ \r -> case r of
     Just (sample, Just result) -> case probDim result of
       Just (pr, _) -> holdsIf (pr >= -1e-9) ("P(" ++ show sample ++ ") = " ++ show pr ++ ", expected >= 0")
       Nothing -> Broken ("unexpected result shape: " ++ show result)
@@ -1015,28 +1091,45 @@ caseFailures (Ran vs)     = [ Breaks n | (n, Broken _) <- vs ]
 -- exact compile, and run every invariant, all inside the per-case budget
 -- (scaled by @factor@, as 'withinBudgetScaled') and charged to @name@'s
 -- property budget.
-runInvariantCase :: String -> Int -> [Invariant] -> Program -> IO CaseOutcome
-runInvariantCase name factor invs p = do
+--
+-- The compiles are shared, and the invariants then run once per argument
+-- tuple ('fuzzArgSets'), each with its own sample. An invariant's verdict on
+-- the draw is its first 'Broken' over the tuples (naming the tuple), else
+-- 'Holds' if it held at any, else 'Vacuous'.
+runInvariantCase :: String -> Int -> [Invariant] -> Draw -> IO CaseOutcome
+runInvariantCase name factor invs d@(p, _) = do
   hasBudget <- claimBudget propertyBudgetMicros name
   if not hasBudget
     then noteExhaustion name propertyBudgetMicros >> return OutOfBudget
     else do
-      let budget = factor * perCaseBudgetMicros
+      let argSets = fuzzArgSets d
+          budget = argsBudget factor argSets * perCaseBudgetMicros
       result <- timeout budget $ do
         let cfgs = [ c | c <- [minBound .. maxBound], any ((c `elem`) . invConfigs) invs ]
         compiled <- mapM (\k -> (,) k <$> compileSafe (fuzzConfig k) p) (nub (map compileKey cfgs))
         let envOf c = rethreshold c <$> (lookup (compileKey c) compiled >>= id)
-        sample <- case envOf CfgExact of
-          Nothing -> return Nothing
-          Just e -> do
-            drawn <- trySync (drawSample p e >>= evaluate . forceShow)
-            return $ case drawn of
-              Right s | not (isRuntimeFailure s) -> Just s
-              _ -> Nothing
-        let ic = InvariantCase p envOf sample
-        verdicts <- mapM (\inv -> (,) (invName inv) <$> invCheck inv ic) invs
-        evaluate (forceShow verdicts)
+        perArgs <- mapM (\args -> do
+          sample <- case envOf CfgExact of
+            Nothing -> return Nothing
+            Just e -> do
+              drawn <- trySync (drawSampleAt p args e >>= evaluate . forceShow)
+              return $ case drawn of
+                Right s | not (isRuntimeFailure s) -> Just s
+                _ -> Nothing
+          let ic = InvariantCase p args envOf sample
+          mapM (\inv -> (,) (invName inv) <$> invCheck inv ic) invs) argSets
+        let merged = [ (invName inv, mergeVerdicts [ (args, v) | (args, vs) <- zip argSets perArgs
+                                                               , Just v <- [lookup (invName inv) vs] ])
+                     | inv <- invs ]
+        evaluate (forceShow merged)
       return (maybe (TimedOut budget) Ran result)
+  where
+    mergeVerdicts vs = case [ (args, msg) | (args, Broken msg) <- vs ] of
+      ((args, msg) : _) -> Broken (msg ++ showArgs args)
+      [] | any (isHolds . snd) vs -> Holds
+         | otherwise -> Vacuous
+    isHolds Holds = True
+    isHolds _ = False
 
 -- | Draw programs and check @invs@ on each, with @n@ (scaled) successes. A
 -- case where every invariant was vacuous is discarded.
@@ -1058,7 +1151,7 @@ invariantsPropertyOn :: Gen Program -> String -> Int -> [Invariant] -> Int -> Pr
 invariantsPropertyOn gen name factor invs n =
   -- 'idempotentIOProperty', not 'ioProperty': the latter strips the
   -- 'shrinking' tree this returns. The IO runs once per draw either way.
-  withMaxSuccess (fuzzCases n) $ forAllBlind gen $ \p -> idempotentIOProperty $ do
+  withMaxSuccess (fuzzCases n) $ forAllBlind (genDraw gen) $ \p -> idempotentIOProperty $ do
     o <- runInvariantCase name factor invs p
     return $ case caseFailures o of
       [] -> case o of
@@ -1067,7 +1160,7 @@ invariantsPropertyOn gen name factor invs n =
         _ -> discardVacuous
       fs@(target : _) ->
         counterexample ("the drawn program failed " ++ show fs ++ "; shrinking against " ++ show target) $
-          shrinking (\(_, q) -> [ (Nothing, q') | q' <- shrinkTypedProgram q ]) (Just o, p) $ \(known, q) ->
+          shrinking (\(_, q) -> [ (Nothing, q') | q' <- shrinkDraw q ]) (Just o, p) $ \(known, q) ->
             case known of
               Just o' -> reportFailure target o' q
               Nothing -> ioProperty $ do
@@ -1081,11 +1174,11 @@ invariantsPropertyOn gen name factor invs n =
     verdictKind (Broken _) = "broken"
 
 -- | A failing case, labelled with the invariant it is being shrunk against.
-reportFailure :: CaseFailure -> CaseOutcome -> Program -> Property
-reportFailure target o q =
+reportFailure :: CaseFailure -> CaseOutcome -> Draw -> Property
+reportFailure target o (q, seed) =
   counterexample (describe target) $
   counterexample ("all failures on this program: " ++ show (caseFailures o)) $
-  counterexample ("PROGRAM:\n" ++ pPrintProg q) False
+  counterexample ("PROGRAM (argument seed " ++ show seed ++ "):\n" ++ pPrintDraw q) False
   where
     describe Hangs = case o of
       TimedOut b -> "hang: did not terminate within " ++ show b ++ "us"
@@ -1399,6 +1492,7 @@ data DrawSummary = DrawSummary
   , dsRecShape       :: RecShape
   , dsBoundaryConsts :: [String]
   , dsDivision       :: String
+  , dsMainArity      :: String
   } deriving (Show, Eq)
 
 summarizeDraw :: Program -> IO DrawSummary
@@ -1424,6 +1518,24 @@ summarizeDraw p = do
     <*> guardAxis NoRec (recShapeOfProgram p)
     <*> guardAxis [crashedAxis] (boundaryConstsOfProgram p)
     <*> guardAxis crashedAxis (divisionOfProgram p)
+    <*> guardAxis crashedAxis (mainArityLabel p)
+
+-- | How many parameters @main@ takes, as a label (task
+-- fuzz-parameterised-main-generation): @0@, a count with whether a signature
+-- states their types, or @neural@ for a network-reading @main@, whose one
+-- parameter is the network's input rather than a conditioning value.
+mainArityLabel :: Program -> String
+mainArityLabel p
+  | hasNeural p = "neural"
+  | otherwise = case lookup "main" (functions p) of
+      Nothing -> "<no main>"
+      Just body -> case arity body of
+        0 -> "0"
+        k -> show k ++ (if any ((== "main") . sigName) (signatures p) then " (signed)" else " (unsigned)")
+  where
+    arity e = case node e of
+      Lambda _ b -> 1 + arity b
+      _ -> 0 :: Int
 
 -- | The modality pass's verdict on @main@, as a label. This is the axis that
 -- catches a collapse into a single inference regime, which the outcome split
@@ -1559,6 +1671,7 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       -- the zero-operand inverse branches special-case, and division.
       $ tabulate "boundary constant" (dsBoundaryConsts s)
       $ tabulate "division"         [dsDivision s]
+      $ tabulate "main arity"       [dsMainArity s]
       -- Cross-tabulated, and only over the neural draws. At one draw in five
       -- the neural surface's own outcome split is invisible in the aggregate
       -- "outcome" row above, and that split is the thing M3 is actually about:
@@ -1631,6 +1744,11 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       -- on the 200-draw run that landed it.
       $ cover 15 (any (isInfixOf "Float") (dsBoundaryConsts s)) "contains a Float boundary constant"
       $ cover 4  (dsDivision s /= "none")       "divides"
+      -- Task fuzz-parameterised-main-generation: one draw in six is a
+      -- parameterised non-neural @main@ ('genParamMainProgram'), half of them
+      -- signed. Observe-first floor again, far under the nominal rate.
+      $ cover 8  (dsMainArity s `notElem` ["0", "neural", "<no main>", crashedAxis])
+                 "main takes a conditioning argument"
       $ property True
 
 -- ---------------------------------------------------------------------------
@@ -1703,18 +1821,71 @@ shrinkAgreementBatch xs = map (: []) xs
 -- top-level function that has them: @main@ at its own arguments, any other
 -- function at seeded draws of its parameter types and their off-support
 -- neighbours.
+--
+-- A parameterised @main@ is compared at one argument tuple @x@, picked from
+-- 'fuzzArgSets' by the seed: the samples are drawn from @generate(x)@ and
+-- every query is asked at that same @x@. 'prepareAgreementNeighbour' adds an
+-- off-support neighbour of @x@.
 prepareAgreementCase :: (Program, Int) -> IO (Either String AgreementCase)
-prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout agreementPerProgramMicros $ do
+prepareAgreementCase d = case agreementArgs d of
+  Nothing -> return (Left "no argument tuple")
+  Just args -> prepareAgreementCaseAt d args args
+
+-- | The argument tuple a program is compared at ('prepareAgreementCase').
+agreementArgs :: (Program, Int) -> Maybe [IRValue]
+agreementArgs d@(_, seed) = case fuzzArgSets d of
+  [] -> Nothing
+  sets -> Just (sets !! (seed `mod` length sets))
+
+-- | The case at an off-support neighbour @x'@ of a parameterised @main@'s
+-- compared tuple @x@ ('offSupport'), where the neighbour is still a value of
+-- the parameter's type -- the other arm of an @Either@ need not be, a nudged
+-- @Float@ always is. Its points are the samples drawn at @x@, so it asks
+-- @p(a | x')@ for an @a ~ generate(x)@: a sample often off the neighbour's
+-- support. The first such neighbour only. 'Nothing' for a nullary or neural
+-- @main@, and where no neighbour is well typed.
+prepareAgreementNeighbour :: (Program, Int) -> IO (Maybe (Either String AgreementCase))
+prepareAgreementNeighbour d@(p, _) = case (agreementArgs d, mainParamRTypes p) of
+  (Just xs@(_ : _), Just ts) | not (hasNeural p), length ts == length xs ->
+    case [ xs' | (k, x) <- zip [0 ..] xs, x' <- offSupport x
+               , valueOfType (adts p) (ts !! k) x'
+               , let xs' = take k xs ++ [x'] ++ drop (k + 1) xs ] of
+      (xs' : _) -> Just <$> prepareAgreementCaseAt d xs xs'
+      [] -> return Nothing
+  _ -> return Nothing
+
+-- | Is a value one of the type's? A type variable takes anything.
+valueOfType :: [ADTDecl] -> RType -> IRValue -> Bool
+valueOfType ds rt v = case (rt, v) of
+  (TVarR _, _) -> True
+  (TFloat, VFloat _) -> True
+  (TInt, VInt _) -> True
+  (TBool, VBool _) -> True
+  (Tuple a b, VTuple x y) -> valueOfType ds a x && valueOfType ds b y
+  (TEither a _, VEither (Left x)) -> valueOfType ds a x
+  (TEither _ b, VEither (Right y)) -> valueOfType ds b y
+  (ListOf a, VList l) -> all (valueOfType ds a) (listElems l)
+  (TADT n, VADT c fs) -> case [ fields | decl <- ds, dataName decl == n, (c', fields) <- constructors decl, c' == c ] of
+    [fields] -> length fields == length fs && and (zipWith (valueOfType ds . snd) fields fs)
+    _ -> False
+  _ -> False
+  where
+    listElems (ListCont x xs) = x : listElems xs
+    listElems _ = []
+
+-- | 'prepareAgreementCase' with the samples drawn at @sampleArgs@ and every
+-- query asked at @args@.
+prepareAgreementCaseAt :: (Program, Int) -> [IRValue] -> [IRValue] -> IO (Either String AgreementCase)
+prepareAgreementCaseAt (p, seed) sampleArgs args = fmap (fromMaybe (Left "timed out")) $ timeout agreementPerProgramMicros $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return (Left "no compile")
     Just env -> do
-      let args = fuzzArgs p
-          backendArgs = resolveNeuralParams p args
+      let backendArgs = resolveNeuralParams p args
       -- 'agreementGenReference' draws; the first three are the query points'
       -- samples (a longer run of one generator shares its prefix).
       drawn <- if hasProbFun env
-                 then trySync (evaluate (forceShow (evalRand (replicateM agreementGenReference (runGenC p env args)) (mkStdGen seed))))
+                 then trySync (evaluate (forceShow (evalRand (replicateM agreementGenReference (runGenC p env sampleArgs)) (mkStdGen seed))))
                  else return (Right [])
       let samples = [ s | Right ss <- [drawn], s <- take 3 ss, queryable s ]
           points = take maxAgreementPoints (nub (samples ++ concatMap anyHoles samples ++ concatMap offSupport samples))
@@ -1722,8 +1893,10 @@ prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout a
                     map QProb points
                     ++ (if hasIntegFun env then [ QInteg v | v <- points, not (hasWildcard v) ] else [])
           bodies = bodyQueries p env seed args backendArgs
+      -- The generate queries are judged against the reference run, which is
+      -- one at the query's own arguments only.
       gens <- genQueries p env seed args (case drawn of
-                                            Right ss | all queryable ss -> Just ss
+                                            Right ss | all queryable ss, sampleArgs == args -> Just ss
                                             _ -> Nothing)
       if null queries && null bodies && null gens then return (Left "no body to compare") else do
         answered <- fmap concat $ mapM (\q -> do
@@ -1930,7 +2103,13 @@ knownBatchedFamily d = case dBackendA d of
 -- does not take it, under the per-program bound.
 prepareAgreementBatched :: AgreementCase -> IO (Either String BatchedCase)
 prepareAgreementBatched c = fromMaybe (Left "batched compile timed out")
-  <$> timeout agreementPerProgramMicros (prepareBatchedCase (fuzzArgs (acProgram c)) c)
+  <$> timeout agreementPerProgramMicros (prepareBatchedCase interpArgs c)
+  where
+    -- The interpreter's arguments: a neural @main@'s unresolved mock
+    -- envelope, anything else's are the backends' own.
+    interpArgs
+      | hasNeural (acProgram c) = fuzzArgs (acProgram c)
+      | otherwise = acBackendArgs c
 
 -- | 'findTorchPython', looked up once per process: each lookup imports torch
 -- in a subprocess, about a second.
@@ -1962,7 +2141,8 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
   forAllShrink genAgreementBatch shrinkAgreementBatch $ \batch -> ioProperty $
     withinBudgetScaled "prop_Fuzz_BackendsAgree" 20 $ do
       prepared <- mapM prepareAgreementCase batch
-      let cases = rights prepared
+      neighbours <- mapM prepareAgreementNeighbour batch
+      let cases = rights prepared ++ rights (catMaybes neighbours)
       if null cases then return discardVacuous else do
         (pyD, pyGen) <- runPythonBatchWith cases
         julia <- findJulia
@@ -1999,6 +2179,7 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
           $ tabulate "IR construct in a batched-compared body" (concatMap (sort . nub . concatMap irConstructs . batchedComparedBodies) bcases)
           $ maybe id (\msg -> const (counterexample msg False)) noTorchFailure
           $ tabulate "drawn program" [ either id (const "compared") r | r <- prepared ]
+          $ tabulate "off-support argument neighbour" [ maybe "none (nullary, neural, or no well-typed neighbour)" (either id (const "compared")) r | r <- neighbours ]
           $ tabulate "query kind" [ kind q | c <- cases, (q, _) <- acQueries c ]
           $ tabulate "body kind" [ bodyKind q | c <- cases, (q, _) <- acQueries c ]
           $ tabulate "generate sample (python)" pyGen
@@ -2380,6 +2561,66 @@ arrowGeneratorTests = testGroup "Arrow generator"
         | p' <- shrinkTypedProgram p ]
   ]
   where incLam = "x" #-># (var "x" #+# constF 1.0)
+
+-- | The parameterised-@main@ contract (task fuzz-parameterised-main-generation).
+-- Default suite, like the groups around it: pure apart from type inference.
+paramMainGeneratorTests :: TestTree
+paramMainGeneratorTests = testGroup "Parameterised main generator"
+  [ testProperty "a parameterised draw validates and takes one or two parameters" $
+      forAll (resize fuzzSize genParamMainProgram) $ \p ->
+        counterexample (show p) $
+              validateProgram p === Right ()
+         .&&. property (mainArityLabel p `elem` ["1 (signed)", "1 (unsigned)", "2 (signed)", "2 (unsigned)"])
+  , testProperty "its parameter types and core type are recoverable" $
+      forAll (resize fuzzSize genParamMainProgram) $ \p ->
+        counterexample (show p ++ "\n  params: " ++ show (mainParamRTypes p)) $
+              fmap length (mainParamRTypes p) === Just (paramCount p)
+         .&&. property (isJust (typedMainCoreTy p))
+  , testProperty "its argument tuples are values of its parameter types" $
+      forAll ((,) <$> resize fuzzSize genParamMainProgram <*> choose (0, 1000000)) $ \d@(p, _) ->
+        let sets = fuzzArgSets d
+            tys = fromMaybe [] (mainParamRTypes p)
+        in counterexample (show p ++ "\n  args: " ++ show sets) $
+                 property (not (null sets))
+            .&&. conjoin [ length xs === length tys
+                           .&&. property (and (zipWith (valueOfType (adts p)) tys xs))
+                         | xs <- sets ]
+  , testProperty "shrinking keeps main's arity and validates" $
+      forAll (resize fuzzSize genParamMainProgram) $ \p -> conjoin
+        [ counterexample (show p') (paramCount p' === paramCount p .&&. validateProgram p' === Right ())
+        | p' <- shrinkTypedProgram p ]
+  , testCase "an unsigned main's parameter types are inferred, a polymorphic one grounded" $ do
+      -- @b@ is never read, and @neg (neg c)@ is @Num a => a@: both are
+      -- grounded at the first instance the program types with as a signature.
+      let p = Program [("main", "a" #-># ("b" #-># ("c" #-># tuple (var "a" #+# normal) (negF (negF (var "c"))))))] [] [] [] []
+      assertEqual "" (Just [TFloat, TFloat, TFloat]) (mainParamRTypes p)
+      -- And a parameter the body pins is read as pinned.
+      let q = Program [("main", "a" #-># injF "not" [var "a"])] [] [] [] []
+      assertEqual "" (Just [TBool]) (mainParamRTypes q)
+      assertBool "and drawn as such"
+        (all (\xs -> case xs of [VBool _] -> True; _ -> False) (fuzzArgSets (q, 7)))
+  , testCase "a signed main's parameter types are its signature's" $ do
+      let p = Program [("main", "a" #-># ("b" #-># (var "a" #+# normal)))] [] [] []
+                [FnSignature "main" (TArrow TFloat (TArrow TBool TFloat)) []]
+      assertEqual "" (Just [TFloat, TBool]) (mainParamRTypes p)
+      assertEqual "three distinct tuples or fewer" True (length (fuzzArgSets (p, 7)) <= fuzzArgDraws)
+  , testCase "a neural main's argument is its mock envelope, not a conditioning value" $
+      -- 'fuzzArgSets' must leave a neural draw at its one 'fuzzArgs' tuple.
+      let p = Program [("main", "s" #-># readNN "nn" (var "s"))] [("nn", TArrow TSymbol TBool, Nothing)] [] [] []
+      in assertEqual "" [fuzzArgs p] (fuzzArgSets (p, 7))
+  , testCase "an off-support neighbour of an argument must be a value of its type" $ do
+      assertBool "a nudged Float is" (valueOfType [] TFloat (VFloat 1.3721))
+      assertBool "an Either moved to the other arm need not be"
+        (not (valueOfType [] (TEither TInt TBool) (VEither (Right (VInt 1)))))
+      assertBool "a type variable takes anything" (valueOfType [] (TVarR (TV "a")) (VBool True))
+  ]
+  where
+    paramCount p = case lookup "main" (functions p) of
+      Just body -> lambdas body
+      Nothing -> 0 :: Int
+    lambdas e = case node e of
+      Lambda _ b -> 1 + lambdas b
+      _ -> 0
 
 -- ---------------------------------------------------------------------------
 -- Milestone M4's contract: ADTs and recursion (design
@@ -3284,12 +3525,12 @@ data QueryPoint = QueryPoint
 -- since PNormal/PLogNormal/Integrate all guarantee a closed-form CDF -- see
 -- docs/pipeline-and-types.md's PType section -- but 'drawQueryPoints' filters query points
 -- via 'irProb', not 'irInteg', so this stays defensive rather than partial).
-windowP0 :: Program -> IREnv -> IRValue -> Double -> Double -> Double -> Double
-windowP0 p irEnv (VFloat center) pr dim eps =
-  case (irInteg p irEnv (VFloat (center - eps / 2)), irInteg p irEnv (VFloat (center + eps / 2))) of
+windowP0 :: Program -> [IRValue] -> IREnv -> IRValue -> Double -> Double -> Double -> Double
+windowP0 p args irEnv (VFloat center) pr dim eps =
+  case (irInteg p args irEnv (VFloat (center - eps / 2)), irInteg p args irEnv (VFloat (center + eps / 2))) of
     (Just lo, Just hi) -> max 0 (hi - lo)
     _ -> pr * eps ** dim
-windowP0 _ _ _ pr dim eps = pr * eps ** dim
+windowP0 _ _ _ _ pr dim eps = pr * eps ** dim
 
 -- | Draw 'n' independent points from 'generate' and keep only the ones the
 -- compiler assigns a well-formed, positive density to (a point with claimed
@@ -3297,18 +3538,18 @@ windowP0 _ _ _ pr dim eps = pr * eps ** dim
 -- carries no meaningful empirical rate to test against). Drawing the points
 -- via 'generate' rather than e.g. a deterministic grid keeps them always
 -- in-support, mirroring every other property in this module.
-drawQueryPoints :: Program -> IREnv -> Int -> IO [QueryPoint]
-drawQueryPoints p irEnv n = do
-  samples <- replicateM n (drawSample p irEnv)
+drawQueryPoints :: Program -> [IRValue] -> IREnv -> Int -> IO [QueryPoint]
+drawQueryPoints p args irEnv n = do
+  samples <- replicateM n (drawSampleAt p args irEnv)
   return
     [ QueryPoint s eps p0
     | s <- samples
     , not (isRuntimeFailure s)
-    , Just result <- [irProb p irEnv s]
+    , Just result <- [irProbAt p args irEnv s]
     , Just (pr, dim) <- [probDim result]
     , pr > 0
     , let eps = if dim == 0 then 0 else continuousEps
-    , let p0 = if dim == 0 then pr else windowP0 p irEnv s pr dim eps
+    , let p0 = if dim == 0 then pr else windowP0 p args irEnv s pr dim eps
     ]
 
 -- | Draw one shared batch of 'batchSize' forward samples and classify every
@@ -3321,9 +3562,9 @@ drawQueryPoints p irEnv n = do
 -- budget or equivalence margin needs revisiting). If some points are still
 -- 'Unclear' and retries remain, double the batch and try again -- mirrors
 -- the retry-doubling in Spec.hs's 'testSamplingProb'.
-runSamplingCheck :: Program -> IREnv -> [QueryPoint] -> Int -> Int -> IO Property
-runSamplingCheck p irEnv points batchSize retriesLeft = do
-  batch <- replicateM batchSize (drawSample p irEnv)
+runSamplingCheck :: Program -> [IRValue] -> IREnv -> [QueryPoint] -> Int -> Int -> IO Property
+runSamplingCheck p args irEnv points batchSize retriesLeft = do
+  batch <- replicateM batchSize (drawSampleAt p args irEnv)
   let classified =
         [ (qp, verdict, pHat, pDiff)
         | qp <- points
@@ -3337,14 +3578,14 @@ runSamplingCheck p irEnv points batchSize retriesLeft = do
       verdictOf (_, v, _, _) = v
   if any ((== Different) . verdictOf) classified
     then return $ counterexample
-      ("batchSize=" ++ show batchSize ++ "\n" ++ unlines (map describe classified))
+      ("batchSize=" ++ show batchSize ++ showArgs args ++ "\n" ++ unlines (map describe classified))
       False
     else if retriesLeft <= 0 || batchSize >= maxSamples || all ((/= Unclear) . verdictOf) classified
       then return $ tabulate "densityMatch verdict" (map (show . verdictOf) classified) (property True)
       -- Clamped to 'maxSamples': without this, doubling on every retry could
       -- overshoot the intended cap exponentially (batchSize*2^maxRetries),
       -- which is what actually ran a case out of memory during testing.
-      else runSamplingCheck p irEnv points (min maxSamples (batchSize * 2)) (retriesLeft - 1)
+      else runSamplingCheck p args irEnv points (min maxSamples (batchSize * 2)) (retriesLeft - 1)
 
 -- | Bounded retries for 'runSamplingCheck': doubling the batch on an
 -- 'Unclear' verdict quadruples statistical power (se shrinks with
@@ -3368,19 +3609,25 @@ maxRetries = 4
 -- batch of forward samples sized to the hardest (lowest-density) point among
 -- them (see 'drawQueryPoints' / 'runSamplingCheck').
 fuzzSamplingMatchesPDF :: Property
-fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinSuperSlowBudget "prop_Fuzz_SamplingMatchesPDF" $ do
+--
+-- A parameterised @main@ is checked at each of its argument tuples
+-- ('fuzzArgSets') separately: the points and the batch are both drawn from
+-- @generate(x)@ and judged against @p(. | x)@ at that @x@, never pooled.
+fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink typedDraw shrinkDraw $ \d@(p, _) -> ioProperty $ withinSuperSlowBudget "prop_Fuzz_SamplingMatchesPDF" $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous
     Just irEnv
       | not (hasProbFun irEnv) -> return discardVacuous
       | otherwise -> do
-          points <- drawQueryPoints p irEnv queryPointCount
-          case points of
-            [] -> return discardVacuous
-            _ -> do
-              let initialBatch = maximum [dynamicSampleCount (qpP0 qp) | qp <- points]
-              runSamplingCheck p irEnv points initialBatch maxRetries
+          checked <- fmap concat $ mapM (\args -> do
+            points <- drawQueryPoints p args irEnv queryPointCount
+            case points of
+              [] -> return []
+              _ -> do
+                let initialBatch = maximum [dynamicSampleCount (qpP0 qp) | qp <- points]
+                (: []) <$> runSamplingCheck p args irEnv points initialBatch maxRetries) (fuzzArgSets d)
+          return $ if null checked then discardVacuous else conjoin checked
 
 superSlowFuzzTests :: TestTree
 superSlowFuzzTests = testGroup "Fuzz" [testProperty "prop_Fuzz_SamplingMatchesPDF" fuzzSamplingMatchesPDF]

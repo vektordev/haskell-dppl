@@ -21,6 +21,8 @@ module ArbitrarySPLL (
 , genExtremeProgram
 , extremeFloats
 , genHelperProgram
+, genParamMainProgram
+, mainParamRTypes
 , genRecursiveProgram
 , RecShape(..)
 , recShapeOfProgram
@@ -86,6 +88,7 @@ import SPLL.Typing.RType
 import SPLL.Parser (reserved)
 import SPLL.ReservedNames (reservedIdentifierReason)
 import SPLL.Validator (validateProgram)
+import SPLL.Typing.RInfer (addRTypeInfo)
 import PredefinedFunctions (globalFEnv, parameterCount, FPair(..), FDecl, contract, applicability)
 import SPLL.IntermediateRepresentation (IRExpr(..))
 import SPLL.Prelude
@@ -390,7 +393,8 @@ tyDepth = 2
 -- and the program declares exactly the ones it uses ('declareHere').
 genTypedProgram :: Gen Program
 genTypedProgram = withGeneratedADTs $ frequency
-  [ (3, genPlainProgramIn)
+  [ (2, genPlainProgramIn)
+  , (1, genParamMainProgramIn)
   , (1, genHelperProgramIn)
   , (1, genNeuralProgramIn)
   , (1, genRecursiveProgramIn)
@@ -430,6 +434,108 @@ genPlainProgramIn = do
   ty <- genTyIn tyDepth
   body <- sized (fmap uniquifyBinders . genTypedExprIn [] ty)
   return $ declareHere $ Program [("main", body)] [] [] [] []
+
+-- | @main p0 [p1] = \<expr\>@: a parameterised @main@, which is a
+-- conditional distribution @p(a | x)@ on every path (task
+-- fuzz-parameterised-main-generation). One or two parameters, each at a
+-- 'genTyIn' type (never an arrow), and the body generated in a scope holding
+-- exactly them at a 'genTyIn' result type. A caller runs it at argument
+-- tuples drawn from the parameter types (TestFuzz's @fuzzArgSets@).
+--
+-- Half the draws carry a signature @main :: T0 -> [T1 ->] R@ and half do not.
+-- The corpus never writes one, so the unsigned shape is the one programs are
+-- in; but where the body does not pin a parameter (it never reads it, or reads
+-- it only through a polymorphic node) only a signature says what its argument
+-- is, and a signature is the one place the drawn types survive into the
+-- 'Program'. 'mainParamRTypes' reads it, and falls back to the compiler's
+-- 'SPLL.Typing.RInfer' for an unsigned draw.
+genParamMainProgram :: Gen Program
+genParamMainProgram = withGeneratedADTs genParamMainProgramIn
+
+genParamMainProgramIn :: HasADTs => Gen Program
+genParamMainProgramIn = sized $ \n -> do
+  k <- choose (1, 2)
+  ptys <- vectorOf k (genTyIn 1)
+  rty <- genTyIn tyDepth
+  let names = [ mainParamPrefix ++ show i | i <- [0 .. k - 1] ]
+  core <- genTypedExprIn (reverse (zip names ptys)) rty n
+  signed <- arbitrary
+  let body = uniquifyBinders (foldr (#->#) core names)
+      sig = FnSignature "main" (foldr (TArrow . tyToRType) (tyToRType rty) ptys) []
+  return $ declareHere $ Program [("main", body)] [] [] [] [ sig | signed ]
+
+-- | The pre-renaming name prefix of a parameterised @main@'s parameters.
+-- 'uniquifyBinders' renames them like every other binder.
+mainParamPrefix :: String
+mainParamPrefix = "mp"
+
+-- | The parameter types a parameterised @main@ is run at, outermost first:
+-- its signature's, where it has one, else what 'SPLL.Typing.RInfer' infers.
+-- @Just []@ for a nullary @main@ and for a neural one (whose parameter is its
+-- network input, supplied by the caller), 'Nothing' where an unsigned @main@
+-- does not type.
+--
+-- Inference can leave a type variable: a parameter the body never reads, or
+-- reads only through polymorphic nodes (@neg (neg x)@ is @Num a => a@). A
+-- variable is grounded at the first of 'TFloat', 'TInt', 'TBool' under which
+-- the program still types *with that type as its signature*, so the compiler's
+-- own checker -- class constraints included -- says the instance is one; with
+-- no such instance (or more than three variables) the answer is 'Nothing'.
+--
+-- One reading for the shrinker ('typedMainParts') and for TestFuzz's argument
+-- draws alike, so the two cannot disagree about what @main@ takes.
+mainParamRTypes :: Program -> Maybe [RType]
+mainParamRTypes p
+  | hasNeural p = Just []
+  | otherwise = case lookup "main" (functions p) of
+      Nothing -> Just []
+      Just body
+        | arity body == 0 -> Just []
+        | Just sig <- find ((== "main") . sigName) (signatures p)
+        -> paramsOf (arity body) (sigType sig)
+        | otherwise -> case addRTypeInfo p of
+            Left _ -> Nothing
+            Right typed -> do
+              b <- lookup "main" (functions typed)
+              ts <- paramsOf (arity body) (rType (getTypeInfo b))
+              ground [] [] ts
+  where
+    arity e = case node e of
+      Lambda _ b -> 1 + arity b
+      _ -> 0 :: Int
+    paramsOf k t = let ts = take k (arrowArgs t) in if length ts == k then Just ts else Nothing
+    arrowArgs (TArrow a b) = a : arrowArgs b
+    arrowArgs _ = []
+    -- Parameter by parameter, outermost first, under the instances chosen so
+    -- far; the trial signature leaves the later parameters and the result as
+    -- holes ('NotSetYet'), so only what is being chosen is pinned.
+    ground _ done [] = Just (reverse done)
+    ground sub done (t : rest) = case nub (tvarsOf (substTVars sub t)) of
+      [] -> ground sub (substTVars sub t : done) rest
+      vs | length vs <= 3 -> listToMaybe (concat
+             [ maybe [] (: []) (ground sub' (t' : done) rest)
+             | inst <- mapM (const [TFloat, TInt, TBool]) vs
+             , let sub' = zip vs inst ++ sub
+                   t' = substTVars sub' t
+                   trial = foldr TArrow NotSetYet (reverse (t' : done) ++ map (const NotSetYet) rest)
+             , isRight' (addRTypeInfo p { signatures = FnSignature "main" trial [] : signatures p }) ])
+      _ -> Nothing
+    isRight' (Right _) = True
+    isRight' (Left _)  = False
+    tvarsOf rt = case rt of
+      TVarR v     -> [v]
+      TArrow a b  -> tvarsOf a ++ tvarsOf b
+      Tuple a b   -> tvarsOf a ++ tvarsOf b
+      TEither a b -> tvarsOf a ++ tvarsOf b
+      ListOf a    -> tvarsOf a
+      _           -> []
+    substTVars sub rt = case rt of
+      TVarR v     -> fromMaybe rt (lookup v sub)
+      TArrow a b  -> TArrow (substTVars sub a) (substTVars sub b)
+      Tuple a b   -> Tuple (substTVars sub a) (substTVars sub b)
+      TEither a b -> TEither (substTVars sub a) (substTVars sub b)
+      ListOf a    -> ListOf (substTVars sub a)
+      _           -> rt
 
 -- | @helper x = \<expr\>; main = helper \<expr\>@ -- the named top-level
 -- function with a probabilistic argument, which is the *low bar* of the arrow
@@ -1342,6 +1448,7 @@ usedADTs p = nub (direct ++ concatMap adtReach direct)
     direct = nub $
       [ n | (_, e) <- functions p, nm <- injFNamesOf e, Just n <- [adtOfName nm] ]
       ++ [ n | (_, rt, _) <- neurals p, n <- adtsOfRType rt ]
+      ++ [ n | sig <- signatures p, n <- adtsOfRType (sigType sig) ]
     adtsOfRType rt = case rt of
       TADT n      -> [ n | n `elem` adtNames ]
       TArrow a b  -> adtsOfRType a ++ adtsOfRType b
@@ -1682,6 +1789,13 @@ adtDeclSize d = 1 + sum [ 1 + length fs | (_, fs) <- constructors d ]
 adtDeclShrinks :: Program -> [Program]
 adtDeclShrinks p = filter grounded dropCtors ++ dropFields
   where
+    -- A type @main@ takes an argument of keeps its shape, so the drawn
+    -- arguments of a parameterised @main@ stay the same values under
+    -- shrinking (task fuzz-parameterised-main-generation).
+    pinned = let ?adts = adts p in
+      nub [ m | rt <- fromMaybe [] (mainParamRTypes p), Just t <- [rTypeToTyFree rt]
+              , n <- adtsInTy t, m <- n : adtReach n ]
+    shrinkable d = dataName d `notElem` pinned
     used = nub (concatMap (injFNamesOf . snd) (functions p))
     ctorUnused (c, fs) = c `notElem` used && ("is" ++ c) `notElem` used
                          && all ((`notElem` used) . fst) fs
@@ -1692,13 +1806,13 @@ adtDeclShrinks p = filter grounded dropCtors ++ dropFields
       | otherwise = d { adtDepth = Nothing }
     dropCtors =
       [ replaceD p (settleDepth d { constructors = dropAt i (constructors d) })
-      | d <- adts p, length (constructors d) > 1
+      | d <- adts p, shrinkable d, length (constructors d) > 1
       , (i, ctor) <- zip [0 ..] (constructors d), ctorUnused ctor ]
     dropFields =
       [ (replaceD p (settleDepth d { constructors = [ if c' == c then (c', dropAt i fs) else (c', fs')
                                                     | (c', fs') <- constructors d ] }))
           { functions = [ (nm, dropArg c (length fs) i e) | (nm, e) <- functions p ] }
-      | d <- adts p, (c, fs) <- constructors d
+      | d <- adts p, shrinkable d, (c, fs) <- constructors d
       , (i, (f, _)) <- zip [0 ..] fs, f `notElem` used ]
 
 dropAt :: Int -> [a] -> [a]
@@ -1932,6 +2046,16 @@ rTypeToTy (ListOf a)    = TyList   <$> rTypeToTy a
 rTypeToTy (TADT n)
   | n `elem` adtNames = Just (TyADT n)
 rTypeToTy _             = Nothing
+
+-- | 'rTypeToTy', reading a type variable as a free position ('TyAny'): what
+-- 'SPLL.Typing.RInfer' leaves a variable at is what no node commits.
+rTypeToTyFree :: HasADTs => RType -> Maybe Ty
+rTypeToTyFree rt = case rt of
+  TVarR _     -> Just TyAny
+  Tuple a b   -> TyTuple  <$> rTypeToTyFree a <*> rTypeToTyFree b
+  TEither a b -> TyEither <$> rTypeToTyFree a <*> rTypeToTyFree b
+  ListOf a    -> TyList   <$> rTypeToTyFree a
+  _           -> rTypeToTy rt
 
 -- | Does this type's partition plan consist of discrete slots only? Only then
 -- does an @of@ clause change anything: 'SPLL.Analysis.annotateEnumsProg'
@@ -2188,9 +2312,19 @@ typedMainParts p = do
       , Just nty <- rTypeToTy (neuralTarget nrt)
       -> Just ( ((s, nty) : helperEnv p, core)
               , \core' -> Expr (ann body) (Lambda sym (letIn s val core')) )
+    Lambda{}
+      | Just rts@(_ : _) <- mainParamRTypes p
+      , Just (params, core) <- peel (length rts) body
+      , Just tys <- mapM rTypeToTyFree rts
+      -> Just ( (reverse (zip params tys) ++ helperEnv p, core)
+              , \core' -> foldr (#->#) core' params )
     _ -> Just ((helperEnv p, body), id)
   where
     fst3 (a, _, _) = a
+    peel 0 e = Just ([], e)
+    peel k e = case node e of
+      Lambda x b -> (\(xs, c) -> (x : xs, c)) <$> peel (k - 1 :: Int) b
+      _ -> Nothing
     neuralTarget (TArrow _ t) = t
     neuralTarget t            = t
 

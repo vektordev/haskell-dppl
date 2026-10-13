@@ -39,6 +39,7 @@ module AdmissionOracle
   , AdmissionReport(..)
   , admitted
   , admissionCheck
+  , admissionCheckAt
   , violations
   , overPromises
   , refusals
@@ -170,7 +171,16 @@ renderViolation (Check f pt m o) =
 -- function with a parameter no value can be built for (an arrow, a symbol) is
 -- checked for existence only.
 admissionCheck :: CompilerConfig -> Program -> [IRValue] -> IO AdmissionReport
-admissionCheck conf p mainArgs = do
+admissionCheck conf p mainArgs = admissionCheckAt conf p [mainArgs]
+
+-- | 'admissionCheck' with @main@ checked at each of several argument tuples:
+-- a parameterised @main@ is the conditional distribution @p(a | x)@, and the
+-- contract holds at every @x@ (task fuzz-parameterised-main-generation). One
+-- compile serves them all; @main@'s generate, probability and integrate
+-- checks are made once per tuple. An empty list checks @main@ for existence
+-- only, like a function with a parameter no value can be built for.
+admissionCheckAt :: CompilerConfig -> Program -> [[IRValue]] -> IO AdmissionReport
+admissionCheckAt conf p mainArgSets = do
   typed <- trySync (evaluate (forceShow (admissionTyped conf p)))
   case typed of
     Left e -> do
@@ -216,22 +226,24 @@ admissionCheck conf p mainArgs = do
         | not (isJust (genFun grp)) -> return [Check nm pt ModeGenerate (Refusal "refused, and generate is absent too")]
         | otherwise -> (++ promised) <$> case argsFor tp nm of
             Nothing -> return [Check nm pt ModeGenerate (Skipped "no argument value for a parameter")]
-            Just as -> do
-              sampled <- trySync (evalRandIO (runGenNamedC p env nm as) >>= evaluate . forceShow)
-              case sampled of
-                Left e -> do
-                  msg <- describe e
-                  return $ case irErrorRaise msg of
-                    Just m  -> [Check nm pt ModeGenerate (Skipped ("sample raised: " ++ m))]
-                    Nothing -> [Check nm pt ModeGenerate (Crash msg)]
-                Right (VError msg) -> return [Check nm pt ModeGenerate (Skipped ("sample failed at run time: " ++ msg))]
-                Right x
-                  | admitted pt -> do
-                      pr <- infer ModeProbability (runProbNamedC p env nm as x)
-                      ig <- infer ModeIntegrate (runIntegNamedC p env nm as x)
-                      return ([Check nm pt ModeGenerate Value] ++ pr ++ ig)
-                  | otherwise -> return [Check nm pt ModeGenerate Value]
+            Just [] -> return [Check nm pt ModeGenerate (Skipped "no argument value for a parameter")]
+            Just sets -> concat <$> mapM checkAt sets
         where
+          checkAt as = do
+            sampled <- trySync (evalRandIO (runGenNamedC p env nm as) >>= evaluate . forceShow)
+            case sampled of
+              Left e -> do
+                msg <- describe e
+                return $ case irErrorRaise msg of
+                  Just m  -> [Check nm pt ModeGenerate (Skipped ("sample raised: " ++ m))]
+                  Nothing -> [Check nm pt ModeGenerate (Crash msg)]
+              Right (VError msg) -> return [Check nm pt ModeGenerate (Skipped ("sample failed at run time: " ++ msg))]
+              Right x
+                | admitted pt -> do
+                    pr <- infer ModeProbability (runProbNamedC p env nm as x)
+                    ig <- infer ModeIntegrate (runIntegNamedC p env nm as x)
+                    return ([Check nm pt ModeGenerate Value] ++ pr ++ ig)
+                | otherwise -> return [Check nm pt ModeGenerate Value]
           -- Existence is checked whether or not an argument can be built.
           promised = [ Check nm pt m (PromisedAbsent (showRefusal r))
                      | admitted pt, (m, lbl, present) <- variants, not present
@@ -260,10 +272,10 @@ admissionCheck conf p mainArgs = do
     unexplained lbl grp = isNothing (lookup lbl (refusedVariants grp))
 
     argsFor tp nm
-      | nm == "main" = Just mainArgs
+      | nm == "main" = Just mainArgSets
       | otherwise = do
           b <- lookup nm (functions tp)
-          mapM (canonicalValue (adts tp)) (paramTypes b)
+          (: []) <$> mapM (canonicalValue (adts tp)) (paramTypes b)
 
 -- | An exception's message, fully forced. The message of an @error@ is itself
 -- a lazy string, and the compiler builds some of them by 'show'ing a value
