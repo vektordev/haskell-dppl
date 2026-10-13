@@ -772,6 +772,12 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertBool "x not recovered" ("recovered" `isInfixOf` justAt [0, 0] src)
           assertBool "spurious shared-latent certificate" (not ("sharing latent" `isInfixOf` justAt [] src))
           assertEqual "" Integrate (mainPType src)
+      , testCase "two witnessed bindings whose densities integrate one latent: (a, b) is Bottom" $
+          assertEqual "" Bottom (mainPType "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)")
+      , testCase "a witnessed binding is one recovered latent downstream: a chain observed past an unwitnessed step stays Integrate" $
+          -- s2 integrates s1's latent, and s3 reads s2 as a point, so the two
+          -- density factors share nothing.
+          assertEqual "" Integrate (mainPType "main = draw s1 = Normal in draw s2 = s1 + Normal in draw s3 = s2 + Normal in (s2, s3)")
       , testCase "fields with independent latents are unaffected" $
           assertEqual "" Integrate (mainPType "main = (Normal + Normal, Normal)")
       ]
