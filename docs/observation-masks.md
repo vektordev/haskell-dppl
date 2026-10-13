@@ -132,8 +132,8 @@ Things worth knowing:
   refuses the compile (`anyExceptCodegenRefusal`); in a variant
   (`IRFunGroup.maskVariantOf`) `retireUnrenderableVariants` replaces just that
   body with a runtime refusal pointing at the interpreter, which answers it.
-- Corpus sweeps in `TestObservationMask` ("per-mask variants and the
-  dispatcher"), over the 38 corpus programs with variants: the all-concrete
+- Corpus sweeps in `TestObservationMask` (`Slow`'s "ObservationMask (slow)",
+  reading the whole corpus), over the corpus programs with variants: the all-concrete
   arm is byte-identical to a `marginalSlots = 0` compile before the optimizer
   (`Prelude.compileUnoptimized`); every mask of a forward sample answers or
   refuses (totality); and a finite slot summed over its domain equals its

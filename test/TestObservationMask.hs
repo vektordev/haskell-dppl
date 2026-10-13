@@ -9,7 +9,7 @@
 -- the per-mask lattice verdicts, and pruning followed by the existing pipeline.
 -- The last group is task @per-mask-variants-by-pruning@'s: the variants, the
 -- dispatcher, and the corpus-wide properties they must keep.
-module TestObservationMask (observationMaskTests) where
+module TestObservationMask (observationMaskTests, slowVariantCorpusTests) where
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -458,10 +458,8 @@ knownMaskCrashes =
 knownPrefix :: String
 knownPrefix = "KNOWN CRASH "
 
-variantTests :: Corpus -> IO TestTree
-variantTests corpus = do
-  corpusChecks <- variantCorpusTests corpus
-  return $ testGroup "per-mask variants and the dispatcher" (variantUnitTests ++ corpusChecks)
+variantTests :: TestTree
+variantTests = testGroup "per-mask variants and the dispatcher" variantUnitTests
 
 variantUnitTests :: [TestTree]
 variantUnitTests =
@@ -544,11 +542,23 @@ variantUnitTests =
 
 -- | The variant sweeps over the corpus, each a single test over every program
 -- 'corpusWithVariants' keeps.
+--
+-- They live in Slow and read the @slow@-headered programs too ('IgnoreSlow')
+-- (docs-repo task demote-tick-redundant-corpus-programs-to-slow). Each asserts
+-- a floor on how many programs, queries or slot marginals it checked, so it
+-- needs the whole corpus: the default corpus left after the tick-redundant
+-- programs were demoted is too small for the floors, and lowering them would
+-- let the checks go vacuous. The programs `slow` for their own compile cost
+-- stay out ('notSlowForCompileCost'), as before.
+slowVariantCorpusTests :: Corpus -> IO TestTree
+slowVariantCorpusTests corpus =
+  testGroup "ObservationMask (slow)" <$> variantCorpusTests corpus
+
 variantCorpusTests :: Corpus -> IO [TestTree]
 variantCorpusTests corpus = sequence
   [ corpusSweepAll corpus SweepSpec
-      { sweepName = "ObservationMask.per-mask variants and the dispatcher.the all-concrete body is the unmasked compile, byte for byte"
-      , sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
+      { sweepName = "Slow.ObservationMask (slow).the all-concrete body is the unmasked compile, byte for byte"
+      , sweepTier = Slow, sweepSlow = IgnoreSlow, sweepSelect = notSlowForCompileCost
       , sweepNote = "a dispatcher's all-concrete arm is the compile without variants" } $ \es ->
     return $ testCase "the all-concrete body is the unmasked compile, byte for byte" $ do
       -- Before the optimizer: the dispatcher's else-arm, under the parameter
@@ -574,8 +584,8 @@ variantCorpusTests corpus = sequence
           assertEqual (vpName vp ++ "." ++ groupName g ++ " integ") (fmap (show . fst) (integFun g0)) (undispatched integFun)
 
   , corpusSweepAll corpus SweepSpec
-      { sweepName = "ObservationMask.per-mask variants and the dispatcher.totality per mask: every masked forward sample answers or refuses"
-      , sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
+      { sweepName = "Slow.ObservationMask (slow).totality per mask: every masked forward sample answers or refuses"
+      , sweepTier = Slow, sweepSlow = IgnoreSlow, sweepSelect = notSlowForCompileCost
       , sweepNote = "every masked forward sample answers or refuses, never crashes" } $ \es ->
     return $ testCase "totality per mask: every masked forward sample answers or refuses" $ do
       vps <- corpusWithVariants es
@@ -594,8 +604,8 @@ variantCorpusTests corpus = sequence
       assertBool ("too few masked queries checked: " ++ show checked) (checked >= 300)
 
   , corpusSweepAll corpus SweepSpec
-      { sweepName = "ObservationMask.per-mask variants and the dispatcher.marginalisation consistency: a finite slot summed over its domain is its ANY"
-      , sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
+      { sweepName = "Slow.ObservationMask (slow).marginalisation consistency: a finite slot summed over its domain is its ANY"
+      , sweepTier = Slow, sweepSlow = IgnoreSlow, sweepSelect = notSlowForCompileCost
       , sweepNote = "a finite slot summed over its domain is its ANY query" } $ \es ->
     return $ testCase "marginalisation consistency: a finite slot summed over its domain is its ANY" $ do
       vps <- corpusWithVariants es
@@ -659,14 +669,12 @@ allConcreteArm other = other
 
 -- ---------------------------------------------------------------------------
 
-observationMaskTests :: Corpus -> IO TestTree
-observationMaskTests corpus = do
-  variants <- variantTests corpus
-  return $ testGroup "ObservationMask"
+observationMaskTests :: TestTree
+observationMaskTests = testGroup "ObservationMask"
     [ treeWalkTests
     , classTests
     , corpusSelfContainedTests
     , maskTableTests
     , pruneTests
-    , variants
+    , variantTests
     ]

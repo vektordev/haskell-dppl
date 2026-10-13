@@ -25,6 +25,8 @@
 module CorpusSweep
   ( Tier(..)
   , SlowHeader(..)
+  , slowForCompileCost
+  , notSlowForCompileCost
   , SweepSpec(..)
   , CorpusEntry(..)
   , Corpus
@@ -68,6 +70,25 @@ data Tier = Default | Slow | Aspirational
 -- neither compile nor run the program.
 data SlowHeader = SkipSlow | OnlySlow | IgnoreSlow
   deriving (Eq, Show)
+
+-- | The corpus programs that are @slow@ for their own compile or run cost (up
+-- to minutes each in a whole-corpus sweep), as opposed to the ones demoted
+-- because the default tier already executes every tick they do (docs-repo
+-- task demote-tick-redundant-corpus-programs-to-slow). A sweep that reads the
+-- @slow@ programs to see the whole corpus ('IgnoreSlow') leaves these out
+-- with 'notSlowForCompileCost'. A name that is not a @slow@ corpus program
+-- fails 'loadCorpus', so the list cannot rot past a rename or a promotion.
+slowForCompileCost :: [String]
+slowForCompileCost =
+  [ "planEnumRecAlternatingWeightCount", "planEnumRecDeepOne", "planEnumRecJointState"
+  , "planEnumRecWeightedCount"
+  , "planFoldDisjunctionBoundOnce", "planFoldDisjunctionOfComparisons"
+  , "planHelperOnFoldResult", "planHelperOnFoldResultBool", "planHelperOnFoldResultCmp"
+  , "planHelperReadsPlanParamTwice"
+  , "planOverBudgetInnerDrawShared", "planOverBudgetPlusIf", "planOverBudgetTuplePair" ]
+
+notSlowForCompileCost :: CorpusEntry -> Bool
+notSlowForCompileCost e = ceName e `notElem` slowForCompileCost
 
 data SweepSpec = SweepSpec
   { sweepName   :: String
@@ -135,6 +156,9 @@ loadCorpus = do
     prog <- parseProgram ppl
     (bs, slow, ef, tcs) <- parseTestCases tst
     return (CorpusEntry (takeBaseName ppl) ppl tst prog bs slow ef tcs)
+  let stale = [ n | n <- slowForCompileCost, n `notElem` [ ceName e | e <- entries, ceSlow e ] ]
+  when (not (null stale)) $
+    error ("CorpusSweep.slowForCompileCost names no slow corpus program: " ++ intercalate ", " stale)
   reg <- newIORef []
   total <- newIORef (0, 0)
   return (Corpus entries reg total)

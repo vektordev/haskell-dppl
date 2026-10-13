@@ -318,8 +318,8 @@ corpus programs this moved: 13 emit larger modules (up to 6.8x,
 (93 KB -> 35 KB); every value agrees. Accepted as a cost question, not a
 correctness one. The plan engine keeps its small-domain coverage through
 End2End's `PlanEngineMatchesDense` (budget 0 against the default compile at
-every query point of every neural corpus program; `planEngineCorpus` lists the
-programs that must answer there) and through the `*Polynomial` growth tests in
+every query point of every neural corpus program, its `slow` ones in the
+`Slow` twin; `planEngineCorpus` lists the programs that must answer there) and through the `*Polynomial` growth tests in
 `TestInternals`, which compile at budget 0. Its non-neural sibling,
 `BudgetZeroMatchesDefault`, compares budget 0 against the default compile on
 every other corpus program, where budget 0 routes discrete lets through point
