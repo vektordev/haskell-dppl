@@ -128,6 +128,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `IRCompiler` — AST to IR for all three variants, holding all the inference engines.
 - `Semiring` — `PResult` combinators over the linear/log/max-product semirings.
 - `IntermediateRepresentation` — `IRExpr` and `IRFunGroup`.
+- `IRTypeCheck` — the IR's type contract: `IRType` and an inference checker over an `IREnv`.
 - `IRSelectPass` — `IRIf` → `IRSelect` for batched mode.
 - `IROptimizer` — constant folding, CSE and let-in optimization.
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.

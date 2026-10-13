@@ -37,6 +37,7 @@ module SPLL.IntermediateRepresentation (
 , isEffectfulVar
 , isPureGiven
 , lookupIREnv
+, reduceIREnv
 , irPrintFlat
 , valueToIR
 , isLambda
@@ -60,10 +61,10 @@ import Data.Data()
 import Data.List (isSuffixOf, sort, group)
 import Data.Char (isAlpha, isAlphaNum)
 import Control.Monad.State.Strict (State, execState, modify)
-import Data.Maybe (mapMaybe, listToMaybe, fromMaybe, isNothing)
+import Data.Maybe (mapMaybe, listToMaybe, fromMaybe, isNothing, catMaybes)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import SPLL.ReservedNames (genSuffix, functionVariantSuffixes)
+import SPLL.ReservedNames (genSuffix, functionVariantSuffixes, componentNormalName)
 
 -- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
 --
@@ -1042,6 +1043,23 @@ irDescendM f x = case x of
 isLambda :: IRExpr -> Bool
 isLambda IRLambda {} = True
 isLambda _ = False
+
+-- | The environment's top-level bindings, as the interpreter's global scope
+-- and 'SPLL.IRTypeCheck' see them: each compile-time constant, then each
+-- present variant of each group under @name ++ suffix@ (@_gen@, @_prob@,
+-- @_integ@, @_writeLogits@, @_normal@). A per-component normal group
+-- registers its normal function under the bare component name, with no
+-- suffix ('SPLL.ReservedNames.componentNormalName'). A name bound twice is
+-- listed twice; consumers keep the first.
+reduceIREnv :: IREnv -> [(String, IRExpr)]
+reduceIREnv (IREnv funcs _ consts) =
+  map (\(name, val) -> (name, IRConst val)) consts ++
+  concatMap (\(IRFunGroup name gen prob integ writeLogits normal _ _ _ _) ->
+    case componentNormalName name of
+     Just componentName -> catMaybes [fmap (\(expr, _) -> (componentName, expr)) normal]
+     Nothing ->
+      catMaybes [red name "_gen" <$> gen, red name "_prob" <$> prob, red name "_integ" <$> integ, red name "_writeLogits" <$> writeLogits, red name "_normal" <$> normal]) funcs
+  where red name suffix (expr, _) = (name ++ suffix, expr)
 
 irPrintFlat :: IRExpr -> String
 irPrintFlat (IRIf _ _ _) = "IRIf"

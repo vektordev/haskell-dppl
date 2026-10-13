@@ -22,6 +22,7 @@ import TestInternals (internalsTests, slowInternalsTests)
 import TestObservationMask (observationMaskTests)
 import TestPerValue (perValueTests)
 import TestMonomorphize (monomorphizeTests)
+import TestIRTypeCheck (irTypeCheckTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestModalityInfer (modalityInferTests)
@@ -593,6 +594,7 @@ main = do
     , injFCatalogTests
     , rejectionTests
     , monomorphizeTests
+    , irTypeCheckTests
     , modalityTests
     , modalityInfer
     , detTests
