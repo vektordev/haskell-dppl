@@ -68,7 +68,12 @@ import End2EndTesting (programRuntimeFields)
 --   refusing an ANY marginal. Those belong to M2 and M6, so the family stays
 --   log-only until the later of the two lands;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
--- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates.
+-- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates, which
+--   cut the promoted draw-intro frontier from 16 failing tests to 13 (probe
+--   rows 5, 8 and 9: the affine certificate of a fresh draw beside a
+--   recovered variable is now the one compiled) and left it there: most of the rest is a single-read random
+--   binding no engine measures in place, which waits on a decision recorded
+--   in that task; linear-inline fails only on gaussianTrajectory4's masks.
 refusalIsHard :: Family -> Bool
 refusalIsHard AliasIntro = False
 refusalIsHard HelperExtract = False
