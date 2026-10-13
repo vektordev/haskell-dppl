@@ -86,15 +86,9 @@ data Known = Known { kProg :: String, kFam :: Family, kSite :: String, kDoc :: S
 -- the list cannot rot. Each tracking document carries the minimal pair.
 knownDivergences :: [Known]
 knownDivergences =
-  -- `draw z = Normal in 0.0 * z`: the random factor bound instead of the
-  -- zero. (The zero bound, `draw z = 0.0 in z * Normal`, agrees since
-  -- fuzz-admission-oracle-bugs item 6: a factor whose value set is {0} is the
-  -- absorbing element.)
-  [ Known "probe10" DrawIntro "draw-intro Normal" zeroRandomBound
-  , Known "multDeterministicZero" DrawIntro "draw-intro Normal" zeroRandomBound
   -- A structured random value read through a second binder -- an alias, or
   -- a helper's parameter -- loses a field's constraint.
-  , Known "drawDestructuredShared" DrawIntro "" structuredReread
+  [ Known "drawDestructuredShared" DrawIntro "" structuredReread
   , Known "drawDestructuredShared" AliasIntro "" structuredReread
   , Known "drawDestructuredShared" HelperExtract "" structuredReread
   , Known "setWitnessTupleDisjointFields" HelperExtract "" structuredReread
@@ -131,7 +125,6 @@ knownDivergences =
   , Known "gaussianTrajectory4" AliasIntro "" aliasChainJacobian
   ]
   where
-    zeroRandomBound = "draw-bound-random-factor-times-literal-zero-loses-dirac-mass"
     aliasDoubleJacobian = "aliased-draw-scaled-sibling-double-jacobian"
     aliasChainJacobian = "aliased-draw-chain-scaled-step-double-jacobian"
     structuredReread = "structured-draw-reread-through-binder-drops-field"

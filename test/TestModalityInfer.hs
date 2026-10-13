@@ -742,6 +742,17 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" "dirac 0.0" (justAt [0, 0, 0] "main = draw z = 0.0 in z * Normal")
       , testCase "a literal zero factor makes the product a Dirac at zero" $
           assertEqual "" "dirac 0.0" (justAt [] "main = 0.0 * Normal")
+      -- The zero rule reads the operands' laws (task
+      -- dispatch-on-law-certificates, design law-carrying-modality §E).
+      , testCase "a zero factor bound by a draw makes the product a Dirac at zero" $
+          assertEqual "" "dirac 0.0" (justAt [0, 0] "main = draw z = 0.0 in z * Normal")
+      , testCase "a zero times a draw-bound random factor is a Dirac at zero, and so is the draw" $
+          assertEqual "" ("dirac 0.0", "dirac 0.0")
+            (justAt [0, 0] "main = draw z = Normal in 0.0 * z", justAt [] "main = draw z = Normal in 0.0 * z")
+      , testCase "a binding whose body is a known point asks no engine" $
+          -- nothing reads z's value, so the let rule records no certificates
+          -- and floors nothing: the lambda's law is not a binding row
+          assertBool "" (not ("binding" `isPrefixOf` justAt [0] "main = draw z = Normal in 0.0 * z"))
       , testCase "a draw-bound variable in the compiler's lawEnv: the binder's law, witnessed" $
           -- 'bindingLawEnv' is the extension IRCompiler applies at a binding;
           -- it binds x as inferE does, so the observation (x, 1.0) witnesses it

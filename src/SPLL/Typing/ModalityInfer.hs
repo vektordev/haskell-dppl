@@ -51,6 +51,7 @@ module SPLL.Typing.ModalityInfer
   , LawTable
   , Env
   , renderJustification
+  , lawValue
   , inferProgram
   , bindingLawEnv
   , bareLawOfPType
@@ -70,10 +71,10 @@ import Data.Graph (SCC(..), stronglyConnComp)
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
   , Value, GenericValue(..), Tag(..), MultiValue(..) )
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isStaticZero, freeVarsExpr)
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isZeroValue, freeVarsExpr)
 import SPLL.Analysis (enumerableDomain, enumerableApplication)
 import SPLL.AutoNeural (planReadOf)
-import Data.Maybe (isJust, catMaybes)
+import Data.Maybe (isJust, catMaybes, listToMaybe)
 import Data.List (intercalate, find)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
@@ -547,11 +548,6 @@ mkICtx adtsDecls fcData obsCN prog = ICtx adtsDecls fcData obsCN prog (planReadC
 cnOf :: Expr -> ChainName
 cnOf = chainName . getTypeInfo
 
--- | A literal zero, in either numeric type -- 'mult'/'multI's absorbing
--- element. See the InjF "mult" clause in 'inferE'.
-isZeroConstant :: Expr -> Bool
-isZeroConstant = isStaticZero
-
 -- | Infer the law of an expression, returning the law, the pType-annotated
 -- expression, and the per-node law accumulation.
 --
@@ -605,35 +601,6 @@ inferE ctx env expr = case expr of
   Expr ti (InjF (Named fname) [a, b])
     | fname `elem` ["gt", "lt"] -> compareNode ti fname a b
 
-  -- mult(0, y) = 0 for every y, regardless of y's own modality -- a
-  -- degenerate point mass, not (as the generic 'tryNormalClosure' "mult"
-  -- [PNormal, Deterministic] closure claims) whatever family y belongs to
-  -- (task mult-inversion-unguarded-at-zero, symptom 1: "0.0 * Normal" typed
-  -- PNormal, so IRCompiler's own zero-guard on the inversion's applicability
-  -- never even ran -- 'scaleCoV' unconditionally read the (undefined at a=0)
-  -- Jacobian instead of skipping it, and IROptimizer's constant folder
-  -- crashed on the literal division by zero *at compile time*, before any
-  -- runtime guard could matter). Recognising a literal zero operand here
-  -- routes the whole node through the ordinary Deterministic-leaf machinery
-  -- (an equality/CDF-step indicator against the known value 0), which never
-  -- constructs 'mult's inversion or its Jacobian at all.
-  --
-  -- This intentionally only catches a *literal* Constant 0 -- e.g. a `let`-
-  -- bound Deterministic value that merely happens to evaluate to 0 at
-  -- runtime (a trained ThetaI, a neural readout) is not recognised, since
-  -- deciding "this Deterministic value's possible range includes 0" in
-  -- general needs value-level support information the modality layer
-  -- (deliberately) doesn't carry -- see the task doc's fork on this point.
-  -- That general case is a known, explicitly scoped-out gap, not silently
-  -- mishandled: it still goes through the ordinary 'injFMod' floor exactly as
-  -- before this fix, unchanged.
-  Expr ti (InjF (Named fname) [a, b])
-    | fname `elem` ["mult", "multI"], isZeroConstant a || isZeroConstant b ->
-        let (_, a', aAcc) = inferE ctx env a
-            (_, b', bAcc) = inferE ctx env b
-            zero = staticValue (if isZeroConstant a then a else b)
-        in doneL (Law (IG gExact) (JDirac zero)) (Expr (setPType ti Deterministic) (InjF (Named fname) [a', b'])) (aAcc ++ bAcc)
-
   -- An affine operator ('affineInjF') over operands that have affine forms
   -- is Gaussian, and its law is the form: the family verdict is the form's
   -- existence (design law-carrying-modality M4), not a table over the
@@ -647,9 +614,20 @@ inferE ctx env expr = case expr of
                    Just c | not (Map.null (acLatents c)) -> Just c
                    _ -> Nothing
         m0   = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname (isJust affine) (map lawMod laws)))
-        l | isFieldConstructor (icADTs ctx) fname = structuredLaw fname laws m0
+        l | Just z <- zeroFactor                  = Law (IG gExact) (JDirac (Just z))
+          | isFieldConstructor (icADTs ctx) fname = structuredLaw fname laws m0
           | Just c <- affine                      = Law m0 (JAffine c)
           | otherwise                             = pointOr m0 (Expr ti (InjF name es'))
+        -- mult(0, y) = 0 for every y, whatever y's own law: a point mass, not
+        -- (as 'injFMod' would say) whatever family y belongs to (task
+        -- mult-inversion-unguarded-at-zero). Read off the operands' laws (a
+        -- Dirac at zero), so a zero bound by a @draw@, or a value set {0},
+        -- counts as the literal does (design law-carrying-modality §E). The
+        -- compiler measures the node from this law's value and never builds
+        -- 'mult''s inversion through a division by zero.
+        zeroFactor
+          | fname `elem` ["mult", "multI"] = listToMaybe [ v | Just v <- map lawValue laws, isZeroValue v ]
+          | otherwise = Nothing
         e'   = Expr (setPType ti (projectI (lawMod l))) (InjF name es')
     in doneL l e' acc
 
@@ -825,6 +803,12 @@ staticValue (Expr ti _) = case [ mv | DiscreteValues mv <- tags ti ] of
   (MultiDiscretes [v] : _) -> Just v
   _ -> Nothing
 
+-- | The value a law certifies its node to take, when it is a point mass whose
+-- value is known statically ('JDirac').
+lawValue :: Law -> Maybe Value
+lawValue (Law _ (JDirac v)) = v
+lawValue _ = Nothing
+
 -- | The law an application binds its parameter to, given the argument's law
 -- and the chain name of the head (a literal lambda, or a callee forward
 -- chaining resolves to one): witnessed when the binding is random and forward
@@ -917,6 +901,10 @@ letBinding ctx env lti x body arg argLaw
                && not (isArrow (rType (getTypeInfo arg)))
                && x `Set.member` freeVarsExpr body
                && not (determinedByWitnesses env arg)
+               -- A body whose law is a known point (@0.0 * z@) takes that
+               -- value whatever the variable draws: nothing reads the
+               -- variable's value, so no engine needs to apply.
+               && not (isJust (lawValue bodyLaw))
     lam' = Expr (setPType lti (projectI (lawMod bodyLaw))) (Lambda x body')
     certs = bindingCerts ctx lam' arg argLaw
     floored = Map.adjust (\(Law m _) -> Law (sampleOnlyI m) JUnjustified) x env1

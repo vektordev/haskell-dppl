@@ -1,2 +1,3 @@
 data Mix = One mu::Float | Two ma::Int
-main = draw h = Two 3 in (if isOne h then mu h else Uniform)
+pick h = if isOne h then mu h else Uniform
+main = pick (Two 3)

@@ -57,6 +57,7 @@ module SPLL.Lang.Lang (
 , printFlat
 , InjFName(..)
 , isStaticZero
+, isZeroValue
 ) where
 
 import SPLL.Lang.Types

@@ -39,19 +39,20 @@ import SPLL.Analysis (enumerableDomain, enumerableApplication, headIsConditional
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (partitionEithers)
-import Data.List (isPrefixOf, isSuffixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate)
+import Data.List (isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural hiding (planReadOf)
 import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
-import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf)
+import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf, lawValue)
 import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
-import Control.Monad (foldM, forM, when, zipWithM)
+import Control.Monad (foldM, forM, mfilter, when, zipWithM)
+import Debug.Trace (traceM)
 import Control.Monad.State.Strict (StateT, runStateT, get, gets, put, modify)
 import Control.Monad.Except (catchError)
 import qualified Data.Map.Strict as Map
@@ -1628,7 +1629,8 @@ resolveBinding meta l v = Binding
   { bindHead = l, bindArg = v, bindLambda = lamCN, bindVar = param
   , bindBodyCN = bodyCN, bindTag = tag
   , bindOccs = fromMaybe [] (lookup lamCN (lambdaVarOccurrences (fcData meta)))
-  , bindBody = exprWithCN meta bodyCN
+  , bindBody = if null tag then reinferRecovered meta (recoveredVars meta) (exprWithCN meta bodyCN)
+                             else exprWithCN meta bodyCN
   , bindOuterVars = snd (unwrapLambdas (fcData meta) bodyCN)
   , bindLeadingArg = False
   , bindScope = scope, bindTopLevel = fst <$> spine }
@@ -1864,6 +1866,23 @@ withBindingLaw meta b var = meta { lawEnv = bindingLawEnv (reinferContext meta) 
   where
     headCN = chainName (getTypeInfo (bindHead b))
     argLaw = nodeLaw meta (bindArg b)
+
+-- | The value a node's certificate ('nodeLaw') fixes it to, when it is a
+-- point mass of statically known value and not itself a literal (whose own
+-- equations measure it), nor a function. A NaN point (@Infinity -
+-- Infinity@) is left to the node's own equations: like the optimizer's
+-- folds ('IROptimizer.isNaNResult'), the compiler never embeds a NaN
+-- literal, which the optimizer's fixpoint test would compare unequal to
+-- itself forever.
+lawPoint :: CompilerMetadata -> Expr -> Maybe Value
+lawPoint meta e@(Expr ti nd)
+  | Constant _ <- nd = Nothing
+  | isTArrowType (rType ti) = Nothing
+  | otherwise = mfilter (not . hasNaN) (lawValue (nodeLaw meta e))
+  where
+    -- Structured values hold their floats at any depth; a symbol spelt
+    -- "NaN" only costs the shortcut.
+    hasNaN v = "NaN" `isInfixOf` show v
 
 -- | A node's certificate ('lawTable'), or for a node the table does not hold
 -- (one an engine synthesized), the law its annotation projects.
@@ -2636,7 +2655,7 @@ readsMarginalised meta e =
 -- point mass there, not a density: @z * Normal@ with @z = 0@ is the Dirac at
 -- 0, and dividing by the zero scale answered NaN at dim 1 (task
 -- helper-parameter-zero-factor-answers-nan; the static-zero twin is the
--- 'isZeroConstant' clause of 'mult'). @build sigma@ is the ordinary leaf;
+-- Dirac-law clause, 'lawPoint'). @build sigma@ is the ordinary leaf;
 -- when the scale may vanish ('scaleMayVanish') it is let-bound and the leaf
 -- selects, at run time, between that and the point mass at @point@ (an
 -- equality indicator, or a step for a cdf). A scale that is a nonzero
@@ -2743,6 +2762,19 @@ toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   -- cdf(True) = 1 is always attainable; cdf(False) inherits the False case.
   return (mkPResult (sealP (IRIf sample (srOne (semiringOf meta)) (unP (rProb false)))) const0 (rBranches false)
                   (IRIf sample constFalseIR (rImposs false)))
+-- A node whose certificate is a point mass of known value ('lawPoint'): the
+-- value is compared against the sample, as for a literal 'Constant'. This is
+-- the zero rule of @mult(0, y)@ read off the law (task
+-- mult-inversion-unguarded-at-zero, design law-carrying-modality §E): the
+-- product is never inverted through a division by its zero factor, and a
+-- zero bound by a @draw@ or a value set {0} counts as the literal does. It
+-- also measures @draw z = Normal in 0.0 * z@ at its point, whose binding
+-- nothing reads the value of.
+toIRInference meta cumulative e@(Expr TypeInfo {rType=rt} _) sample
+  | Just v <- lawPoint meta e =
+      if cumulative
+        then return (mass (compareValueExpr (semiringOf meta) rt (IRConst (valueToIR v)) sample))
+        else return (indicatorP (semiringOf meta) (equalityGuard rt (IRConst (valueToIR v)) sample))
 toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, gaussianLeaf meta e = do
   (mu, sigma0) <- toIRNormalParams meta e
   degenerateScaleGuard meta False TFloat mu sigma0 sample $ \sigma ->
@@ -3075,24 +3107,7 @@ toIRInference meta False (Expr _ (InjF (Named cmp) [left, right])) sample
     let (outerBinds, body') = hoistInvariantBindings bnd (buildLetIns binds returnExpr)
     setVariables outerBinds
     opaqueMass sr (enumSumNode sr bnd enumList body') const0
--- mult(0, y) = 0 for every y, whatever y's own distribution or shape (task
--- mult-inversion-unguarded-at-zero, symptom 1): this is a genuine point mass,
--- compiled exactly like a literal 'Constant' of the same value (the clause a
--- few cases up) rather than through 'mult's own inversion, which is what
--- 'ModalityInfer' now also types this node as -- but IRCompiler's own InjF
--- dispatch picks its clause from the OPERANDS' pTypes (e.g. 'countProbParams'
--- below), not the node's own annotation, so retyping it upstream alone does
--- not change which clause fires here; this is the matching compiler-side
--- half. Placed ahead of every other 'mult' clause (structural, not
--- pType-gated) so it also covers an enumerable non-zero operand, not just a
--- continuous one.
-toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named "mult") [left, right])) sample
-  | isZeroConstant left || isZeroConstant right =
-      return (indicatorP (semiringOf meta) (equalityGuard rt (IRConst (valueToIR (zeroValueOf rt))) sample))
-toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named "mult") [left, right])) sample
-  | isZeroConstant left || isZeroConstant right =
-      return (mass (compareValueExpr (semiringOf meta) rt (IRConst (valueToIR (zeroValueOf rt))) sample))
--- The run-time twin of the two clauses above (task
+-- The run-time twin of the Dirac-law clause ('lawPoint') (task
 -- helper-parameter-zero-factor-answers-nan): a deterministic factor that is
 -- not statically known nonzero -- a helper's parameter, say -- can still be
 -- zero when the product runs, and then the product is the same point mass,
@@ -4150,11 +4165,6 @@ runtimeZeroFactor a b = case (det a, det b) of
     isZeroLit (VInt 0) = True
     isZeroLit _ = False
 
--- | A literal zero operand, in either numeric type. See the 'mult'
--- zero-multiplier InjF clause above.
-isZeroConstant :: Expr -> Bool
-isZeroConstant = isStaticZero
-
 -- | Discrete value-equality / step-CDF masses (used both for a deterministic
 -- Constant's cumulative "0 below, 1 at-or-above" step function and for
 -- equality indicators), built as semiring one/zero rather than the literal
@@ -4333,13 +4343,13 @@ toIRGenerate _ (Expr _ (Constant x)) = return (IRConst (fmap failConversion x))
 toIRGenerate _ (Expr _ (Var "Uniform")) = return $ IRSample IRUniform
 toIRGenerate _ (Expr _ (Var "Normal")) = return $ IRSample IRNormal
 -- A product with a statically-zero factor is zero whatever the other factor
--- draws ('isZeroConstant'; ModalityInfer types it Deterministic). Emitting the
+-- draws (its law is a point, 'lawPoint'). Emitting the
 -- other factor would put its unread draw into every generate-and-compare
 -- probability over the product, which the generate-backed guard then refused
 -- (fuzz-admission-oracle-bugs item 6).
-toIRGenerate _ (Expr TypeInfo{rType=rt} (InjF (Named name) [a, b]))
-  | name `elem` ["mult", "multI"], isZeroConstant a || isZeroConstant b =
-  return (IRConst (valueToIR (zeroValueOf rt)))
+toIRGenerate meta e@(Expr _ (InjF (Named name) [_, _]))
+  | name `elem` ["mult", "multI"], Just v <- lawPoint meta e =
+  return (IRConst (valueToIR v))
 toIRGenerate meta (Expr ti (InjF (Named name) params)) = do
   -- Assuming that the logic within packParamsIntoLetinsGen typeEnv is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.
@@ -8369,12 +8379,17 @@ type BindingEngine = (String, Maybe (Maybe String -> CompilerMonad (Either (Mayb
 -- | Try the engines in order, first applicable wins ('applyBinding'); a
 -- construction that declines hands on to the next applicable one. @none@
 -- answers when every engine is inapplicable or declined.
-dispatchEngines :: [BindingEngine] -> (Maybe String -> CompilerMonad PResult) -> CompilerMonad PResult
-dispatchEngines engines none = go Nothing engines
+--
+-- Under @-v@ it names the engine a binding compiled from (@onAnswer@), which
+-- can differ from the first one the modality engine's report lists: that one
+-- may decline here.
+dispatchEngines :: (String -> CompilerMonad ()) -> [BindingEngine] -> (Maybe String -> CompilerMonad PResult) -> CompilerMonad PResult
+dispatchEngines onAnswer engines none = go Nothing engines
   where
     go diag [] = none diag
     go diag ((_, Nothing) : rest) = go diag rest
-    go diag ((_, Just run) : rest) = run diag >>= either (\d -> go (d <|> diag) rest) return
+    go diag ((name, Just run) : rest) =
+      run diag >>= either (\d -> go (d <|> diag) rest) (\r -> onAnswer name >> return r)
 
 -- | The plan-guided engine's applicability to a binding: its argument is a
 -- plan read ('planReadOf', the predicate the modality engine reads too), its
@@ -8795,4 +8810,8 @@ applyBinding meta cumulative rt binding sample = do
    -- constraint sets on the bound variable (intervals from comparisons, case
    -- splits from ifs, intersections across occurrences) and measure them
    -- against the bound distribution (design set-valued-witnesses).
-   dispatchEngines engines (\diag -> setWitnessApply meta cumulative rt binding diag sample)
+   let compiledFrom name = when (verbose (compilerConfig meta) >= 1) $
+         traceM ("binding of '" ++ userBound ++ "' (" ++ lChainName ++ ", "
+                 ++ (if cumulative then "integrate" else "probability") ++ ") compiled by " ++ name)
+       userBound = case l of Expr _ (Lambda n _) -> n; _ -> toInvCN
+   dispatchEngines compiledFrom engines (\diag -> setWitnessApply meta cumulative rt binding diag sample)

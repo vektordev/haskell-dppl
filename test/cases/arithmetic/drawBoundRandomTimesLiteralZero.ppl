@@ -1,0 +1,8 @@
+main = draw z = Normal in 0.0 * z
+-- The sibling of drawBoundZeroTimesNormal with the *random* factor bound
+-- instead of the zero: like `0.0 * Normal`, the point mass at 0. It answered
+-- (0.0, dim 0), the mass lost, until the zero rule read the operands' laws
+-- (law-carrying-modality M6, task dispatch-on-law-certificates): the body's
+-- law is a Dirac at 0, so nothing reads z's value and no engine is needed.
+-- Found by the rewrite-invariance net's draw introduction (task
+-- draw-bound-random-factor-times-literal-zero-loses-dirac-mass).
