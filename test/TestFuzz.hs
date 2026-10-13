@@ -2006,7 +2006,7 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
 -- reason and fails unless that reason is filed ('IRFuzz.knownRefusals').
 --
 -- Budget (the design's review decision (4)): about the SPLL-level agreement
--- property's 28-66 s; a batch takes ~1.6 s. @NEST_IRFUZZ_EXPLORE=<file>@
+-- property's 28-66 s; a batch takes ~3 s (M3, with helpers and builtins). @NEST_IRFUZZ_EXPLORE=<file>@
 -- appends every unfiled disagreement and every refusal to the file and passes
 -- regardless, for surveying a new production's findings in bulk (pair it with
 -- @NEST_FUZZ_SCALE@).

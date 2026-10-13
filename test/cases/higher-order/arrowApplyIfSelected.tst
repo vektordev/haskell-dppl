@@ -2,7 +2,7 @@
 -- weight zero, so the answer is the then arm's N(1, 1) -- but the else arm is
 -- still compiled, which is what used to crash.
 slow
-backends: interpreter, julia, python, batched
+batched
 p(0.5)=(0.3520653, 1.0, False)
 p(1.0)=(0.3989423, 1.0, False)
 cdf(1.0)=(0.5, 0.0)

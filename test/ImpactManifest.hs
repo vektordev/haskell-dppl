@@ -35,6 +35,12 @@
 -- module of a sweep defined outside the harness). A check is a QuickCheck
 -- property ('cachedProperty'), a batch sharing one process ('cachedBatch'), or
 -- an HUnit action ('cachedAction').
+--
+-- M2 (task impact-analysis-m2-drop-runtime-from-key) changed which checks
+-- exist, not how they are keyed: the interpreter is the corpus's only oracle,
+-- and the Python and Julia per-program checks, still keyed with their runtime,
+-- run only for a program whose construct census the agreement fuzzers do not
+-- certify ("CertifiedCensus").
 module ImpactManifest
   ( Manifest
   , openManifest

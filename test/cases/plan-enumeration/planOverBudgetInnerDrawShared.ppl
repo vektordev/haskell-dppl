@@ -16,9 +16,9 @@
 -- answered 0.1202 at (1.0, 1.0). The oracle is numRed's own law on the
 -- diagonal. Two readers means one world per scene path, a module that was too
 -- deep for CPython's parser and Julia's. Python accepts it since
--- python-codegen-exceeds-parser-nesting-limit; Julia is still excluded
--- (unchecked). Under `slow`, which runs the interpreter only;
--- planMultiReaderInnerDraw is its fast depth-3 twin on every backend.
+-- python-codegen-exceeds-parser-nesting-limit; Julia unchecked. Under `slow`,
+-- which runs the interpreter only; planMultiReaderInnerDraw is its fast
+-- depth-3 twin.
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 7

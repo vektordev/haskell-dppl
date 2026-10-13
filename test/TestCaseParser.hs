@@ -25,6 +25,9 @@ module TestCaseParser (
   testCaseName,
   parseTestCases,
   parseTestCasesFromString,
+  TstFile(..),
+  parseTstFile,
+  parseTstFileFromString,
   FreezeCase(..),
   FreezeMode(..),
   parseFreezeCasesFromString,
@@ -52,20 +55,29 @@ import System.Directory (listDirectory, doesDirectoryExist)
 import System.FilePath ((</>), isExtensionOf, takeBaseName, stripExtension)
 
 
--- Which execution backends a .tst file's cases run against. Declared via an
--- optional first line `backends: interpreter, julia` (any non-empty subset);
--- a file without the header runs against the three scalar backends
--- ('defaultBackends').
+-- Which execution backends a .tst file's cases run against.
 --
--- `batched` is deliberately NOT part of that default: it is an opt-in
--- declaration that the program is expected to be batched-mode eligible (see
+-- In the ordinary corpus the interpreter is the implicit and only oracle
+-- (docs-repo task impact-analysis-m2-drop-runtime-from-key): every row is
+-- checked there, and a file names no backends. Whether the scalar Python and
+-- Julia backends agree with the interpreter is the backend-agreement fuzzers'
+-- question; End2EndTesting runs a program's rows on them only when its IR
+-- census leaves what the fuzzers certify ('CertifiedCensus'). An explicit
+-- `backends: python` (any non-empty subset) is kept for two cases: a corpus
+-- program the interpreter cannot serve (End2EndTesting.interpreterServesExempt,
+-- empty today), and the known-issues pins, which say where a bug lives. A file
+-- without the line parses as 'defaultBackends', which the known-issues pins
+-- read as "interpreter and python".
+--
+-- `batched` and `dense` are standalone header lines (like `slow`), and may
+-- also appear inside a `backends:` list. `batched` is an opt-in declaration
+-- that the program is expected to be batched-mode eligible (see
 -- End2EndTesting.batchedPythonTests), asserted rather than filtered, so
--- silently losing eligibility fails the suite. Listing it does not remove the
--- file from any scalar backend -- spell those out alongside it.
--- `dense` is the same kind of declaration one level in: that the program's
--- *query domain* is finite, so batched mode emits dense-enumeration entry points
--- for it (design heterogeneous-batch-inference, M3). It presupposes `batched`
--- and does not imply it -- list both.
+-- silently losing eligibility fails the suite; its rows are also checked on
+-- the batched backend. `dense` is the same kind of declaration one level in:
+-- that the program's *query domain* is finite, so batched mode emits
+-- dense-enumeration entry points for it (design heterogeneous-batch-inference,
+-- M3). It presupposes `batched` and does not imply it -- list both.
 data Backend = Interpreter | Julia | Python | Batched | Dense
   deriving (Eq, Show, Enum, Bounded)
 
@@ -589,38 +601,75 @@ pPerfLine = choice [pKnobLine, pMetricLine, pFlagsLine, pCapLine] <* pNewline
                <|> (Right <$> pByteSize)
     headOr d xs = case xs of { (x:_) -> x; [] -> d }
 
--- All three headers are optional and may appear in any order. A missing
+-- | A parsed @.tst@ file.
+data TstFile = TstFile
+  { tstBackends        :: [Backend]
+    -- ^ The @backends:@ list ('defaultBackends' without one), plus the
+    -- standalone @batched@ / @dense@ lines.
+  , tstSlow            :: Bool
+  , tstExpectFailure   :: Maybe ExpectFailure
+  , tstNoNormalization :: Bool
+    -- ^ A standalone @no-normalization@ line: keep the program out of
+    -- End2End's Normalization sweep, which samples the output and cannot
+    -- cover a wide support. The file's comment says why.
+  , tstCases           :: [TestCase]
+  } deriving (Show)
+
+-- The header lines are optional and may appear in any order. A missing
 -- `backends:` header means 'defaultBackends' (the three scalar backends),
 -- never 'allBackends': `batched` must be opted into explicitly. A missing
 -- `expect-failure:` header means 'Nothing' -- an ordinary corpus program.
-pHeaders :: MonadParser m => m ([Backend], Bool, Maybe ExpectFailure)
-pHeaders = go defaultBackends False Nothing
+pHeaders :: MonadParser m => m TstFile
+pHeaders = go (TstFile defaultBackends False Nothing False [])
   where
-    go bs slow ef =
-      (try pBackendsHeader >>= \bs' -> go bs' slow ef) <|>
-      (try pSlowHeader >> go bs True ef) <|>
-      (try pExpectFailureHeader >>= \ef' -> go bs slow (Just ef')) <|>
-      return (bs, slow, ef)
+    go h =
+      (try pBackendsHeader >>= \bs' -> go h { tstBackends = bs' ++ filter (`notElem` bs') (extraTokens h) }) <|>
+      (try pSlowHeader >> go h { tstSlow = True }) <|>
+      (try (pFlagLine "batched") >> go (addToken Batched h)) <|>
+      (try (pFlagLine "dense") >> go (addToken Dense h)) <|>
+      (try (pFlagLine "no-normalization") >> go h { tstNoNormalization = True }) <|>
+      (try pExpectFailureHeader >>= \ef' -> go h { tstExpectFailure = Just ef' }) <|>
+      return h
+    extraTokens h = filter (`elem` [Batched, Dense]) (tstBackends h)
+    addToken b h = if b `elem` tstBackends h then h else h { tstBackends = tstBackends h ++ [b] }
 
-pTestFile :: MonadParser m => String -> m ([Backend], Bool, Maybe ExpectFailure, [TestCase])
+-- | A standalone header line holding one word.
+pFlagLine :: MonadParser m => String -> m ()
+pFlagLine w = do
+  _ <- string w
+  notFollowedBy (alphaNumChar <|> char '-' <|> char ':')
+  sc
+  pNewline
+
+pTestFile :: MonadParser m => String -> m TstFile
 pTestFile name = do
   scn
-  (bs, slow, ef) <- pHeaders
+  h <- pHeaders
   tcs <- pTestCases name
   scn
   eof
-  return (bs, slow, ef, tcs)
+  return h { tstCases = tcs }
 
-parseTestCasesFromString :: FilePath -> String -> Either String ([Backend], Bool, Maybe ExpectFailure, [TestCase])
-parseTestCasesFromString fp content =
+parseTstFileFromString :: FilePath -> String -> Either String TstFile
+parseTstFileFromString fp content =
   case runParser (runStateT (pTestFile fp) 0) fp content of
     Left err -> Left (errorBundlePretty err)
     Right (val, _) -> Right val
 
-parseTestCases :: FilePath -> IO ([Backend], Bool, Maybe ExpectFailure, [TestCase])
-parseTestCases fp = do
+parseTstFile :: FilePath -> IO TstFile
+parseTstFile fp = do
   content <- readFile fp
-  either error return (parseTestCasesFromString fp content)
+  either error return (parseTstFileFromString fp content)
+
+-- | 'parseTstFileFromString' as the tuple most callers read.
+parseTestCasesFromString :: FilePath -> String -> Either String ([Backend], Bool, Maybe ExpectFailure, [TestCase])
+parseTestCasesFromString fp content = asTuple <$> parseTstFileFromString fp content
+
+parseTestCases :: FilePath -> IO ([Backend], Bool, Maybe ExpectFailure, [TestCase])
+parseTestCases fp = asTuple <$> parseTstFile fp
+
+asTuple :: TstFile -> ([Backend], Bool, Maybe ExpectFailure, [TestCase])
+asTuple t = (tstBackends t, tstSlow t, tstExpectFailure t, tstCases t)
 
 -- ---------------------------------------------------------------------------
 -- Showcase behavioural-freeze lines (examples/showcase.freeze)

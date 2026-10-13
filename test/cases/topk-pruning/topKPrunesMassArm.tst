@@ -6,6 +6,6 @@
 -- dim to be the higher one (pruning removes alternatives, and the lowest dim
 -- wins, so it can only rise).
 slow
-backends: interpreter, julia, python, batched
+batched
 p(1.0)=(0.05, 0.0)
 p(0.5)=(0.95, 1.0)

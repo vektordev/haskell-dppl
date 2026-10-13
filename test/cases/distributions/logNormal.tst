@@ -1,5 +1,5 @@
 slow
-backends: interpreter, julia, python, batched
+batched
 p(1.0)=(0.398942, 1.0, False)
 p(2.0)=(0.156874, 1.0)
 p(-1.0) is impossible

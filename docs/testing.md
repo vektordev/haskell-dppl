@@ -158,17 +158,31 @@ all.
 
 ## The `.tst` format
 
-A `.tst` file may start with three optional header lines, in any order: a
-routing header `backends: interpreter, julia, python` (any non-empty
-subset; default is all three scalar backends), a standalone `slow`
-line, plus two opt-in tokens: `batched` (declares batched-mode
-eligibility, asserted by the `BatchedPython` group rather than filtered)
-and `dense` (declares a finite query domain, presupposes `batched`); and,
-for a `test/cases/known-issues/` file only, `expect-failure: <shape>`
-(design testcases-corpus-restructure — see "Known-issues corpus" below).
-The interpreter answers every ordinary corpus program's rows whatever the
-header says: `End2End.Interpreter serves unrouted` covers the programs it
-leaves out, bar `End2EndTesting.interpreterServesExempt` (empty).
+A `.tst` file may start with optional header lines, in any order: a
+standalone `slow` line; two opt-in tokens, `batched` (declares batched-mode
+eligibility, asserted by the `BatchedPython` group rather than filtered, and
+checks the rows on the batched backend) and `dense` (declares a finite query
+domain, presupposes `batched`), each a line of its own; `no-normalization`
+(keeps a program out of `End2End.Normalization`, which samples the output and
+cannot cover a wide support; the file's leading comment says why); and, for a
+`test/cases/known-issues/` file only, `expect-failure: <shape>` (design
+testcases-corpus-restructure — see "Known-issues corpus" below).
+
+**The interpreter is the oracle** (impact analysis M2, docs-repo task
+`impact-analysis-m2-drop-runtime-from-key`). An ordinary corpus file names no
+backends: every row is checked on the interpreter, and only there. Whether the
+scalar Python and Julia backends agree with it is the backend-agreement
+fuzzers' question (`docs/fuzz-testing.md`). `End2End.Python`, `End2End.Julia`
+and their WriteLogits groups run a program's rows only when its construct
+census leaves the set the fuzzers certify (`CertifiedCensus`, see "Impact
+analysis" below), which today selects no program. A `backends:` line
+(`backends: python`, any non-empty subset of `interpreter`, `julia`,
+`python`, `batched`, `dense`) survives in two places: a corpus program the
+interpreter cannot serve, which must be listed in
+`End2EndTesting.interpreterServesExempt` (empty) and whose rows then run on
+the backends the line names, and the known-issues pins, where it says on which
+backends the bug lives. `End2End."a .tst names backends only for a program
+the interpreter cannot serve"` holds the corpus to that.
 Comments are only allowed as a leading/trailing block, not interleaved
 between test cases; an unparseable line is a hard parse failure naming
 the file and line. Beware CRLF files when adding a token by script —
@@ -180,8 +194,8 @@ Expected values are compared with `probTolerance` (1e-4). A `p(...)`/
 `cdf(...)` expectation has two shapes (`TestCaseParser.Expectation`):
 
 - **`p(x) = (prob, dim)`** or **`p(x) = (prob, dim, imposs)`** — an ordinary
-  point. `prob` and `dim` are *both always checked*, by all three scalar
-  backends and the interpreter, unconditionally — there is no "probability
+  point. `prob` and `dim` are *both always checked*, on every backend the
+  row runs on, unconditionally — there is no "probability
   happened to compute to zero so skip the dim check" special case. The
   optional third component is the expected impossibility flag, checked when
   present; omitting it (most pre-existing corpus lines) means "don't check
@@ -518,8 +532,8 @@ its own key (`sourcesFingerprint`), so editing it reruns that sweep only.
 
 | sweep | key, besides version and harness |
 |---|---|
-| `End2End.Python` | the exact script `testPython` runs (the emitted module, the mocks, and the row checks with the tolerance spliced in), `pythonLib.py`, and `python3`'s path and version |
-| `End2End.Julia` (per program, inside each shard) | the program's module and row checks as `juliaBatchTestCode` renders them under a fixed module name, `juliaLib.jl`, `julia --version`, and the flags. An all-unchanged shard starts no julia |
+| `End2End.Python` (only a program the fuzzers do not certify; see M2 below) | the exact script `testPython` runs (the emitted module, the mocks, and the row checks with the tolerance spliced in), `pythonLib.py`, and `python3`'s path and version |
+| `End2End.Julia` (per program, inside each shard; as `End2End.Python`, only an uncertified program) | the program's module and row checks as `juliaBatchTestCode` renders them under a fixed module name, `juliaLib.jl`, `julia --version`, and the flags. An all-unchanged shard starts no julia |
 | `End2End.Interpreter`, `Interpreter Unoptimized` | `show` of the compiled `IREnv` (at -O2 or -O0), the parsed program's networks, writeLogits registry and ADTs, the rows, the values `testInterpreter` derives from them, the tolerances, and the interpreter fingerprint |
 | `End2End.Normalization` | the `IREnv`, the same program fields, the seeded draws (`normalizationDraws`), the tolerance, and the interpreter fingerprint |
 | `End2End.Python Unoptimized`, `End2End.Julia Unoptimized` | as `End2End.Python` and `End2End.Julia`, on the -O0 compile |
@@ -539,6 +553,32 @@ optimizer, the parser, the typing passes, codegen) is outside it. A compiler
 change reaches an interpreter check through the emitted `IREnv`, which is in
 the key already, so a commit that leaves a program's IR unchanged reruns
 nothing for it.
+
+**M2: the runtimes leave the corpus.** The interpreter is the corpus's only
+oracle, so a change to `pythonLib.py`, `juliaLib.jl` or the `python3`/`julia`
+in use reruns no corpus program. It is checked by the agreement fuzzers
+(`prop_Fuzz_BackendsAgree`, `prop_Fuzz_IRBackendsAgree`) and the runtime-level
+tests (`PythonPrelude`, `SamplingPrimitives`). That holds for a program only
+when the fuzzers put every construct it emits through both backends. So
+`buildEnd2EndTree` takes each default-tier program's census
+(`CertifiedCensus.programCensus`): the `irConstructs` of every body, generate
+included, under every config of `corpusCensusConfigs` (the six beyond -O2 and
+-O0 cost about a second over the default corpus, and are compiled in
+parallel before the tree is built), less the sampling primitives. A program
+with a construct outside `certifiedConstructs` keeps its `End2End.Python` and
+`End2End.Julia` checks (and the WriteLogits ones), keyed with the runtime as in
+the table above. `certifiedConstructs` is a static list of what the IR fuzz
+generator's fixed-seed sample reaches, held exact by `Slow.IRGeneratorCoverage`.
+Two checks stay on the text backends regardless:
+
+- `End2End.Python Unoptimized` and `End2End.Julia Unoptimized`, the -O0
+  codegen smoke. The class they guard, a placeholder of the wrong type reaching
+  a backend, is a typing fact a construct census cannot see.
+- The batched groups. Their tokens assert eligibility, and removing their row
+  checks is task `batched-backend-reference-compliance`.
+
+A census says nothing about effects or sharing either; for generate bodies
+that is `prop_Fuzz_BackendsAgree`'s generate arm (`docs/fuzz-testing.md`).
 
 **What is never skipped.** The compile always runs: the key is computed from
 its output. A compile that fails, or crashes while the key is rendered, has

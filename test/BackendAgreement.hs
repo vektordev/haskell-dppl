@@ -89,7 +89,7 @@ module BackendAgreement
 
 import Control.Exception (SomeException, SomeAsyncException(..), try, evaluate, fromException, throwIO)
 import Data.Char (toLower, isSpace)
-import Data.List (intercalate, nub, sort, isPrefixOf, find)
+import Data.List (intercalate, isPrefixOf, find)
 import Data.Maybe (fromMaybe)
 import System.Directory (getCurrentDirectory, findExecutable)
 import System.Exit (ExitCode(..))
@@ -113,6 +113,7 @@ import qualified SPLL.CodeGenPyTorch as Py
 import qualified SPLL.CodeGenJulia as Jl
 import PrettyPrint (pPrintProg)
 import TestTolerances (probTolerance)
+import CertifiedCensus (irConstructs, irEnvConstructs, inferenceBodies, deterministicBodies, allBodies)
 import End2EndTesting (qualifyConstructors, juliaTestFlags, SampleBatch(..), batchSamples,
                        batchSymColumn, networkMocks, batchedMockExpr, netMockName)
 
@@ -321,6 +322,8 @@ oneLine = take 400 . map (\c -> if c == '\n' then ' ' else c)
 -- ('decodeSample'), for a driver that prints what a call returned. An ADT
 -- value is an instance of a class the module defined (so its name is bound to
 -- it in the module's namespace); its field values are in @_fields@, in order.
+-- A rank-1 tensor (a Python list) is @v<length>@ and its elements; only the
+-- IR fuzz generator ('IRFuzz.valueAgrees') reads that token so far.
 -- Expects @_pl@ to be the imported @pythonLib@.
 pythonSerializer :: [String]
 pythonSerializer =
@@ -336,6 +339,9 @@ pythonSerializer =
   , "        elif isinstance(v, _pl.Right): out.append('r'); go(v.val)"
   , "        elif isinstance(v, _pl.ConsInferenceList): out.append('c'); go(v.value); go(v.next)"
   , "        elif isinstance(v, _pl.EmptyInferenceList): out.append('n')"
+  , "        elif isinstance(v, list):"
+  , "            out.append('v' + str(len(v)))"
+  , "            for x in v: go(x)"
   , "        elif ns.get(type(v).__name__) is type(v):"
   , "            fs = getattr(v, '_fields', [])"
   , "            out.append('a' + type(v).__name__); out.append(str(len(fs)))"
@@ -359,6 +365,7 @@ juliaSerializer =
   , "  elseif v isa JuliaSPPLLib.Right; push!(out, \"r\"); _ser(v.val, out)"
   , "  elseif v isa JuliaSPPLLib.ConsInferenceList; push!(out, \"c\"); _ser(v.value, out); _ser(v.next, out)"
   , "  elseif v isa JuliaSPPLLib.EmptyInferenceList; push!(out, \"n\")"
+  , "  elseif v isa AbstractVector; push!(out, \"v\" * string(length(v))); for x in v; _ser(x, out); end"
   , "  elseif isstructtype(typeof(v)) && startswith(string(nameof(parentmodule(typeof(v)))), \"Prog\")"
   , "    push!(out, \"a\" * string(nameof(typeof(v)))); push!(out, string(nfields(v)))"
   , "    for k in 1:nfields(v); _ser(getfield(v, k), out); end"
@@ -943,59 +950,6 @@ runBatchedPythonBatch py cases = withSystemTempDirectory "nest-batched" $ \dir -
 -- ---------------------------------------------------------------------------
 -- Construct inventory
 
--- | Every IR construct a body uses, as a label naming its kind:
--- @IRExpr:IRIf@, @Operand:OpPlus@, @UnaryOperand:OpExp@, @Builtin:BReduce ROpAdd@,
--- @Distribution:IRNormal Log@ (density/cumulative leaves, with their log-space
--- flag), @Sample:IRUniform@, @ConTag:TgCons@, @Accessor:AcHead@. These are the
--- axes along which the two text backends' lowerings differ case by case.
-irConstructs :: IRExpr -> [String]
-irConstructs e = nub (go e)
-  where
-    go x = here x ++ concatMap go (getIRSubExprs x) ++ inValues x
-    here x = ("IRExpr:" ++ ctor (show x)) : case x of
-      IROp op _ _ -> ["Operand:" ++ show op]
-      IRUnaryOp op _ -> ["UnaryOperand:" ++ show op]
-      IRBuiltin b _ -> ["Builtin:" ++ builtinLabel b]
-      IRDensity d ls _ -> ["Density:" ++ show d ++ " " ++ show ls]
-      IRCumulative d ls _ -> ["Cumulative:" ++ show d ++ " " ++ show ls]
-      IRSample d -> ["Sample:" ++ show d]
-      IRConstruct t _ -> ["ConTag:" ++ show t]
-      IRDestruct a _ -> ["Accessor:" ++ ctor (show a)]
-      _ -> []
-    -- A closure or a lambda-valued constant carries IR of its own.
-    inValues (IRConst v) = concatMap go (valueExprs v)
-    inValues _ = []
-    ctor = takeWhile (not . isSpace)
-    builtinLabel b = case b of
-      BReduce op _ -> "BReduce " ++ show op
-      BZip op -> "BZip " ++ show op
-      _ -> ctor (show b)
-
-valueExprs :: IRValue -> [IRExpr]
-valueExprs v = case v of
-  VTuple a b -> valueExprs a ++ valueExprs b
-  VEither (Left a) -> valueExprs a
-  VEither (Right b) -> valueExprs b
-  VList l -> listExprs l
-  VADT _ fs -> concatMap valueExprs fs
-  VClosure _ _ body -> [body]
-  _ -> []
-  where
-    listExprs (ListCont x xs) = valueExprs x ++ listExprs xs
-    listExprs _ = []
-
--- | The probability and integrate bodies of every group: what
--- 'prop_Fuzz_BackendsAgree' actually evaluates in both backends.
-inferenceBodies :: IREnv -> [IRExpr]
-inferenceBodies (IREnv gs _ _) = [ b | g <- gs, Just (b, _) <- [probFun g, integFun g] ]
-
--- | The probability, integrate, writeLogits and normal bodies of every group:
--- every body that has a value the backends can agree on. The corpus side of
--- 'BackendCoverage''s census.
-deterministicBodies :: IREnv -> [IRExpr]
-deterministicBodies (IREnv gs _ _) =
-  [ b | g <- gs, Just (b, _) <- [probFun g, integFun g, writeLogitsFun g, normalFun g] ]
-
 -- | The bodies a compared case puts through the backends: every group's
 -- inference bodies (as 'inferenceBodies'; a helper's are reached through
 -- @main@'s), the normal and writeLogits body of each group a query of that
@@ -1019,12 +973,3 @@ comparedBodies c = inferenceBodies env ++
 -- removes it from the fuzz side, so it stays listed while the corpus uses it.
 maskedConstruct :: String -> Bool
 maskedConstruct c = c == "IRExpr:IRSample" || "Sample:" `isPrefixOf` c
-
--- | Every emitted body, generate and writeLogits included: what a corpus
--- program asks of the backends.
-allBodies :: IREnv -> [IRExpr]
-allBodies (IREnv gs _ _) =
-  [ b | g <- gs, Just (b, _) <- [genFun g, probFun g, integFun g, writeLogitsFun g, normalFun g] ]
-
-irEnvConstructs :: (IREnv -> [IRExpr]) -> IREnv -> [String]
-irEnvConstructs which env = sort (nub (concatMap irConstructs (which env)))

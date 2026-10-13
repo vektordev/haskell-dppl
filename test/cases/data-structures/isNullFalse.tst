@@ -1,5 +1,6 @@
 slow
-backends: interpreter, julia, python, batched, dense
+batched
+dense
 p(1.0)=(0.0, 0.0)
 p(0.0)=(1.0, 0.0)
 cdf(0.1)=(1.0, 0.0)

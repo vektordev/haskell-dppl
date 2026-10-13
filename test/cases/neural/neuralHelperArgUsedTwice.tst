@@ -6,7 +6,7 @@
 -- non-recursive generator into the prob/integ body instead.
 -- d c = m c + m c - m c = m c, so p(1) = P(Red) and p(0) = P(Blue).
 slow
-backends: interpreter, julia, python, batched
+batched
 p(0, (2, [0.3, 0.7]))=(0.7, 0.0)
 p(1, (2, [0.3, 0.7]))=(0.3, 0.0)
 p(2, (2, [0.3, 0.7])) is impossible

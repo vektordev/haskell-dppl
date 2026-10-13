@@ -1,5 +1,7 @@
+-- no-normalization: End2End's Normalization sweep samples the output and
+-- cannot cover a 2^14 support. The interpreter answers every row here.
 slow
-backends: python
+no-normalization
 p(Face True False ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY, (2, [0.8, 0.2, 0.3, 0.7, 0.6, 0.4, 0.1, 0.9, 0.5, 0.5, 0.9, 0.1, 0.2, 0.8, 0.7, 0.3, 0.4, 0.6, 0.55, 0.45, 0.35, 0.65, 0.65, 0.35, 0.15, 0.85, 0.85, 0.15]))=(0.4484, 0.0)
 p(Face False False False ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY, (2, [0.8, 0.2, 0.3, 0.7, 0.6, 0.4, 0.1, 0.9, 0.5, 0.5, 0.9, 0.1, 0.2, 0.8, 0.7, 0.3, 0.4, 0.6, 0.55, 0.45, 0.35, 0.65, 0.65, 0.35, 0.15, 0.85, 0.85, 0.15]))=(0.053808, 0.0)
 p(Face ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY ANY, (2, [0.8, 0.2, 0.3, 0.7, 0.6, 0.4, 0.1, 0.9, 0.5, 0.5, 0.9, 0.1, 0.2, 0.8, 0.7, 0.3, 0.4, 0.6, 0.55, 0.45, 0.35, 0.65, 0.65, 0.35, 0.15, 0.85, 0.85, 0.15]))=(1.0, 0.0)

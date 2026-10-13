@@ -35,18 +35,9 @@ import Test.Tasty.HUnit (testCase, assertFailure)
 
 import SPLL.Prelude (compile)
 import SPLL.IntermediateRepresentation (IREnv(..), IRExpr, IRFunGroup(..), defaultCompilerConfig)
-import BackendAgreement (irEnvConstructs, inferenceBodies)
+import CertifiedCensus (irEnvConstructs, inferenceBodies, samplingConstructs)
 import BackendCoverage (fuzzCoverageExceptions)
 import CorpusSweep
-
--- | The sampling primitives: the draws themselves, and the inverse-CDF
--- categorical index a neural read's sampler is built on (pure given its
--- uniform, but it exists only to turn a uniform into a categorical draw, and
--- appears only in generate bodies). Each has its own runtime function per
--- backend (@rand@, @randn@, @categorical_index@).
-samplingConstructs :: [String]
-samplingConstructs =
-  [ "IRExpr:IRSample", "Sample:IRNormal", "Sample:IRUniform", "Builtin:BCategoricalIndex" ]
 
 -- | Constructs of corpus generate bodies that are not sampling primitives and
 -- occur in no corpus inference body, each with why. Empty as measured

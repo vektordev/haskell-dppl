@@ -1,10 +1,7 @@
 -- M4 value-grouped DP path, depth-12 counting fold. At M2 this fold was
 -- 2^depth worlds (4096 at depth 12) and blew up the IR; the milestone-4
 -- value grouping collapses same-count worlds into one measured mass each, so
--- the compile stays O(depth^2) worlds. Interpreter-only: the compiled prob
--- function is a large let-block of shared count masses, and the backend
--- surface (logit-slice reads) is already pinned by the depth-3 planEnumRec*
--- and planEnumInline* cases. Expected values from an independent DP oracle
+-- the compile stays O(depth^2) worlds. Expected values from an independent DP oracle
 -- over the factorized per-level distribution (P(#red >= 2) at depth 12).
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color

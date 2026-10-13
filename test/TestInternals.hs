@@ -42,7 +42,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet, generateRand)
 import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectationProb, defaultBackends,
-                        parseTestCasesFromString, corpusPplPath, corpusTstPath)
+                        parseTestCasesFromString, corpusPplPath, corpusTstPath, TstFile(..), parseTstFileFromString)
 import CorpusSweep (Corpus, CorpusEntry(..), SweepSpec(..), Tier(..), SlowHeader(..), corpusSweepAll, sweepLoaderNames)
 import System.Directory (listDirectory)
 import System.FilePath ((</>), takeExtension)
@@ -989,6 +989,23 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
     Right (bs, slow, _, _) -> do
       assertEqual "slow-then-backends routing" [Interpreter] bs
       assertEqual "slow-then-backends is recognized" True slow
+  -- Impact analysis M2: `batched`, `dense` and `no-normalization` are
+  -- standalone lines, in any order with the others.
+  case parseTstFileFromString "header.tst" "batched\nslow\ndense\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right t -> do
+      assertEqual "standalone batched and dense join the scalar default" (defaultBackends ++ [Batched, Dense]) (tstBackends t)
+      assertEqual "slow among standalone tokens" True (tstSlow t)
+      assertEqual "no no-normalization line" False (tstNoNormalization t)
+      assertEqual "rows after the standalone tokens" 1 (length (tstCases t))
+  case parseTstFileFromString "header.tst" "no-normalization\nbatched\nbackends: python\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right t -> do
+      assertEqual "a backends line keeps an earlier standalone token" [Python, Batched] (tstBackends t)
+      assertEqual "no-normalization is recognized" True (tstNoNormalization t)
+  case parseTstFileFromString "header.tst" "batchedx\np(0.5)=(1.0, 1.0)\n" of
+    Left _ -> return ()
+    Right t -> assertFailure ("a word merely starting with a token is not that token: " ++ show (tstBackends t))
 
 -- The four `expect-failure:` shapes (design testcases-corpus-restructure),
 -- order-independent with `backends:`/`slow` like the other two headers.

@@ -7,7 +7,7 @@
 -- polymorphicParameterComparedAsFloat; docs task
 -- polymorphic-parameter-compared-as-float.
 slow
-backends: interpreter, julia, python, batched
+batched
 p((True, True), True)=(1.0, 0.0)
 p((True, False), True)=(0.0, 0.0)
 p((False, False), False)=(1.0, 0.0)

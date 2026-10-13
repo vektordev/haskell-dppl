@@ -7,8 +7,9 @@
 -- drawProductReadEnumeratedJointly; TestInternals.drawProductReadFactorizesPerField
 -- pins the per-field cost). Found by experiments_nest exact-eig-question-asking.
 -- Task draw-product-read-enumerated-jointly.
--- Python-only: End2End's Normalization sweep samples the output and cannot
--- cover a 2^14 support; drawProductReadPerField4 runs on every backend.
+-- Kept out of End2End's Normalization sweep (its .tst's no-normalization line),
+-- which samples the output and cannot cover a 2^14 support;
+-- drawProductReadPerField4 is the size that sweep sees.
 data Face = Face x0::Bool, x1::Bool, x2::Bool, x3::Bool, x4::Bool, x5::Bool, x6::Bool, x7::Bool, x8::Bool, x9::Bool, x10::Bool, x11::Bool, x12::Bool, x13::Bool
 neural see :: (Symbol -> Face)
 tells yes no truth = if truth then Uniform < yes else Uniform < no

@@ -15,8 +15,9 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, (@?=))
 
 import SPLL.Prelude (compile)
-import SPLL.IntermediateRepresentation (defaultCompilerConfig)
+import SPLL.IntermediateRepresentation (defaultCompilerConfig, IREnv)
 import ImpactManifest
+import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs)
 import End2EndTesting (interpreterKey, pythonKey, juliaKey, loadCorpusPair, networkMocks)
 import TestCaseParser (corpusPplPath, isProbTestCase, isCumulTestCase)
 
@@ -30,7 +31,28 @@ impactManifestTests = testGroup "ImpactManifest"
   , testCase "an action is skipped on a hit, and recorded only when it returns" actionPassThenSkip
   , testCase "an unreadable manifest is an empty one" corruptManifest
   , testCase "the interpreter closure is the interpreter, not the compiler" closureIsNarrow
+  , testCase "M2: a census leaving the certified constructs keeps the text backends" censusRouting
   ]
+
+-- | M2 (task impact-analysis-m2-drop-runtime-from-key): a corpus program runs
+-- on the scalar Python and Julia backends exactly when 'uncertifiedConstructs'
+-- of its census is non-empty. The census of a real corpus program sees its
+-- constructs, generate bodies included, without the sampling primitives; a
+-- construct outside 'certifiedConstructs' is reported, one inside is not.
+censusRouting :: IO ()
+censusRouting = do
+  path <- corpusPplPath "addNormals"
+  (p, _) <- loadCorpusPair (path, take (length path - 4) path ++ ".tst")
+  let census = programCensus [compile defaultCompilerConfig p]
+  assertBool ("the census sees the program's IR: " ++ show census) ("IRExpr:IRVar" `elem` census)
+  assertBool ("the census leaves out the sampling primitives: " ++ show census)
+    (not (any (`elem` samplingConstructs) census))
+  assertEqual "a corpus program's census is certified" [] (uncertifiedConstructs census)
+  assertEqual "a refused compile contributes nothing" census
+    (programCensus [compile defaultCompilerConfig p, Left "refused" :: Either String IREnv])
+  assertEqual "a construct the fuzzers never reach is uncertified" ["Accessor:AcNotDrawn"]
+    (uncertifiedConstructs ("Accessor:AcNotDrawn" : census))
+  assertEqual "the certified list certifies itself" [] (uncertifiedConstructs certifiedConstructs)
 
 -- | Run a property once, quietly, and report whether it passed.
 runProp :: Property -> IO Bool

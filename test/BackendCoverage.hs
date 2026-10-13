@@ -17,10 +17,11 @@
 --
 -- the constructs ('BackendAgreement.irConstructs') the corpus uses and the
 -- sample does not, and requires that set to be exactly
--- 'fuzzCoverageExceptions'. That list is two things at once: the generator's
--- to-do (@typed-program-generator-expansion@), and M2's exception list -- a
--- program emitting a listed construct keeps the runtime fingerprint in its
--- key. Equality, not inclusion, so the list cannot rot in either direction: a
+-- 'fuzzCoverageExceptions', the generator's to-do
+-- (@typed-program-generator-expansion@). M2 itself certifies by the IR fuzz
+-- generator's reach ('CertifiedCensus.certifiedConstructs', held exact by
+-- 'irGeneratorCoverageTests'), which covers every construct listed here.
+-- Equality, not inclusion, so the list cannot rot in either direction: a
 -- construct the generator starts reaching must leave it, and one the corpus
 -- starts using must be added (and so be seen).
 --
@@ -49,8 +50,9 @@ import Test.Tasty.HUnit (testCase, assertFailure)
 import SPLL.Prelude (compile)
 import Control.Concurrent.MVar (newMVar, modifyMVar)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv, IRExpr)
-import BackendAgreement (AgreementCase, irConstructs, irEnvConstructs, deterministicBodies, comparedBodies, maskedConstruct,
-                         inferenceBodies, batchedComparedBodies)
+import BackendAgreement (AgreementCase, comparedBodies, maskedConstruct, batchedComparedBodies)
+import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies, corpusCensusConfigs,
+                        certifiedConstructs, samplingConstructs)
 import CorpusSweep
 import TestCaseParser (Backend(Batched))
 import IRFuzz (irGeneratorConstructs)
@@ -96,25 +98,6 @@ batchedFuzzCoverageExceptions =
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (gaussianTrajectory4, theta)")
   ]
 
--- | The compiler configs the corpus checks a program under (default, log
--- space, the plan engine at materialization budget 0 in both spaces, branch
--- counting, topK in both spaces, the unoptimized pipeline): the census the IR
--- fuzz generator ('IRFuzz') is measured against. It is per config because
--- each emits different IR, and the IR generator draws below the compiler, so
--- one census over all of them is what it has to reach (docs-repo design
--- @ir-fuzz-generator@, milestone M2).
-corpusCensusConfigs :: [(String, CompilerConfig)]
-corpusCensusConfigs =
-  [ ("default", defaultCompilerConfig)
-  , ("log space", defaultCompilerConfig { logSpace = True })
-  , ("budget 0", defaultCompilerConfig { materializationCardinality = 0 })
-  , ("budget 0, log space", defaultCompilerConfig { materializationCardinality = 0, logSpace = True })
-  , ("branch counts", defaultCompilerConfig { countBranches = True })
-  , ("topK", defaultCompilerConfig { topKThreshold = Just 0.05 })
-  , ("topK, log space", defaultCompilerConfig { topKThreshold = Just 0.05, logSpace = True })
-  , ("-O0", defaultCompilerConfig { optimizerLevel = 0 })
-  ]
-
 -- | Constructs some corpus config compiles to that the IR fuzz generator has
 -- no production for yet, each with the milestone that owns it. Exact, like
 -- 'fuzzCoverageExceptions': a construct the generator starts reaching must
@@ -122,15 +105,10 @@ corpusCensusConfigs =
 irGeneratorDeferred :: [(String, String)]
 irGeneratorDeferred =
   -- Measured 2026-10-13 at M2 (567 programs x 8 configs): the corpus uses 68
-  -- constructs, the generator reaches all but these. M2's PResult bodies
-  -- reach the enumerated sum's BTensor, BMap and BReduce (all three
-  -- reductions); the other builtins are M3's.
-  [ ("Builtin:BIndex",      "M3 (builtins and tensors): agreement fusion's indexed read (categoricalProductFusion)")
-  , ("Builtin:BListIndex",  "M3 (builtins and tensors): a neural read's slot of a logits list (floatInputGaussian)")
-  , ("Builtin:BMapList",    "M3 (builtins and functions): list map (mapMultList)")
-  , ("Builtin:BZip OpMult", "M3 (builtins and tensors): agreement fusion's elementwise product (categoricalProductFusion)")
-  , ("Builtin:BZip OpPlus", "M3 (builtins and tensors): agreement fusion's elementwise product in log space (categoricalProductFusion)")
-  , ("IRExpr:IRSample",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
+  -- constructs, the generator reaches all but these. M3 gave every builtin a
+  -- production (BIndex, BListIndex, BMapList, BZip were listed here until
+  -- then); what is left is M4's.
+  [ ("IRExpr:IRSample",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
   , ("Sample:IRNormal",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
   ]
 
@@ -178,13 +156,25 @@ irGeneratorCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
   { sweepName = "Slow.IRGeneratorCoverage", sweepTier = Slow, sweepSlow = IgnoreSlow
   , sweepSelect = notSlowForCompileCost
   , sweepNote = "the constructs the corpus compiles to under any corpus config and the IR fuzz generator never draws are listed" } $ \es ->
-  return $ testGroup "IRGeneratorCoverage" $ (: []) $
-   testCase "corpus constructs under every corpus config the IR generator misses are exactly irGeneratorDeferred" $ do
-    perConfig <- forM corpusCensusConfigs $ \(cname, conf) -> do
-      cs <- corpusConstructsWith conf deterministicBodies es
-      return [ (n ++ " [" ++ cname ++ "]", c) | (n, c) <- cs ]
-    checkExceptions "IR generator" "irGeneratorDeferred" "deterministic bodies under every corpus config"
-      (Just "IRFuzz's fixed-seed sample") (concat perConfig) [irGeneratorConstructs] irGeneratorDeferred
+  return $ testGroup "IRGeneratorCoverage" $
+  [ testCase "certifiedConstructs is exactly what the IR generator reaches, sampling primitives aside" $ do
+      -- M2 of impact analysis (CertifiedCensus): a corpus program whose
+      -- census lies in this list has no per-program Python or Julia check.
+      let reached = sort (nub irGeneratorConstructs) \\ samplingConstructs
+          listed = sort (nub certifiedConstructs)
+          missing = reached \\ listed
+          stale = listed \\ reached
+      if null missing && null stale then return () else assertFailure $ unlines $
+        [ "certifiedConstructs is out of date." ]
+        ++ (if null missing then [] else "Reached by the IR generator, not listed (add them):" : map ("  " ++) missing)
+        ++ (if null stale then [] else "Listed, but the IR generator no longer reaches them (remove them):" : map ("  " ++) stale)
+  , testCase "corpus constructs under every corpus config the IR generator misses are exactly irGeneratorDeferred" $ do
+      perConfig <- forM corpusCensusConfigs $ \(cname, conf) -> do
+        cs <- corpusConstructsWith conf deterministicBodies es
+        return [ (n ++ " [" ++ cname ++ "]", c) | (n, c) <- cs ]
+      checkExceptions "IR generator" "irGeneratorDeferred" "deterministic bodies under every corpus config"
+        (Just "IRFuzz's fixed-seed sample") (concat perConfig) [irGeneratorConstructs] irGeneratorDeferred
+  ]
 
 -- | The census verdict: the constructs the corpus uses and the fuzz sample
 -- does not must be exactly @listed@.
