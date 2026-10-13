@@ -38,7 +38,15 @@ module SPLL.Typing.ModalityInfer
   ( addModalityPTypeInfo
   , perNodeOuterGrounds
   , IMod(..)
+  , Law(..)
+  , Justification(..)
+  , LawTable
+  , Env
+  , renderJustification
   , inferProgram
+  , bindingLawEnv
+  , bareLawOfPType
+  , lambdaParamLaw
   , toMod
   , ReinferCtx
   , reinferCtx
@@ -52,10 +60,12 @@ import SPLL.ReservedNames (uniformName, normalName)
 import Data.Graph (SCC(..), stronglyConnComp)
 
 import SPLL.Lang.Types
-  ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl )
+  ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
+  , Value, GenericValue(..), Tag(..), MultiValue(..) )
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isStaticZero)
 import SPLL.Analysis (enumerableDomain)
 import Data.Maybe (isJust)
+import Data.List (intercalate, find)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
@@ -325,11 +335,92 @@ fromClosurePType _             = gIntegrate
 -- Environment and the bottom-up walk
 -- ---------------------------------------------------------------------------
 
-type Env = Map String IMod
+-- ---------------------------------------------------------------------------
+-- Laws: a capability summary with its justification (law-carrying-modality M3)
+-- ---------------------------------------------------------------------------
 
--- | Per-node outer ground accumulated for the diff harness's partial-set check
--- (design §6). Keyed by chain name (every node has one after @annotateProg@).
-type GAcc = [(ChainName, GroundMod)]
+-- | What the engine concluded about a value (design @law-carrying-modality@
+-- §A): its capability summary ('lawMod', projected to the flat 'PType' by
+-- 'projectI' exactly as before) together with /why/ -- the data an engine
+-- would need to act on it ('lawJust').
+--
+-- Nothing dispatches on the justification yet (milestone M3). It is issued so
+-- that later milestones can make each engine consume its own row rather than
+-- re-derive the fact from syntax.
+data Law = Law
+  { lawMod  :: IMod
+  , lawJust :: Justification
+  }
+
+-- | Why a node has its law. The rule for adding a constructor: a row exists
+-- only with an engine that consumes it, and it is issued only where that
+-- engine can act on it. A node none of them describes is 'JUnjustified',
+-- which says nothing about its capability (that is 'lawMod''s job), only that
+-- no certificate backs it yet.
+--
+-- This milestone issues the three that need no engine. The engine-backed
+-- justifications are later milestones' (affine: M4; witnessed, worlds, plan,
+-- enumerable: M5), and until they land the nodes they will describe are
+-- 'JUnjustified'.
+data Justification
+  = JDirac (Maybe Value)
+    -- ^ A point mass: the node's capability is 'Exact'. Carries the value
+    -- where it is statically known -- a constant, a node whose enumeration
+    -- domain is a single value, a product with a literal zero factor.
+  | JLeaf String [Law]
+    -- ^ A primitive distribution and the laws of its parameters: @Normal@ and
+    -- @Uniform@ (no parameters), or a neural read whose input is a point
+    -- (@neural <net>@, the input's law).
+  | JStructured String [Law]
+    -- ^ A field constructor (a tuple, @Cons@, a user-ADT constructor) and the
+    -- laws of its fields, in order.
+  | JUnjustified
+
+-- | A law with no justification beyond its capability: 'JDirac' (value
+-- unknown) when the value is a point mass, 'JUnjustified' otherwise. A
+-- function is never a 'JDirac': its law is its transfer.
+bareLaw :: IMod -> Law
+bareLaw m = Law m (if isPointMass m then JDirac Nothing else JUnjustified)
+
+-- | The law of a value known only by its flat annotation: a fallback for a
+-- node no inference saw.
+bareLawOfPType :: PType -> Law
+bareLawOfPType = bareLaw . IG . fromClosurePType
+
+isPointMass :: IMod -> Bool
+isPointMass (IArr _ _) = False
+isPointMass (IWit _)   = False
+isPointMass m          = gCap (outerI m) == Exact
+
+-- | One line per law, for the @-d@ dump and for tests.
+renderJustification :: Justification -> String
+renderJustification j = case j of
+  JDirac Nothing   -> "dirac"
+  JDirac (Just v)  -> "dirac " ++ renderValue v
+  JLeaf p []       -> "leaf " ++ p
+  JLeaf p ls       -> "leaf " ++ p ++ args ls
+  JStructured c ls -> c ++ args ls
+  JUnjustified     -> "unjustified"
+  where args ls = "(" ++ intercalate ", " (map (renderJustification . lawJust) ls) ++ ")"
+        renderValue (VFloat x) = show x
+        renderValue (VInt n)   = show n
+        renderValue (VBool b)  = show b
+        renderValue v          = show v
+
+-- | The per-node certificates of a program, keyed by chain name: what
+-- 'inferProgram' concluded at every node of the program as written (not at
+-- the β-reduced copies its closures evaluate).
+type LawTable = Map ChainName Law
+
+-- | The binder environment: the law of every variable in scope. 'inferE'
+-- extends it at every binder, and the compiler keeps one too
+-- (@CompilerMetadata.lawEnv@), extended by the same 'bindParam'.
+type Env = Map String Law
+
+-- | Per-node laws accumulated during the walk, keyed by chain name (every
+-- node has one after @annotateProg@): the source of 'LawTable' and of the
+-- diff harness's per-node outer grounds (design §6).
+type GAcc = [(ChainName, Law)]
 
 -- | The per-declaration inference context: the ADT declarations, the
 -- forward-chaining certificate, and the chain name of the declaration root —
@@ -354,25 +445,31 @@ cnOf = chainName . getTypeInfo
 isZeroConstant :: Expr -> Bool
 isZeroConstant = isStaticZero
 
--- | Infer the modality of an expression, returning the modality, the
--- pType-annotated expression, and the per-node outer-ground accumulation.
-inferE :: ICtx -> Env -> Expr -> (IMod, Expr, GAcc)
+-- | Infer the law of an expression, returning the law, the pType-annotated
+-- expression, and the per-node law accumulation.
+--
+-- The modality ('lawMod') is computed by the rules below; the justification
+-- is attached alongside it and never feeds back into a modality, so the
+-- annotation is exactly what it was before laws existed.
+inferE :: ICtx -> Env -> Expr -> (Law, Expr, GAcc)
 inferE ctx env expr = case expr of
 
   -- The theta-tree source of ThetaI/Subtree is left untouched (PInfer2 does not
   -- annotate it either); only this node's own modality is recorded.
-  Expr ti (ThetaI s i)  -> done (IG gExact) (Expr (setPType ti Deterministic) (ThetaI s i)) []
-  Expr ti (Subtree s i) -> done (IG gExact) (Expr (setPType ti Deterministic) (Subtree s i)) []
-  Expr ti (Constant v)  -> done (IG gExact) (Expr (setPType ti Deterministic) (Constant v)) []
+  Expr ti (ThetaI s i)  -> done' (IG gExact) (Expr (setPType ti Deterministic) (ThetaI s i)) []
+  Expr ti (Subtree s i) -> done' (IG gExact) (Expr (setPType ti Deterministic) (Subtree s i)) []
+  Expr ti (Constant v)  -> doneL (Law (IG gExact) (JDirac (Just v))) (Expr (setPType ti Deterministic) (Constant v)) []
 
+  -- A variable's law is its binder's, justification included: a @draw@-bound
+  -- variable reads as what it was bound to.
   Expr ti (Var name) ->
-    let m = case Map.lookup name env of
-              Just im            -> im
+    let l = case Map.lookup name env of
+              Just bl            -> bl
               Nothing
-                | name == normalName  -> IG gNormal
-                | name == uniformName -> IG gIntegrate
-                | otherwise         -> IG gExact   -- unbound ⇒ Deterministic (PInfer2 default)
-    in done m (Expr (setPType ti (projectNode (rType ti) m)) (Var name)) []
+                | name == normalName  -> Law (IG gNormal) (JLeaf normalName [])
+                | name == uniformName -> Law (IG gIntegrate) (JLeaf uniformName [])
+                | otherwise         -> bareLaw (IG gExact)   -- unbound ⇒ Deterministic (PInfer2 default)
+    in doneL l (Expr (setPType ti (projectNode (rType ti) (lawMod l))) (Var name)) []
 
   -- A neural read is a Gaussian head (Float) or an enumerable/integrable read
   -- /given its input/. That verdict is the read's own law only when the input
@@ -385,11 +482,11 @@ inferE ctx env expr = case expr of
   -- the input's modality was discarded, which was sound only while every input
   -- was an opaque Symbol, and @mu Normal@ answered a silently wrong density.
   Expr ti (ReadNN name s) ->
-    let (sm, s', sa) = inferE ctx env s
+    let (sl, s', sa) = inferE ctx env s
         given = tagFin ti (if rType ti == TFloat then gNormal else gIntegrate)
-        g | inputIsPoint sm = given
-          | otherwise       = groundMod SampleOnly Infinite FamNone
-    in done (IG g) (Expr (setPType ti (projectGround g)) (ReadNN name s')) sa
+        l | inputIsPoint (lawMod sl) = Law (IG given) (JLeaf ("neural " ++ name) [sl])
+          | otherwise                = bareLaw (IG (groundMod SampleOnly Infinite FamNone))
+    in doneL l (Expr (setPType ti (projectI (lawMod l))) (ReadNN name s')) sa
 
   -- gt/lt are forward-only InjFs (PredefinedFunctions), but their modality is
   -- not the generic marginalize-combination floor 'injFMod' gives every other
@@ -427,32 +524,38 @@ inferE ctx env expr = case expr of
     | fname `elem` ["mult", "multI"], isZeroConstant a || isZeroConstant b ->
         let (_, a', aAcc) = inferE ctx env a
             (_, b', bAcc) = inferE ctx env b
-        in done (IG gExact) (Expr (setPType ti Deterministic) (InjF (Named fname) [a', b'])) (aAcc ++ bAcc)
+            zero = staticValue (if isZeroConstant a then a else b)
+        in doneL (Law (IG gExact) (JDirac zero)) (Expr (setPType ti Deterministic) (InjF (Named fname) [a', b'])) (aAcc ++ bAcc)
 
   Expr ti (InjF name@(Named fname) args) ->
     let rs   = map (inferE ctx env) args
-        mods = [ md  | (md,_,_) <- rs ]
+        laws = [ al | (al,_,_) <- rs ]
         es'  = [ e  | (_,e,_) <- rs ]
         acc  = concat [ a | (_,_,a) <- rs ]
-        m    = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname mods))
-    in done m (Expr (setPType ti (projectI m)) (InjF name es')) acc
+        m    = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname (map lawMod laws)))
+        e'   = Expr (setPType ti (projectI m)) (InjF name es')
+        l | isFieldConstructor (icADTs ctx) fname = Law m (JStructured fname laws)
+          | otherwise                             = pointOr m e'
+    in doneL l e' acc
 
   -- The arms are inferred under an environment in which every random variable
   -- the condition reads has been /conditioned/ on the condition's outcome:
   -- see 'conditionEnv'. The condition itself is inferred under the unrefined
   -- environment (it reads the variable's standalone law).
   Expr ti (IfThenElse c t f) ->
-    let (mc, c', ca) = inferE ctx env c
+    let (lc, c', ca) = inferE ctx env c
         armEnv       = conditionEnv env c
-        (mt, t', ta) = inferE ctx armEnv t
-        (mf, f', fa) = inferE ctx armEnv f
-        m = mixOuterI (outerI mc) (meetI mt mf)
-    in done m (Expr (setPType ti (projectI m)) (IfThenElse c' t' f')) (ca ++ ta ++ fa)
+        (lt, t', ta) = inferE ctx armEnv t
+        (lf, f', fa) = inferE ctx armEnv f
+        m = mixOuterI (outerI (lawMod lc)) (meetI (lawMod lt) (lawMod lf))
+        e' = Expr (setPType ti (projectI m)) (IfThenElse c' t' f')
+    in doneL (pointOr m e') e' (ca ++ ta ++ fa)
 
   Expr ti (Lambda x body) ->
     let bodyTy = case rType ti of TArrow _ b -> b; _ -> TFloat
-        arr   = IArr gExact (\m -> let (im,_,_) = inferE ctx (Map.insert x m env) body in im)
-        (bodyRepMod, body', ba) = inferE ctx (Map.insert x (lambdaParamMod ti) env) body
+        arr   = IArr gExact (\m -> let (bl,_,_) = inferE ctx (Map.insert x (bareLaw m) env) body in lawMod bl)
+        (bodyRepLaw, body', ba) = inferE ctx (Map.insert x (bareLaw (lambdaParamMod ti)) env) body
+        bodyRepMod = lawMod bodyRepLaw
     -- The internal modality is the closure 'arr' (so application β-reduces), but
     -- the flat annotation @IRCompiler@ reads is the /body's/ pType, not the outer
     -- closure 'Deterministic' — IRCompiler selects prob/integrate codegen from the
@@ -468,10 +571,10 @@ inferE ctx env expr = case expr of
     -- @continuous-recursive-gate-witness-failure@; the one-parameter twin was
     -- declined cleanly). 'projectNode' recurses down the arrow spine to the
     -- final result, the same way a 'Var' referencing the function is annotated.
-    in done arr (Expr (setPType ti (projectNode bodyTy bodyRepMod)) (Lambda x body')) ba
+    in done' arr (Expr (setPType ti (projectNode bodyTy bodyRepMod)) (Lambda x body')) ba
 
   Expr ti (Apply f arg) ->
-    let (argMod, arg', aa) = inferE ctx env arg
+    let (argLaw, arg', aa) = inferE ctx env arg
     in case f of
          -- A directly-applied lambda is a @let@: bind the parameter to the
          -- argument's actual modality (β-reduction with the precise value).
@@ -483,13 +586,13 @@ inferE ctx env expr = case expr of
          -- own slot) is untouched. The capability gate (@gCap /= Exact@) skips
          -- the FC query for deterministic and function-valued bindings.
          Expr lti (Lambda x body) ->
-           let boundMod = letBoundMod ctx (chainName lti) argMod
-               (bodyMod, body', ba) = inferE ctx (Map.insert x boundMod env) body
+           let (bodyLaw, body', ba) = inferE ctx (bindParam ctx (chainName lti) x argLaw env) body
+               bodyMod = lawMod bodyLaw
                -- The applied lambda node carries the body's pType (its result),
                -- matching @PInfer2@ and what @IRCompiler@ reads, not the outer
                -- closure 'Deterministic'.
                f' = Expr (setPType lti (projectI bodyMod)) (Lambda x body')
-           in done bodyMod (Expr (setPType ti (projectNode (rType ti) bodyMod)) (Apply f' arg'))
+           in doneL bodyLaw (Expr (setPType ti (projectNode (rType ti) bodyMod)) (Apply f' arg'))
                    (laccLambda lti ++ ba ++ aa)
          -- Any other head -- a named function, a function parameter, a
          -- partial application -- binds its parameter by the same rule: the
@@ -499,43 +602,87 @@ inferE ctx env expr = case expr of
          -- sees its parameter witnessed exactly as a literal lambda's body
          -- does. A head that resolves to no lambda is answered unwitnessed.
          _ ->
-           let (fMod, f', fa) = inferE ctx env f
-               m = applyI fMod (letBoundMod ctx (cnOf f) argMod)
-           in done m (Expr (setPType ti (projectNode (rType ti) m)) (Apply f' arg')) (fa ++ aa)
+           let (fLaw, f', fa) = inferE ctx env f
+               m = applyI (lawMod fLaw) (lawMod (letBoundLaw ctx (cnOf f) argLaw))
+               e' = Expr (setPType ti (projectNode (rType ti) m)) (Apply f' arg')
+           in doneL (pointOr m e') e' (fa ++ aa)
 
   where
-    done m e acc = (m, e, (cnOf e, outerI m) : acc)
+    doneL l e acc = (l, e, (cnOf e, l) : acc)
+    done' m = doneL (bareLaw m)
     -- a directly-applied lambda node still records its own (det) outer ground
-    laccLambda lti = [(chainName lti, gExact)]
+    laccLambda lti = [(chainName lti, Law (IG gExact) JUnjustified)]
 
     compareNode ti fname a b =
-      let (ma, a', aacc) = inferE ctx env a
-          (mb, b', bacc) = inferE ctx env b
+      let (la, a', aacc) = inferE ctx env a
+          (lb, b', bacc) = inferE ctx env b
           g = tagFin ti
                 (compareGround (icPlan ctx)
                                (enumerableOperand a) (enumerableOperand b)
                                (independentOperands env a b)
-                               (outerI ma) (outerI mb))
-      in done (IG g) (Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])) (aacc ++ bacc)
+                               (outerI (lawMod la)) (outerI (lawMod lb)))
+          e' = Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])
+      in doneL (pointOr (IG g) e') e' (aacc ++ bacc)
+
+-- | The law of a node no more specific rule justifies: a point mass, with
+-- its value where the node's enumeration domain is a single value, or
+-- unjustified.
+pointOr :: IMod -> Expr -> Law
+pointOr m e
+  | isPointMass m = Law m (JDirac (staticValue e))
+  | otherwise     = Law m JUnjustified
+
+-- | The value of a node known statically: a constant, or a node whose
+-- enumeration domain is one value.
+staticValue :: Expr -> Maybe Value
+staticValue (Expr _ (Constant v)) = Just v
+staticValue (Expr ti _) = case [ mv | DiscreteValues mv <- tags ti ] of
+  (MultiDiscretes [v] : _) -> Just v
+  _ -> Nothing
 
 -- | The law an application binds its parameter to, given the argument's law
 -- and the chain name of the head (a literal lambda, or a callee forward
 -- chaining resolves to one): witnessed when the binding is random and forward
 -- chaining certifies it recoverable from the observation (see the 'Apply' rule
--- of 'inferE'). Shared with 'envAt', which must bind exactly as 'inferE' does.
--- A head forward chaining never saw -- a node 'reinferGiven' synthesized --
--- is not asked.
-letBoundMod :: ICtx -> ChainName -> IMod -> IMod
-letBoundMod ctx headCN argMod
+-- of 'inferE'). The justification is the argument's. A head forward chaining
+-- never saw -- a node 'reinferGiven' synthesized -- is not asked.
+letBoundLaw :: ICtx -> ChainName -> Law -> Law
+letBoundLaw ctx headCN argLaw@(Law argMod j)
   | gCap (outerI argMod) /= Exact
   , isJust (lookup headCN (chainNameInfo (icFC ctx)))
-  , isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) headCN = iwit argMod
-  | otherwise = argMod
+  , isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) headCN = Law (iwit argMod) j
+  | otherwise = argLaw
+
+-- | The one binder-environment extension of an application: the parameter
+-- @x@ of the lambda the head (chain name @headCN@) resolves to is bound to
+-- the argument's law, witnessed where 'letBoundLaw' says so. 'inferE''s
+-- @draw@/let rule, 'envAt' and the compiler's @lawEnv@ ('bindingLawEnv') all
+-- extend through it, so the three cannot disagree on what a binder means.
+bindParam :: ICtx -> ChainName -> String -> Law -> Env -> Env
+bindParam ctx headCN x argLaw = Map.insert x (letBoundLaw ctx headCN argLaw)
 
 -- | The law a free-standing lambda binds its parameter to: the representative
 -- of the parameter's type. Shared with 'envAt'.
 lambdaParamMod :: TypeInfo -> IMod
 lambdaParamMod ti = repIMod (case rType ti of TArrow a _ -> a; _ -> TFloat)
+
+-- | The law a free-standing lambda's parameter is bound to: the
+-- representative of its type, as 'inferE''s 'Lambda' rule binds it.
+lambdaParamLaw :: TypeInfo -> Law
+lambdaParamLaw = bareLaw . lambdaParamMod
+
+-- | 'bindParam' for a caller outside the walk -- the compiler, extending its
+-- @lawEnv@ at a binding. The inference context is that of the declaration
+-- holding the head, as in 'inferE'. A head in no declaration (a synthesized
+-- node) is one forward chaining never saw, which 'letBoundLaw' does not ask
+-- either, so the binding is unwitnessed.
+bindingLawEnv :: ReinferCtx -> ChainName -> String -> Law -> Env -> Env
+bindingLawEnv rc headCN = bindParam ctx headCN
+  where
+    ctx = case find (containsCN . snd) (rcDecls rc) of
+      Just (_, b) -> ICtx (rcADTs rc) (rcFC rc) (cnOf b) (hasReadNN b)
+      Nothing     -> ICtx (rcADTs rc) (rcFC rc) headCN False
+    containsCN e = cnOf e == headCN || any containsCN (getSubExprs e)
 
 -- | Does this declaration body contain a neural read anywhere?
 --
@@ -578,8 +725,8 @@ hasReadNN (Expr _ f)            = any hasReadNN f
 conditionEnv :: Env -> Expr -> Env
 conditionEnv env c = foldr refine env (Set.toList (freeVarsOf c))
   where refine v e = case Map.lookup v e of
-          Just m | gCap (outerI m) /= Exact -> Map.insert v (conditionI m) e
-          _                                 -> e
+          Just l | gCap (outerI (lawMod l)) /= Exact -> Map.insert v (bareLaw (conditionI (lawMod l))) e
+          _                                          -> e
 
 -- | A law restricted to the event some condition on its value holds. The
 -- capability set survives (restriction preserves having a density / CDF /
@@ -627,7 +774,7 @@ independentOperands :: Env -> Expr -> Expr -> Bool
 independentOperands env a b = not (any randomLocal (Set.toList shared))
   where shared = Set.intersection (freeVarsOf a) (freeVarsOf b)
         randomLocal v = case Map.lookup v env of
-          Just m -> gCap (outerI m) /= Exact
+          Just l -> gCap (outerI (lawMod l)) /= Exact
           Nothing -> False
 
 -- | Comparison (@>@\/@<@): the Boolean result is a Bernoulli (finite support).
@@ -875,12 +1022,12 @@ summaries adtsDecl fcData decls = foldl solve Map.empty components
     -- the component's members only, seeded at the top.
     solve env (CyclicSCC grp) = go (foldr seed env grp) (50 :: Int)
       where
-        seed (n, b) e = Map.insert n (topI (rType (getTypeInfo b))) e
+        seed (n, b) e = Map.insert n (bareLaw (topI (rType (getTypeInfo b)))) e
         step e = foldr (\(n, b) e' -> Map.insert n (inferDecl e b) e') e grp
         go e 0 = e
         go e k = let e' = step e
                  in if converged e e' then e' else go e' (k - 1)
-        converged a b = and [ eqI (a Map.! n) (b Map.! n) | (n, _) <- grp ]
+        converged a b = and [ eqI (lawMod (a Map.! n)) (lawMod (b Map.! n)) | (n, _) <- grp ]
 
     inferDecl env b = fst3 (inferE (declCtx b) env b)
     fst3 (x,_,_) = x
@@ -898,10 +1045,13 @@ summaries adtsDecl fcData decls = foldl solve Map.empty components
 addModalityPTypeInfo :: FCData -> Program -> Either CompilerError Program
 addModalityPTypeInfo fcData prog = Right (fst (inferProgram fcData prog))
 
--- | The annotated program plus the per-node outer-ground list (for the diff
--- harness's partial-set invariant check).
-inferProgram :: FCData -> Program -> (Program, [(ChainName, GroundMod)])
-inferProgram fcData (Program decls nns adtDecls enc sigs) =
+-- | The annotated program plus its per-node certificates ('LawTable').
+inferProgram :: FCData -> Program -> (Program, LawTable)
+inferProgram fcData prog = (prog', Map.fromList acc)
+  where (prog', acc) = inferProgramAcc fcData prog
+
+inferProgramAcc :: FCData -> Program -> (Program, GAcc)
+inferProgramAcc fcData (Program decls nns adtDecls enc sigs) =
   (Program decls' nns adtDecls enc sigs, concat accs)
   where
     env = summaries adtDecls fcData decls
@@ -912,7 +1062,7 @@ inferProgram fcData (Program decls nns adtDecls enc sigs) =
 
 -- | The per-node outer 'GroundMod', keyed by chain name (diff harness §6).
 perNodeOuterGrounds :: FCData -> Program -> [(ChainName, GroundMod)]
-perNodeOuterGrounds fcData = snd . inferProgram fcData
+perNodeOuterGrounds fcData p = [ (cn, outerI (lawMod l)) | (cn, l) <- snd (inferProgramAcc fcData p) ]
 
 -- ---------------------------------------------------------------------------
 -- Re-inference under recovered bindings (law-carrying-modality M1, §D)
@@ -957,7 +1107,7 @@ reinferGiven :: ReinferCtx -> [String] -> Expr -> Expr
 reinferGiven rc pins target = e'
   where
     pinSet = Set.fromList pins
-    pinMap = Map.fromList [ (n, IG gExact) | n <- pins ]
+    pinMap = Map.fromList [ (n, bareLaw (IG gExact)) | n <- pins ]
     located = [ (b, env) | (_, b) <- rcDecls rc
                          , Just env <- [envAt (declCtx b) pinSet (rcSummaries rc) (cnOf target) b] ]
     (ctx, env0) = case located of
@@ -974,13 +1124,13 @@ annotatedFreeLaws = go Set.empty
   where
     go bound (Expr ti (Var n))
       | n `Set.member` bound = Map.empty
-      | otherwise = Map.singleton n (IG (fromClosurePType (pType ti)))
+      | otherwise = Map.singleton n (bareLawOfPType (pType ti))
     go bound (Expr _ (Lambda x b)) = go (Set.insert x bound) b
     go bound e = Map.unions (map (go bound) (getSubExprs e))
 
 -- | The environment 'inferE' extends to on its way from @e@ down to the node
 -- with chain name @cn@, or 'Nothing' if @e@ does not contain it. It binds
--- exactly as 'inferE' does -- 'letBoundMod', 'lambdaParamMod', 'conditionEnv'
+-- exactly as 'inferE' does -- 'bindParam', 'lambdaParamMod', 'conditionEnv'
 -- -- except that a binder of a pinned name binds 'Exact'.
 envAt :: ICtx -> Set.Set String -> Env -> ChainName -> Expr -> Maybe Env
 envAt ctx pins env cn e
@@ -990,14 +1140,14 @@ envAt ctx pins env cn e
         firstJust
           [ envAt ctx pins env cn arg
           , if cnOf f == cn then Just env else Nothing
-          , envAt ctx pins (Map.insert x (bind x (letBoundMod ctx (chainName lti) (argLaw arg))) env) cn body ]
+          , envAt ctx pins (pin x (bindParam ctx (chainName lti) x (argLaw arg) env)) cn body ]
       Expr ti (Lambda x body) ->
-        envAt ctx pins (Map.insert x (bind x (lambdaParamMod ti)) env) cn body
+        envAt ctx pins (pin x (Map.insert x (bareLaw (lambdaParamMod ti)) env)) cn body
       Expr _ (IfThenElse c t f) ->
         let armEnv = conditionEnv env c
         in firstJust [envAt ctx pins env cn c, envAt ctx pins armEnv cn t, envAt ctx pins armEnv cn f]
       _ -> firstJust (map (envAt ctx pins env cn) (getSubExprs e))
   where
-    bind x m = if x `Set.member` pins then IG gExact else m
-    argLaw arg = let (m, _, _) = inferE ctx env arg in m
+    pin x en = if x `Set.member` pins then Map.insert x (bareLaw (IG gExact)) en else en
+    argLaw arg = let (l, _, _) = inferE ctx env arg in l
     firstJust = foldr (\m r -> maybe r Just m) Nothing

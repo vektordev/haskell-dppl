@@ -23,13 +23,14 @@ import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Parser (tryParseProgram)
 import SPLL.Analysis (annotateEnumsProg)
-import SPLL.Typing.ForwardChaining (annotateProg, progToFCData)
-import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Typing.ForwardChaining (annotateProg, progToFCData, FCData)
+import SPLL.Typing.Infer (addTypeInfo, addModalityLaws)
 import SPLL.Typing.RInfer (addRTypeInfo)
 import SPLL.CalleeNormalize (normalizeCallees)
 import Data.Maybe (fromMaybe)
 import SPLL.Typing.Determinism (knownAnchors)
-import SPLL.Typing.ModalityInfer (perNodeOuterGrounds)
+import SPLL.Typing.ModalityInfer (perNodeOuterGrounds, Law(..), LawTable, IMod(..), renderJustification, bindingLawEnv, reinferCtx)
+import qualified Data.Map.Strict as Map
 import SPLL.Typing.Modality (GroundMod(gCap), CapabilitySet(..))
 import TestCaseParser (corpusRoot)
 import CorpusSweep
@@ -712,7 +713,65 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" Bottom $
             mainPType "neural mu :: ((Float, Float) -> Float)\nmain = mu (Normal, 1.0)"
       ]
+  -- Law certificates (task law-certificate-preliminaries, design
+  -- law-carrying-modality §A-§B): the justification each node's law carries.
+  -- Nothing dispatches on these yet; they pin what later milestones consume.
+  , testGroup "law certificates: the justification of a node's law"
+      [ testCase "a constant is a Dirac with its value" $
+          assertEqual "" "dirac 1.5" (justAt [] "main = 1.5")
+      , testCase "a primitive is a leaf" $
+          assertEqual "" "leaf Normal" (justAt [] "main = Normal")
+      , testCase "a tuple of them is structured over their laws" $
+          assertEqual "" "TCons(dirac 1.5, leaf Normal)" (justAt [] "main = (1.5, Normal)")
+      , testCase "a draw-bound variable reads its binder's law" $
+          -- the Var node of x, inside the tuple inside the draw's body
+          assertEqual "" "leaf Uniform" (justAt [0, 0, 0] "main = draw x = Uniform in (x, 1.0)")
+      , testCase "a draw-bound zero is a Dirac with its value" $
+          assertEqual "" "dirac 0.0" (justAt [0, 0, 0] "main = draw z = 0.0 in z * Normal")
+      , testCase "a literal zero factor makes the product a Dirac at zero" $
+          assertEqual "" "dirac 0.0" (justAt [] "main = 0.0 * Normal")
+      , testCase "a draw-bound variable in the compiler's lawEnv: the binder's law, witnessed" $
+          -- 'bindingLawEnv' is the extension IRCompiler applies at a binding;
+          -- it binds x as inferE does, so the observation (x, 1.0) witnesses it
+          let src = "main = draw x = Uniform in (x, 1.0)"
+              (p, fc, laws) = lawsOf src
+              body = fromMaybe (error "no main") (lookup "main" (functions p))
+              (headCN, argCN) = case body of
+                Expr _ (Apply h a) -> (chainName (getTypeInfo h), chainName (getTypeInfo a))
+                _ -> error "main is not a draw"
+              argLaw = fromMaybe (error "no law for the argument") (Map.lookup argCN laws)
+              env = bindingLawEnv (reinferCtx fc p) headCN "x" argLaw Map.empty
+          in case Map.lookup "x" env of
+               Just (Law (IWit _) j) -> assertEqual "" "leaf Uniform" (renderJustification j)
+               Just (Law _ j) -> assertFailure ("x bound unwitnessed, as " ++ renderJustification j)
+               Nothing -> assertFailure "x not bound"
+      , testCase "a random combination is unjustified (until the engine milestones)" $
+          assertEqual "" "unjustified" (justAt [] "main = Normal + Uniform")
+      ]
   ]
+
+-- | The modality pass's per-node certificates for a source program, with the
+-- program and certificate they were computed on.
+lawsOf :: String -> (Program, FCData, LawTable)
+lawsOf src =
+  case tryParseProgram "<test>" src of
+    Left e  -> error ("parse error: " ++ show e)
+    Right p -> case addRTypeInfo p of
+      Left e1 -> error ("rtype error: " ++ show e1)
+      Right rt -> case addModalityLaws (annotateProg (annotateEnumsProg rt)) of
+        Left e2 -> error ("typing error: " ++ show e2)
+        Right r -> r
+
+-- | The rendered justification of the node at a child path beneath @main@.
+justAt :: [Int] -> String -> String
+justAt path src =
+  case lookup "main" (functions p) of
+    Just body -> maybe "(no law)" (renderJustification . lawJust)
+                   (Map.lookup (chainName (getTypeInfo (descend path body))) laws)
+    Nothing   -> error "no main"
+  where (p, _, laws) = lawsOf src
+        descend []     e = e
+        descend (i:is) e = descend is (getSubExprs e !! i)
 
 -- | Corpus programs that legitimately reach a partial capability set (see the
 -- comment above 'corpusPartialSetTests'). Both combine two continuous operands

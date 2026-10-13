@@ -83,12 +83,29 @@ standalone `PNormal`, and the Gaussian catch-all handed `Var y` to
 
 The environment is the one `inferE` had at the target's position, rebuilt by
 `envAt` from its declaration's root with the same binding helpers
-(`letBoundMod`, `lambdaParamMod`, `conditionEnv`), so enclosing binders that
+(`bindParam`, `lambdaParamMod`, `conditionEnv`), so enclosing binders that
 were not recovered keep their laws. A pin binds `Exact` at every binder of its
 name on the way down and is also bound outright, which covers a loop variable
 with no source binder (`enumerateCurriedArgument`'s, or a parameter
 `enumerateAppliedLambda` renamed). The top-level summaries are computed once
 per compile (`CompilerMetadata.reinferContext`).
+
+### Laws and certificates
+
+The engine's environment and results are `Law`s: the capability summary
+(`IMod`, which still projects to the `pType`) plus a justification -- a Dirac
+(with its value where it is statically known), a primitive leaf, a field
+constructor over its fields' laws, or none yet (design `law-carrying-modality`
+§A-§B, milestone M3). `inferProgram` emits one per node (`LawTable`, by chain
+name), which `compile` threads into `CompilerMetadata.lawTable`; the compiler
+also keeps `lawEnv`, the laws of the binders enclosing the code it compiles,
+extended at every `Binding` by `bindingLawEnv`, which is `inferE`'s own binder
+rule (`bindParam`). Nothing dispatches on either yet. `-d` prints each node's
+justification after Modality Inference.
+
+`lawEnv` holds a binding's law as the modality engine issued it. A variable an
+engine then recovers or enumerates is pinned through `recoveredVars` and
+`reinferRecovered`, not in `lawEnv`.
 
 Two things moved with it:
 

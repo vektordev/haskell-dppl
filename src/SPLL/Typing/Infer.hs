@@ -1,11 +1,12 @@
 module SPLL.Typing.Infer
   ( addTypeInfo
   , addModalityInfo
+  , addModalityLaws
   ) where
 
 import SPLL.Lang.Lang (Program)
 import SPLL.Typing.RInfer
-import SPLL.Typing.ModalityInfer (addModalityPTypeInfo)
+import SPLL.Typing.ModalityInfer (LawTable, inferProgram)
 import SPLL.Typing.ForwardChaining (FCData, progToFCData)
 import SPLL.Typing.Determinism (knownAnchors)
 import SPLL.Lang.Types (CompilerError)
@@ -36,6 +37,14 @@ addTypeInfo p = do
 -- (conditional annotation, IR codegen) instead of rebuilding it.
 addModalityInfo :: Program -> Either CompilerError (Program, FCData)
 addModalityInfo rtyped = do
-  let fcData = progToFCData (knownAnchors rtyped) rtyped
-  typed <- addModalityPTypeInfo fcData rtyped
+  (typed, fcData, _) <- addModalityLaws rtyped
   return (typed, fcData)
+
+-- | 'addModalityInfo', plus the modality engine's per-node certificates
+-- (design @law-carrying-modality@ §B), which 'SPLL.Prelude.compile' threads to
+-- IR compilation alongside the FCData.
+addModalityLaws :: Program -> Either CompilerError (Program, FCData, LawTable)
+addModalityLaws rtyped = do
+  let fcData = progToFCData (knownAnchors rtyped) rtyped
+      (typed, laws) = inferProgram fcData rtyped
+  return (typed, fcData, laws)
