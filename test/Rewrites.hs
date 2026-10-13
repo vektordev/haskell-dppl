@@ -45,6 +45,13 @@
 -- The catalog's fifth M3 entry, @of@-clause toggling, rewrites a neural
 -- declaration rather than an expression, so it is not a 'Family':
 -- 'ofToggles'.
+--
+-- Milestone M4 (task transformation-differential-testing-m4-isolation-automation)
+-- composes them: a 'Step' names one site of one family, a sequence of steps
+-- is applied left to right ('applySteps'), each to the program the previous
+-- one produced, and 'shrinkSteps' is the QuickCheck shrinker that drops steps,
+-- the last one first, so a failing sequence shrinks to the shortest one that
+-- still fails.
 module Rewrites
   ( Family(..)
   , allFamilies
@@ -61,9 +68,20 @@ module Rewrites
   , commutativeInjFs
   , commuteSites
   , ofToggles
+  , Step(..)
+  , renderStep
+  , stepsOf
+  , applyStep
+  , applySteps
+  , applyStepsLabelled
+  , genSteps
+  , shrinkSteps
   ) where
 
+import Control.Monad (foldM)
 import Data.Foldable (toList)
+import Data.Maybe (isJust)
+import Test.QuickCheck (Gen, chooseInt, elements)
 import Data.List (delete, isPrefixOf, nub)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -98,6 +116,9 @@ data Variant = Variant
   { variantFamily :: Family
   , variantSite :: String
   , variantProgram :: Program
+  , variantNode :: (String, [Int])
+    -- ^ The declaration and the path (child indices, 'getSubExprs' order)
+    -- of the node the rewrite replaced.
   }
 
 -- | What a site knows about where it sits: the local binders in scope,
@@ -129,9 +150,9 @@ freshName prefix avoid = head [n | k <- [0 :: Int ..], let n = prefix ++ show k,
 -- | Every single-site application of a family, in traversal order.
 variants :: Family -> Program -> [Variant]
 variants fam p =
-  [ Variant fam (declName ++ ": " ++ siteLbl) (p { functions = replaceDecl declName e' (functions p) ++ extra })
+  [ Variant fam (declName ++ ": " ++ siteLbl) (p { functions = replaceDecl declName e' (functions p) ++ extra }) (declName, path)
   | (declName, body) <- functions p
-  , (siteLbl, e', extra) <- everySite (site fam) (Ctx [] False (typedTwin body =<< lookup declName typedDecls) declName) body ]
+  , (path, siteLbl, e', extra) <- everySiteAt (site fam) (Ctx [] False (typedTwin body =<< lookup declName typedDecls) declName) body ]
   where
     avoid = programNames p
     var' = freshName "rwv" avoid
@@ -167,10 +188,14 @@ variants fam p =
 
 -- | Apply a site function once at every node, rebuilding the path above it.
 everySite :: (Ctx -> Expr -> [(String, Expr, [FnDecl])]) -> Ctx -> Expr -> [(String, Expr, [FnDecl])]
-everySite f ctx e = f ctx e ++
-  [ (lbl, setSubExprs e (replaceAt i c' cs), extra)
+everySite f ctx e = [ (lbl, e', extra) | (_, lbl, e', extra) <- everySiteAt f ctx e ]
+
+-- | 'everySite', with the path of each rewritten node.
+everySiteAt :: (Ctx -> Expr -> [(String, Expr, [FnDecl])]) -> Ctx -> Expr -> [([Int], String, Expr, [FnDecl])]
+everySiteAt f ctx e = [ ([], lbl, e', extra) | (lbl, e', extra) <- f ctx e ] ++
+  [ (i : path, lbl, setSubExprs e (replaceAt i c' cs), extra)
   | (i, c) <- zip [0 ..] cs
-  , (lbl, c', extra) <- everySite f (childCtx i c) c ]
+  , (path, lbl, c', extra) <- everySiteAt f (childCtx i c) c ]
   where
     cs = getSubExprs e
     twinChild i c = ctxTyped ctx >>= \t -> let tcs = getSubExprs t
@@ -554,3 +579,78 @@ ofToggles p =
   , resolvedAll p' == resolvedAll p ]
   where
     resolvedAll q = Map.fromList [ (n, resolveNeuralAnnotation (adts q) (writeLogitsDecls q) d) | d@(n, _, _) <- neurals q ]
+
+-- ---------------------------------------------------------------------------
+-- Rewrite sequences
+-- ---------------------------------------------------------------------------
+
+-- | One rewrite: a family, the node it rewrites (its declaration and its
+-- path from the declaration's root), and which of the family's rewrites at
+-- that node, by position. The site label is carried for reading only. A node
+-- named by its path, not by its label (which renders the subterm), is still
+-- the same node when a step before it is dropped that changed the subterm's
+-- text -- an operand commuted inside it, say. Where an earlier step changed
+-- the shape above it, the path names another node, or none, and the step
+-- does not apply ('applyStep').
+data Step = Step { stepFamily :: Family, stepNode :: (String, [Int]), stepIndex :: Int, stepSite :: String }
+  deriving (Show, Eq)
+
+renderStep :: Step -> String
+renderStep s = familyName (stepFamily s) ++ " at \"" ++ stepSite s ++ "\""
+
+-- | Every step that applies to a program, family by family.
+stepsOf :: Program -> [Step]
+stepsOf p = concat [ numbered (variants fam p) | fam <- allFamilies ]
+  where
+    numbered vs = [ Step (variantFamily v) (variantNode v) (length (filter ((== variantNode v) . variantNode) (take i vs))) (variantSite v)
+                  | (i, v) <- zip [0 ..] vs ]
+
+-- | The variant a step names, if its node is in the program and the family
+-- has that many rewrites there.
+applyStep :: Program -> Step -> Maybe Variant
+applyStep p s = case drop (stepIndex s) [ v | v <- variants (stepFamily s) p, variantNode v == stepNode s ] of
+  (v : _) -> Just v
+  [] -> Nothing
+
+-- | Apply steps left to right; 'Nothing' if one of them does not apply.
+applySteps :: Program -> [Step] -> Maybe Program
+applySteps p ss = fst <$> applyStepsLabelled p ss
+
+-- | 'applySteps', with each step's site label as it applied. A step keeps
+-- the label of the program it was drawn on; once shrinking has dropped a step
+-- before it, the subterm at its node can read differently.
+applyStepsLabelled :: Program -> [Step] -> Maybe (Program, [Step])
+applyStepsLabelled p0 = fmap (fmap reverse) . foldM one (p0, [])
+  where
+    one (q, done) s = (\v -> (variantProgram v, s { stepSite = variantSite v } : done)) <$> applyStep q s
+
+-- | A sequence of one to @n@ steps: each picks a family that has a site in
+-- the program so far, then one of its sites. Picking the family first keeps
+-- the families with few sites (if-flip, compare-flip) from drowning under the
+-- ones with many (injf-identity, tuple-law). Stops early where nothing applies.
+genSteps :: Int -> Program -> Gen [Step]
+genSteps n p0 = do
+  len <- chooseInt (1, n)
+  go len p0
+  where
+    go 0 _ = return []
+    go k p = case [ (fam, ss) | fam <- allFamilies, let ss = filter ((== fam) . stepFamily) sites, not (null ss) ] of
+      [] -> return []
+      byFamily -> do
+        (_, ss) <- elements byFamily
+        s <- elements ss
+        case applyStep p s of
+          Just v -> (s :) <$> go (k - 1) (variantProgram v)
+          Nothing -> return []
+      where sites = stepsOf p
+
+-- | Shorter sequences that still apply: without the last step first, then
+-- without each earlier one, latest first. Never the empty sequence, which is
+-- the original program itself.
+shrinkSteps :: Program -> [Step] -> [[Step]]
+shrinkSteps p ss =
+  [ c | c <- dropLast ++ [ deleteAt i ss | i <- [length ss - 2, length ss - 3 .. 0] ]
+      , not (null c), isJust (applySteps p c) ]
+  where
+    dropLast = [ init ss | not (null ss) ]
+    deleteAt i xs = take i xs ++ drop (i + 1) xs

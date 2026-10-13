@@ -59,6 +59,9 @@ module SPLL.Prelude
   , compile
   , compileRTyped
   , compileUnoptimized
+  , compileStages
+  , StageSnapshot(..)
+  , StageValue(..)
   , admissionTyped
   , rtypedProgram
   , chainNamedProgram
@@ -376,23 +379,82 @@ resolveNeuralDecls p = do
       Left err -> Left ("Compiler Error: " ++ err)
 
 compile :: CompilerConfig -> Program -> Either CompilerError IREnv
-compile conf p0 = frontEnd conf p0 >>= compileRTyped conf
+compile conf p0 = evalStaged (frontEndS conf p0 >>= compileRTypedS conf)
+
+-- | 'compile', keeping every stage's output: the programs and environments
+-- @-d@ prints, in pipeline order, under the same labels. A stage that does
+-- not fire (callee normalisation, draw sinking, the select pass outside
+-- batched mode) is absent, as it is from the dump. On a refusal the list holds
+-- every stage that completed before it. Read by the stage-diff driver
+-- ("SPLL.StageDiff"); since 'compile' is this function's second component,
+-- the snapshots are the compile's own intermediates, not a re-derivation.
+compileStages :: CompilerConfig -> Program -> ([StageSnapshot], Either CompilerError IREnv)
+compileStages conf p0 = runStaged (frontEndS conf p0 >>= compileRTypedS conf)
+
+-- | One stage's output, as 'compileStages' records it.
+data StageSnapshot = StageSnapshot { snapLabel :: String, snapValue :: StageValue }
+
+data StageValue
+  = StageProgram Program
+    -- ^ An annotated AST stage.
+  | StageTyped Program LawTable
+    -- ^ The modality stage: the typed program and its per-node laws.
+  | StageIR IREnv
+    -- ^ An IR stage.
+
+-- | 'Either' that also collects 'StageSnapshot's, and keeps them on a 'Left'.
+-- Its bind matches the 'Either' as strictly as 'Either''s own does, so the
+-- @-d@ traces fire in the order they always have.
+newtype Staged a = Staged ([StageSnapshot], Either CompilerError a)
+
+instance Functor Staged where
+  fmap f (Staged (w, r)) = Staged (w, fmap f r)
+
+instance Applicative Staged where
+  pure x = Staged ([], Right x)
+  sf <*> sx = sf >>= \f -> fmap f sx
+
+instance Monad Staged where
+  Staged (w, Left e) >>= _ = Staged (w, Left e)
+  Staged (w, Right a) >>= k = let Staged (w', r) = k a in Staged (w ++ w', r)
+
+runStaged :: Staged a -> ([StageSnapshot], Either CompilerError a)
+runStaged (Staged x) = x
+
+evalStaged :: Staged a -> Either CompilerError a
+evalStaged = snd . runStaged
+
+liftE :: Either CompilerError a -> Staged a
+liftE r = Staged ([], r)
+
+record :: String -> StageValue -> Staged ()
+record label v = Staged ([StageSnapshot label v], Right ())
+
+-- | 'printStage', and the snapshot of the same program.
+stage :: CompilerConfig -> String -> Program -> Staged ()
+stage conf label prog = liftE (printStage conf label prog) >> record label (StageProgram prog)
+
+stageIR :: CompilerConfig -> String -> IREnv -> Staged ()
+stageIR conf label ir = liftE (printStageIR conf label ir) >> record label (StageIR ir)
 
 -- | 'compile' up to and including RType inference: validation, neural
 -- annotation resolution, callee normalisation, RInfer.
 frontEnd :: CompilerConfig -> Program -> Either CompilerError Program
-frontEnd conf p0 = do
-  validateProgram p0
-  validateSignatures p0
+frontEnd conf = evalStaged . frontEndS conf
+
+frontEndS :: CompilerConfig -> Program -> Staged Program
+frontEndS conf p0 = do
+  liftE (validateProgram p0)
+  liftE (validateSignatures p0)
   -- Per-value queries (task per-value-query-over-enumerated-slot): a function
   -- whose signature marks a result slot Enumerated gets its helper
   -- definitions here, before anything is inferred, so they are typed and
   -- compiled like any other definition. See "SPLL.PerValue".
-  p <- expandPerValue (isNothing (topKThreshold conf)) <$> resolveNeuralDecls p0
+  p <- expandPerValue (isNothing (topKThreshold conf)) <$> liftE (resolveNeuralDecls p0)
   printIfVerbose conf "=== Parsed Program ==="
   pPrintIfMoreVerbose conf p
   printIfVerbose conf (pPrintProg p)
-  printStage conf "After Parsing (no annotations)" p
+  stage conf "After Parsing (no annotations)" p
 
   -- Callee normalisation (task modality-arrow-apply-crashes): resolve a
   -- function *value* in callee position back to the lambda literal it denotes,
@@ -407,7 +469,7 @@ frontEnd conf p0 = do
     Nothing -> return p
     Just rewritten -> do
       printIfMoreVerbose conf "\n=== Callee normalisation rewrote the program ==="
-      printStage conf "After Callee Normalization" rewritten
+      stage conf "After Callee Normalization" rewritten
       return rewritten
 
   -- RType inference now runs first, directly on the freshly parsed program --
@@ -419,10 +481,10 @@ frontEnd conf p0 = do
   -- partial-function crash on genuinely ill-typed input; (2) every later pass
   -- -- enum annotation, forward chaining, the modality pass -- sees real RType
   -- instead of NotSetYet, in case any of them can make use of it.
-  rtyped <- addRTypeInfoAt (verbose conf) normalized
+  rtyped <- liftE (addRTypeInfoAt (verbose conf) normalized)
   printIfMoreVerbose conf "\n=== RType-inferred Program ==="
   pPrintIfMoreVerbose conf rtyped
-  printStage conf "After RType Inference" rtyped
+  stage conf "After RType Inference" rtyped
   return rtyped
 
 -- | 'compile' from the post-RInfer seam onwards: enum annotation, chain naming,
@@ -436,16 +498,19 @@ frontEnd conf p0 = do
 -- @Constant VAny@ the hole is spelled with. Everything below runs on it
 -- unchanged, which is the design's central claim.
 compileRTyped :: CompilerConfig -> Program -> Either CompilerError IREnv
-compileRTyped conf rtypedWithSigs = do
+compileRTyped conf = evalStaged . compileRTypedS conf
+
+compileRTypedS :: CompilerConfig -> Program -> Staged IREnv
+compileRTypedS conf rtypedWithSigs = do
   -- Signatures are consumed here: checked against the inferred types, and
   -- each per-value function planned. Cleared before compiling, so the
   -- per-mask variants, which re-enter this function with a pruned program,
   -- never plan a per-value function again.
-  checkSignatureTypes rtypedWithSigs
+  liftE (checkSignatureTypes rtypedWithSigs)
   let perValue = perValuePlans conf rtypedWithSigs
       rtyped = (dropSlotProbes rtypedWithSigs) { signatures = [] }
-  unoptimized <- irUnoptimized conf rtyped
-  printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
+  unoptimized <- irUnoptimizedS conf rtyped
+  stageIR conf "After IR Compilation (pre-optimization)" unoptimized
   -- The per-value bodies are installed after branch-count stripping, because
   -- they are built for the result encoding the point queries end up with.
   let stripped = installPerValue conf perValue
@@ -461,13 +526,13 @@ compileRTyped conf rtypedWithSigs = do
   -- retire-irenumsum deleted the family, and 'SPLL.Semiring' now builds that
   -- form directly, so there is nothing left to lower and the stage is gone.
   let selected = if batched conf then selectPassEnv stripped else stripped
-  printStageIR conf "After Select Pass" selected
+  stageIR conf "After Select Pass" selected
 
   let compiled = optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
   printIfVerbose conf "\n=== Compiled Program ==="
   pPrintIfMoreVerbose conf compiled
   printIfVerbose conf (pPrintIREnv compiled)
-  printStageIR conf "After Optimization" compiled
+  stageIR conf "After Optimization" compiled
   return compiled
 
 -- | IR compilation of an RType-inferred program, before the optimizer: the
@@ -475,10 +540,13 @@ compileRTyped conf rtypedWithSigs = do
 -- with their dispatchers (task per-mask-variants-by-pruning), spliced in here
 -- so they go through every later pass like any other group.
 irUnoptimized :: CompilerConfig -> Program -> Either CompilerError IREnv
-irUnoptimized conf rtypedWithProbes = do
+irUnoptimized conf = evalStaged . irUnoptimizedS conf
+
+irUnoptimizedS :: CompilerConfig -> Program -> Staged IREnv
+irUnoptimizedS conf rtypedWithProbes = do
   let rtyped = dropSlotProbes rtypedWithProbes
-  (annotated, fcData, laws) <- typedStages conf rtyped
-  baseIR <- envToIRUnoptimized conf fcData laws annotated
+  (annotated, fcData, laws) <- typedStagesS conf rtyped
+  baseIR <- liftE (envToIRUnoptimized conf fcData laws annotated)
   return (withMaskVariants conf rtyped baseIR)
 
 -- | 'compile' stopped before the select pass and the optimizer: the IR exactly
@@ -494,11 +562,14 @@ compileUnoptimized conf p = frontEnd conf p >>= irUnoptimized conf
 -- oracle reads its verdicts here ('admissionTyped'), so it can never read a
 -- different program from the one the variant gate reads.
 typedStages :: CompilerConfig -> Program -> Either CompilerError (Program, FCData, LawTable)
-typedStages conf rtyped = do
+typedStages conf = evalStaged . typedStagesS conf
+
+typedStagesS :: CompilerConfig -> Program -> Staged (Program, FCData, LawTable)
+typedStagesS conf rtyped = do
   let enumAnnotated = annotateEnumsProg rtyped
   printIfMoreVerbose conf "\n=== Annotated Program (1) ==="
   pPrintIfMoreVerbose conf enumAnnotated
-  printStage conf "After Enum Annotation" enumAnnotated
+  stage conf "After Enum Annotation" enumAnnotated
 
   -- Draw sinking (task shared-enumerated-latent-loses-per-slot-factorization):
   -- move each enumerable `draw` down into the one InjF operand that reads it,
@@ -510,13 +581,13 @@ typedStages conf rtyped = do
     Nothing -> return enumAnnotated
     Just sunk -> do
       let reannotated = annotateEnumsProg sunk
-      printStage conf "After Draw Sinking" reannotated
+      stage conf "After Draw Sinking" reannotated
       return reannotated
 
   let forwardChained = annotateProg preAnnotated
   printIfMoreVerbose conf "\n=== Chain named Program ==="
   pPrintIfMoreVerbose conf forwardChained
-  printStage conf "After Forward Chaining (chain names)" forwardChained
+  stage conf "After Forward Chaining (chain names)" forwardChained
 
   -- Stage 1 of the modality pipeline (modality-typesystem-port §4): the forward
   -- determinism dataflow whose known-anchor set ForwardChaining will consume in
@@ -533,10 +604,11 @@ typedStages conf rtyped = do
   -- (modality-witnessed-inference, milestone 2). The same FCData is returned
   -- here and threaded to IR codegen, whose enumeration predicate reads
   -- 'SPLL.Analysis.isConditional' off it directly.
-  (typed, fcData, laws) <- addModalityLaws forwardChained
+  (typed, fcData, laws) <- liftE (addModalityLaws forwardChained)
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
-  printStageWith (lawColumn laws) conf "After Modality Inference (PType)" typed
+  liftE (printStageWith (lawColumn laws) conf "After Modality Inference (PType)" typed)
+  record "After Modality Inference (PType)" (StageTyped typed laws)
   printIfVerbose conf (engineReport typed laws)
 
   return (typed, fcData, laws)

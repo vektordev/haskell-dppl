@@ -24,7 +24,7 @@
 -- program's own @.tst@ query points. A fourth, @OfToggleCompilesIdentically@,
 -- toggles neural declarations' @of@ clauses ('ofToggles'; M3 of
 -- transformation-differential-testing) and compares the compiles themselves.
-module TestRewrites (rewriteTests, rewriteCorpusTests, ofToggleCorpusTests) where
+module TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, ofToggleCorpusTests) where
 
 import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -33,19 +33,23 @@ import Control.Exception (SomeException, bracket_, evaluate, throwIO, try)
 import Control.Monad (forM, replicateM)
 import Control.Monad.Random.Lazy (evalRandIO)
 import Data.List (intercalate, isInfixOf, isPrefixOf, nub)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Set as Set
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, testCaseInfo, assertBool, assertFailure, (@?=))
+import Test.QuickCheck (Property, Result(..), Discard(..), stdArgs, quickCheckWithResult, replay, maxSuccess, chatty, maxShrinks,
+                        forAllShrinkShow, ioProperty, property, tabulate, counterexample, chooseInt, (==>))
+import Test.QuickCheck.Random (mkQCGen)
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (freeVarsExpr)
 import SPLL.IntermediateRepresentation (IREnv, IRValue, defaultCompilerConfig, pattern VProbDim)
 import SPLL.Parser (tryParseProgram)
-import SPLL.Prelude (compile, runProbC, runGenC)
+import SPLL.Prelude (compile, compileStages, runProbC, runGenC, StageSnapshot(..), StageValue(..))
 import TestCaseParser (TestCase(..), Backend(..))
 import CorpusSweep
+import SPLL.StageDiff (StageDiffOpts(..), StageReport(..), StageRow(Rewrite, Same, Diverges), defaultStageDiffOpts, stageDiff, stageDiffStages, renderStageReport)
 import TestTolerances (probTolerance, samplingTolerance)
 import Rewrites
 import ImpactManifest
@@ -171,6 +175,24 @@ knownDivergences =
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
 
+-- | A divergence only a composition of rewrites reaches, for the sequence
+-- property: a sequence on the program whose steps include every family listed
+-- is judged known. Each has a known-issues pin and a tracking document, as
+-- 'knownDivergences' do. There is no staleness check: a random sequence
+-- property cannot show that a divergence is gone.
+data KnownSeq = KnownSeq { ksProg :: String, ksFams :: [Family], ksDoc :: String }
+
+knownSequenceDivergences :: [KnownSeq]
+knownSequenceDivergences =
+  -- `h y = (y, y * Normal)`, `main = draw x = Uniform in draw y = x in h y`:
+  -- the scaled draw's Jacobian twice (2x the density). The alias alone and
+  -- the helper alone are right. Found by the sequence property's first run.
+  [ KnownSeq "rewriteProbeHelperScaledNoise" [AliasIntro, HelperExtract] "aliased-draw-through-helper-scaled-by-parameter-double-jacobian"
+  -- Probe row 10, `0.0 * Normal`, with the Normal drawn into a binding and
+  -- the product wrapped in `0 - (0 - .)`: knownDivergences' diracLawLost on
+  -- drawBoundRandomTimesLiteralZero, which the sweep skips as slow.
+  , KnownSeq "probe10" [DrawIntro, InjFIdentity] "dirac-law-point-lost-under-plus-or-helper" ]
+
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =
   case [k | k <- knownDivergences, kProg k == prog, kFam k == fam, kSite k `isInfixOf` site] of
@@ -285,17 +307,23 @@ judge prog fam site origOut rewritten qs = do
 
 -- | 'judge' on the rewritten program's compile from 'compileTimed'.
 judgeCompiled :: String -> Family -> String -> Outcome -> Program -> Either String IREnv -> [Query] -> IO Verdict
-judgeCompiled prog fam site origOut rewritten compiled qs = do
+judgeCompiled prog fam site = judgeWith (refusalIsHard fam) (knownDivergence prog fam site) site
+
+-- | The oracle, given whether a refusal is hard and the known divergence the
+-- pair is, if any. A mismatch carries where the stage-diff driver
+-- ("SPLL.StageDiff") places it: the whole stage report for a new one, the
+-- first diverging stage for a known one.
+judgeWith :: Bool -> Maybe Known -> String -> Outcome -> Program -> Either String IREnv -> [Query] -> IO Verdict
+judgeWith hardRefusal known site origOut rewritten compiled qs = do
   out <- runCompiled rewritten compiled qs
   case (origOut, out) of
     (Answered as, Answered bs)
       | and (zipWith agrees as bs) -> return Agree
-      | otherwise ->
+      | otherwise -> do
           let msg = site ++ "\n      original " ++ show as ++ "\n      rewritten " ++ show bs
-          in return $ maybe (HardMismatch msg) (\k -> KnownMismatch k (msg ++ " [" ++ kDoc k ++ "]"))
-                             (knownDivergence prog fam site)
+          return $ maybe (HardMismatch msg) (\k -> KnownMismatch k (msg ++ " [" ++ kDoc k ++ "]")) known
     (Answered _, Refused why)
-      | refusalIsHard fam -> return (HardRefusal (site ++ ": " ++ why))
+      | hardRefusal -> return (HardRefusal (site ++ ": " ++ why))
       | otherwise -> return (LoggedRefusal (site ++ ": " ++ why))
     (Refused _, Refused _) -> return BothRefuse
     (Refused _, Answered bs) -> case compiled of
@@ -362,8 +390,38 @@ compileSweep p = do
 sweepCompiled :: String -> Program -> [Query] -> Either String IREnv -> [(Variant, Either String IREnv)] -> IO [(Family, Verdict)]
 sweepCompiled prog p qs orig vs = do
   origOut <- runCompiled p orig qs
-  concurrently [ (,) (variantFamily v) <$> judgeCompiled prog (variantFamily v) (variantSite v) origOut (variantProgram v) c qs
+  concurrently [ (,) (variantFamily v) <$> (judgeCompiled prog (variantFamily v) (variantSite v) origOut (variantProgram v) c qs
+                                              >>= isolated p (variantProgram v) qs)
                | (v, c) <- vs ]
+
+-- ---------------------------------------------------------------------------
+-- Isolation: the stage-diff driver on a mismatching pair
+-- ---------------------------------------------------------------------------
+
+-- | The stage-diff report ("SPLL.StageDiff") of a pair at the program's query
+-- rows, under a 60 s timeout.
+stageReport :: Program -> Program -> [Query] -> IO (Either String StageReport)
+stageReport a b qs = do
+  t <- timedTry (60 * 1000000) $ do
+    r <- stageDiff (defaultStageDiffOpts defaultCompilerConfig) { sdQueries = qs, sdTolerance = probTolerance } a b
+    evaluate (length (renderStageReport r) `seq` r)
+  return $ case t of
+    Nothing -> Left "stage diff timed out (60s)"
+    Just (Left ex) -> Left ("stage diff crashed: " ++ firstLine (show (ex :: SomeException)))
+    Just (Right x) -> Right x
+
+-- | Where the driver places a mismatch: a new one gets the whole report, a
+-- known one the first diverging stage only. Other verdicts are unchanged.
+isolated :: Program -> Program -> [Query] -> Verdict -> IO Verdict
+isolated a b qs v = case v of
+  HardMismatch m -> HardMismatch . (m ++) . either (("\n      " ++)) (indentReport . renderStageReport) <$> stageReport a b qs
+  KnownMismatch k m -> KnownMismatch k . (m ++) . either (\e -> " (" ++ e ++ ")") ((" -- first divergence: " ++) . firstStage) <$> stageReport a b qs
+  _ -> return v
+  where
+    indentReport = concatMap ("\n      " ++) . lines
+
+firstStage :: StageReport -> String
+firstStage r = maybe "none" fst (firstDivergence r)
 
 -- | Run the actions concurrently, at most one per capability, and return
 -- their results in order (rethrowing the first exception). A program's
@@ -401,16 +459,7 @@ report prog verdicts = do
     logged BothRefuse = False
     logged SampledOk = False
     logged _ = True
-    line (f, v) = familyName f ++ ": " ++ case v of
-      HardMismatch m -> "MISMATCH " ++ m
-      KnownMismatch _ m -> "known mismatch " ++ m
-      LoggedRefusal m -> "compiled -> refuses (log-only) " ++ m
-      HardRefusal m -> "compiled -> refuses (promoted) " ++ m
-      SampleMismatch m -> "refused -> compiles, SAMPLING MISMATCH " ++ m
-      SampleUnchecked m -> "refused -> compiles, unchecked by sampling: " ++ m
-      SampledOk -> "refused -> compiles, sampling agrees"
-      Agree -> "agree"
-      BothRefuse -> "both refuse"
+    line (f, v) = familyName f ++ ": " ++ verdictLine v
 
 -- ---------------------------------------------------------------------------
 -- Probe pairs
@@ -449,8 +498,8 @@ probeTests = testGroup "Probes"
           qs = [(q, [])]
       ow <- runQueries pw qs
       orr <- runQueries pr qs
-      forward <- judge name fam "hand-written rewrite" ow pr qs
-      backward <- judge name fam "hand-written rewrite, reversed" orr pw qs
+      forward <- judge name fam "hand-written rewrite" ow pr qs >>= isolated pw pr qs
+      backward <- judge name fam "hand-written rewrite, reversed" orr pw qs >>= isolated pr pw qs
       swept <- sweep name pw qs
       report name ((fam, forward) : (fam, backward) : swept)
   | (row, fam, works, rewritten, q) <- probePairs ]
@@ -595,8 +644,93 @@ unitTests = testGroup "Units"
       map (tagOf . snd) (ofToggles (parseSrc "u" (decl " of ([True, False], _)"))) @?= [[Nothing]]
       map (tagOf . snd) (ofToggles (parseSrc "u" (decl ""))) @?= [[Just (MultiTuple (MultiDiscretes [VBool True, VBool False]) (MultiDiscretes [VBool True, VBool False]))]]
       map fst (ofToggles (parseSrc "u" (decl " of ([True], _)"))) @?= []
+  -- Rewrite sequences (M4): applied in turn, shrunk from the tail.
+  , testCase "steps: a sequence applies each step to the program the last one produced" $ do
+      let p = parseSrc "u" "main = draw x = Normal in x + 1.0"
+          commute = stepAt InjFIdentity "commute" p
+      fmap render' (applySteps p [commute]) @?= Just (render' (parseSrc "v" "main = draw x = Normal in 1.0 + x"))
+      fmap render' (applySteps p [commute, commute]) @?= Just (render' p)
+  , testCase "steps: a step whose node is not in the program does not apply" $ do
+      let p = parseSrc "u" "main = draw x = Normal in x + 1.0"
+      fmap render' (applySteps (parseSrc "v" "main = 1.0") [stepAt InjFIdentity "commute" p]) @?= Nothing
+  , testCase "steps: every listed step applies, and two rewrites at one node are told apart" $ do
+      let p = parseSrc "u" "main = Normal + 1.0"
+          ss = stepsOf p
+      assertBool "every step applies" (all (isJust . applySteps p . (: [])) ss)
+      map stepIndex (filter ((== (InjFIdentity, ("main", []))) . (\s -> (stepFamily s, stepNode s))) ss) @?= [0, 1, 2, 3]
+  , testCase "shrink: the last step goes first, an inapplicable or empty sequence never appears" $ do
+      let p = parseSrc "u" "main = draw x = Normal in x + 1.0"
+          commute = stepAt InjFIdentity "commute" p
+          q = maybe (error "no step") id (applySteps p [commute])
+          inner = stepAt InjFIdentity "plus-zero (plus 1.0 x)" q
+      shrinkSteps p [commute, inner] @?= [[commute], [inner]]
+      shrinkSteps (parseSrc "w" "main = 1.0") [stepAt InjFIdentity "plus-zero Normal" (parseSrc "z" "main = Normal")] @?= []
+  , testCase "shrink: a failure caused by one step shrinks to that step alone" $ do
+      -- A stand-in oracle that fails exactly when the sequence if-flips: the
+      -- shrinker has to drop the harmless steps around it, the one before it
+      -- having rewritten text inside the if.
+      let p = parseSrc "u" "main = draw x = Normal in if x < 0.5 then x + 1.0 else 2.0"
+          before = stepAt InjFIdentity "commute (plus x 1.0)" p
+          p1 = maybe (error "no step") id (applySteps p [before])
+          flipStep = stepAt IfFlip "if-flip" p1
+          p2 = maybe (error "no step") id (applySteps p1 [flipStep])
+          after = stepAt CompareFlip "compare-swap" p2
+          sq = [before, flipStep, after]
+      assertBool "the sequence applies" (isJust (applySteps p sq))
+      r <- quickCheckWithResult stdArgs { chatty = False, maxSuccess = 1 }
+             (forAllShrinkShow (return sq) (shrinkSteps p) (intercalate "; " . map (familyName . stepFamily))
+                (\ss -> counterexample "if-flipped" (IfFlip `notElem` map stepFamily ss)))
+      case r of
+        Failure { failingTestCase = (shrunk : _) } -> shrunk @?= "if-flip"
+        _ -> assertFailure ("expected one shrunk counterexample, got: " ++ output r)
+  -- The stage-diff driver (M4).
+  , testCase "stage diff: a pair that agrees everywhere has no divergence" $ do
+      -- Probe row 10, fixed by dispatch-on-law-certificates: both spellings are
+      -- a point mass at 0.
+      r <- stageDiff (defaultStageDiffOpts defaultCompilerConfig) { sdQueries = [(VFloat 0.0, []), (VFloat 0.5, [])] }
+                (parseSrc "a" "main = 0.0 * Normal") (parseSrc "b" "main = draw z = 0.0 in z * Normal")
+      assertBool (renderStageReport r) (isNothing (firstDivergence r))
+  , testCase "stage diff: the parse stage shows the rewrite, not a divergence" $ do
+      r <- stageDiff (defaultStageDiffOpts defaultCompilerConfig)
+                (parseSrc "a" "main = if Uniform < 0.5 then 1.0 else 2.0") (parseSrc "b" "main = (if Uniform < 0.5 then 1.0 else 2.0) + 0.0")
+      lookup "After Parsing (no annotations)" (stageRows r) @?= Just (Rewrite ["main [if -> plus]"])
+      assertBool (renderStageReport r) (isNothing (firstDivergence r))
+  , testCase "stage diff: a seeded enum-annotation defect is placed at enum annotation" $ do
+      -- The seeded defect: from enum annotation on, a `+ 0.0` node's value
+      -- set loses its last value. Only the rewrite has such a node, as with a
+      -- real defect the rewrite triggers; every later stage inherits the
+      -- wrong set.
+      let a = parseSrc "a" "main = if Uniform < 0.5 then 1.0 else 2.0"
+          b = parseSrc "b" "main = (if Uniform < 0.5 then 1.0 else 2.0) + 0.0"
+          seeded (ss, res) = (seedFrom "After Enum Annotation" truncatePlusZeroTags ss, res)
+          r = stageDiffStages (defaultStageDiffOpts defaultCompilerConfig)
+                (compileStages defaultCompilerConfig a) (seeded (compileStages defaultCompilerConfig b))
+                (Nothing, Nothing) (Nothing, Nothing)
+      fmap fst (firstDivergence r) @?= Just "After Enum Annotation"
+      lookup "After RType Inference" (stageRows r) @?= Just Same
+  , testCase "stage diff: a refusal is placed at the stage that refused" $ do
+      r <- stageDiff (defaultStageDiffOpts defaultCompilerConfig)
+                (parseSrc "a" "main = 1.0 + 2.0") (parseSrc "b" "main = 1.0 + True")
+      fmap fst (firstDivergence r) @?= Just "After RType Inference"
   ]
   where
+    -- The first step of a family whose site label contains the text.
+    stepAt fam txt q = case [ st | st <- stepsOf q, stepFamily st == fam, txt `isInfixOf` stepSite st ] of
+      (st : _) -> st
+      [] -> error ("no " ++ familyName fam ++ " step at " ++ txt)
+    -- Apply a seeded defect to every program stage from the named one on.
+    seedFrom l f ss = let (before, from) = break ((== l) . snapLabel) ss in before ++ map (seedSnap f) from
+    seedSnap f (StageSnapshot l v) = StageSnapshot l $ case v of
+      StageProgram q -> StageProgram (onBodies f q)
+      StageTyped q laws -> StageTyped (onBodies f q) laws
+      StageIR e -> StageIR e
+    onBodies f q = q { functions = [ (n, f b) | (n, b) <- functions q ] }
+    truncatePlusZeroTags (Expr t e) =
+      let e' = fmap truncatePlusZeroTags e
+      in case e' of
+           InjF (Named "plus") [_, Expr _ (Constant (VFloat 0))] ->
+             Expr t { tags = [ DiscreteValues (MultiDiscretes (init vs)) | DiscreteValues (MultiDiscretes vs) <- tags t, not (null vs) ] } e'
+           _ -> Expr t e'
     paramsOf (Expr _ (Lambda v b)) = v : paramsOf b
     paramsOf _ = []
     -- A program's declarations, annotations dropped, to compare a rewrite's
@@ -620,7 +754,7 @@ rewriteTests = testGroup "RewriteInvariance" [unitTests, probeTests]
 rewriteCorpusTests :: Corpus -> Manifest -> IO TestTree
 rewriteCorpusTests corpus manifest = corpusSweep corpus SweepSpec
   { sweepName = "Slow.RewriteInvarianceCorpus", sweepTier = Slow, sweepSlow = SkipSlow
-  , sweepSelect = \e -> Interpreter `elem` ceBackends e && null (neurals (ceProgram e)) && not (null (queries e))
+  , sweepSelect = rewritePool
   , sweepNote = "every rewrite family at every site agrees with the original at its p() rows" } $ \e ->
     testCaseInfo (ceName e) $ do
       let n = ceName e; p = ceProgram e; qs = queries e
@@ -629,7 +763,139 @@ rewriteCorpusTests corpus manifest = corpusSweep corpus SweepSpec
              (sweepCompiled n p qs orig vs >>= report n)
       return (either ("skipped: unchanged since " ++) id r)
   where
-    queries e = [(s, params) | ProbTestCase _ s params _ <- ceCases e]
+    queries = corpusQueries
+
+-- | The programs the rewrite sweeps take: interpreter-routed, not neural,
+-- with at least one probability row.
+rewritePool :: CorpusEntry -> Bool
+rewritePool e = Interpreter `elem` ceBackends e && null (neurals (ceProgram e)) && not (null (corpusQueries e))
+
+corpusQueries :: CorpusEntry -> [Query]
+corpusQueries e = [(s, params) | ProbTestCase _ s params _ <- ceCases e]
+
+-- ---------------------------------------------------------------------------
+-- Rewrite sequences (M4)
+-- ---------------------------------------------------------------------------
+
+-- | The sequence property (milestone M4 of transformation-differential-testing):
+-- a base program and one to three rewrite steps, of any families, applied in
+-- turn ('applySteps'), judged against the base by the same three-outcome
+-- oracle. A hard verdict is shrunk by QuickCheck over the sequence, not the
+-- program ('shrinkSteps': the last step first), and the minimal pair is handed
+-- to the stage-diff driver, whose report is the counterexample.
+--
+-- A single step is what 'rewriteCorpusTests' already checks at every site, so
+-- what this adds is composition: two rewrites, each harmless alone, that
+-- together reach a shape neither does. The pool is the sweep's (the same
+-- corpus programs) plus the probe pairs' working spellings.
+--
+-- Deterministic: each test runs a fixed number of cases from a fixed seed,
+-- so a run is reproducible and a new failure is a finding, not noise. A
+-- sequence with a step at a 'knownDivergences' site is judged known.
+rewriteSequenceTests :: Corpus -> IO TestTree
+rewriteSequenceTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "Slow.RewriteSequences", sweepTier = Slow, sweepSlow = SkipSlow
+  , sweepSelect = rewritePool
+  , sweepNote = "random rewrite sequences agree with the original; a failure shrinks over the sequence and is stage-diffed" } $ \entries -> do
+    let pool = [ (ceName e, ceProgram e, corpusQueries e) | e <- entries ]
+            ++ [ ("probe" ++ show row, parseSrc ("probe" ++ show row) works, [(q, [])]) | (row, _, works, _, q) <- probePairs ]
+    return $ testGroup "RewriteSequences"
+      [ testCaseInfo ("seed " ++ show sd) (sequenceProperty pool sd sequenceCasesPerSeed) | sd <- sequenceSeeds ]
+
+sequenceSeeds :: [Int]
+sequenceSeeds = [20261014, 20261015, 20261016, 20261017]
+
+sequenceCasesPerSeed :: Int
+sequenceCasesPerSeed = 200
+
+type Base = (String, Program, [Query])
+
+-- | Run the sequence property over a pool from one seed: 'Right' the summary,
+-- or the shrunk counterexample as a test failure.
+sequenceProperty :: [Base] -> Int -> Int -> IO String
+sequenceProperty pool seed cases = do
+  r <- quickCheckWithResult stdArgs { replay = Just (mkQCGen seed, 0), maxSuccess = cases, chatty = False, maxShrinks = 30 }
+         (sequenceProp pool)
+  case r of
+    Success { output = o } -> return o
+    _ -> assertFailure (output r) >> return ""
+
+sequenceProp :: [Base] -> Property
+sequenceProp pool = forAllShrinkShow gen shrinker shown $ \(i, steps) -> not (null steps) ==> ioProperty (check i steps)
+  where
+    gen = do
+      i <- chooseInt (0, length pool - 1)
+      let (_, p, _) = pool !! i
+      steps <- genSteps 3 p
+      return (i, steps)
+    shrinker (i, steps) = let (_, p, _) = pool !! i in [ (i, ss) | ss <- shrinkSteps p steps ]
+    shown (i, steps) = let (n, p, _) = pool !! i
+                       in n ++ ": " ++ intercalate "; " (map renderStep (maybe steps snd (applyStepsLabelled p steps)))
+    check i steps0 = do
+      let (name, p, qs) = pool !! i
+      case applyStepsLabelled p steps0 of
+        Nothing -> return (property Discard)
+        Just (rewritten, steps) -> do
+          v <- judgeSequence name p qs steps rewritten
+          frontier <- case v of
+            LoggedRefusal m -> do
+              r <- stageReport p rewritten qs
+              return [either id (\rep -> firstStage rep ++ maybe "" (" -- " ++) (frontierClass rep m)) r]
+            _ -> return []
+          return $ tabulate "transition" [transition v] $ tabulate "compiled -> refuses: first divergence" frontier
+                 $ counterexample (verdictLine v) (not (isHard v))
+    transition v = case v of
+      Agree -> "both answer, agree"
+      KnownMismatch{} -> "known mismatch"
+      HardMismatch{} -> "MISMATCH"
+      LoggedRefusal{} -> "compiled -> refuses"
+      HardRefusal{} -> "compiled -> refuses (promoted)"
+      BothRefuse -> "both refuse"
+      SampledOk -> "refused -> compiles, sampling agrees"
+      SampleUnchecked{} -> "refused -> compiles, unchecked"
+      SampleMismatch{} -> "SAMPLING MISMATCH"
+
+-- | Judge a rewrite sequence against its base, with the stage diff of a
+-- mismatch. A refusal is hard only if every step's family promotes it; the
+-- pair is known if any step's site is a 'knownDivergences' entry.
+judgeSequence :: String -> Program -> [Query] -> [Step] -> Program -> IO Verdict
+judgeSequence name p qs steps rewritten = do
+  origOut <- runQueries p qs
+  c <- compileTimed rewritten
+  let fams = map stepFamily steps
+      known = case [ k | s <- steps, Just k <- [knownDivergence name (stepFamily s) (stepSite s)] ]
+                   ++ [ Known name (last fams) "" (ksDoc k) | k <- knownSequenceDivergences, ksProg k == name, all (`elem` fams) (ksFams k) ] of
+        (k : _) -> Just k
+        [] -> Nothing
+  v <- judgeWith (all (refusalIsHard . stepFamily) steps) known (intercalate "; " (map renderStep steps)) origOut rewritten c qs
+  isolated p rewritten qs v
+
+-- | Which of the refusal classes of task dispatch-on-law-certificates (M6 of
+-- law-carrying-modality, "The draw-introduction frontier") a compiled ->
+-- refuses transition looks like, from its stage report and its message.
+-- Classes A-C are the let rule flooring a binding no engine measures, which
+-- the stage diff shows as the modality stage typing a node Bottom; D is
+-- enumeration meeting a density at run time; E a VAnyExcept witness reaching
+-- a runtime test. F (gaussianTrajectory4's tuple-shaped tail) has no
+-- signature of its own. A guide for reading the frontier, not a verdict.
+frontierClass :: StageReport -> String -> Maybe String
+frontierClass rep msg
+  | "continuous density" `isInfixOf` msg = Just "M6 class D (enumeration over a density body)"
+  | "VAnyExcept" `isInfixOf` msg = Just "M6 class E (a VAnyExcept witness reaches a runtime test)"
+  | Just (_, Diverges ds) <- firstDivergence rep, any ("vs Bottom" `isInfixOf`) ds = Just "M6 classes A-C (a binding floored to Bottom)"
+  | otherwise = Nothing
+
+verdictLine :: Verdict -> String
+verdictLine v = case v of
+  HardMismatch m -> "MISMATCH " ++ m
+  KnownMismatch _ m -> "known mismatch " ++ m
+  LoggedRefusal m -> "compiled -> refuses (log-only) " ++ m
+  HardRefusal m -> "compiled -> refuses (promoted) " ++ m
+  SampleMismatch m -> "refused -> compiles, SAMPLING MISMATCH " ++ m
+  SampleUnchecked m -> "refused -> compiles, unchecked by sampling: " ++ m
+  SampledOk -> "refused -> compiles, sampling agrees"
+  Agree -> "agree"
+  BothRefuse -> "both refuse"
 
 -- | Bump when the rewrite oracle's logic changes.
 rewriteCheckVersion :: String

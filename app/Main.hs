@@ -16,6 +16,7 @@ import Data.Maybe (fromMaybe)
 import System.Exit (exitFailure, exitWith, ExitCode (ExitFailure))
 import System.IO (hPutStrLn, stderr)
 import Control.Exception (SomeException, evaluate, try)
+import SPLL.StageDiff (StageDiffOpts(..), StageReport(..), defaultStageDiffOpts, stageDiff, renderStageReport)
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,
@@ -55,6 +56,11 @@ data CommandOpts =
   | CumulativeOpts {
     posC :: IRValue,
     paramsC :: [IRValue]
+  }
+  | StageDiffCmd {
+    againstFile :: String,
+    samplesD :: [IRValue],
+    paramsD :: [IRValue]
   } deriving Show
 
 readLanguage :: ReadM CodeGenTarget
@@ -185,6 +191,7 @@ parseGlobalOpts = GlobalOpts
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
           <> command "probability" (info parseProbabilityOpts (progDesc "Runs probabilistic inference on the program. Returns the probability of a given value to be the output of the program"))
           <> command "cumulative" (info parseIntegrateOpts (progDesc "Runs probabilistic inference on the program. Returns the probability of the program output to be less than the given sample"))
+          <> command "stagediff" (info parseStageDiffOpts (progDesc "Compiles the input program and a second one that should denote the same distribution (a rewrite of it) side by side, and reports the first pipeline stage whose output differs more than the rewrite explains (design transformation-differential-testing, isolation loop). Exits 1 if some stage diverges."))
         )
 
 parseCompileOpts :: Parser CommandOpts
@@ -233,6 +240,22 @@ parseIntegrateOpts = CumulativeOpts
             <> metavar "PARAMS"
             <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer."))
 
+
+parseStageDiffOpts :: Parser CommandOpts
+parseStageDiffOpts = StageDiffCmd
+        <$> strOption
+            ( long "against"
+            <> short 'j'
+            <> metavar "OTHER_FILE"
+            <> help "The rewritten program, compared against the input file")
+        <*> many (option readValue
+            ( short 'x'
+            <> metavar "SAMPLE"
+            <> help "A sample to compare p(X=SAMPLE) of both programs at, at -O0 and at the given -O level. Repeatable. Without one, only the stages are compared."))
+        <*> optionalList (option readValueList
+            ( short 'p'
+            <> metavar "PARAMS"
+            <> help "Parameters passed to both main functions, as for probability."))
 
 -- Entry point for the program, parse CLI arguments and pass execution to transpile
 main :: IO ()
@@ -284,6 +307,13 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
       case runInteg conf prog params x of 
         Left err -> handleError err
         Right i -> print ("CDF("++ show x ++ ")=" ++ show i)
+    StageDiffCmd{againstFile=other, samplesD=xs, paramsD=params} -> do
+      prog' <- parseProgram other
+      -- The dumps of -d would interleave both compiles; the report replaces them.
+      let quiet = conf { showIntermediates = False }
+      report <- stageDiff (defaultStageDiffOpts quiet) { sdQueries = [ (x, params) | x <- xs ] } prog prog'
+      putStr (renderStageReport report)
+      maybe (return ()) (const (exitWith (ExitFailure 1))) (firstDivergence report)
 
 parseProgram :: FilePath -> IO Program
 --parseProgram path = return testLambdaParameter

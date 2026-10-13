@@ -1,0 +1,2 @@
+h y = (y, y * Normal)
+main = draw x = Uniform in draw y = x in h y
