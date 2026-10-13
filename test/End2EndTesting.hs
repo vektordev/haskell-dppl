@@ -1163,6 +1163,7 @@ qualifyConstructors modName = go
     go (VEither (Left a))    = VEither (Left (go a))
     go (VEither (Right b))   = VEither (Right (go b))
     go (VList l)             = VList (goList l)
+    go (VTensor sh xs)       = VTensor sh (map go xs)
     go v                     = v
     goList EmptyList         = EmptyList
     goList AnyList           = AnyList

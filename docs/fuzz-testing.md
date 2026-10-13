@@ -899,7 +899,7 @@ raised at the sample); none disagreed.
 
 ## IR-level backend agreement (`prop_Fuzz_IRBackendsAgree`)
 
-Design `ir-fuzz-generator`, milestones M1 and M2 (`test/IRFuzz.hs`). Where
+Design `ir-fuzz-generator`, milestones M1 to M3 (`test/IRFuzz.hs`). Where
 `prop_Fuzz_BackendsAgree` reaches the backends only through IR the compiler
 emits, this property draws `IREnv`s directly, within the IR type contract
 (`SPLL.IRTypeCheck`), so a construct is checked because it has a production.
@@ -907,13 +907,29 @@ emits, this property draws `IREnv`s directly, within the IR type contract
 - **A value case** (M1) is one group `main` whose normal or writeLogits body is a plain
   value expression over zero to three parameters and up to two top-level
   constants, with four argument vectors. Types: `Bool`, `Int`, `Float`, `()`,
-  lists, tuples, `Either`, and theta trees as accessor operands only. Values
-  lean on boundaries: 0, -0, the infinities, NaN, 1e300, the smallest
-  subnormal, the empty list. Ints stay small, and `OpIntDiv`/`OpMod` are drawn
-  only in the guarded shape the compiler emits (the preconditions are listed
-  at `IRTypeCheck.inferExpr`). No production yet: `IRSample` (M4), the
-  builtins other than the enumerated sum's (M3), ADT values (M3), symbol
-  constants (no text backend renders one); `IRFuzz.noProduction` records why.
+  lists, tuples, `Either`, rank-1 tensors, the case's ADT, and theta trees as
+  accessor operands only; inside bodies also function types. Values lean on
+  boundaries: 0, -0, the infinities, NaN, 1e300, the smallest subnormal, the
+  empty list. Ints stay small, and `OpIntDiv`/`OpMod` are drawn only in the
+  guarded shape the compiler emits (the preconditions are listed at
+  `IRTypeCheck.inferExpr`). Value preconditions of the builtins are kept the
+  same way: a tensor or list index in range, a categorical index's uniform in
+  [0, 1) and its weights finite and non-negative. No production:
+  `IRSample` (M4), rank > 1 and axis > 0 (neither text backend emits them),
+  symbol constants (no text backend renders one), function-typed parameters
+  or results of `main`; `IRFuzz.noProduction` records why.
+- **Builtins, ADTs and function groups** (M3). Every `Builtin` has a
+  production at value level (`BZip` at every operator but `OpIntDiv`/`OpMod`),
+  as do the standard library's `indexOf`, `listProd` and `listConcat`. A
+  case may declare one ADT, built by its constructor functions, read by its
+  accessors under its constructor tests, and passed and returned. Before its
+  body a case draws up to three helper groups (`IRFuzz.Helper`), normal
+  functions the body and later helpers call: plain ones, whose parameters
+  and results may be function types (closures passed and returned, partial
+  applications, a nullary helper referenced as a value), and recursive ones on
+  a strictly decreasing measure (an `Int` countdown capped at both ends, a
+  list's tail, a mutually recursive pair). Since `PResult` operands are value
+  expressions, the builtins are drawn inside every semiring's bodies too.
 - **A `PResult` case** (M2, half the draws) is a probability or integrate
   body returning a packed `PResult`. It is drawn as a plan, a tree of
   `SPLL.Semiring` combinator names (`density`, `indicatorP`, `prodP`, `mixP`,
@@ -942,9 +958,10 @@ emits, this property draws `IREnv`s directly, within the IR type contract
   still reproduces on exactly its backends. A fixed bug fails that check, so
   its entry cannot outlive it.
 - **Shrinking** cuts a batch to single cases, then to one argument vector,
-  then replaces body nodes by children, keeping only candidates the checker
-  accepts at the drawn type.
-- **Budget:** 20 batches of 60 cases, ~50 s (one `python3` and one `julia`
+  then drops helpers, then replaces body nodes (of `main` and of each helper)
+  by children, keeping only candidates the checker accepts at the drawn
+  type.
+- **Budget:** 20 batches of 60 cases, ~60 s (one `python3` and one `julia`
   process per batch). `NEST_IRFUZZ_EXPLORE=<file>` appends every unfiled
   disagreement and refusal to the file and passes, for surveying a new
   production's findings in bulk.
@@ -952,8 +969,11 @@ emits, this property draws `IREnv`s directly, within the IR type contract
   type-check, and that a fixed-seed sample reaches every `Operand`,
   `UnaryOperand`, `Accessor` and drawn `IRExpr` constructor, and every
   density and cumulative leaf; that a fixed-seed sample of plans reaches
-  every combinator in every semiring; and that both `PResult` bodies, both
-  layouts and every semiring's reduction are drawn.
+  every combinator in every semiring; that both `PResult` bodies, both
+  layouts and every semiring's reduction are drawn; that every `Builtin` (at
+  every operator it is drawn with), every helper shape, closures passed and
+  returned, and the ADT constructions are reached; and that the list and
+  tensor builtins are reached inside `PResult` bodies of every semiring.
 - **Census** (Slow, `Slow.IRGeneratorCoverage` in `test/BackendCoverage.hs`):
   the constructs the deterministic bodies of the corpus compile to under any
   corpus config (default, log space, budget 0 in both spaces, branch counts,

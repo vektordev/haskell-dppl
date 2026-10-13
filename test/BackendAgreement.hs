@@ -321,6 +321,8 @@ oneLine = take 400 . map (\c -> if c == '\n' then ' ' else c)
 -- ('decodeSample'), for a driver that prints what a call returned. An ADT
 -- value is an instance of a class the module defined (so its name is bound to
 -- it in the module's namespace); its field values are in @_fields@, in order.
+-- A rank-1 tensor (a Python list) is @v<length>@ and its elements; only the
+-- IR fuzz generator ('IRFuzz.valueAgrees') reads that token so far.
 -- Expects @_pl@ to be the imported @pythonLib@.
 pythonSerializer :: [String]
 pythonSerializer =
@@ -336,6 +338,9 @@ pythonSerializer =
   , "        elif isinstance(v, _pl.Right): out.append('r'); go(v.val)"
   , "        elif isinstance(v, _pl.ConsInferenceList): out.append('c'); go(v.value); go(v.next)"
   , "        elif isinstance(v, _pl.EmptyInferenceList): out.append('n')"
+  , "        elif isinstance(v, list):"
+  , "            out.append('v' + str(len(v)))"
+  , "            for x in v: go(x)"
   , "        elif ns.get(type(v).__name__) is type(v):"
   , "            fs = getattr(v, '_fields', [])"
   , "            out.append('a' + type(v).__name__); out.append(str(len(fs)))"
@@ -359,6 +364,7 @@ juliaSerializer =
   , "  elseif v isa JuliaSPPLLib.Right; push!(out, \"r\"); _ser(v.val, out)"
   , "  elseif v isa JuliaSPPLLib.ConsInferenceList; push!(out, \"c\"); _ser(v.value, out); _ser(v.next, out)"
   , "  elseif v isa JuliaSPPLLib.EmptyInferenceList; push!(out, \"n\")"
+  , "  elseif v isa AbstractVector; push!(out, \"v\" * string(length(v))); for x in v; _ser(x, out); end"
   , "  elseif isstructtype(typeof(v)) && startswith(string(nameof(parentmodule(typeof(v)))), \"Prog\")"
   , "    push!(out, \"a\" * string(nameof(typeof(v)))); push!(out, string(nfields(v)))"
   , "    for k in 1:nfields(v); _ser(getfield(v, k), out); end"

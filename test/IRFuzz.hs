@@ -1,9 +1,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | The IR fuzz generator (docs-repo design @ir-fuzz-generator@), milestones
--- M1 (deterministic-value IR) and M2 ('PResult' bodies in every semiring, see
--- "PResult bodies" below) on the scalar Python and Julia backends, with the
--- interpreter as the oracle.
+-- M1 (deterministic-value IR), M2 ('PResult' bodies in every semiring, see
+-- "PResult bodies" below) and M3 (builtins, tensors, ADTs and function groups,
+-- see "Function groups" below) on the scalar Python and Julia backends, with
+-- the interpreter as the oracle.
 --
 -- 'prop_Fuzz_BackendsAgree' reaches the backends only through what the SPLL
 -- compiler emits from programs its generator can draw. This module draws
@@ -13,7 +14,8 @@
 --
 -- One drawn case is one function group @main@ whose normal-parameter body (or
 -- writeLogits body: same calling convention, different method) is a plain
--- value expression over its parameters and a few top-level constants. It
+-- value expression over its parameters and a few top-level constants, next to
+-- up to three helper groups it may call and one ADT declaration. It
 -- carries several argument vectors, drawn by the same type discipline and
 -- leaning on boundary values (0, negative zero, the infinities, NaN, the
 -- largest and smallest doubles, the empty list).
@@ -35,6 +37,8 @@ module IRFuzz
   ( IRCase(..)
   , BodyKind(..)
   , SemiringChoice(..)
+  , Helper(..)
+  , HelperShape(..)
   , genIRCase
   , shrinkIRCase
   , irCaseEnv
@@ -54,6 +58,7 @@ module IRFuzz
   , runIRCasesPython
   , runIRCasesJulia
   , checkedIRConstructs
+  , caseFeatures
   , irGeneratorConstructs
   , noProduction
   , valueAgrees
@@ -62,10 +67,10 @@ module IRFuzz
 
 import Control.Exception (SomeException, SomeAsyncException(..), ErrorCall(..), try, evaluate, fromException, throwIO)
 import Control.Monad (replicateM)
-import Control.Monad.State.Strict (StateT, evalStateT, get, put, lift, State, execState, evalState, modify)
-import Data.Char (isSpace)
+import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, lift, State, execState, evalState, modify)
+import Data.Char (isSpace, toLower)
 import Data.List (intercalate, isPrefixOf, isInfixOf, nub, sort)
-import Data.Maybe (mapMaybe, isJust)
+import Data.Maybe (mapMaybe, isJust, fromMaybe)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as M
 import System.Directory (getCurrentDirectory, findExecutable)
@@ -83,17 +88,17 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
-import SPLL.IRTypeCheck (IRType(..), checkIREnv, showIRType, showIRTypeError)
+import SPLL.IRTypeCheck (IRType(..), checkIREnv, showIRType, showIRTypeError, irTypeOfRType)
 import SPLL.Semiring
 import SPLL.IRCompiler (stripBranchCount)
 import Control.Monad.Writer.Lazy (runWriterT)
-import SPLL.Typing.RType (RType(..), TVarR(..))
+import SPLL.Typing.RType (RType(..), TVarR(..), shapeNumel)
 import IRInterpreter (generateDet)
 import qualified SPLL.CodeGenPyTorch as Py
 import qualified SPLL.CodeGenJulia as Jl
 import BackendAgreement (Answer(..), parseAnswerLine, pythonSerializer, juliaSerializer,
                          readNum, runBounded, forcedSource, oneLine, probAgrees, irConstructs)
-import End2EndTesting (juliaTestFlags)
+import End2EndTesting (juliaTestFlags, qualifyConstructors)
 
 -- ---------------------------------------------------------------------------
 -- Cases
@@ -117,15 +122,56 @@ data IRCase = IRCase
   , icConsts :: [(String, IRValue)]   -- ^ the env's top-level constants
   , icBody   :: IRExpr                -- ^ under the parameter lambdas
   , icArgs   :: [[IRValue]]           -- ^ one argument vector per query
+  , icHelpers :: [Helper]             -- ^ the other function groups (M3), in definition order
+  , icADTs   :: [ADTDecl]             -- ^ the env's ADT declarations (M3)
   } deriving (Show)
+
+-- | A helper function group (M3): a normal-parameter function @main@ (and
+-- later helpers) may call as @<name>_normal@.
+data Helper = Helper
+  { hName   :: String
+  , hParams :: [(String, IRType)]
+  , hResult :: IRType
+  , hBody   :: IRExpr                 -- ^ under the parameter lambdas
+  , hShape  :: HelperShape
+  } deriving (Show)
+
+-- | How a helper was drawn: a plain body, or one of the recursion shapes,
+-- each recursing on a decreasing measure.
+data HelperShape
+  = HPlain      -- ^ any body over its parameters and the earlier helpers
+  | HCountdown  -- ^ recursion on an Int measure, bounded both ways
+  | HListRec    -- ^ structural recursion on a list's tail
+  | HMutual     -- ^ one of a pair of functions recursing into each other on an Int measure
+  deriving (Show, Eq, Enum, Bounded)
+
+-- | The name a helper is called by.
+helperRef :: Helper -> String
+helperRef h = hName h ++ "_normal"
+
+helperType :: Helper -> IRType
+helperType h = foldr (ITArrow . snd) (hResult h) (hParams h)
 
 -- | The body with its parameter lambdas.
 irCaseFunction :: IRCase -> IRExpr
 irCaseFunction c = foldr IRLambda (icBody c) (map fst (icParams c))
 
+-- | Every body of the case: @main@'s, then each helper's (unwrapped).
+caseBodies :: IRCase -> [IRExpr]
+caseBodies c = icBody c : map hBody (icHelpers c)
+
+-- | The case with one rewrite applied to every body.
+onBodies :: (IRExpr -> IRExpr) -> IRCase -> IRCase
+onBodies f c = c { icBody = f (icBody c), icHelpers = [ h { hBody = f (hBody h) } | h <- icHelpers c ] }
+
 irCaseEnv :: IRCase -> IREnv
-irCaseEnv c = IREnv [group] [] (icConsts c)
+irCaseEnv c = IREnv (map helperGroup (icHelpers c) ++ [group]) (icADTs c) (icConsts c)
   where
+    helperGroup h = IRFunGroup
+      { groupName = hName h, genFun = Nothing, writeLogitsFun = Nothing
+      , normalFun = Just (foldr IRLambda (hBody h) (map fst (hParams h)), "")
+      , probFun = Nothing, integFun = Nothing
+      , groupDoc = "", refusedVariants = [], sampleDomain = Nothing, maskVariantOf = Nothing }
     decl = Just (irCaseFunction c, "")
     group = IRFunGroup
       { groupName = "main", genFun = Nothing
@@ -162,6 +208,13 @@ irCaseWellTyped c = do
   let expected = foldr (ITArrow . snd) (icResult c) (icParams c)
   if isJust (instanceOf t expected IM.empty) then Right ()
     else Left ("drawn at " ++ showIRType expected ++ ", checked as " ++ showIRType t)
+  tys <- either (Left . showIRTypeError) Right (checkIREnv (irCaseEnv c))
+  mapM_ (\h -> case lookup (helperRef h) tys of
+                  Nothing -> Left ("no type for " ++ helperRef h)
+                  Just th | isJust (instanceOf th (helperType h) IM.empty) -> Right ()
+                          | otherwise -> Left (helperRef h ++ " drawn at " ++ showIRType (helperType h)
+                                               ++ ", checked as " ++ showIRType th))
+        (icHelpers c)
 
 -- | Whether the second type is an instance of the first: one substitution of
 -- the first's variables makes them equal.
@@ -181,6 +234,11 @@ renderIRCase :: IRCase -> String
 renderIRCase c = unlines $
   [ "IR CASE (" ++ show (icKind c) ++ maybe "" (\(sr, stripped) -> ", " ++ show sr ++ (if stripped then ", branch count stripped" else "")) (icShape c)
     ++ "): main :: " ++ showIRType (foldr (ITArrow . snd) (icResult c) (icParams c)) ]
+  ++ [ "  data " ++ show d | d <- icADTs c ]
+  ++ concat [ [ "  helper " ++ helperRef h ++ " (" ++ show (hShape h) ++ ") :: " ++ showIRType (helperType h)
+              , "    params " ++ unwords (map fst (hParams h))
+              , "    body " ++ show (hBody h) ]
+            | h <- icHelpers c ]
   ++ [ "  const " ++ n ++ " = " ++ show v | (n, v) <- icConsts c ]
   ++ [ "  params " ++ unwords (map fst (icParams c))
      , "  body " ++ show (icBody c) ]
@@ -188,34 +246,73 @@ renderIRCase c = unlines $
 -- ---------------------------------------------------------------------------
 -- The generator
 
--- | A drawn name is fresh: the counter makes every binder distinct, so no
--- case exercises shadowing (a property of the source language, not of the
--- IR the compiler emits).
-type G = StateT Int Gen
+-- | A drawn name is fresh: one counter runs over the whole case (helpers
+-- included), so every binder is distinct and no case exercises shadowing (a
+-- property of the source language, not of the IR the compiler emits). The
+-- state also carries the case's ADT declarations, which types and values are
+-- drawn over.
+data GS = GS { gsNext :: !Int, gsADTs :: [ADTDecl] }
+
+type G = StateT GS Gen
+
+runG :: [ADTDecl] -> G a -> Gen a
+runG ds m = evalStateT m (GS 0 ds)
 
 fresh :: String -> G String
 fresh pre = do
-  n <- get
-  put (n + 1)
-  return (pre ++ show n)
+  s <- get
+  put s { gsNext = gsNext s + 1 }
+  return (pre ++ show (gsNext s))
 
 liftG :: Gen a -> G a
 liftG = lift
 
--- | Types a case is drawn at. 'ITThetaTree' only appears where a theta
--- accessor consumes it (a theta tree is a Python tuple of lists and has no
--- token form to compare), and neither 'ITSymbol' (no text backend can render
--- a symbol constant) nor the M3 types (tensors, arrows, ADTs) appear at all.
-genType :: Int -> Gen IRType
-genType d
+adtsG :: G [ADTDecl]
+adtsG = gets gsADTs
+
+frequencyG :: [(Int, G a)] -> G a
+frequencyG xs = liftG (frequency [ (w, return m) | (w, m) <- xs ]) >>= id
+
+-- | What a drawn type may hold beyond scalars, lists, tuples, 'Either' and
+-- rank-1 tensors: function types, and the case's ADTs. Function types are not
+-- drawn where a backend's caller passes or reads the value (@main@'s
+-- parameters and result, the constants): no text backend renders a closure
+-- argument, nor serialises one.
+--
+-- 'ITThetaTree' only appears where a theta accessor consumes it (a theta tree
+-- is a Python tuple of lists and has no token form to compare), and
+-- 'ITSymbol' not at all (no text backend can render a symbol constant).
+-- Tensors are rank 1 only: neither text backend emits a higher rank
+-- ('noProduction').
+data TyOpts = TyOpts { tyArrows :: Bool, tyADTs :: [String] }
+
+genTypeWith :: TyOpts -> Int -> Gen IRType
+genTypeWith o d
   | d <= 0 = scalar
-  | otherwise = frequency
+  | otherwise = frequency $
       [ (6, scalar)
-      , (1, ITList <$> genType (d - 1))
-      , (1, ITTuple <$> genType (d - 1) <*> genType (d - 1))
-      , (1, ITEither <$> genType (d - 1) <*> genType (d - 1))
-      ]
-  where scalar = frequency [(3, return ITFloat), (2, return ITInt), (2, return ITBool), (1, return ITUnit)]
+      , (1, ITList <$> sub)
+      , (1, ITTuple <$> sub <*> sub)
+      , (1, ITEither <$> sub <*> sub)
+      , (1, (\k a -> ITTensor [EFixed k] a) <$> choose (0, 3) <*> sub)
+      ] ++ [ (1, ITArrow <$> sub <*> sub) | tyArrows o ]
+  where
+    sub = genTypeWith o (d - 1)
+    scalar = frequency $ [(3, return ITFloat), (2, return ITInt), (2, return ITBool), (1, return ITUnit)]
+                         ++ [ (2, elements (map ITADT (tyADTs o))) | not (null (tyADTs o)) ]
+
+-- | A type for a value a backend's caller passes or reads: no functions.
+genValueType :: [ADTDecl] -> Int -> Gen IRType
+genValueType ds = genTypeWith (TyOpts False (map dataName ds))
+
+-- | A type inside a body: functions too.
+genTy :: Int -> G IRType
+genTy d = genTySuchThat d (const True)
+
+genTySuchThat :: Int -> (IRType -> Bool) -> G IRType
+genTySuchThat d ok = do
+  ds <- adtsG
+  liftG (genTypeWith (TyOpts True (map dataName ds)) d `suchThat` ok)
 
 isNumeric :: IRType -> Bool
 isNumeric t = t == ITFloat || t == ITInt
@@ -233,10 +330,37 @@ isOrderedTy t = case t of
 isEquatable :: IRType -> Bool
 isEquatable t = case t of
   ITThetaTree -> False
+  ITArrow _ _ -> False
+  ITTensor _ _ -> False
   ITList a -> isEquatable a
   ITTuple a b -> isEquatable a && isEquatable b
   ITEither a b -> isEquatable a && isEquatable b
   _ -> True
+
+hasArrow :: IRType -> Bool
+hasArrow t = case t of
+  ITArrow _ _ -> True
+  ITList a -> hasArrow a
+  ITTuple a b -> hasArrow a || hasArrow b
+  ITEither a b -> hasArrow a || hasArrow b
+  ITTensor _ a -> hasArrow a
+  _ -> False
+
+isArrow :: IRType -> Bool
+isArrow (ITArrow _ _) = True
+isArrow _ = False
+
+-- | What 'IRConformsTo' is drawn at: the shapes of a query value, so no
+-- functions and no tensors.
+isConformable :: IRType -> Bool
+isConformable t = not (hasArrow t) && noTensor t
+  where
+    noTensor x = case x of
+      ITTensor _ _ -> False
+      ITList a -> noTensor a
+      ITTuple a b -> noTensor a && noTensor b
+      ITEither a b -> noTensor a && noTensor b
+      _ -> True
 
 -- | Every theta tree drawn has this shape: three parameters per node, two
 -- subtrees per node down to depth 'thetaDepth', leaves below. An accessor
@@ -265,8 +389,9 @@ genFloat = frequency
 genInt :: Gen Int
 genInt = frequency [(4, choose (-5, 5)), (1, elements [0, 1, -1, 1000, -1000])]
 
-genValue :: IRType -> Gen IRValue
-genValue t = case t of
+-- | A value of a function-free type, over the case's ADTs.
+genValue :: [ADTDecl] -> IRType -> Gen IRValue
+genValue ds t = case t of
   ITBool -> VBool <$> arbitrary
   ITInt -> VInt <$> genInt
   ITFloat -> VFloat <$> genFloat
@@ -274,23 +399,76 @@ genValue t = case t of
   ITThetaTree -> VThetaTree <$> genTheta thetaDepth
   ITList a -> do
     n <- frequency [(2, return 0), (3, choose (1, 3))]
-    xs <- vectorOf n (genValue a)
+    xs <- vectorOf n (genValue ds a)
     return (VList (foldr ListCont EmptyList xs))
-  ITTuple a b -> VTuple <$> genValue a <*> genValue b
-  ITEither a b -> oneof [VEither . Left <$> genValue a, VEither . Right <$> genValue b]
+  ITTuple a b -> VTuple <$> genValue ds a <*> genValue ds b
+  ITEither a b -> oneof [VEither . Left <$> genValue ds a, VEither . Right <$> genValue ds b]
+  ITTensor sh a -> VTensor sh <$> vectorOf (shapeNumel sh) (genValue ds a)
+  ITADT n | (cs@(_ : _)) <- adtCtors ds n -> do
+    (c, fts) <- elements cs
+    VADT c <$> mapM (genValue ds) fts
   _ -> error ("IRFuzz.genValue: no values drawn at " ++ show t)
+
+-- ---------------------------------------------------------------------------
+-- ADTs (M3)
+
+-- | The case's ADT: none in three cases of four, else one type @Qt@ of one to
+-- three constructors with zero to two scalar fields each. The names are
+-- fixed (none is reserved or mangled in either backend), the field names
+-- unique. Values of it are built by its implicit constructor functions, read
+-- by its field accessors (guarded by its constructor tests: an accessor
+-- applied to another constructor is a Haskell 'error' in the interpreter)
+-- and compared by equality; constants and arguments of it are drawn too.
+genADTs :: Gen [ADTDecl]
+genADTs = frequency [(3, return []), (1, (: []) <$> one)]
+  where
+    one = do
+      k <- choose (1, 3)
+      ctors <- mapM ctor (take k ["Qa", "Qb", "Qc"])
+      return (ADTDecl "Qt" ctors Nothing)
+    ctor c = do
+      nf <- choose (0, 2)
+      tys <- vectorOf nf (elements [TFloat, TInt, TBool])
+      return (c, [ (map toLower c ++ show i, rt) | (i, rt) <- zip [0 :: Int ..] tys ])
+
+-- | The constructors of an ADT, with their field types.
+adtCtors :: [ADTDecl] -> String -> [(String, [IRType])]
+adtCtors ds n = [ (c, map (fieldTy . snd) fs) | d <- ds, dataName d == n, (c, fs) <- constructors d ]
+
+-- | Every field: its ADT, constructor, accessor and type.
+adtFields :: [ADTDecl] -> [(String, String, String, IRType)]
+adtFields ds = [ (dataName d, c, f, fieldTy rt) | d <- ds, (c, fs) <- constructors d, (f, rt) <- fs ]
+
+fieldTy :: RType -> IRType
+fieldTy rt = fromMaybe (error ("IRFuzz.fieldTy: " ++ show rt)) (irTypeOfRType rt)
+
+-- ---------------------------------------------------------------------------
+-- Expressions
+
+applyAll :: IRExpr -> [IRExpr] -> IRExpr
+applyAll = foldl IRApply
+
+intE :: Int -> IRExpr
+intE = IRConst . VInt
+
+floatE :: Double -> IRExpr
+floatE = IRConst . VFloat
+
+consE :: IRExpr -> IRExpr -> IRExpr
+consE h t = IRConstruct TgCons [h, t]
 
 type Scope = [(String, IRType)]
 
 -- | An expression of type @t@ over the variables in scope, of roughly the
--- given size.
+-- given size. Function-typed variables in scope (helpers, parameters,
+-- let-bound closures) are called.
 genExpr :: Scope -> IRType -> Int -> G IRExpr
 genExpr sc t n
   | n <= 0 = leaf sc t
   | otherwise = do
-      join' (liftG (frequency [ (w, return p) | (w, p) <- general ++ specific ]))
+      ds <- adtsG
+      frequencyG (general ++ calls ++ anyBuiltins ++ adtAccessors ds ++ specific ds)
   where
-    join' m = m >>= id
     half = n `div` 2
     third = n `div` 3
     general =
@@ -298,8 +476,8 @@ genExpr sc t n
       , (3, IRIf <$> genExpr sc ITBool third <*> genExpr sc t third <*> genExpr sc t third)
       , (1, IRSelect <$> genExpr sc ITBool third <*> genExpr sc t third <*> genExpr sc t third)
       , (3, letIn)
-      , (1, do s <- liftG (genType 1); IRDestruct AcFst <$> genExpr sc (ITTuple t s) (n - 1))
-      , (1, do s <- liftG (genType 1); IRDestruct AcSnd <$> genExpr sc (ITTuple s t) (n - 1))
+      , (1, do s <- genTy 1; IRDestruct AcFst <$> genExpr sc (ITTuple t s) (n - 1))
+      , (1, do s <- genTy 1; IRDestruct AcSnd <$> genExpr sc (ITTuple s t) (n - 1))
       , (1, guardedHead)
       , (1, guardedFromEither True)
       , (1, guardedFromEither False)
@@ -307,11 +485,11 @@ genExpr sc t n
       ]
       ++ [ (1, IRIf <$> genExpr sc ITBool half <*> genExpr sc t half <*> return (IRError "drawn IRError")) | n > 4 ]
     letIn = do
-      s <- liftG (genType 1)
+      s <- genTy 1
       v <- fresh "l"
       IRLetIn v <$> genExpr sc s half <*> genExpr ((v, s) : sc) t half
     betaRedex = do
-      s <- liftG (genType 1)
+      s <- genTy 1
       v <- fresh "p"
       body <- genExpr ((v, s) : sc) t half
       IRApply (IRLambda v body) <$> genExpr sc s half
@@ -326,7 +504,7 @@ genExpr sc t n
           return (IRLetIn v xs (IRIf (IROp OpEq (IRVar v) (IRConst (VList EmptyList))) dflt (IRDestruct AcHead (IRVar v))))
         else return (IRDestruct AcHead xs)
     guardedFromEither isL = do
-      s <- liftG (genType 1)
+      s <- genTy 1
       let et = if isL then ITEither t s else ITEither s t
       e <- genExpr sc et half
       guarded <- liftG (frequency [(6, return True), (1, return False)])
@@ -337,9 +515,59 @@ genExpr sc t n
           dflt <- genExpr sc t half
           return (IRLetIn v e (IRIf (IRDestruct test (IRVar v)) (IRDestruct proj (IRVar v)) dflt))
         else return (IRDestruct proj e)
+    -- A call of a function in scope (a helper, a parameter, a let-bound
+    -- closure) whose result after some of its arguments is @t@. Fewer
+    -- arguments than it takes is a partial application, a closure.
+    calls = [ (4, do (f, as) <- liftG (elements cands)
+                     let k = max 1 (n `div` (length as + 1))
+                     applyAll (IRVar f) <$> mapM (\a -> genExpr sc a k) as)
+            | not (null cands) ]
+    cands = [ (v, as) | (v, ty) <- sc, as <- argPrefixes ty ]
+    argPrefixes ty = case ty of
+      ITArrow a b -> [ [a] | b == t ] ++ map (a :) (argPrefixes b)
+      _ -> []
+    -- Reads at any element type: a tensor at a key in range (a constant, or
+    -- a drawn Int guarded by the tensor's static extent), a list at a
+    -- constant index inside a cons prefix of known length. An index out of
+    -- range is a value precondition, as 'OpIntDiv''s divisor is: the
+    -- interpreter refuses it, Python reads from the end at a negative key.
+    anyBuiltins = [ (1, tensorIndex), (1, listIndex) ]
+    tensorIndex = do
+      k <- liftG (choose (1, 3))
+      te <- genExpr sc (ITTensor [EFixed k] t) half
+      guarded <- liftG arbitrary
+      if guarded
+        then do
+          v <- fresh "ix"
+          key <- genExpr sc ITInt half
+          dflt <- genExpr sc t half
+          let x = IRVar v
+          return (IRLetIn v key (IRIf (ltE x (intE 0)) dflt (IRIf (ltE x (intE k)) (IRBuiltin (BIndex 0) [te, x]) dflt)))
+        else do
+          i <- liftG (choose (0, k - 1))
+          return (IRBuiltin (BIndex 0) [te, intE i])
+    listIndex = do
+      m <- liftG (choose (1, 2))
+      pre <- replicateM m (genExpr sc t third)
+      rest <- genExpr sc (ITList t) third
+      i <- liftG (choose (0, m - 1))
+      return (IRBuiltin BListIndex [foldr consE rest pre, intE i])
+    -- A field of type @t@, read under its constructor's test.
+    adtAccessors ds =
+      [ (2, do (tyName, c, f, _) <- liftG (elements fs)
+               e <- genExpr sc (ITADT tyName) half
+               v <- fresh "d"
+               dflt <- genExpr sc t half
+               return (IRLetIn v e (IRIf (IRApply (IRVar ("is" ++ c)) (IRVar v)) (IRApply (IRVar f) (IRVar v)) dflt)))
+      | let fs = [ x | x@(_, _, _, ft) <- adtFields ds, ft == t ], not (null fs) ]
+    -- A function from @s@ to @a@: mostly a lambda (a closure over the
+    -- scope), else any expression of the function type.
+    funcOf s a = frequencyG
+      [ (3, do v <- fresh "m"; IRLambda v <$> genExpr ((v, s) : sc) a half)
+      , (1, genExpr sc (ITArrow s a) half) ]
     bin op ty = IROp op <$> genExpr sc ty half <*> genExpr sc ty half
     un op ty = IRUnaryOp op <$> genExpr sc ty (n - 1)
-    specific = case t of
+    specific ds = case t of
       ITFloat ->
         [ (2, bin OpPlus ITFloat), (2, bin OpMult ITFloat), (2, bin OpSub ITFloat)
         , (1, bin OpMax ITFloat), (2, bin OpDiv ITFloat)
@@ -350,44 +578,86 @@ genExpr sc t n
                  cum <- liftG arbitrary
                  (if cum then IRCumulative d ls else IRDensity d ls) <$> genExpr sc ITFloat (n - 1))
         , (2, do i <- liftG (choose (0, 2)); IRDestruct (AcTheta i) <$> genExpr sc ITThetaTree (n - 1))
+        , (1, do op <- liftG (elements [ROpAdd, ROpLogSumExp, ROpMax])
+                 k <- liftG (choose (0, 3))
+                 IRBuiltin (BReduce op 0) . (: []) <$> genExpr sc (ITTensor [EFixed k] ITFloat) (n - 1))
+        , (1, IRApply (IRVar "listProd") <$> genExpr sc (ITList ITFloat) (n - 1))
         ]
       ITInt ->
         [ (2, bin OpPlus ITInt), (2, bin OpMult ITInt), (2, bin OpSub ITInt), (1, bin OpMax ITInt)
         , (1, un OpNeg ITInt), (1, un OpSign ITInt), (1, un OpAbs ITInt)
         , (2, exactDivision)
+        , (1, categorical)
+        , (1, do s <- genTySuchThat 1 isEquatable
+                 x <- genExpr sc s half
+                 xs <- genExpr sc (ITList s) half
+                 return (applyAll (IRVar "indexOf") [x, xs]))
         ]
       ITBool ->
-        [ (2, do s <- liftG (suchThat (genType 1) isOrderedTy)
+        [ (2, do s <- genTySuchThat 1 isOrderedTy
                  op <- liftG (elements [OpLessThan, OpGreaterThan])
                  bin op s)
-        , (3, do s <- liftG (suchThat (genType 2) isEquatable); bin OpEq s)
+        , (3, do s <- genTySuchThat 2 isEquatable; bin OpEq s)
         , (1, bin OpApprox ITFloat)
         , (2, bin OpAnd ITBool), (2, bin OpOr ITBool), (2, un OpNot ITBool)
-        , (1, do s <- liftG (genType 1)
-                 e <- frequency' [(3, genExpr sc s (n - 1)), (1, return (IRConst VAny))]
+        , (1, do s <- genTy 1
+                 e <- frequencyG [(3, genExpr sc s (n - 1)), (1, return (IRConst VAny))]
                  return (IRUnaryOp OpIsAny e))
-        , (1, do a <- liftG (genType 1); b <- liftG (genType 1)
+        , (1, do a <- genTy 1; b <- genTy 1
                  acc <- liftG (elements [AcIsLeft, AcIsRight])
                  IRDestruct acc <$> genExpr sc (ITEither a b) (n - 1))
-        , (1, do s <- liftG (genType 1)
-                 rt <- liftG (frequency [(3, return (rTypeOf s)), (1, rTypeOf <$> genType 1)])
+        , (1, do s <- genTySuchThat 1 isConformable
+                 rt <- frequencyG [(3, return (rTypeOf s)), (1, rTypeOf <$> genTySuchThat 1 isConformable)]
                  IRConformsTo rt <$> genExpr sc s (n - 1))
-        , (1, do s <- liftG (suchThat (genType 1) (\ty -> isJust' (domainShape ty)))
+        , (1, do s <- genTySuchThat 1 (isJust . domainShape)
                  dom <- liftG (genDomain s)
                  IRIsPossible dom <$> genExpr sc s (n - 1))
-        ]
+        ] ++
+        [ (1, do (c, _) <- liftG (elements (adtCtors ds (dataName d)))
+                 IRApply (IRVar ("is" ++ c)) <$> genExpr sc (ITADT (dataName d)) (n - 1))
+        | d <- ds ]
       ITList a ->
         [ (3, IRConstruct TgCons <$> sequence [genExpr sc a half, genExpr sc t half])
         , (1, guardedTail a)
-        ]
+        , (2, do s <- genTy 1
+                 f <- funcOf s a
+                 IRBuiltin BMapList . (\xs -> [f, xs]) <$> genExpr sc (ITList s) half)
+        ] ++
+        -- The standard library compares its list to @[]@, so its element
+        -- type must have equality.
+        [ (1, applyAll (IRVar "listConcat") <$> sequence [genExpr sc t half, genExpr sc t half]) | isEquatable a ]
       ITTuple a b -> [ (4, IRConstruct TgTuple <$> sequence [genExpr sc a half, genExpr sc b half]) ]
       ITEither a b ->
         [ (2, IRConstruct TgLeft . (: []) <$> genExpr sc a (n - 1))
         , (2, IRConstruct TgRight . (: []) <$> genExpr sc b (n - 1)) ]
       ITThetaTree ->
         [ (1, do i <- liftG (choose (0, 1)); IRDestruct (AcSubtree i) <$> genExpr sc ITThetaTree (n - 1)) ]
+      ITTensor sh a ->
+        [ (3, IRBuiltin (BTensor sh) <$> replicateM (shapeNumel sh) (genExpr sc a (n `div` (shapeNumel sh + 1))))
+        , (3, do s <- genTy 1
+                 f <- funcOf s a
+                 IRBuiltin BMap . (\te -> [f, te]) <$> genExpr sc (ITTensor sh s) half)
+        ] ++
+        [ (3, do (op, operandTy) <- liftG (elements zs)
+                 s <- operandTy
+                 IRBuiltin (BZip op) <$> sequence [genExpr sc (ITTensor sh s) half, genExpr sc (ITTensor sh s) half])
+        | let zs = zipOps a, not (null zs) ]
+      ITArrow a b ->
+        [ (4, do v <- fresh "f"; IRLambda v <$> genExpr ((v, a) : sc) b (n - 1)) ]
+      ITADT name ->
+        [ (4, do (c, fts) <- liftG (elements (adtCtors ds name))
+                 applyAll (IRVar c) <$> mapM (\ft -> genExpr sc ft (n `div` (length fts + 1))) fts) ]
       _ -> []
-    frequency' xs = join' (liftG (frequency [ (w, return m) | (w, m) <- xs ]))
+    -- The operators 'BZip' is drawn with at element type @a@, each with its
+    -- operands' element type. Not 'OpIntDiv'/'OpMod': their value
+    -- precondition (an exact, nonzero divisor) is not drawable elementwise.
+    zipOps a = case a of
+      ITFloat -> [ (op, return ITFloat) | op <- [OpPlus, OpMult, OpSub, OpDiv, OpMax] ]
+      ITInt -> [ (op, return ITInt) | op <- [OpPlus, OpMult, OpSub, OpMax] ]
+      ITBool -> [ (OpAnd, return ITBool), (OpOr, return ITBool), (OpApprox, return ITFloat)
+                , (OpLessThan, genTySuchThat 1 isOrderedTy), (OpGreaterThan, genTySuchThat 1 isOrderedTy)
+                , (OpEq, genTySuchThat 1 isEquatable) ]
+      _ -> []
     guardedTail a = do
       xs <- genExpr sc t half
       if isEquatable a
@@ -408,13 +678,54 @@ genExpr sc t n
       let x = IRVar v
           kc = IRConst (VInt k)
       return (IRLetIn v a (IRIf (IROp OpEq (IROp OpMod x kc) (IRConst (VInt 0))) (IROp OpIntDiv x kc) dflt))
-    isJust' = maybe False (const True)
+    -- An inverse-CDF index within its contract: a uniform in [0, 1) (a
+    -- constant, or a drawn float clamped into it, NaN to 0.5) and finite
+    -- non-negative weights (constants, or drawn floats clamped into [0, 1e6],
+    -- NaN to 0), read as a tensor or out of a cons list whose prefix holds
+    -- them.
+    categorical = do
+      m <- liftG (choose (1, 4))
+      start <- liftG (choose (0, m - 1))
+      cnt <- liftG (choose (1, m - start))
+      ws <- replicateM m weight
+      asTensor <- liftG arbitrary
+      w <- if asTensor then return (IRBuiltin (BTensor [EFixed m]) ws)
+           else (\rest -> foldr consE rest ws) <$> genExpr sc (ITList ITFloat) third
+      u <- frequencyG
+        [ (2, floatE <$> liftG (frequency [(3, choose (0, 0.999)), (1, elements [0, 0.5, 0.999999])]))
+        , (1, do v <- fresh "u"
+                 e <- genExpr sc ITFloat third
+                 let x = IRVar v
+                 return (IRLetIn v e (IRIf (ltE x (floatE 0)) (floatE 0) (IRIf (ltE x (floatE 1)) x (floatE 0.5))))) ]
+      return (IRBuiltin (BCategoricalIndex start cnt) [u, w])
+    weight = frequencyG
+      [ (3, floatE <$> liftG (choose (0, 3)))
+      , (1, return (floatE 0))
+      , (2, do v <- fresh "w"
+               e <- genExpr sc ITFloat third
+               let x = IRVar v
+               return (IRLetIn v e (IRIf (gtE x (floatE 0)) (IRIf (ltE x (floatE 1e6)) x (floatE 1e6)) (floatE 0)))) ]
 
--- | A leaf: a variable of the type in scope, or a constant.
+-- | A leaf: a variable of the type in scope, or a constant (a closure for a
+-- function type, a structure of leaves for a type holding one).
 leaf :: Scope -> IRType -> G IRExpr
 leaf sc t = case [ v | (v, t') <- sc, t' == t ] of
-  [] -> IRConst <$> liftG (genValue t)
-  vs -> liftG (frequency [(3, IRVar <$> elements vs), (1, IRConst <$> genValue t)])
+  [] -> build
+  vs -> frequencyG [(3, IRVar <$> liftG (elements vs)), (1, build)]
+  where
+    build = case t of
+      ITArrow a b -> do
+        v <- fresh "f"
+        IRLambda v <$> leaf ((v, a) : sc) b
+      ITTuple a b | hasArrow t -> (\x y -> IRConstruct TgTuple [x, y]) <$> leaf sc a <*> leaf sc b
+      ITEither a b | hasArrow t -> do
+        l <- liftG arbitrary
+        if l then IRConstruct TgLeft . (: []) <$> leaf sc a else IRConstruct TgRight . (: []) <$> leaf sc b
+      ITList _ | hasArrow t -> return (IRConst (VList EmptyList))
+      ITTensor sh a | hasArrow t -> IRBuiltin (BTensor sh) <$> replicateM (shapeNumel sh) (leaf sc a)
+      _ -> do
+        ds <- adtsG
+        IRConst <$> liftG (genValue ds t)
 
 rTypeOf :: IRType -> RType
 rTypeOf t = case t of
@@ -427,6 +738,7 @@ rTypeOf t = case t of
   ITList a -> ListOf (rTypeOf a)
   ITTuple a b -> Tuple (rTypeOf a) (rTypeOf b)
   ITEither a b -> TEither (rTypeOf a) (rTypeOf b)
+  ITADT n -> TADT n
   _ -> NotSetYet
 
 -- | The types 'IRIsPossible' is drawn at: those a 'MultiValue' describes
@@ -450,11 +762,108 @@ genDomain t = case t of
   _ -> error ("IRFuzz.genDomain: no domain at " ++ show t)
   where sublistOf' xs = sublistOf xs `suchThat` (not . null)
 
+-- ---------------------------------------------------------------------------
+-- Function groups (M3)
+--
+-- A case draws zero to three helper groups before its body, each a normal
+-- function @<name>_normal@ that the body and every later helper may call
+-- (cross-function calls; the calls production of 'genExpr'). A helper's
+-- parameters and result may be function types, so closures are passed (a
+-- lambda over the caller's scope, a helper reference, a partial application)
+-- and returned. A nullary helper is referenced as a value. Recursion comes in
+-- three shapes, each on a measure that strictly decreases: an Int countdown
+-- (bounded by 'recursionCap' at both ends, so a drawn argument cannot make
+-- it deep), a list's tail, and a mutually recursive pair on an Int. A
+-- recursive helper is not in its own body's scope: its only self-call is the
+-- one on the decreased measure.
+
+recursionCap :: Int
+recursionCap = 6
+
+helperScope :: [Helper] -> Scope
+helperScope hs = [ (helperRef h, helperType h) | h <- hs ]
+
+genHelpers :: G [Helper]
+genHelpers = do
+  k <- liftG (frequency [(4, return 0), (3, return 1), (2, return 2), (1, return 3)])
+  go k []
+  where
+    go :: Int -> [Helper] -> G [Helper]
+    go 0 acc = return acc
+    go i acc = do
+      shape <- liftG (frequency [(5, return HPlain), (2, return HCountdown), (2, return HListRec), (1, return HMutual)])
+      new <- genHelper shape (helperScope acc)
+      go (i - 1) (acc ++ new)
+
+genHelper :: HelperShape -> Scope -> G [Helper]
+genHelper shape sc = case shape of
+  HPlain -> do
+    name <- fresh "hf"
+    np <- liftG (choose (0, 2))
+    ps <- replicateM np ((,) <$> fresh "hp" <*> genTy 2)
+    rt <- genTy 2
+    size <- liftG (choose (1, 8))
+    body <- genExpr (ps ++ sc) rt size
+    return [Helper name ps rt body HPlain]
+  HCountdown -> do
+    name <- fresh "hf"
+    s <- genTy 1
+    t <- genTy 1
+    nv <- fresh "hn"
+    xv <- fresh "hx"
+    rv <- fresh "hr"
+    body <- countdownBody sc (IRVar (name ++ "_normal")) nv xv rv s t
+    return [Helper name [(nv, ITInt), (xv, s)] t body HCountdown]
+  HListRec -> do
+    name <- fresh "hf"
+    a <- genTySuchThat 1 isEquatable
+    t <- genTy 1
+    xs <- fresh "hl"
+    hd <- fresh "hh"
+    rv <- fresh "hr"
+    let xsV = IRVar xs
+    base <- genExpr sc t 3
+    step <- genExpr ((hd, a) : (rv, t) : (xs, ITList a) : sc) t 4
+    let body = IRIf (IROp OpEq xsV (IRConst (VList EmptyList))) base
+                 (IRLetIn hd (IRDestruct AcHead xsV)
+                   (IRLetIn rv (IRApply (IRVar (name ++ "_normal")) (IRDestruct AcTail xsV)) step))
+    return [Helper name [(xs, ITList a)] t body HListRec]
+  HMutual -> do
+    f <- fresh "hf"
+    g <- fresh "hf"
+    s <- genTy 1
+    t <- genTy 1
+    n1 <- fresh "hn"
+    x1 <- fresh "hx"
+    r1 <- fresh "hr"
+    n2 <- fresh "hn"
+    x2 <- fresh "hx"
+    r2 <- fresh "hr"
+    bf <- countdownBody sc (IRVar (g ++ "_normal")) n1 x1 r1 s t
+    bg <- countdownBody sc (IRVar (f ++ "_normal")) n2 x2 r2 s t
+    return [ Helper f [(n1, ITInt), (x1, s)] t bf HMutual
+           , Helper g [(n2, ITInt), (x2, s)] t bg HMutual ]
+
+-- | @if n < 1 then base else if n > recursionCap then base' else let r =
+-- callee (n - 1) x' in step@.
+countdownBody :: Scope -> IRExpr -> String -> String -> String -> IRType -> IRType -> G IRExpr
+countdownBody sc callee nv xv rv s t = do
+  let n = IRVar nv
+      inner = (xv, s) : (nv, ITInt) : sc
+  base <- genExpr inner t 3
+  base' <- genExpr inner t 2
+  x' <- genExpr inner s 2
+  step <- genExpr ((rv, t) : inner) t 4
+  return (IRIf (ltE n (intE 1)) base
+            (IRIf (gtE n (intE recursionCap)) base'
+              (IRLetIn rv (applyAll callee [IROp OpSub n (intE 1), x']) step)))
+
 -- | The size bodies are drawn at.
 caseSize :: Int
 caseSize = 14
 
--- | A case: a value body (M1) or a 'PResult' body (M2), in equal parts.
+-- | A case: a value body (M1) or a 'PResult' body (M2), in equal parts. Both
+-- draw the case's ADTs and helpers (M3) first.
 genIRCase :: Gen IRCase
 genIRCase = oneof [genValueCase, genPResultCase]
 
@@ -462,20 +871,24 @@ genIRCase = oneof [genValueCase, genPResultCase]
 -- constants, a body and four argument vectors.
 genValueCase :: Gen IRCase
 genValueCase = do
+  ds <- genADTs
   kind <- frequency [(3, return NormalBody), (1, return WriteLogitsBody)]
   np <- choose (0, 3)
-  ptys <- vectorOf np (genType 2)
+  ptys <- vectorOf np (genValueType ds 2)
   nc <- frequency [(3, return 0), (1, choose (1, 2))]
-  ctys <- vectorOf nc (genType 1)
-  cvals <- mapM genValue ctys
-  rt <- genType 2
+  ctys <- vectorOf nc (genValueType ds 1)
+  cvals <- mapM (genValue ds) ctys
+  rt <- genValueType ds 2
   size <- choose (2, caseSize)
   let params = zip [ "a" ++ show i | i <- [0 :: Int ..] ] ptys
       consts = zip [ "k" ++ show i | i <- [0 :: Int ..] ] cvals
       sc = params ++ zip (map fst consts) ctys
-  body <- evalStateT (genExpr sc rt size) 0
-  args <- replicateM 4 (mapM genValue ptys)
-  return (IRCase kind Nothing params rt consts body args)
+  (helpers, body) <- runG ds $ do
+    hs <- genHelpers
+    b <- genExpr (sc ++ helperScope hs) rt size
+    return (hs, b)
+  args <- replicateM 4 (mapM (genValue ds) ptys)
+  return (IRCase kind Nothing params rt consts body args helpers ds)
 
 -- ---------------------------------------------------------------------------
 -- PResult bodies (M2)
@@ -640,7 +1053,7 @@ genPlan c sc n
       , (1, PAnySafeShared <$> anySample <*> sub)
       , (3, PMix <$> half <*> half)
       , (2, PIf <$> bool <*> half <*> half)
-      , (1, do s <- liftG (genType 1)
+      , (1, do s <- genTy 1
                v <- fresh "pl"
                e <- genExpr sc s operandSize
                PLet v e <$> genPlan c ((v, s) : sc) (n - 1))
@@ -661,11 +1074,11 @@ genPlan c sc n
     join' m = m >>= id
     -- The sample an ANY guard tests: mostly a marginal hole, else a value.
     anySample = frequency' [ (2, return (IRConst VAny))
-                           , (2, do s <- liftG (genType 1); genExpr sc s 1) ]
+                           , (2, do s <- genTy 1; genExpr sc s 1) ]
     -- An enumerated sum's body sees the enumerated variable, over a small
     -- finite domain (no Float slot: a continuous domain has no values).
     enumerated k = do
-      s <- liftG (suchThat (genType 1) (\ty -> isJust (domainShape ty) && finiteTy ty))
+      s <- genTySuchThat 1 (\ty -> isJust (domainShape ty) && finiteTy ty)
       dom <- liftG (genDomain s)
       v <- fresh "ev"
       body <- genPlan c ((v, s) : sc) (n `div` 2)
@@ -706,24 +1119,29 @@ genPResultCase = do
   c <- frequency [(4, return SRLinear), (4, return SRLog), (1, return SRMaxLinear), (1, return SRMaxLog)]
   stripped <- arbitrary
   np <- choose (0, 2)
-  ptys <- (ITFloat :) <$> vectorOf np (genType 1)
+  ds <- genADTs
+  ptys <- (ITFloat :) <$> vectorOf np (genValueType ds 1)
   nc <- frequency [(3, return 0), (1, choose (1, 2))]
-  ctys <- vectorOf nc (genType 1)
-  cvals <- mapM genValue ctys
+  ctys <- vectorOf nc (genValueType ds 1)
+  cvals <- mapM (genValue ds) ctys
   size <- choose (1, 7)
   let params = zip [ "a" ++ show i | i <- [0 :: Int ..] ] ptys
       consts = zip [ "k" ++ show i | i <- [0 :: Int ..] ] cvals
       sc = params ++ zip (map fst consts) ctys
-  plan <- evalStateT (genPlan c sc size) 0
-  args <- replicateM 4 (mapM genValue ptys)
-  let unstripped = IRCase kind (Just (c, stripped)) params (presultType False) consts (buildPlan c plan) args
+  (helpers, plan) <- runG ds $ do
+    hs <- genHelpers
+    pl <- genPlan c (sc ++ helperScope hs) size
+    return (hs, pl)
+  args <- replicateM 4 (mapM (genValue ds) ptys)
+  let unstripped = IRCase kind (Just (c, stripped)) params (presultType False) consts (buildPlan c plan) args helpers ds
   return $ if stripped then stripCase unstripped else unstripped
 
 -- | The case with its body's branch count stripped, by the compiler's own
 -- pass.
 stripCase :: IRCase -> IRCase
 stripCase c = case stripBranchCount (irCaseEnv c) of
-  IREnv [g] _ _ | Just (f, _) <- (if icKind c == ProbBody then probFun g else integFun g) ->
+  IREnv gs _ _ | [g] <- [ g' | g' <- gs, groupName g' == "main" ]
+               , Just (f, _) <- (if icKind c == ProbBody then probFun g else integFun g) ->
     c { icBody = dropLambdas (length (icParams c)) f, icResult = presultType True }
   _ -> error "IRFuzz.stripCase: stripBranchCount changed the group's shape"
   where
@@ -744,7 +1162,13 @@ stripCase c = case stripBranchCount (irCaseEnv c) of
 shrinkIRCase :: IRCase -> [IRCase]
 shrinkIRCase c =
   [ c { icArgs = [a] } | length (icArgs c) > 1, a <- icArgs c ]
+  ++ [ c' | i <- [0 .. length (icHelpers c) - 1]
+          , let c' = c { icHelpers = [ h | (j, h) <- zip [0 :: Int ..] (icHelpers c), j /= i ] }
+          , either (const False) (const True) (irCaseWellTyped c') ]
   ++ [ c' | b <- shrinkExpr (icBody c), let c' = c { icBody = b }, either (const False) (const True) (irCaseWellTyped c') ]
+  ++ [ c' | (i, h) <- zip [0 :: Int ..] (icHelpers c), b <- shrinkExpr (hBody h)
+          , let c' = c { icHelpers = [ if j == i then h { hBody = b } else h' | (j, h') <- zip [0 ..] (icHelpers c) ] }
+          , either (const False) (const True) (irCaseWellTyped c') ]
 
 shrinkExpr :: IRExpr -> [IRExpr]
 shrinkExpr e = children e ++ simpler e ++
@@ -825,7 +1249,7 @@ knownRefusal r = case [ t | (r', t, _) <- knownRefusals, r' == r ] of
 
 -- | A one-query case, for a pin.
 repro :: [(String, IRType)] -> IRType -> IRExpr -> [IRValue] -> IRCase
-repro params rt body args = IRCase NormalBody Nothing params rt [] body [args]
+repro params rt body args = IRCase NormalBody Nothing params rt [] body [args] [] []
 
 -- ---------------------------------------------------------------------------
 -- Comparing a backend's answer
@@ -864,10 +1288,18 @@ valueAgrees v0 toks0 = case go v0 toks0 of
       (VEither (Right b), "r" : rest) -> go b rest
       (VList EmptyList, "n" : rest) -> Right (False, rest)
       (VList (ListCont x xs), "c" : rest) -> both x (VList xs) rest
+      -- A rank-1 tensor is a Python list or a Julia Vector.
+      (VTensor _ xs, ('v' : k) : rest) | readMaybe k == Just (length xs) -> many xs rest
+      (VADT ctor fs, ('a' : name) : k : rest) | name == ctor, readMaybe k == Just (length fs) -> many fs rest
       _ -> Left (show v ++ " against " ++ unwords (take 6 toks))
     both a b toks = do
       (l1, r1) <- go a toks
       (l2, r2) <- go b r1
+      return (l1 || l2, r2)
+    many [] toks = Right (False, toks)
+    many (x : xs) toks = do
+      (l1, r1) <- go x toks
+      (l2, r2) <- many xs r1
       return (l1 || l2, r2)
 
 data IRDisagreement = IRDisagreement
@@ -938,7 +1370,7 @@ knownDisagreements =
       (ByAnswer (\_ o a -> isValue o && raisedWith "ZeroDivisionError" a))
       (repro [("a0", ITFloat)] ITFloat (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a0")) [VFloat 0])
   , KnownFamily "python-normal-density-overflows-past-1e154" ["python"]
-      (ByAnswer (\c o a -> isValue o && raisedWith "OverflowError" a && hasNormalDensity (icBody c)))
+      (ByAnswer (\c o a -> isValue o && raisedWith "OverflowError" a && any hasNormalDensity (caseBodies c)))
       (repro [("a0", ITFloat)] ITFloat (IRDensity IRNormal Linear (IRVar "a0")) [VFloat 1e300])
   , KnownFamily "python-uniform-density-and-cdf-answer-ints" ["python"]
       (AsIf (const (irMap pythonUniform)))
@@ -950,7 +1382,7 @@ knownDisagreements =
   -- density or CDF.
   , KnownFamily "python-uniform-density-and-cdf-answer-ints" ["python"]
       (ByAnswer (\c o a -> isValue o && isSampled a
-                           && not (null [ () | x <- universe (icBody c), linearUniform x ])))
+                           && not (null [ () | x <- caseUniverse c, linearUniform x ])))
       (repro [("a0", ITFloat)] ITBool (IRConformsTo TFloat (IRCumulative IRUniform Linear (IRVar "a0"))) [VFloat 2])
   , KnownFamily "python-empty-list-head-and-tail-answer-none" ["python"]
       (ByAnswer (\_ o a -> case (o, a) of
@@ -958,14 +1390,17 @@ knownDisagreements =
                   _ -> False))
       (repro [] ITBool (IRUnaryOp OpIsAny (IRDestruct AcHead (IRConst (VList (EmptyList :: GenericList IRValue))))) [])
   , KnownFamily "python-ispossible-on-a-tuple-domain-answers-none" ["python"]
-      (ByAnswer (\c _ _ -> any tupleDomain [ d | IRIsPossible d _ <- universe (icBody c) ]))
+      (ByAnswer (\c _ _ -> any tupleDomain [ d | IRIsPossible d _ <- caseUniverse c ]))
       (repro [] ITBool (IRIsPossible (MultiTuple MultiContinuous MultiContinuous) (IRConst (VTuple (VFloat 1) (VFloat 2)))) [])
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (AsIf (const (irMap conformsUnitUnchecked)))
       (repro [] ITBool (IRConformsTo TUnit (IRConst (VBool True))) [])
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
+      (AsIf (const (irMap conformsUnitUnchecked)))
+      ((repro [] ITBool (IRConformsTo (TADT "Qt") (IRConst (VBool True))) []) { icADTs = [ADTDecl "Qt" [("Qa", [])] Nothing] })
+  , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (ByAnswer (\c _ a -> raisedWith "module did not load" a
-                           && not (null [ () | IRConformsTo _ x <- universe (icBody c), not (isVar x) ])))
+                           && not (null [ () | IRConformsTo _ x <- caseUniverse c, not (isVar x) ])))
       -- Python cannot parse the walrus a let lowers to inside the
       -- comprehension a list check iterates; Julia cannot parse a field
       -- access on a negative literal (@-1.0.t1@).
@@ -974,6 +1409,34 @@ knownDisagreements =
             [ IRConformsTo (ListOf TFloat) (IRLetIn "l0" (IRConst (VInt 1)) (IRConst (VList (ListCont (VFloat 1) EmptyList))))
             , IRConformsTo (Tuple TFloat TFloat) (IRConst (VFloat (-1))) ])
          [])
+  -- M3 (builtins, tensors and function groups).
+  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
+      (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
+      (repro [] ITFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList))) [])
+  -- After the ConformsTo entry above, whose repro fails to parse the same way.
+  , KnownFamily "python-let-in-a-comprehension-iterable-fails-to-parse" ["python"]
+      (ByAnswer (\_ _ a -> raisedWith "assignment expression cannot be used in a comprehension iterable expression" a))
+      (repro [] (ITTensor [EFixed 1] ITFloat)
+         (IRBuiltin BMap [IRLambda "m" (IRVar "m"), IRLetIn "l" (IRConst (VFloat 1)) (IRBuiltin (BTensor [EFixed 1]) [IRVar "l"])]) [])
+  , KnownFamily "bzip-max-and-approx-have-no-text-lowering" ["python", "julia"]
+      (ByAnswer (\_ _ a -> raisedWith "codegen threw" a && (raisedWith "OpMax" a || raisedWith "OpApprox" a)))
+      (repro [] (ITTensor [EFixed 1] ITFloat)
+         (IRBuiltin (BZip OpMax) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat 1)], IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat 2)]]) [])
+  , KnownFamily "interpreter-bmap-evaluates-its-function-operand-per-element" ["python", "julia"]
+      (AsIf (const (irMap functionOperandFirst)))
+      (repro [] (ITTensor [EFixed 0] ITFloat)
+         (IRBuiltin BMap [IRError "the function operand raises", IRBuiltin (BTensor [EFixed 0]) []]) [])
+  -- Both text backends render nested lambdas as one lambda of several
+  -- parameters and an application chain as one call, so only an application
+  -- saturating its function's syntactic lambdas exactly works: a partial
+  -- application, or a call through a closure a function returns, raises.
+  , KnownFamily "text-backends-uncurry-lambdas-and-application-chains" ["python", "julia"]
+      (ByAnswer (\_ o a -> isValue o && (  (raisedWith "TypeError" a && raisedWith "positional argument" a)
+                                        || (raisedWith "MethodError: no method matching" a
+                                            && (raisedWith "var\"#" a || raisedWith "_normal(" a)))))
+      (repro [] ITFloat
+         (IRLetIn "g" (IRApply (IRLambda "x" (IRLambda "y" (IROp OpPlus (IRVar "x") (IRVar "y")))) (IRConst (VFloat 1)))
+            (IRApply (IRVar "g") (IRConst (VFloat 2)))) [])
   ]
   where
     isValue (Interpreted _) = True
@@ -997,6 +1460,10 @@ knownDisagreements =
 -- | Every subexpression, the expression itself included.
 universe :: IRExpr -> [IRExpr]
 universe e = e : concatMap universe (getIRSubExprs e)
+
+-- | Every subexpression of every body of the case.
+caseUniverse :: IRCase -> [IRExpr]
+caseUniverse = concatMap universe . caseBodies
 
 -- | @a && b@ and @a || b@ as the backends evaluate them: the right operand
 -- only when the left does not decide.
@@ -1048,12 +1515,27 @@ backendMaxReduce backend = go M.empty
       IRLambda v b -> IRLambda v (go (M.delete v env) b)
       IRBuiltin (BReduce ROpMax 0) [t] ->
         let t' = go env t
-        in maybe (IRBuiltin (BReduce ROpMax 0) [t']) (fold t') (staticLength env t')
+        in maybe (unknownLength t') (fold t') (staticLength env t')
       _ -> irDescend (go env) e
     bind v = maybe (M.delete v) (M.insert v)
+    -- Where the length is not static, the NaN orders are told apart at run
+    -- time instead of by a fold (signed zeros are not): Julia's NaN wins
+    -- anywhere; Python's raises on an empty tensor, wins only in front, and
+    -- is skipped elsewhere.
+    unknownLength t =
+      IRLetIn "rmx_t" t $
+        if backend == "python"
+          then IRIf (IROp OpEq (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin BMap [IRLambda "rmx_e" (IRConst (VFloat 1)), IRVar "rmx_t"]]) (IRConst (VFloat 0)))
+                    (IRError "max() arg is an empty sequence")
+                    (IRIf (isNaNE (IRBuiltin (BIndex 0) [IRVar "rmx_t", IRConst (VInt 0)]))
+                          (IRConst (VFloat (0 / 0)))
+                          (IRBuiltin (BReduce ROpMax 0) [IRBuiltin BMap [IRLambda "rmx_e" (IRIf (isNaNE (IRVar "rmx_e")) (IRConst (VFloat (-1 / 0))) (IRVar "rmx_e")), IRVar "rmx_t"]]))
+          else IRIf (countWhere isNaNE (IRVar "rmx_t")) (IRConst (VFloat (0 / 0))) (IRBuiltin (BReduce ROpMax 0) [IRVar "rmx_t"])
     staticLength env x = case x of
       IRBuiltin (BTensor [EFixed n]) _ -> Just n
+      IRConst (VTensor [EFixed n] _) -> Just n
       IRBuiltin BMap [_, t] -> staticLength env t
+      IRBuiltin (BZip _) [t, _] -> staticLength env t
       IRVar v -> M.lookup v env
       IRLetIn v a b -> staticLength (bind v (staticLength env a) env) b
       _ -> Nothing
@@ -1104,8 +1586,21 @@ pythonUniform e = case e of
   _ -> e
   where x = IRVar "un_a"
 
--- | 'IRConformsTo' as both text backends lower it: a unit or theta-tree
--- slot is not checked (any value conforms), where the interpreter checks it.
+-- | 'BMap' and 'BMapList' as both text backends evaluate them: the function
+-- operand once, before the collection. The interpreter evaluates it per
+-- element, after the collection (so not at all over an empty one).
+functionOperandFirst :: IRExpr -> IRExpr
+functionOperandFirst e = case e of
+  IRBuiltin b [f, xs] | b == BMap || b == BMapList, not (isLambda' f) ->
+    IRLetIn "bm_f" f (IRBuiltin b [IRVar "bm_f", xs])
+  _ -> e
+  where
+    isLambda' (IRLambda _ _) = True
+    isLambda' _ = False
+
+-- | 'IRConformsTo' as both text backends lower it: a unit, theta-tree or
+-- ADT slot is not checked (any value conforms), where the interpreter checks
+-- it.
 conformsUnitUnchecked :: IRExpr -> IRExpr
 conformsUnitUnchecked e = case e of
   IRConformsTo t a -> IRConformsTo (loosen t) a
@@ -1114,6 +1609,7 @@ conformsUnitUnchecked e = case e of
     loosen t = case t of
       TUnit -> TVarR (TV "unchecked")
       TThetaTree -> TVarR (TV "unchecked")
+      TADT _ -> TVarR (TV "unchecked")
       ListOf a -> ListOf (loosen a)
       Tuple a b -> Tuple (loosen a) (loosen b)
       TEither a b -> TEither (loosen a) (loosen b)
@@ -1145,7 +1641,10 @@ backendLogSumExp backend e = case e of
   IRBuiltin (BReduce ROpLogSumExp 0) [t] ->
     IRLetIn "lse_t" t $ IRLetIn "lse_r" (IRBuiltin (BReduce ROpLogSumExp 0) [IRVar "lse_t"]) $
       (if backend == "python" then IRIf pythonMaxIsNegInf negInf else id) $
-        IRIf (countWhere (\x -> IROp OpEq x posInf) (IRVar "lse_t")) (IRConst (VFloat (0 / 0))) (IRVar "lse_r")
+        IRIf (countWhere (\x -> IROp OpEq x posInf) (IRVar "lse_t")) (IRConst (VFloat (0 / 0)))
+             -- @m + log(...)@ is never a negative zero; the interpreter's
+             -- fold answers a lone -0 term as itself.
+             (IROp OpPlus (IRVar "lse_r") (IRConst (VFloat 0)))
   _ -> e
   where
     posInf = IRConst (VFloat (1 / 0))
@@ -1172,7 +1671,7 @@ knownDisagreement d = do
       [] -> do
         let rewrite = foldr (.) id [ r (idBackend d) | KnownFamily{kfMatch = AsIf r} <- kfs ]
             c = idCase d
-        o <- interpretIRCase c { icBody = rewrite (icBody c) } (idArgs d)
+        o <- interpretIRCase (onBodies rewrite c) (idArgs d)
         return $ case o of
           InterpRefusal _ -> False
           _ -> either (const False) (const True) (judge o (idAnswer d))
@@ -1300,7 +1799,7 @@ juliaIRDriver projectDir entries = unlines $
       , "  println(\"L " ++ show i ++ " \", _msg(e)); flush(stdout)"
       , "end"
       ] ++ concat [ [ "try"
-                    , "  r = Base.invokelatest(" ++ intercalate ", " (("Prog" ++ show i ++ "." ++ fn c) : map Jl.juliaVal args) ++ ")"
+                    , "  r = Base.invokelatest(" ++ intercalate ", " (("Prog" ++ show i ++ "." ++ fn c) : map (Jl.juliaVal . qualifyConstructors ("Prog" ++ show i)) args) ++ ")"
                     , "  println(\"S " ++ show i ++ " " ++ show j ++ " \", join(_ser(r, String[]), \" \")); flush(stdout)"
                     , "catch e"
                     , "  println(\"E " ++ show i ++ " " ++ show j ++ " \", _msg(e)); flush(stdout)"
@@ -1325,21 +1824,26 @@ runIRCasesJulia julia cases = runCases "julia" emit ".jl" juliaIRDriver
 
 -- | The constructs a case's body reaches ('irConstructs' labels).
 checkedIRConstructs :: IRCase -> [String]
-checkedIRConstructs = sort . nub . irConstructs . irCaseFunction
+checkedIRConstructs c = sort (nub (concatMap irConstructs (irCaseFunction c : map helperFunction (icHelpers c))))
+  where helperFunction h = foldr IRLambda (hBody h) (map fst (hParams h))
 
 -- | Every construct the generator's fixed-seed sample reaches: what
 -- 'BackendCoverage' measures the corpus census under every config against.
 irGeneratorConstructs :: [String]
 irGeneratorConstructs = sort (nub (concatMap checkedIRConstructs fixedSample))
 
--- | Constructs of 'irConstructs'' inventory with no production yet, and
--- why. Later milestones own most of them.
+-- | Constructs of 'irConstructs'' inventory, or shapes of them, with no
+-- production, and why.
 noProduction :: [(String, String)]
 noProduction =
   [ ("IRExpr:IRSample", "random draws: generate bodies are M4")
-  , ("Builtin:BIndex, BListIndex, BMapList, BZip", "builtins and tensors are M3; M2's PResult bodies reach only the enumerated sum's BTensor, BMap and BReduce")
-  , ("ConTag:ADT", "ADT values are built by implicit constructor functions; function groups are M3")
-  , ("Symbol constants", "neither text backend can render a VSymbol constant (pyVal/juliaVal have no case); symbols reach the backends only as network inputs")
+  , ("Builtin:BTensor/BReduce/BIndex at rank > 1 or axis > 0",
+     "neither text backend emits them (CodeGenPyTorch/CodeGenJulia refuse with rankUnsupported/axisUnsupported); the interpreter is their only consumer, and the compiler emits rank 1, axis 0")
+  , ("Builtin:BZip OpIntDiv, BZip OpMod",
+     "the value precondition of OpIntDiv/OpMod (an exact, nonzero divisor; IRTypeCheck.inferExpr) cannot be drawn elementwise; the compiler never zips them")
+  , ("ITSymbol values", "neither text backend can render a VSymbol constant (pyVal/juliaVal have no case); symbols reach the backends only as network inputs")
+  , ("function-typed parameters, results and constants of main",
+     "the driver has no way to pass a closure to a backend or serialise one back; function types are drawn inside bodies and at helpers' parameters and results")
   ]
 
 -- ---------------------------------------------------------------------------
@@ -1364,8 +1868,50 @@ accessorLabels = map (\a -> "Accessor:" ++ takeWhile (/= ' ') (show (accessorWit
           AcFst -> a; AcSnd -> a; AcHead -> a; AcTail -> a; AcFromLeft -> a; AcFromRight -> a
           AcIsLeft -> a; AcIsRight -> a; AcTheta _ -> a; AcSubtree _ -> a
 
+-- | Every 'Builtin', as 'irConstructs' labels it, at every operator it is
+-- drawn with. A complete match, as above.
+builtinLabels :: [String]
+builtinLabels = map ("Builtin:" ++) $
+  [ "BTensor", "BMap", "BIndex", "BMapList", "BListIndex", "BCategoricalIndex" ]
+  ++ [ "BReduce " ++ show op | op <- [ROpAdd, ROpLogSumExp, ROpMax] ]
+  ++ [ "BZip " ++ show op | op <- [OpPlus, OpMult, OpSub, OpDiv, OpMax, OpAnd, OpOr, OpApprox, OpLessThan, OpGreaterThan, OpEq] ]
+  where
+    _complete b = case b of
+      BTensor _ -> (); BMap -> (); BReduce _ _ -> (); BIndex _ -> (); BZip _ -> ()
+      BMapList -> (); BListIndex -> (); BCategoricalIndex _ _ -> ()
+
+-- | The function-group and ADT shapes a case reaches (M3), for the coverage
+-- check.
+caseFeatures :: IRCase -> [String]
+caseFeatures c = nub $
+  [ "helper " ++ show (hShape h) | h <- icHelpers c ]
+  ++ [ "helper call" | any (`elem` map helperRef (icHelpers c)) vars ]
+  ++ [ "closure passed (function-typed helper parameter)" | h <- icHelpers c, any (isArrow . snd) (hParams h) ]
+  ++ [ "closure returned (function-typed helper result)" | h <- icHelpers c, isArrow (hResult h) ]
+  ++ [ "nullary helper" | h <- icHelpers c, null (hParams h) ]
+  ++ [ "ADT constructor" | any (`elem` ctors) vars ]
+  ++ [ "ADT test" | any (`elem` map ("is" ++) ctors) vars ]
+  ++ [ "ADT field accessor" | any (`elem` [ f | (_, _, f, _) <- adtFields (icADTs c) ]) vars ]
+  ++ [ "ADT parameter" | any (isADT . snd) (icParams c) ]
+  ++ [ "ADT result" | isADT (icResult c) ]
+  ++ [ "tensor parameter" | any (isTensor . snd) (icParams c) ]
+  ++ [ "tensor result" | isTensor (icResult c) ]
+  ++ [ "standard library " ++ f | f <- ["indexOf", "listProd", "listConcat"], f `elem` vars ]
+  where
+    vars = [ v | IRVar v <- caseUniverse c ]
+    ctors = [ k | d <- icADTs c, (k, _) <- constructors d ]
+    isADT t = case t of { ITADT _ -> True; _ -> False }
+    isTensor t = case t of { ITTensor _ _ -> True; _ -> False }
+
+featureLabels :: [String]
+featureLabels =
+  [ "helper " ++ show s | s <- [minBound .. maxBound :: HelperShape] ] ++
+  [ "helper call", "closure passed (function-typed helper parameter)", "closure returned (function-typed helper result)"
+  , "nullary helper", "ADT constructor", "ADT test", "ADT field accessor", "ADT parameter", "ADT result"
+  , "tensor parameter", "tensor result", "standard library indexOf", "standard library listProd", "standard library listConcat" ]
+
 -- | The 'IRExpr' constructors with a production: all but 'IRSample'
--- ('noProduction'). 'IRBuiltin' only through M2's enumerated sums.
+-- ('noProduction').
 exprLabels :: [String]
 exprLabels = map ("IRExpr:" ++)
   [ "IRIf", "IRSelect", "IROp", "IRUnaryOp", "IRConst", "IRConstruct", "IRDestruct", "IRDensity"
@@ -1376,11 +1922,11 @@ exprLabels = map ("IRExpr:" ++)
 -- reads it.
 fixedPlans :: SemiringChoice -> [PPlan]
 fixedPlans c = unGen (vectorOf 300 drawPlan) (mkQCGen (20261013 + fromEnum c)) 30
-  where drawPlan = choose (1, 7) >>= \size -> evalStateT (genPlan c [("a0", ITFloat)] size) 0
+  where drawPlan = choose (1, 7) >>= \size -> runG [] (genPlan c [("a0", ITFloat)] size)
 
 -- | A fixed-seed sample of cases, as the coverage check reads it.
 fixedSample :: [IRCase]
-fixedSample = unGen (vectorOf 400 genIRCase) (mkQCGen 20261013) 30
+fixedSample = unGen (vectorOf 600 genIRCase) (mkQCGen 20261013) 30
 
 irFuzzGeneratorTests :: TestTree
 irFuzzGeneratorTests = testGroup "IR fuzz generator"
@@ -1434,6 +1980,21 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             , k `notElem` shapes ]
       assertEqual "unreached" [] (filter (`notElem` reached)
         [ "Builtin:BReduce ROpAdd", "Builtin:BReduce ROpLogSumExp", "Builtin:BReduce ROpMax", "Builtin:BMap", "Builtin:BTensor" ])
+  , testCase "a fixed-seed sample reaches every Builtin, at every operator it is drawn with" $ do
+      let reached = nub (concatMap checkedIRConstructs fixedSample)
+      assertEqual "unreached" [] (filter (`notElem` reached) builtinLabels)
+  , testCase "a fixed-seed sample reaches every helper shape, closures both ways, and ADTs" $ do
+      let reached = nub (concatMap caseFeatures fixedSample)
+      assertEqual "unreached" [] (filter (`notElem` reached) featureLabels)
+  -- The design's consequence 3: nesting the compiler reaches only by chance
+  -- (a builtin over lists or tensors inside a log-space PResult body) is
+  -- drawn by construction, since a PResult body's operands are value
+  -- expressions with every production.
+  , testCase "a fixed-seed sample reaches the list and tensor builtins inside PResult bodies of every semiring" $ do
+      let inside sr = nub [ l | c <- fixedSample, Just (sr', _) <- [icShape c], sr' == sr, l <- checkedIRConstructs c ]
+          wanted = [ "Builtin:BMapList", "Builtin:BIndex", "Builtin:BListIndex" ]
+      assertEqual "unreached (semiring, builtin)" []
+        [ (sr, l) | sr <- [minBound .. maxBound], let r = inside sr, l <- wanted, l `notElem` r ]
   , testCase "a fixed-seed sample reaches both densities and cumulatives in both spaces" $ do
       let reached = nub (concatMap checkedIRConstructs fixedSample)
           wanted = [ k ++ ":" ++ d ++ " " ++ ls | k <- ["Density", "Cumulative"], d <- ["IRNormal", "IRUniform"], ls <- ["Linear", "Log"] ]

@@ -122,15 +122,10 @@ corpusCensusConfigs =
 irGeneratorDeferred :: [(String, String)]
 irGeneratorDeferred =
   -- Measured 2026-10-13 at M2 (567 programs x 8 configs): the corpus uses 68
-  -- constructs, the generator reaches all but these. M2's PResult bodies
-  -- reach the enumerated sum's BTensor, BMap and BReduce (all three
-  -- reductions); the other builtins are M3's.
-  [ ("Builtin:BIndex",      "M3 (builtins and tensors): agreement fusion's indexed read (categoricalProductFusion)")
-  , ("Builtin:BListIndex",  "M3 (builtins and tensors): a neural read's slot of a logits list (floatInputGaussian)")
-  , ("Builtin:BMapList",    "M3 (builtins and functions): list map (mapMultList)")
-  , ("Builtin:BZip OpMult", "M3 (builtins and tensors): agreement fusion's elementwise product (categoricalProductFusion)")
-  , ("Builtin:BZip OpPlus", "M3 (builtins and tensors): agreement fusion's elementwise product in log space (categoricalProductFusion)")
-  , ("IRExpr:IRSample",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
+  -- constructs, the generator reaches all but these. M3 gave every builtin a
+  -- production (BIndex, BListIndex, BMapList, BZip were listed here until
+  -- then); what is left is M4's.
+  [ ("IRExpr:IRSample",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
   , ("Sample:IRNormal",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
   ]
 
