@@ -430,7 +430,7 @@ facts the engines decide on instead of the head's syntax:
   `_prob` at the recovered witness (`namedCall`), or nothing.
 
 The modality engine asks the witness question of the same resolved lambda for
-every head (`ModalityInfer.letBoundMod`), so a helper's parameter is `IWit`
+every head (`ModalityInfer.letBoundLaw`), so a helper's parameter is `IWit`
 like a `draw`'s. The engines:
 
 - **point inversion** folds the body inline where `bindInline`, else uses

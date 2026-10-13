@@ -17,6 +17,7 @@ module SPLL.Lang.Lang (
 , Name
 , prettyPrintProg
 , prettyPrintProgRTyOnly
+, prettyPrintProgCustomTI
 , prettyPrint
 , prettyRType
 , getSubExprs

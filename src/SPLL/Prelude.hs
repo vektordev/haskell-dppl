@@ -102,7 +102,9 @@ import SPLL.MaskVariants
 import SPLL.AutoNeural (validateWriteLogitsGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
-import SPLL.Typing.Infer (addModalityInfo)
+import SPLL.Typing.Infer (addModalityInfo, addModalityLaws)
+import SPLL.Typing.ModalityInfer (LawTable, Law(..), renderJustification)
+import qualified Data.Map.Strict as Map
 import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
 import SPLL.CalleeNormalize (normalizeCallees)
@@ -475,8 +477,8 @@ compileRTyped conf rtypedWithSigs = do
 irUnoptimized :: CompilerConfig -> Program -> Either CompilerError IREnv
 irUnoptimized conf rtypedWithProbes = do
   let rtyped = dropSlotProbes rtypedWithProbes
-  (annotated, fcData) <- typedStages conf rtyped
-  baseIR <- envToIRUnoptimized conf fcData annotated
+  (annotated, fcData, laws) <- typedStages conf rtyped
+  baseIR <- envToIRUnoptimized conf fcData laws annotated
   return (withMaskVariants conf rtyped baseIR)
 
 -- | 'compile' stopped before the select pass and the optimizer: the IR exactly
@@ -488,10 +490,10 @@ compileUnoptimized conf p = frontEnd conf p >>= irUnoptimized conf
 
 -- | The program exactly as 'envToIRUnoptimized' receives it: every annotation
 -- IRCompiler dispatches on, @pType@ included, plus the forward-chaining
--- certificate. The admission-totality oracle reads its verdicts here
--- ('admissionTyped'), so it can never read a different program from the one
--- the variant gate reads.
-typedStages :: CompilerConfig -> Program -> Either CompilerError (Program, FCData)
+-- certificate and the modality engine's per-node laws. The admission-totality
+-- oracle reads its verdicts here ('admissionTyped'), so it can never read a
+-- different program from the one the variant gate reads.
+typedStages :: CompilerConfig -> Program -> Either CompilerError (Program, FCData, LawTable)
 typedStages conf rtyped = do
   let enumAnnotated = annotateEnumsProg rtyped
   printIfMoreVerbose conf "\n=== Annotated Program (1) ==="
@@ -531,16 +533,16 @@ typedStages conf rtyped = do
   -- (modality-witnessed-inference, milestone 2). The same FCData is returned
   -- here and threaded to both remaining consumers (conditional annotation and
   -- IR codegen).
-  (typed, fcData) <- addModalityInfo forwardChained
+  (typed, fcData, laws) <- addModalityLaws forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
-  printStage conf "After Modality Inference (PType)" typed
+  printStageWith (lawColumn laws) conf "After Modality Inference (PType)" typed
 
   let annotated = annotateConditionalProg fcData typed
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
   pPrintIfMoreVerbose conf annotated
   printStage conf "After Conditional Annotation (IsConditional tags)" annotated
-  return (annotated, fcData)
+  return (annotated, fcData, laws)
 
 -- | The fully annotated program 'compile' hands to IR compilation, without
 -- compiling it: the modality engine's verdicts, read where IRCompiler reads
@@ -550,7 +552,7 @@ typedStages conf rtyped = do
 -- fuzz oracle (task @admission-totality-property@), which has to know what was
 -- admitted even when the compile it is checking crashes.
 admissionTyped :: CompilerConfig -> Program -> Either CompilerError Program
-admissionTyped conf p = frontEnd conf p >>= fmap fst . typedStages conf
+admissionTyped conf p = frontEnd conf p >>= fmap (\(t, _, _) -> t) . typedStages conf
 
 -- | Would batched mode (@--batched@) take this program? 'Nothing' if it would,
 -- @Just diag@ otherwise, carrying the same diagnostic the batched backend would
@@ -785,6 +787,16 @@ printStage :: (Monad m) => CompilerConfig -> String -> Program -> m ()
 printStage CompilerConfig {showIntermediates=True} label prog =
   trace (unlines (stageHeader label ++ prettyPrintProg prog ++ [""])) (return ())
 printStage _ _ _ = return ()
+
+-- | 'printStage' with a column appended to every node's type info.
+printStageWith :: (Monad m) => (TypeInfo -> String) -> CompilerConfig -> String -> Program -> m ()
+printStageWith col CompilerConfig {showIntermediates=True} label prog =
+  trace (unlines (stageHeader label ++ prettyPrintProgCustomTI (\ti -> show ti ++ col ti) prog ++ [""])) (return ())
+printStageWith _ _ _ _ = return ()
+
+-- | The justification of each node's law, for the modality stage's dump.
+lawColumn :: LawTable -> TypeInfo -> String
+lawColumn laws ti = " law: " ++ maybe "(none)" (renderJustification . lawJust) (Map.lookup (chainName ti) laws)
 
 printStageIR :: (Monad m) => CompilerConfig -> String -> IREnv -> m ()
 printStageIR CompilerConfig {showIntermediates=True} label ir =
@@ -1033,11 +1045,11 @@ withMaskVariants conf rtyped env@(IREnv groups decls consts)
     variantFor fname m = case typedStages quiet pruned of
       -- The masked program does not even type: no mode is admitted.
       Left _ -> MaskVariant m Nothing Nothing
-      Right (typedPruned, fc) ->
+      Right (typedPruned, fc, prunedLaws) ->
         let admitted = maybe False (admittedPType . pType . getTypeInfo . snd)
                          (find ((== fname) . fst) (functions typedPruned))
             -- Lazy: forced only when a variant body is read.
-            compiled = envToIRUnoptimized quiet fc typedPruned
+            compiled = envToIRUnoptimized quiet fc prunedLaws typedPruned
             body lbl field = case compiled of
               Left err -> Left err
               Right menv -> case find ((== fname) . groupName) (irGroups menv) of

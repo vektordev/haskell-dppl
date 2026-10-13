@@ -45,7 +45,8 @@ import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
-import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven)
+import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw)
+import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
 import Control.Monad (foldM, forM, when, zipWithM)
@@ -141,7 +142,19 @@ data CompilerMetadata = CompilerMetadata {
   -- | Function parameters an engine has bound to a lambda it can see, under
   -- the fresh names 'enterBindingScope' gives them: a call through one is a
   -- binding of that lambda's parameter ('callBindingAt').
-  boundLambdas :: [(String, Expr)]
+  boundLambdas :: [(String, Expr)],
+  -- | The modality engine's certificate for every node of the program, by
+  -- chain name ('SPLL.Typing.ModalityInfer.inferProgram'; design
+  -- law-carrying-modality §B). Not a 'TypeInfo' field: a 'Law' holds closures.
+  -- Read by nothing that dispatches yet (milestone M3).
+  lawTable :: LawTable,
+  -- | The law of every variable bound by an enclosing binder of the code
+  -- being compiled: a lambda's parameter ('extendMetaForLambda') and, at
+  -- every 'Binding', the bound parameter at the argument's law
+  -- ('withBindingLaw'). Extended by the modality engine's own binder rule
+  -- ('bindingLawEnv'), so it is the environment 'inferE' had there. Read by
+  -- nothing that dispatches yet (milestone M3).
+  lawEnv :: LawEnv
 }
 
 -- | A value's law as an affine combination of independent standard-normal
@@ -266,8 +279,8 @@ modeInverse cumulative decl deriv
       (IRIf (IROp OpGreaterThan deriv const0) floorB ceilB, app)
   | otherwise = (body decl, applicability decl)
 
-envToIR :: CompilerConfig -> FCData -> Program -> IREnv
-envToIR conf fcDat p
+envToIR :: CompilerConfig -> FCData -> LawTable -> Program -> IREnv
+envToIR conf fcDat laws p
   | any (null . chainName . getTypeInfo . snd) (functions p) =
       error "envToIR: one or more top-level expressions have empty chainNames — did you call annotateProg before envToIR?"
   | otherwise =
@@ -275,7 +288,7 @@ envToIR conf fcDat p
       -- 'requireNoGenerateBacked' can only be thrown here. 'Prelude.compile',
       -- the entry point everything actually uses, threads the 'Left' instead
       -- (task compiler-throws-instead-of-returning-left).
-      let unopt    = either error id (envToIRUnoptimized conf fcDat p)
+      let unopt    = either error id (envToIRUnoptimized conf fcDat laws p)
           stripped = if countBranches conf then unopt else stripBranchCount unopt
           -- Batched mode: retag elementwise ifs to selects before optimizing
           -- (design pytorch-tensorizer). Mirrors 'Prelude.compile'.
@@ -292,8 +305,8 @@ envToIR conf fcDat p
 -- backend. This is the single point where 'genFun'/'probFun'/'integFun'/
 -- 'normalFun'/'writeLogitsFun' are assembled, so the check sees every site
 -- regardless of which combinator produced it and needs no per-site edits.
-envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> Either CompilerError IREnv
-envToIRUnoptimized conf fcDat p = requireNoGenerateBacked conf (propagateRefusals (envToIRUnoptimized' conf fcDat p))
+envToIRUnoptimized :: CompilerConfig -> FCData -> LawTable -> Program -> Either CompilerError IREnv
+envToIRUnoptimized conf fcDat laws p = requireNoGenerateBacked conf (propagateRefusals (envToIRUnoptimized' conf fcDat laws p))
 
 -- | Refuse every compiled variant that calls a refused one, to a fixed point
 -- (task static-refusals-become-absent-variants). A refused variant is absent,
@@ -474,8 +487,8 @@ generateBackedSites (IREnv groups _ _) =
                               , ("writeLogits", (\(b, ps) -> (stripDeadSlotFills b, ps)) <$> writeLogitsFun g) ]
       ]
 
-envToIRUnoptimized' :: CompilerConfig -> FCData -> Program -> IREnv
-envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} fcDat p@Program{adts=progADTs} = IREnv (
+envToIRUnoptimized' :: CompilerConfig -> FCData -> LawTable -> Program -> IREnv
+envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} fcDat laws p@Program{adts=progADTs} = IREnv (
   map (makeAutoNeural progADTs conf (writeLogitsDecls p)) (neurals p) ++
   concatMap (\(name, binding) ->
     let progTypeEnv = getGlobalTypeEnv p
@@ -666,7 +679,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty []
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty [] laws Map.empty
     reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
@@ -1701,7 +1714,7 @@ enterBindingScope meta0 b = case bindScope b of
       return (param, fresh, rType (getTypeInfo arg))
     let meta = bindRenamed meta0 [ (fresh, rty, arg) | ((_, arg), (_, fresh, rty)) <- zip leading renames ]
     let scopedBody = foldr (\(param, fresh, _) -> renameFreeVar param fresh) (bindBody b) renames
-    return (Just (meta, scopedBody))
+    return (Just (withBindingLaw meta b (bindVar b), scopedBody))
 
 -- | The metadata once each of these fresh variables is let-bound to its
 -- (deterministic) argument: in scope, recovered, and where the argument is a
@@ -1712,7 +1725,8 @@ bindRenamed meta binds =
   meta { typeEnv = [ (fresh, (rty, hasInf rty)) | (fresh, rty, _) <- binds ] ++ typeEnv meta
        , recoveredVars = [ fresh | (fresh, _, _) <- binds ] ++ recoveredVars meta
        , boundLambdas = [ (fresh, lam) | (fresh, _, arg) <- binds, Just lam <- [visibleLambda arg] ]
-                        ++ boundLambdas meta }
+                        ++ boundLambdas meta
+       , lawEnv = foldr (\(fresh, _, arg) -> Map.insert fresh (nodeLaw meta arg)) (lawEnv meta) binds }
   where
     hasInf (TArrow (TArrow _ _) _) = True
     hasInf _ = False
@@ -1815,7 +1829,28 @@ extendMetaForLambda meta t name =
         TArrow p _ -> p
         other -> error ("extendMetaForLambda: parameter '" ++ name ++ "' of a non-function type " ++ show other)
       hasInference = case paramRType of { TArrow (TArrow _ _) _ -> True; _ -> False }
-  in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta }
+  in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta
+          , lawEnv = Map.insert name (lambdaParamLaw t) (lawEnv meta) }
+
+-- | The binder environment the modality engine had at a node: a variable's law.
+type LawEnv = ModalityInfer.Env
+
+-- | The metadata for compiling a binding's body: its parameter, under the
+-- name @var@ the body reads it by, bound in 'lawEnv' at the argument's law,
+-- by the modality engine's own binder rule. The argument's law is its node
+-- certificate ('lawTable'); an argument the table does not hold (a node an
+-- engine synthesized) is taken at the law its annotation projects.
+withBindingLaw :: CompilerMetadata -> Binding -> String -> CompilerMetadata
+withBindingLaw meta b var = meta { lawEnv = bindingLawEnv (reinferContext meta) headCN var argLaw (lawEnv meta) }
+  where
+    headCN = chainName (getTypeInfo (bindHead b))
+    argLaw = nodeLaw meta (bindArg b)
+
+-- | A node's certificate ('lawTable'), or for a node the table does not hold
+-- (one an engine synthesized), the law its annotation projects.
+nodeLaw :: CompilerMetadata -> Expr -> Law
+nodeLaw meta e = fromMaybe (bareLawOfPType (pType ti)) (Map.lookup (chainName ti) (lawTable meta))
+  where ti = getTypeInfo e
 
 -- | Whether variable @x@ occurs free in @e@ underneath a field constructor
 -- (@Cons@, @TCons@, a user ADT constructor). Shadowing-aware, and followed
@@ -3259,7 +3294,7 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt, chainName=_} (Apply 
   -- resolve l's chain name through 'findEquivalentExpression'.
   let deadBinding = isJust (deadBindingBodyCN meta l)
   if deadBinding then
-    toIRInference meta cumulative (bindBody binding0) sample
+    toIRInference (withBindingLaw meta binding0 (bindVar binding0)) cumulative (bindBody binding0) sample
   else do
    -- A call whose body reads a leading parameter bound to a random argument
    -- binds that argument first ('leadingArgBinding').
@@ -8394,7 +8429,7 @@ applyBinding meta cumulative rt binding sample = do
       where
         affineMarginalise (x, lamBody) = do
           form <- affineFormOf meta v
-          let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) x)
+          let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) x) binding x)
                            { affineEnv = (x, form) : affineEnv meta }
           toIRInference bodyMeta cumulative lamBody sample
      Just chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} -> do
@@ -8499,7 +8534,7 @@ applyBinding meta cumulative rt binding sample = do
       let bodyExpr = reinferRecovered meta recovered (bindBody binding)
       -- The body references the bound variable, so it must be in scope in the type
       -- environment (mirrors how the Lambda arm descends into a lambda body).
-      let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) toInvCN) { recoveredVars = recovered }
+      let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN) { recoveredVars = recovered }
       -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
       -- appliedSample is VAny at runtime iff the slot FC recovers this binding
       -- from was queried marginally. If the binding is a "sink" — a single
@@ -8684,7 +8719,7 @@ applyBinding meta cumulative rt binding sample = do
           -- compiled this way keeps the refusal.
           unevaluable <- if not singleUse then return (constResult anyRefusal) else do
             let openBody = bindBody binding
-            let openMeta = extendMetaForLambda meta (getTypeInfo l) toInvCN
+            let openMeta = withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN
             r <- lift ((Just <$> runWriterT (toIRInference openMeta cumulative openBody sample))
                          `catchError` (\_ -> return Nothing))
             -- Bound ONCE ('shareResult'), like the body factor above: unpacked
