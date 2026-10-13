@@ -222,7 +222,12 @@ readLogitsLinearOnly =
   , "agreementBareEqualityLetBound", "agreementBareEqualityInline", "mNistAdd3", "mNistAdd4"
   -- task symbol-chosen-by-inline-coin-refused: a mixture of reads of selected
   -- Symbols, each read through see_auto.forward.
-  , "symbolChosenByInlineCoin", "symbolChosenByDrawBoundCoin", "symbolChosenInsideReadArgument" ]
+  , "symbolChosenByInlineCoin", "symbolChosenByDrawBoundCoin", "symbolChosenInsideReadArgument"
+  -- task binding-resolver-one-application-rule: the per-field `draw truth_xi =
+  -- xi (see img) in tells 0.9 0.2 truth_xi` is answered by the set-witness
+  -- engine through the named callee `tells`, which measures its worlds through
+  -- see_auto.forward.
+  , "drawProductReadUnderBinding", "drawProductReadPerField4" ]
 
 -- | The corpus programs whose default compile took the plan engine until every
 -- read was tagged, and which now enumerate densely by default. They were
