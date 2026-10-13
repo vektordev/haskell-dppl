@@ -2936,6 +2936,40 @@ freeVsUnrecoveredTests = testGroup "free vs not recovered"
         (collapsed `notElem` [ e | p' <- shrinkTypedProgram p, Just e <- [lookup "main" (functions p')] ])
       assertBool "every offered shrink keeps the core type"
         (and [ compatibleTys (typedMainCoreTy p') (typedMainCoreTy p) | p' <- shrinkTypedProgram p ])
+  , testCase "a main shrink that leaves a helper unrecoverable is not offered (replay 937805)" $ do
+      -- The same shape at 5025074, before 'keepsCoreTy' existed. The collapse
+      -- of the @if@ onto its else-arm is a valid, Float-typed program: the
+      -- shrinker was right and recovery is incomplete. The helper's only call
+      -- argument now mentions the helper, so it pins nothing ('helperEnv'),
+      -- and the helper's body read alone is ambiguous: @mult h0 h0@ over a
+      -- not-recovered @h0@ matches both the Float and the Int row, although
+      -- @sq h0@ beside it fixes @h0@ (recovery is bottom-up, not unifying).
+      -- Unlike 520205 the core recovers 'Nothing', not 'TyUnrecovered', which
+      -- is the other branch of 'keepsCoreTy' that rejects it.
+      let helper = "h0" #-># letIn "h1" (injF "lt" [injF "sq" [var "h0"], injF "mult" [var "h0", var "h0"]])
+                                 (injF "snd" [letIn "h2" (cons (constB True) nul)
+                                                (tuple (cons uniform nul) uniform)])
+          selected = apply ("v2" #-># ifThenElse (injF "gt" [var "v2", constF 1.08])
+                                                 (var "helper") (var "helper")) normal
+          arg = injF "exp" [injF "mult" [injF "mult" [normal, normal],
+                                         injF "fst" [tuple (constF 8.89) (constF 7.03)]]]
+          cond = apply ("v0" #-># ifThenElse (injF "gt" [var "v0", constF (-1.91)]) (constB True)
+                                             (injF "lt" [uniform, constF 0.89])) normal
+          mainE = apply (var "helper")
+                    (apply (ifThenElse cond (injF "snd" [tuple (right normal) ("v1" #-># uniform)]) selected) arg)
+          p = Program [("helper", helper), ("main", mainE)] [] [] [] []
+          -- 'uniquifyBinders' renumbers the surviving binder v2 to v0.
+          selected' = apply ("v0" #-># ifThenElse (injF "gt" [var "v0", constF 1.08])
+                                                  (var "helper") (var "helper")) normal
+          collapsedE = apply (var "helper") (apply selected' arg)
+          collapsed = p { functions = [("helper", helper), ("main", collapsedE)] }
+      assertEqual "the original recovers" (Just TyFloat) (typedMainCoreTy p)
+      assertEqual "the collapse is a valid program" (Right ()) (validateProgram collapsed)
+      assertEqual "but does not recover" Nothing (typedMainCoreTy collapsed)
+      assertBool "and is not offered"
+        (collapsedE `notElem` [ e | p' <- shrinkTypedProgram p, Just e <- [lookup "main" (functions p')] ])
+      assertBool "every offered shrink keeps the core type"
+        (and [ compatibleTys (typedMainCoreTy p') (typedMainCoreTy p) | p' <- shrinkTypedProgram p ])
   ]
 
 shrinkerTests :: TestTree
