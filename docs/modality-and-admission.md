@@ -39,7 +39,7 @@ it). The condition itself is inferred under the unrefined environment, and a
 deterministic condition conditions nothing.
 
 Without this, the arm occurrences were bound at the standalone witnessed
-`PNormal`, so `tryNormalClosure` typed `s + Normal` inside an arm as `PNormal`
+`PNormal`, so the family rule typed `s + Normal` inside an arm as `PNormal`
 and `sim_fpi s2 thetas` (a recursive call threading `s2` into a further draw)
 as `Integrate`: the program was admitted, the set-witness engine refused it at
 compile time ("draws fresh randomness"), and because that refusal is eager it
@@ -154,10 +154,11 @@ calls a refused one (`main_prob` calling a refused `f_prob`), naming the callee
 and its reason, so no backend emits a call to a function that was never
 written (`Rejection.RefusedVariant`).
 
-One site *catches* a refusal instead of propagating it, because it used to
-discard a failed attempt's lazy `error` along with its bindings: the
-set-witness inversion (`invertToWorlds`) when it has a fallback (the affine
-marginalisation), so the fallback still gets its turn. Refusals are otherwise
+A few sites *catch* a refusal instead of propagating it, where an engine
+tries an alternative after a failed attempt: the cumulative atom of a point
+inverse (`pointInverseCoV`), a call whose leading argument is bound only when
+compiling through the callee refuses, and the open-body marginal of the
+body-factor fold. Refusals are otherwise
 eager where the old `error`s were lazy, so a refusing sub-compile whose result
 an engine then discards now refuses the variant; the corpus showed no such
 case. Query-dependent

@@ -3364,17 +3364,18 @@ admissionOracleTests = testGroup "Admission oracle"
           assertBool msg ("Comparison not implemented for type: TArrow" `isInfixOf` msg)
         _ -> assertFailure ("expected a crash on main, got " ++ show (violations rep))
   , testCase "an admitted function the IR compiler refuses is an over-promise, and generate survives" $ do
-      -- test/cases/known-issues/correlatedGaussianLetSharesLatent: admitted,
-      -- and the set-valued witness engine refuses the shared latent. That
-      -- crashed the whole compile, generate included, until
-      -- static-refusals-become-absent-variants made it an absent variant with
-      -- a recorded reason. (This case used item 4's negated log-normal of
-      -- fuzz-admission-oracle-bugs until that compiled.) Not a crash, but
+      -- TestRejection's nested-let shared occurrence: admitted, and the
+      -- set-valued witness engine refuses it. Such a refusal crashed the whole
+      -- compile, generate included, until static-refusals-become-absent-variants
+      -- made it an absent variant with a recorded reason. (This case used item
+      -- 4's negated log-normal of fuzz-admission-oracle-bugs until that
+      -- compiled, then known-issues/correlatedGaussianLetSharesLatent until
+      -- affine-form-as-law-certificate typed it Bottom.) Not a crash, but
       -- still a lattice bug, so its own class (task
       -- admission-oracle-promised-variants-present): the non-vacuity check
       -- that the property sees an over-promise, under the over-promise label
       -- and filed in 'knownOverPromises'.
-      rep <- oracleOn "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)"
+      rep <- oracleOn "main = draw x = Normal in draw y = x + 1.0 in if y > x then 1.0 else 0.0"
       assertNoViolation rep
       assertEqual "outcomes" [(ModeGenerate, "value"), (ModeProbability, "promised-absent"), (ModeIntegrate, "promised-absent")]
         (outcomesOf "main" rep)

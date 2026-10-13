@@ -364,30 +364,51 @@ combine is still `srComplement` (max-product refuses `srMinus`).
 ## Affine Gaussian marginalisation of an unwitnessed `draw`
 
 A third answer to "no occurrence of the bound variable is point-invertible",
-tried before set-valued witnesses: if the binding is a Gaussian affine
-expression and **every** use of the variable flows affinely into **one**
+tried before set-valued witnesses: if the binding's certificate is a Gaussian
+affine form and **every** use of the variable flows affinely into **one**
 Gaussian density leaf, the variable needs no witness at all -- it is
 integrated out analytically inside that leaf (task
 `affine-gaussian-closure-lost-across-let-bindings`, the scalar M1 slice of
-docs design `affine-gaussian-forms`).
+docs design `affine-gaussian-forms`; dispatched on the certificate since
+`affine-form-as-law-certificate`, law-carrying-modality M4).
 
-`CompilerMetadata.affineEnv` maps such a variable to an `AffineForm`,
-`c + sum a_i * eps_i` over independent standard normals. Latents are keyed by
-the chain name of the env-free Gaussian leaf that introduced them, so two reads
-of one variable share them (`draw x = Normal in x + x` is `2 eps`, `N(0,2)`),
-while every other leaf is a fresh draw. `toIRNormalParams` collapses a form
-(`mu = c`, `sigma` the norm of the coefficient vector) **only** for expressions reading an `affineEnv`
-variable, so everything else emits exactly what it did before, and
-`hasOwnInferenceHandler`'s local-`Var` exclusion stops applying to a variable
-that has a form. The rules are `plus`, `mult` by a deterministic operand, `neg`
-and the env lookup; `-` is `plus`/`neg` by the time IRCompiler sees it.
+**The certificate.** ModalityInfer issues `JAffine` for every node with an
+affine form: a `plus`, a `mult` by a constant, or a `neg` over operands that
+have one (`affineInjF`, `affineOf`). A point mass is a constant, and any other
+`PNormal` operand is one fresh latent keyed by its own chain name. The node is
+`PNormal` exactly when that form exists; `tryNormalClosure` keeps only the
+log-normal rows. `bindParam` binds a Gaussian argument at its form, keyed by
+the argument's chain name, so every read of the variable carries the same
+latent (`draw x = Normal in x + x` is one latent). A witnessed binding is one
+`Recovered` latent to whatever reads it, and records its own density factor:
+the `Marginal` latents its argument integrates (`acFactors`). A field
+constructor's density is the product of those binding factors (each counted
+once) and each field's residual; where two factors integrate the same
+`Marginal` latent it is `JSharedLatent`, floored to sample-only:
+`draw x = Normal in (x + Normal, x + Normal)` and `draw x = Normal in draw a =
+x + Normal in draw b = x + Normal in (a, b)` type `Bottom`. Their joint law is
+a bivariate Gaussian, which needs the multivariate density (design M2).
 
-`affineMarginalisable` decides applicability. "One leaf" means: all
-occurrences sit in a single affine `PNormal` consumer, which is either the
-value of a directly nested `draw` (that binding's own treatment -- witnessed,
-marginalised in turn, or refused -- carries the latents on) or the let spine's
-terminal expression. That is what keeps the scalar collapse sound. The
-refusals, all falling through to `setWitnessApply` exactly as before:
+**The compiler.** `CompilerMetadata.affineEnv` holds the IR of such a variable's
+form, `c + sum a_i * eps_i` over independent standard normals, keyed the same
+way: by the chain name of the env-free Gaussian leaf that introduced each
+latent. `toIRNormalParams` collapses a form (`mu = c`, `sigma` the norm of the
+coefficient vector) **only** for expressions reading an `affineEnv` variable,
+so everything else emits exactly what it did before. The Gaussian catch-all
+takes such an expression (`readsMarginalised`) whether or not it has a handler
+of its own. The rules are `plus`, `mult` by a deterministic operand, `neg` and
+the env lookup; `-` is `plus`/`neg` by the time IRCompiler sees it.
+
+`affineMarginalisable` decides applicability. It reads the argument's
+certificate (`affineOf` over its `lawTable` law), and keeps `isAffineOver` as
+the check that the form's IR can be built (inside a callee entered at a call
+site the certificate, issued over the program as written, cannot promise
+that). "One leaf" means: all occurrences sit in a single affine `PNormal`
+consumer, which is either the value of a directly nested `draw` (that
+binding's own treatment -- witnessed, marginalised in turn, or refused --
+carries the latents on) or the let spine's terminal expression. That is what
+keeps the scalar collapse sound. Otherwise the binding goes to
+`setWitnessApply`:
 
 - uses spread over two consumers: `(x + Normal, x + Normal)` needs a joint
   density (design M2), and so does `draw y = x + Normal in x + y`, since `y`
