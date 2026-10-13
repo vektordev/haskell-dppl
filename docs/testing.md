@@ -54,8 +54,8 @@ current list for whichever binary you run):
 - `test/End2EndTesting.hs` — `.ppl`/`.tst` integration against interpreter,
   Julia and Python, plus the batched groups (see `batched-mode-pytorch-tensorizer.md`)
 - `test/Rewrites.hs` / `test/TestRewrites.hs` — the rewrite-invariance net
-  (groups `RewriteInvariance`, `RewriteInvarianceCorpus` and
-  `OfToggleCompilesIdentically`; see "Rewrite invariance" below)
+  (groups `RewriteInvariance`, `RewriteInvarianceCorpus`, `RewriteSequences`
+  and `OfToggleCompilesIdentically`; see "Rewrite invariance" below)
 - `test/TestKnownIssues.hs` — drives `test/cases/known-issues/`: pinned
   repros of open compiler bugs, each declaring which failure shape
   it demonstrates (see "Known-issues corpus" below)
@@ -450,6 +450,47 @@ which is how it found `enumerateAppliedLambda`'s capture: the loop bound the
 callee's parameter around the argument's own measure, so `h b` called under an
 enumerated `draw b` measured `b == b` and lost the draw's weight (29 corpus
 programs; `let-bindings/helperParamShadowsEnumeratedDraw`).
+
+### Isolating a divergence: rewrite sequences and the stage diff
+
+Milestone M4 (task `transformation-differential-testing-m4-isolation-automation`)
+automates the two steps of the design's isolation loop.
+
+**Rewrite sequences.** A `Rewrites.Step` names one rewrite: a family, the node
+(its declaration and child-index path) and which of the family's rewrites at
+that node. `applySteps` applies a list of them in turn, each to the program the
+previous one produced. `Slow.RewriteSequences` is a QuickCheck property over
+(base program, one to three steps of any families): the pool is the corpus
+sweep's 37 programs plus the probe pairs' working spellings, the oracle is the
+same three-outcome one, and a hard verdict is shrunk over the sequence
+(`shrinkSteps`, the last step first), not the program. It runs four fixed
+seeds of 200 cases each (about 60 test-s), so a run is reproducible and a new
+failure is a finding. A step names its node by path, not by label, so dropping
+an earlier step that changed the subterm's text leaves it applying. A sequence
+whose steps hit a `knownDivergences` site, or whose families cover a
+`knownSequenceDivergences` entry (divergences only a composition reaches), is
+judged known. The output tabulates the transitions and, for each compiled →
+refuses case, the stage where the stage diff places it, with a guess at the
+`dispatch-on-law-certificates` refusal class (`frontierClass`).
+
+**The stage diff** (`SPLL.StageDiff`; CLI `stagediff -j OTHER.ppl [-x SAMPLE]...`,
+exit 1 on a divergence) compiles both programs with
+`Prelude.compileStages`, which records the program or IR every `-d` stage
+prints, and compares them in pipeline order. On the AST stages it aligns the
+two trees from each declaration's root, descends through the single differing
+child of each node, and compares the nodes it reaches: the rewritten
+subterm's root and its ancestors denote the same value on both sides, and
+alpha-equal subtrees are compared node by node. Those must agree on `rType`
+(type variables aside), `pType` (except for function values) and, where both
+have one, the value set (as a set). At the modality stage a node's known point
+value must agree too. The engine a node's law names is not compared, since
+changing it is a rewrite's purpose. The IR stages compare which `gen`/`prob`
+variants each group built. Then come the answers at `-O0` (a difference there
+is IR compilation's) and at the configured level (the optimizer's). A side
+that refuses or raises at a stage stops there. Every hard mismatch of the
+sweeps carries the full report, and a known one its first diverging stage. On
+the property's 702 agreeing pairs at landing, 699 reported no divergence; the
+three that did were real (a lost point law, an `-O0`-only run-time type error).
 
 `Corpus.TopKOperandOrder` (Slow, task
 `transformation-differential-testing-m1-config-differencing`) applies one more

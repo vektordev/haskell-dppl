@@ -7,6 +7,7 @@
 -- (@haskell-dppl-exe@, put on PATH by the test-suite's @build-tools@ entry).
 module TestCLI (cliTests) where
 
+import Data.List (isInfixOf)
 import System.Directory (getFileSize, doesFileExist)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
@@ -37,7 +38,29 @@ cliTests = testGroup "CLI"
               (ExitSuccess, Nothing) -> assertFailure "compile succeeded but wrote no output file"
               (ExitFailure _, _) -> assertFailure ("compile with a raised budget failed:\n" ++ err)
       ]
+  , testGroup "stagediff (task transformation-differential-testing-m4-isolation-automation)"
+      [ testCase "an equivalent pair has no divergence and exits 0" $
+          withStageDiff "main = 0.0 * Normal" "main = draw z = 0.0 in z * Normal" ["-x", "0.0"] $ \code out -> do
+            assertBool ("expected exit 0:\n" ++ out) (code == ExitSuccess)
+            assertBool out ("first divergence: none" `isInfixOf` out)
+      , testCase "a divergence is placed at its stage and exits 1" $
+          -- dirac-law-point-lost-under-plus-or-helper: the `+ 0.0` loses the
+          -- product's point law in the modality pass.
+          withStageDiff "main = draw z = Normal in 0.0 * z" "main = draw z = Normal in (0.0 * z) + 0.0" ["-x", "0.0"] $ \code out -> do
+            assertBool ("expected exit 1:\n" ++ out) (code == ExitFailure 1)
+            assertBool out ("first divergence: After Modality Inference (PType)" `isInfixOf` out)
+      ]
   ]
+
+-- | Run @stagediff@ on two programs, with extra subcommand flags.
+withStageDiff :: String -> String -> [String] -> (ExitCode -> String -> IO ()) -> IO ()
+withStageDiff a b flags k = withSystemTempDirectory "nest-cli" $ \dir -> do
+  let fa = dir </> "a.ppl"
+      fb = dir </> "b.ppl"
+  writeFile fa a
+  writeFile fb b
+  (code, out, _) <- readProcessWithExitCode "haskell-dppl-exe" (["-i", fa, "stagediff", "-j", fb] ++ flags) ""
+  k code out
 
 -- | The dense module for this program is ~6MB; the plan path's is tens of KB.
 denseThreshold :: Integer

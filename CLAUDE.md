@@ -23,6 +23,7 @@ stack run -- -i file.ppl compile -o output.jl -l julia
 stack run -- -i file.ppl generate
 stack run -- -i file.ppl probability -x 0.5               # P(X=0.5)
 stack run -- -i file.ppl cumulative -x 0.5                # P(X<=0.5)
+stack run -- -i a.ppl stagediff -j b.ppl -x 0.5           # first stage where two equivalent programs diverge
 
 stack test --ta '-l'                                      # list test names
 stack test --ta '-p "/End2End.Interpreter/ && /dice/"'    # select tests
@@ -135,6 +136,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `AutoNeural` — generated readLogits/writeLogits functions and partition plans for neural declarations.
 - `ReservedNames` — the single registry of compiler-claimed and target-language names.
 - `Prelude` — `compile`, smart constructors and the `run*` query entry points.
+- `StageDiff` — compiles two equivalent programs side by side and names the first stage that diverges (`docs/testing.md`, "Rewrite invariance").
 - `Examples` — hand-built example programs.
 
 `src/`: `IRInterpreter` (reference semantics), `PredefinedFunctions`

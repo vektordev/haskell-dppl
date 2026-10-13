@@ -131,7 +131,7 @@ stageDiff opts a b = do
       Right env -> mapM (\(s, params) -> runProbC p env params s >>= probDim) (sdQueries opts)
     probDim (VProbDim pr d) = Right (pr, d)
     probDim v = Left ("not a probability result: " ++ show v)
-    forceAnswers r = either (\e -> length e `seq` r) (\xs -> sum (map (uncurry (+)) xs) `seq` r) r
+    forceAnswers r = either (\e -> length e `seq` r) (\xs -> sum (map (\(p, d) -> p + fromIntegral d) xs) `seq` r) r
 
 crash :: SomeException -> String
 crash ex = "crash: " ++ show ex
@@ -165,7 +165,7 @@ settle (snaps, res) = go snaps
       _ -> 0
     inventory (IREnv gs _ _) = concat [ groupName g ++ show (isJust (genFun g), isJust (probFun g), isJust (integFun g), map fst (refusedVariants g)) | g <- gs ]
 
-type Answers = Maybe (Either String [(Double, Double)])
+type Answers = Maybe (Either String [(Double, Int)])
 
 -- | 'stageDiff' on already computed stages and answers (at @-O0@, then at the
 -- configuration). Exposed so a test can hand it a pipeline with a seeded
@@ -228,7 +228,7 @@ mergeOrder (x : xs) (y : ys)
   | x `notElem` ys = x : mergeOrder xs (y : ys)
   | otherwise = y : mergeOrder (x : xs) ys
 
-compareAnswers :: Double -> Either String [(Double, Double)] -> Either String [(Double, Double)] -> StageRow
+compareAnswers :: Double -> Either String [(Double, Int)] -> Either String [(Double, Int)] -> StageRow
 compareAnswers tol x y = case (x, y) of
   (Right as, Right bs)
     | length as == length bs && and (zipWith agrees as bs) -> Same
