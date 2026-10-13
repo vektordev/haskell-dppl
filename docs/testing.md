@@ -161,8 +161,10 @@ all.
 A `.tst` file may start with optional header lines, in any order: a
 standalone `slow` line; two opt-in tokens, `batched` (declares batched-mode
 eligibility, asserted by the `BatchedPython` group rather than filtered, and
-checks the rows on the batched backend) and `dense` (declares a finite query
-domain, presupposes `batched`), each a line of its own; `no-normalization`
+checks the rows on the batched backend when the batched fuzz arms do not
+certify the program, see "Impact analysis" below) and `dense` (declares a
+finite query domain, presupposes `batched`, and always checks the rows on the
+dense entry points), each a line of its own; `no-normalization`
 (keeps a program out of `End2End.Normalization`, which samples the output and
 cannot cover a wide support; the file's leading comment says why); and, for a
 `test/cases/known-issues/` file only, `expect-failure: <shape>` (design
@@ -575,8 +577,25 @@ Two checks stay on the text backends regardless:
 - `End2End.Python Unoptimized` and `End2End.Julia Unoptimized`, the -O0
   codegen smoke. The class they guard, a placeholder of the wrong type reaching
   a backend, is a typing fact a construct census cannot see.
-- The batched groups. Their tokens assert eligibility, and removing their row
-  checks is task `batched-backend-reference-compliance`.
+- The batched groups other than `batched-vs-expected` (next paragraph).
+
+**Batched reference compliance** (docs-repo task
+`batched-backend-reference-compliance`). The same argument, for the batched
+backend: `BatchedPython.batched-vs-expected` runs a `batched` program's rows on
+the batched backend only when its batched census
+(`CertifiedCensus.batchedProgramCensus`: the probability and integrate bodies
+of its `batched = True` compile, after the select pass) leaves
+`batchedCertifiedConstructs`, what the two batched fuzz arms compare (the
+typed fuzzer's and the IR generator's, `docs/fuzz-testing.md`). That list is
+held exact by `Slow.BackendAgreementCoverage`. The check stays keyed with the
+torch fingerprint, and a stderr line says how many programs it certified and
+which constructs keep the rest (today `AcTheta` and `AcSubtree`, the theta
+trees). The rest of the batched groups run regardless: the `batched` token's
+eligibility assertion, `gradients-nan-free` and
+`generate-density-matches-expected` (no arm compares gradients or batched
+generate), and the dense and topK checks in `BatchedPython (slow)`. `dense`
+keeps its row checks by decision: it is a corpus claim about the program, not
+backend testing.
 
 A census says nothing about effects or sharing either; for generate bodies
 that is `prop_Fuzz_BackendsAgree`'s generate arm and the replayed generate

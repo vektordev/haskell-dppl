@@ -31,6 +31,9 @@ module CertifiedCensus
   , certifiedConstructs
   , programCensus
   , uncertifiedConstructs
+  , batchedCertifiedConstructs
+  , batchedProgramCensus
+  , batchedUncertifiedConstructs
   ) where
 
 import Data.Char (isSpace)
@@ -183,3 +186,54 @@ programCensus envs =
 -- | The constructs of a census the fuzzers do not certify.
 uncertifiedConstructs :: [String] -> [String]
 uncertifiedConstructs census = census \\ certifiedConstructs
+
+-- | The batched counterpart of 'certifiedConstructs' (docs-repo task
+-- @batched-backend-reference-compliance@): the constructs the two batched
+-- fuzz arms put through the batched backend and compare with the
+-- interpreter, in the probability and integrate bodies they call. Those are
+-- the typed-program fuzzer's batched arm ('TestFuzz.prop_Fuzz_BackendsAgree',
+-- over the fixed-seed sample of 'BackendCoverage') and the IR fuzz
+-- generator's ('IRFuzz.irGeneratorBatchedConstructs'). The typed arm carries
+-- nearly all of it: the IR generator's batched cases are few, and a body that
+-- calls a helper or holds a theta constant is refused there. Kept exact by
+-- @Slow.BackendAgreementCoverage@.
+--
+-- A corpus program declaring @batched@ has its @batched-vs-expected@ value
+-- check (its @.tst@ rows on the batched backend) exactly when
+-- 'batchedUncertifiedConstructs' of its 'batchedProgramCensus' is non-empty.
+-- Only that check: the arm compares @forward@ and @integrate@ at query
+-- points, never gradients, batched generate or the dense entry points, so
+-- @gradients-nan-free@, @generate-density-matches-expected@ and the dense and
+-- topK checks run regardless.
+batchedCertifiedConstructs :: [String]
+batchedCertifiedConstructs =
+  -- Measured 2026-10-13: the typed fuzzer's sample (1000 draws, 344
+  -- batched-compared) reaches 54 constructs, the IR generator's (600 cases,
+  -- 28 batched-compared) 49; together 58.
+  [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
+    "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcTail",
+    "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BReduce ROpAdd",
+    "Builtin:BReduce ROpLogSumExp", "Builtin:BTensor",
+    "ConTag:TgCons", "ConTag:TgLeft", "ConTag:TgRight", "ConTag:TgTuple",
+    "Cumulative:IRNormal Linear", "Cumulative:IRNormal Log", "Cumulative:IRUniform Linear",
+    "Density:IRNormal Linear", "Density:IRUniform Linear",
+    "IRExpr:IRApply", "IRExpr:IRBuiltin", "IRExpr:IRConformsTo", "IRExpr:IRConst",
+    "IRExpr:IRConstruct", "IRExpr:IRCumulative", "IRExpr:IRDensity", "IRExpr:IRDestruct",
+    "IRExpr:IRError", "IRExpr:IRIf", "IRExpr:IRIsPossible", "IRExpr:IRLambda",
+    "IRExpr:IRLetIn", "IRExpr:IROp", "IRExpr:IRSelect", "IRExpr:IRUnaryOp", "IRExpr:IRVar",
+    "Operand:OpAnd", "Operand:OpApprox", "Operand:OpDiv", "Operand:OpEq",
+    "Operand:OpGreaterThan", "Operand:OpLessThan", "Operand:OpMax", "Operand:OpMult",
+    "Operand:OpOr", "Operand:OpPlus", "Operand:OpSub",
+    "UnaryOperand:OpAbs", "UnaryOperand:OpExp", "UnaryOperand:OpIsAny", "UnaryOperand:OpLog",
+    "UnaryOperand:OpNeg", "UnaryOperand:OpNot", "UnaryOperand:OpSign"
+  ]
+
+-- | A program's batched census: the constructs of the probability and
+-- integrate bodies of its batched compile (after the select pass), which is
+-- what @batched-vs-expected@ calls. A refused compile contributes nothing.
+batchedProgramCensus :: Either e IREnv -> [String]
+batchedProgramCensus = either (const []) (irEnvConstructs inferenceBodies)
+
+-- | The constructs of a batched census the batched arm does not certify.
+batchedUncertifiedConstructs :: [String] -> [String]
+batchedUncertifiedConstructs census = census \\ batchedCertifiedConstructs
