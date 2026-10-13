@@ -3,7 +3,8 @@ module SPLL.Analysis (
   annotate,
   annotateEnumsProg,
   definitelyUntagged,
-  annotateConditionalProg,
+  enumerableApplication,
+  headIsConditional,
   enumerableDomain,
   materializationDomain,
   withinMaterializationBudget,
@@ -19,6 +20,8 @@ import Data.List (genericLength, genericTake, nub)
 import Data.Bifunctor
 import Control.Monad (guard)
 import SPLL.Typing.Typing (setTags)
+import SPLL.Typing.PType (PType(..))
+import SPLL.Typing.RType (RType(..))
 import PredefinedFunctions
 import Utils
 import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN)
@@ -107,7 +110,6 @@ annotateIn adtsParam funEnv visited env e = withNewTypeInfo
     -- is reached on every `(\x -> ..) v` under an application spine.
     newTags = valueTgs ++ filter (not . isDiscreteValues) oldTags
     isDiscreteValues (DiscreteValues _) = True
-    isDiscreteValues IsConditional = False
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
 
 discretesTags :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> [Tag]
@@ -442,15 +444,32 @@ getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of
   -- ran twice or disagreed with itself, and silently picking one would hide it.
   mvs -> error ("getValuesFromExpr: " ++ show (length mvs) ++ " DiscreteValues tags on one node")
 
--- The FCData certificate is built once in 'Prelude.compile' and threaded in,
--- rather than rebuilt here (modality-split-forwardchaining).
-annotateConditionalProg :: FCData -> Program -> Program
-annotateConditionalProg fcData p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap (tagConditional fcData p))) fs}
+-- | The enumeration engine's applicability to an application @l v@ (design
+-- law-carrying-modality M5): the head is conditional ('headIsConditional')
+-- and the argument is a random value with an enumerable domain, which is the
+-- certificate. Read alike by the modality engine's let rule and by
+-- IRCompiler's dispatch. The engine's own budget gate
+-- ('enumerationWithinMaterializationBudget') stays at the dispatch: over
+-- budget, the application falls through to the next engine.
+enumerableApplication :: FCData -> Program -> Expr -> Expr -> Maybe MultiValue
+enumerableApplication fcData p l v
+  | headIsConditional fcData p l
+  , pType (getTypeInfo v) /= Deterministic
+  , not (returnsFunction (rType (getTypeInfo l)))
+  = enumerableDomain (tags (getTypeInfo v))
+  | otherwise = Nothing
+  where
+    returnsFunction (TArrow _ (TArrow _ _)) = True
+    returnsFunction _ = False
 
-tagConditional :: FCData -> Program -> Expr -> TypeInfo
-tagConditional fcData p (Expr ti (Lambda _ b)) = if isConditional fcData p [] b then ti{tags=IsConditional:tags ti} else ti
-tagConditional fcData p e@(Expr ti (Var _)) = if isConditional fcData p [] e then ti{tags=IsConditional:tags ti} else ti
-tagConditional _ _ x = getTypeInfo x
+-- | Is an application head conditional ('isConditional'): a lambda whose body
+-- is, or a reference resolving to such a function. Any other head is not.
+-- The FCData certificate is built once in 'Prelude.compile' and threaded in
+-- (modality-split-forwardchaining).
+headIsConditional :: FCData -> Program -> Expr -> Bool
+headIsConditional fcData p (Expr _ (Lambda _ b)) = isConditional fcData p [] b
+headIsConditional fcData p e@(Expr _ (Var _)) = isConditional fcData p [] e
+headIsConditional _ _ _ = False
 
 isConditional :: FCData -> Program -> [ChainName] -> Expr -> Bool
 isConditional _ _ visited e | chainName (getTypeInfo e) `elem` visited = False

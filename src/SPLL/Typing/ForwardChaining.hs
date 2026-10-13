@@ -18,6 +18,13 @@ module SPLL.Typing.ForwardChaining
   , imageGuards
   , isInvertibleLambda
   , isWitnessedLambda
+  , WitnessCert(..)
+  , pointWitnessCert
+  , WorldsShape(..)
+  , WorldsCtx(..)
+  , worldsShape
+  , hasRandomLeaf
+  , permissiveDet
   , findEquivalentExpression
   , findExprWithCN
   , unwrapLambdas
@@ -41,6 +48,9 @@ import Data.Foldable
 import Data.Char (isUpper)
 import Utils
 import SPLL.Typing.RType
+import SPLL.Typing.PType (PType(Deterministic))
+import SPLL.ReservedNames (uniformName, normalName)
+import Control.Applicative ((<|>))
 
 
 
@@ -184,6 +194,208 @@ isWitnessedLambda fcData adtsDecls obsCN lambdaCN = case inversionSetup fcData l
         obsClause = ParameterHornClause unwrappedObsCN
     in any (isJust . toValueExpr (hornClauses fcData) [obsClause] adtsDecls) toInvCNs
   Nothing -> False
+
+-- ===== Engine applicability (law-carrying-modality M5) =====
+--
+-- Two of the probabilistic application's engines decide on forward chaining
+-- alone, so their applicability is answered here, as a certificate the
+-- modality engine's let rule and IRCompiler's dispatch both read
+-- (task engine-applicability-as-data).
+
+-- | The point-inversion engine's certificate for a binding: the inverse the
+-- codegen applies, seeded at the lambda's body ('toInvExprMaybe'), and the
+-- witness verdict seeded at the declaration's observed root
+-- ('isWitnessedLambda'), which the modality engine's let rule reads. Two
+-- seeds, deliberately (design law-carrying-modality §C): the IR applies the
+-- inverse to the sample reaching the binding, while the verdict says whether
+-- the observation reaches the binding at all.
+data WitnessCert = WitnessCert
+  { wcChain  :: InvChain
+  , wcAtRoot :: Bool
+  }
+
+-- | The point-inversion certificate of the binding of the lambda that head
+-- @headCN@ resolves to, in the declaration observed at @obsCN@: 'Nothing'
+-- when no occurrence of the bound variable is point-invertible from the
+-- lambda's body. A chain name forward chaining never saw (a node a later pass
+-- synthesized) has no certificate.
+pointWitnessCert :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe WitnessCert
+pointWitnessCert fcData adtsDecls obsCN headCN
+  | isNothing (lookup headCN (chainNameInfo fcData)) = Nothing
+  | otherwise = do
+      chain <- toInvExprMaybe fcData adtsDecls headCN
+      Just (WitnessCert chain (isWitnessedLambda fcData adtsDecls obsCN headCN))
+
+-- | The set-witness engine's certificate (design set-valued-witnesses): how
+-- the observation is inverted onto the bound variable, one node per
+-- structural case of IRCompiler's @invertToWorlds@. The walk is that
+-- function's shape walk, factored out of its IR construction.
+data WorldsShape
+  = WSFree
+    -- ^ A subtree the bound variable does not reach: a membership test, or an
+    -- independent factor.
+  | WSTransport
+    -- ^ A point or monotone interval transport, by forward chaining seeded at
+    -- this node, down to the variable's one occurrence below it.
+  | WSEquality WorldsShape
+    -- ^ An @==@ against a deterministic operand, inverted at the point.
+  | WSSplit WorldsShape WorldsShape WorldsShape
+    -- ^ An @if@: its condition (free when it does not read the variable) and
+    -- its two arms.
+  | WSCompare WorldsShape
+    -- ^ A comparison against a deterministic bound: an interval on its side.
+  | WSConnective [WorldsShape]
+    -- ^ @not@, @and@, @or@ over Boolean parts.
+  | WSTuple WorldsShape WorldsShape
+    -- ^ A tuple observed at a point, per field.
+  | WSThrough WorldsShape (Maybe WorldsShape)
+    -- ^ A binding the variable reaches only through its value (a nested
+    -- @let@, or a call): the body inverted onto the inner parameter, then,
+    -- where the body constrains it, the value inverted onto the variable.
+  | WSOpaqueCall
+    -- ^ A call of a function parameter, whose callee only the compile in
+    -- scope knows; admitted here, decided there.
+  deriving (Eq, Show)
+
+-- | What the set-witness walk reads besides forward chaining: the program's
+-- declarations (a call of a top-level function is entered) and whether an
+-- x-free subtree is deterministic given scope.
+data WorldsCtx = WorldsCtx
+  { wcFC    :: FCData
+  , wcADTs  :: [ADTDecl]
+  , wcDecls :: [FnDecl]
+  , wcDet   :: Expr -> Bool
+  }
+
+data WTarget = WTPoint | WTInterval
+  deriving Eq
+
+-- | The set-witness certificate of a binding whose variable occurs at @occs@
+-- in @body@, or 'Nothing' when some node between an occurrence and the
+-- observation is none of the shapes the engine inverts: a comparison against
+-- a deterministic bound, an @if@ split, a Boolean connective, a tuple, an
+-- @==@, a step forward chaining transports, a binding the variable reaches
+-- through its value, or a subtree the variable does not reach. Either
+-- target the engine builds (a point, or an interval for a cumulative query)
+-- will do.
+--
+-- This is the engine's necessary condition, not its whole contract: the IR
+-- construction can still decline (a transported sentinel it cannot measure,
+-- an x-free factor reading a random local, a function-valued body), which
+-- stays a refusal. Where the walk asks whether a part is deterministic it
+-- asks 'wcDet', which a caller makes permissive enough to admit every part
+-- the compiler might find deterministic once enclosing variables are
+-- recovered.
+worldsShape :: WorldsCtx -> [ChainName] -> Expr -> Maybe WorldsShape
+worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterval
+  where
+    fc = wcFC wc
+    det = wcDet wc
+    walk os e tgt
+      | not (hasOcc os e) = Just WSFree
+      | Expr _ (InjF (Named "eq") [l, r]) <- e, tgt == WTPoint
+      , Just side <- eqSide os l r, not (isBareOcc os side) = WSEquality <$> walk os side WTPoint
+      | Just t <- transport os e tgt = Just t
+      | otherwise = structural os e tgt
+    hasOcc os e = any (`elem` os) (subtreeCNs e)
+    isBareOcc os (Expr ti (Var _)) = chainName ti `elem` os
+    isBareOcc _ _ = False
+    eqSide os l r
+      | hasOcc os l && not (hasOcc os r) && det r = Just l
+      | hasOcc os r && not (hasOcc os l) && det l = Just r
+      | otherwise = Nothing
+    transport os e tgt = case filter (`elem` subtreeCNs e) os of
+      [occ] -> case tgt of
+        WTPoint    -> WSTransport <$ toSeededInvExpr fc (wcADTs wc) (getChainName e) occ
+        WTInterval -> WSTransport <$ toSeededMonotoneInvExpr fc (wcADTs wc) (getChainName e) occ
+      _ -> Nothing
+    structural os e tgt = case e of
+      Expr _ (IfThenElse c t f)
+        | not (hasOcc os c) && det c -> WSSplit WSFree <$> walk os t tgt <*> walk os f tgt
+        | otherwise -> WSSplit <$> walk os c WTPoint <*> walk os t tgt <*> walk os f tgt
+      Expr _ (InjF (Named op) [a, b])
+        | op `elem` ["lt", "gt"] -> case () of
+            _ | hasOcc os a && not (hasOcc os b) && det b -> WSCompare <$> walk os a WTInterval
+              | hasOcc os b && not (hasOcc os a) && det a -> WSCompare <$> walk os b WTInterval
+              | otherwise -> Nothing
+        | op `elem` ["and", "or"] -> (\x y -> WSConnective [x, y]) <$> walk os a WTPoint <*> walk os b WTPoint
+        | op == "TCons", tgt == WTPoint -> WSTuple <$> walk os a WTPoint <*> walk os b WTPoint
+      Expr _ (InjF (Named "not") [a]) -> WSConnective . (: []) <$> walk os a WTPoint
+      Expr _ (Apply (Expr lamTI (Lambda _ b)) v)
+        | hasOcc os v && not (hasOcc os b) ->
+            through os (fromMaybe [] (lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
+        | otherwise -> Nothing
+      Expr _ (Apply _ _) -> call os e tgt
+      _ -> Nothing
+    -- The body onto the inner parameter (@osY@), then the value @v@ onto the
+    -- variable, which the body consults only where it constrains the
+    -- parameter at all.
+    through os osY b v tgt = do
+      wy <- walk osY b tgt
+      case wy of
+        WSFree -> Just (WSThrough WSFree Nothing)
+        _ | isBareOcc os v -> Just (WSThrough wy Nothing)
+          | otherwise -> WSThrough wy . Just <$> (walk os v WTPoint <|> walk os v WTInterval)
+    -- A call: a saturated call of a non-recursive top-level function entered
+    -- at the one parameter the variable reaches; a function parameter's call,
+    -- whose callee is known only in scope; or a callee forward chaining
+    -- resolves to a lambda the variable is not in.
+    call os e tgt
+      | (Expr _ (Var f), args@(_:_)) <- spine e
+      , Just decl <- lookup f (wcDecls wc) = do
+          let lams = lambdaSpine decl
+          guard' (length lams == length args && not (recursive f))
+          k <- case [ i | (i, a) <- zip [0 :: Int ..] args, hasOcc os a ] of
+                 [i] -> Just i
+                 _   -> Nothing
+          guard' (and [ det a | (i, a) <- zip [0 ..] args, i /= k ])
+          let (lamK, pK) = lams !! k
+          guard' (pK `notElem` map snd (drop (k + 1) lams))
+          through os (fromMaybe [] (lookup lamK (lambdaVarOccurrences fc))) (finalBody decl) (args !! k) tgt
+      | Expr _ (Apply (Expr _ (Var g)) _) <- e, isNothing (lookup g (wcDecls wc)) = Just WSOpaqueCall
+      | Expr _ (Apply l v) <- e
+      , isJust (lookup (getChainName l) (chainNameInfo fc))
+      , not (hasOcc os l)
+      , Just (lamCN, LambdaInfo _ bodyCN, _) <- findEquivalentExpression fc (getChainName l)
+      , Just b <- findInDecls (untag bodyCN)
+      = through os (fromMaybe [] (lookup lamCN (lambdaVarOccurrences fc))) b v tgt
+      | otherwise = Nothing
+    guard' True = Just ()
+    guard' False = Nothing
+    spine = go []
+      where go args (Expr _ (Apply l v)) = go (v : args) l
+            go args e = (e, args)
+    lambdaSpine (Expr ti (Lambda p b)) = (chainName ti, p) : lambdaSpine b
+    lambdaSpine _ = []
+    finalBody (Expr _ (Lambda _ b)) = finalBody b
+    finalBody e = e
+    findInDecls cn = listToMaybe (mapMaybe (findExprWithCN' cn . snd) (wcDecls wc))
+    -- Does top-level @f@ reach itself through the declarations its body names?
+    recursive f = go Set.empty (callees f)
+      where
+        go _ [] = False
+        go seen (g : gs)
+          | g == f = True
+          | g `Set.member` seen = go seen gs
+          | otherwise = go (Set.insert g seen) (callees g ++ gs)
+        callees g = maybe [] (filter (`elem` map fst (wcDecls wc)) . Set.toList . freeVarsExpr) (lookup g (wcDecls wc))
+
+-- | The chain names of every node of an expression.
+subtreeCNs :: Expr -> [ChainName]
+subtreeCNs e = getChainName e : concatMap subtreeCNs (getSubExprs e)
+
+-- | Does an expression draw fresh randomness itself: a primitive
+-- distribution or a neural read anywhere in it? A part with none can only be
+-- random through the variables and calls it reads.
+hasRandomLeaf :: Expr -> Bool
+hasRandomLeaf (Expr _ (Var n)) = n == normalName || n == uniformName
+hasRandomLeaf (Expr _ (ReadNN _ _)) = True
+hasRandomLeaf e = any hasRandomLeaf (getSubExprs e)
+
+-- | The permissive determinism test of the set-witness walk: deterministic as
+-- annotated, or drawing no fresh randomness itself ('hasRandomLeaf').
+permissiveDet :: Expr -> Bool
+permissiveDet e = pType (getTypeInfo e) == Deterministic || not (hasRandomLeaf e)
 
 -- | One inversion chain, as codegen consumes it. The three IR expressions past
 -- 'invValue' are all tests or corrections *about* that value, and every one of
@@ -915,7 +1127,7 @@ mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
   , "Candidate occurrences that were tried and could not be witnessed: " ++ show candidateCNs
   , "This usually means the function is not algebraically invertible in this variable (e.g. it is"
   , "many-to-one, like a count/sum of conditional contributions) and the program shape did not"
-  , "qualify for enumeration-based inference instead (the IsConditional + toIREnumerate path in the"
+  , "qualify for enumeration-based inference instead (the isConditional + toIREnumerate path in the"
   , "IRCompiler). See docs/forward-chaining-recursion-constraint.md for the failure analysis."
   ]
 mergeExpr _ _ _ [x] = x

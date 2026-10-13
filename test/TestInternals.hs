@@ -11,14 +11,16 @@ import SPLL.Lang.Types
 import ArbitrarySPLL ()
 
 import Test.QuickCheck hiding (collect, label, sample, total)
-import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
+import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..), addRTypeInfo)
 import SPLL.Typing.RType (RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
 import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.Analysis (annotate, annotateEnumsProg, definitelyUntagged, materializationDomain, withinMaterializationBudget, structuralTag, listedTag)
 import qualified SPLL.CodeGenPyTorch
-import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Typing.Infer (addTypeInfo, addModalityLaws)
+import SPLL.Typing.ModalityInfer (Law(..), Justification(..), EngineCert(..), engineName)
+import SPLL.Typing.ForwardChaining (WorldsShape(..))
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
@@ -30,7 +32,7 @@ import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, det
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
-import SPLL.Typing.PType (PType(Integrate, Deterministic))
+import SPLL.Typing.PType (PType(Integrate, Deterministic, Bottom))
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate, isPrefixOf, isSuffixOf, sort, nub)
 import Data.Maybe (fromMaybe, mapMaybe)
@@ -1165,6 +1167,78 @@ witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
             assertBool "observation-seeded query must not"
               (not (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) lamCN))
   ]
+
+-- | Engine applicability as data (task engine-applicability-as-data,
+-- law-carrying-modality M5): each probabilistic-application engine's
+-- predicate returns its certificate, which the modality engine's let rule
+-- records on the binding's applied lambda ('JBinding', in dispatch order) and
+-- IRCompiler's dispatch reads. One positive and one negative shape per
+-- predicate, the set-witness ones including the nested-let shapes of
+-- set-witness-nested-let-classifier at their landed verdict; then the floor
+-- a binding no engine applies to gets, and the plan closed form of the
+-- comparison rule.
+engineApplicabilityTests :: TestTree
+engineApplicabilityTests = testGroup "Engine applicability (law-carrying-modality M5)"
+  [ testCase "enumeration: a conditional body over an enumerable draw" $
+      assertHas "enumeration" (engines "c" "main = draw c = (if Uniform < 0.5 then 1 else 2) in if c == 1 then 0.3 else 0.7")
+  , testCase "enumeration: not over a body that is not conditional" $
+      assertHasNot "enumeration" (engines "c" "main = draw c = (if Uniform < 0.5 then 1 else 2) in c + 1")
+  , testCase "plan: a neural read's structured output" $
+      assertHas "plan readPair" (engines "p" (readPairDecl ++ "main s = draw p = readPair s in fst p < snd p"))
+  , testCase "plan: not a tuple of primitives" $
+      assertHasNot "plan readPair" (engines "p" "main = draw p = (Normal, Normal) in fst p < snd p")
+  , testCase "point inversion: an invertible body" $
+      assertHas "point inversion (witnessed)" (engines "x" "main = draw x = Uniform in x + 1.0")
+  , testCase "point inversion: not through a comparison" $
+      assertBool "point inversion claimed" (not (any ("point inversion" `isPrefixOf`)
+        (engines "x" "main = draw x = Uniform in if x > 0.5 then 1.0 else 0.0")))
+  , testCase "affine: every use flows into one affine consumer" $
+      assertHas "affine marginalisation" (engines "x" "main = draw x = Normal in x + Normal")
+  , testCase "affine: not into two consumers" $
+      assertHasNot "affine marginalisation" (engines "x" "main = draw x = Normal in (x + Normal, x + Normal)")
+  , testCase "set-valued witnesses: a comparison against a deterministic bound" $
+      assertHas "set-valued witnesses" (engines "x" "main = draw x = Normal in if x > 0.5 then 1.0 else 0.0")
+  , testCase "set-valued witnesses: not through sqrt, outside the monotone table" $
+      assertHasNot "set-valued witnesses" (engines "x" "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0")
+  , testCase "set-valued witnesses: a nested let reading x only in its right-hand side is inverted through" $
+      case [ w | CertWorlds w <- certsOf "x" "main = draw x = Normal in draw y = x + 1.0 in if y > 0.0 then 1.0 else 0.0" ] of
+        [WSThrough _ (Just WSTransport)] -> return ()
+        ws -> assertFailure ("expected the inversion through y, got " ++ show ws)
+  , testCase "set-valued witnesses: not with x in the nested let's body too" $
+      assertHasNot "set-valued witnesses" (engines "x" "main = draw x = Normal in draw y = x + 1.0 in if y > x then 1.0 else 0.0")
+  , testCase "set-valued witnesses: not with fresh randomness in the nested right-hand side (the affine collapse takes it)" $ do
+      let es = engines "x" "main = draw x = Normal in draw y = x + Normal in if y > 0.0 then 1.0 else 0.0"
+      assertHasNot "set-valued witnesses" es
+      assertHas "affine marginalisation" es
+  , testCase "no engine: the binding is sample-only, and the function Bottom" $ do
+      let src = "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
+      assertEqual "certificates" [] (engines "x" src)
+      assertEqual "main" Bottom (mainPTypeOf src)
+  , testCase "a deterministic binding needs no engine and records none" $
+      assertEqual "" Nothing (map engineName <$> bindingJust "x" "main = draw x = 1.0 in x + Normal")
+  , testCase "compare: two operands projecting from a plan read have the plan closed form" $
+      assertEqual "" Integrate (mainPTypeOf (readPairDecl ++ "main s = draw p = readPair s in fst p < snd p"))
+  , testCase "compare: a plan operand against a fresh Gaussian has none" $
+      assertEqual "" Bottom (mainPTypeOf ("neural readObj :: (Symbol -> (Bool, Float))\n"
+        ++ "main sym = draw o = readObj sym in if (snd o) > (2.0 + (Normal * 0.5)) then 1 else 0"))
+  ]
+  where
+    readPairDecl = "neural readPair :: (Symbol -> (Float, Float))\n"
+    typed src = case tryParseProgram "test" src of
+      Left e -> error ("parse failed: " ++ show e)
+      Right p -> case addRTypeInfo p of
+        Left e -> error ("rtype failed: " ++ show e)
+        Right rt -> either (\e -> error ("typing failed: " ++ show e)) id
+                      (addModalityLaws (annotateProg (annotateEnumsProg rt)))
+    bindingJust v src = let (prog, _, laws) = typed src
+                        in case Map.lookup (letLambdaCN v prog) laws of
+                             Just (Law _ (JBinding cs)) -> Just cs
+                             _ -> Nothing
+    certsOf v src = fromMaybe (error ("no engine certificate on the binding of " ++ v)) (bindingJust v src)
+    engines v src = map engineName (certsOf v src)
+    mainPTypeOf src = let (prog, _, _) = typed src in pType (getTypeInfo (fromMaybe (error "no main") (lookup "main" (functions prog))))
+    assertHas e es = assertBool (show e ++ " not among " ++ show es) (e `elem` es)
+    assertHasNot e es = assertBool (show e ++ " among " ++ show es) (e `notElem` es)
 
 -- | Runtime ANY-refusal guard (design modality-witnessed-inference, §ANY —
 -- the milestone-3 remainder). ANY in the slot that witnesses a let binding
@@ -3547,8 +3621,6 @@ materializationGuardTests = testGroup "Cardinality guard for marginal materializ
       let bound = defaultMaterializationCardinality
       assertEqual "no DiscreteValues tag at all"
         Nothing (materializationDomain bound [])
-      assertEqual "a tag carrying no domain (IsConditional only)"
-        Nothing (materializationDomain bound [IsConditional])
       assertEqual "a continuous leaf has no finite enumeration"
         Nothing (materializationDomain bound [DiscreteValues MultiContinuous])
       assertEqual "a partly-continuous tuple enumerates only a discrete residue"
@@ -5453,6 +5525,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , classConstraintTests
   , forwardChainingCertTests
   , witnessedBindingTests
+  , engineApplicabilityTests
   , sweepBypassTests
   , anyRefusalTests
   , testGroup "writeLogits"

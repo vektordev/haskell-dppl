@@ -306,7 +306,7 @@ prop_TopKEndToEnd = once $ ioProperty $ do
     | r <- results ]
 
 -- testConditionalLambdaBC: named deterministic selector applied to a coin-flip argument.
--- Routes through IsConditional + toIREnumerate path in IRCompiler.
+-- Routes through the isConditional + toIREnumerate path in IRCompiler.
 -- Argument has 2 discrete values; each iteration traverses one if-else arm → BC = 2.
 prop_BCConditionalLambda :: Property
 prop_BCConditionalLambda = once $ ioProperty $ do
@@ -317,7 +317,7 @@ prop_BCConditionalLambda = once $ ioProperty $ do
     _ -> return $ counterexample ("Unexpected result shape: " ++ show result) False
 
 -- Investigation program-equivalence-invariants, required invariant #1:
--- `apply (var "f") (discrete_arg)` (routed through IsConditional + toIREnumerate,
+-- `apply (var "f") (discrete_arg)` (routed through isConditional + toIREnumerate,
 -- same shape as testConditionalLambdaBC above) vs. the fully hand-inlined
 -- if-else over the same discrete argument must agree on (prob, dim, bc) at
 -- every query point. This is the exact program pair the investigation

@@ -68,7 +68,12 @@ import End2EndTesting (programRuntimeFields)
 --   refusing an ANY marginal. Those belong to M2 and M6, so the family stays
 --   log-only until the later of the two lands;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
--- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates.
+-- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates, which
+--   cut the promoted draw-intro frontier from 16 failing tests to 13 (probe
+--   rows 5, 8 and 9: the affine certificate of a fresh draw beside a
+--   recovered variable is now the one compiled) and left it there: most of the rest is a single-read random
+--   binding no engine measures in place, which waits on a decision recorded
+--   in that task; linear-inline fails only on gaussianTrajectory4's masks.
 refusalIsHard :: Family -> Bool
 refusalIsHard AliasIntro = False
 refusalIsHard HelperExtract = False
@@ -86,15 +91,9 @@ data Known = Known { kProg :: String, kFam :: Family, kSite :: String, kDoc :: S
 -- the list cannot rot. Each tracking document carries the minimal pair.
 knownDivergences :: [Known]
 knownDivergences =
-  -- `draw z = Normal in 0.0 * z`: the random factor bound instead of the
-  -- zero. (The zero bound, `draw z = 0.0 in z * Normal`, agrees since
-  -- fuzz-admission-oracle-bugs item 6: a factor whose value set is {0} is the
-  -- absorbing element.)
-  [ Known "probe10" DrawIntro "draw-intro Normal" zeroRandomBound
-  , Known "multDeterministicZero" DrawIntro "draw-intro Normal" zeroRandomBound
   -- A structured random value read through a second binder -- an alias, or
   -- a helper's parameter -- loses a field's constraint.
-  , Known "drawDestructuredShared" DrawIntro "" structuredReread
+  [ Known "drawDestructuredShared" DrawIntro "" structuredReread
   , Known "drawDestructuredShared" AliasIntro "" structuredReread
   , Known "drawDestructuredShared" HelperExtract "" structuredReread
   , Known "setWitnessTupleDisjointFields" HelperExtract "" structuredReread
@@ -131,7 +130,6 @@ knownDivergences =
   , Known "gaussianTrajectory4" AliasIntro "" aliasChainJacobian
   ]
   where
-    zeroRandomBound = "draw-bound-random-factor-times-literal-zero-loses-dirac-mass"
     aliasDoubleJacobian = "aliased-draw-scaled-sibling-double-jacobian"
     aliasChainJacobian = "aliased-draw-chain-scaled-step-double-jacobian"
     structuredReread = "structured-draw-reread-through-binder-drops-field"

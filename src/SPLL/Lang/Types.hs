@@ -358,7 +358,6 @@ data MultiValue = MultiDiscretes [Value]
 
 
 data Tag = DiscreteValues MultiValue
-           | IsConditional
            deriving (Show, Eq)
            
 

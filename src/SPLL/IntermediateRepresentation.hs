@@ -397,7 +397,7 @@ data LogSpace = Linear | Log deriving (Show, Eq)
 -- fourteen retiring constructors group into (tuples, cons lists, and the two
 -- 'Either' arms) -- see "Tuples stay binary" in the design for why there is no
 -- fifth, N-ary tag. Named @ConTag@, not @Tag@: "SPLL.Lang.Types" already
--- exports @Tag@ (@DiscreteValues@ / @IsConditional@), which this module
+-- exports @Tag@ (@DiscreteValues@), which this module
 -- re-exports, so reusing the name would shadow it in every module that needs
 -- both.
 data ConTag
