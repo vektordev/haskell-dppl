@@ -25,14 +25,13 @@
 -- construct the generator starts reaching must leave it, and one the corpus
 -- starts using must be added (and so be seen).
 --
--- Generate bodies are left out on both sides: they are never checked across
--- backends (a sample is random, so there is no point value to agree on; task
--- @backend-agreement-writelogits-and-normal-functions@). M2 carries the
--- argument that generate is equivalent anyway: its random primitives are few
--- and simple, and its non-random IR is built from the constructs this census
--- certifies. That is stated in the task docs rather than encoded here, since a
--- construct list cannot express it.
-module BackendCoverage (backendCoverageTests, irGeneratorCoverageTests, fuzzCoverageExceptions, batchedFuzzCoverageExceptions, irGeneratorDeferred, corpusCensusConfigs) where
+-- Generate bodies are left out on both sides of this census: the typed
+-- fuzzer checks a sample only for support, by the interpreter's probability
+-- function (task @backend-agreement-generate-support@). The IR fuzz
+-- generator's census ('irGeneratorCoverageTests') does count them: since its
+-- M4 it compares generate bodies on both backends by replaying each backend's
+-- draws through the interpreter.
+module BackendCoverage (backendCoverageTests, irGeneratorCoverageTests, fuzzCoverageExceptions, batchedFuzzCoverageExceptions, irGeneratorDeferred) where
 
 import Control.Exception (SomeException, try, evaluate)
 import Control.Monad (forM)
@@ -51,11 +50,11 @@ import SPLL.Prelude (compile)
 import Control.Concurrent.MVar (newMVar, modifyMVar)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv, IRExpr)
 import BackendAgreement (AgreementCase, comparedBodies, maskedConstruct, batchedComparedBodies)
-import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies, corpusCensusConfigs,
-                        certifiedConstructs, samplingConstructs)
+import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies,
+                        certifiedConstructs, allBodies, batchedCertifiedConstructs)
 import CorpusSweep
 import TestCaseParser (Backend(Batched))
-import IRFuzz (irGeneratorConstructs)
+import IRFuzz (irGeneratorConstructs, irGeneratorBatchedConstructs)
 import TestFuzz (prepareAgreementCase, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize)
 
 -- | Corpus constructs the agreement property does not reach, each with why.
@@ -80,15 +79,15 @@ fuzzCoverageExceptions =
   , ("Sample:IRNormal",    "writeLogits dead-arm noise: a random draw, whose slots the agreement property masks rather than compares (maskedConstruct)")
   ]
 
--- | The batched arm's counterpart of 'fuzzCoverageExceptions' (task
--- @backend-agreement-batched-arm@): constructs of the probability and
--- integrate bodies of the corpus programs that declare @batched@, compiled
--- for batched mode, that the agreement property never puts through the
--- batched backend. Exact, like the scalar list: it says which
--- @batched-vs-expected@ checks the fuzzer certifies (a program none of whose
--- batched constructs is listed). Only the value check: the corpus's batched
--- gradient, generate-density, dense and topK checks are not compared by the
--- fuzzer at all.
+-- | The batched arms' counterpart of 'fuzzCoverageExceptions' (tasks
+-- @backend-agreement-batched-arm@, @batched-backend-reference-compliance@):
+-- constructs of the probability and integrate bodies of the corpus programs
+-- that declare @batched@, compiled for batched mode, that neither batched arm
+-- (the typed fuzzer's, the IR generator's) puts through the batched backend.
+-- Exact, like the scalar list. The programs using one are the ones that keep
+-- their @batched-vs-expected@ check ('CertifiedCensus.batchedCertifiedConstructs').
+-- Only the value check: the corpus's batched gradient, generate-density,
+-- dense and topK checks are not compared by either arm at all.
 batchedFuzzCoverageExceptions :: [(String, String)]
 batchedFuzzCoverageExceptions =
   -- Measured 2026-10-09 (the same 1000-draw sample: 337 of its 548 compared
@@ -104,13 +103,12 @@ batchedFuzzCoverageExceptions =
 -- leave the list.
 irGeneratorDeferred :: [(String, String)]
 irGeneratorDeferred =
-  -- Measured 2026-10-13 at M2 (567 programs x 8 configs): the corpus uses 68
-  -- constructs, the generator reaches all but these. M3 gave every builtin a
-  -- production (BIndex, BListIndex, BMapList, BZip were listed here until
-  -- then); what is left is M4's.
-  [ ("IRExpr:IRSample",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
-  , ("Sample:IRNormal",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
-  ]
+  -- Empty since M4 (generate bodies). Measured 2026-10-13 at M2 (567
+  -- programs x 8 configs): the corpus used 68 constructs in its
+  -- deterministic bodies, the generator reached all but BIndex, BListIndex,
+  -- BMapList, BZip (given productions in M3), IRSample and Sample:IRNormal
+  -- (M4). Since M4 the corpus side counts generate bodies too.
+  []
 
 -- | How many draws the fixed-seed sample takes, and from which seed. Large
 -- enough that a construct the generator reaches at all is in it: a run of the
@@ -133,22 +131,64 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
         Nothing -> do
           cs <- sampleCases
           return (Just cs, cs)
+  -- The batched arm's constructs, shared the same way by the two batched cases.
+  bcache <- newMVar Nothing
+  let batchedSample = modifyMVar bcache $ \c -> case c of
+        Just cs -> return (c, cs)
+        Nothing -> do
+          cs <- batchedFuzzConstructs sample
+          return (Just cs, cs)
   return $ testGroup "BackendAgreementCoverage"
     [ testCase "corpus constructs the agreement fuzzer misses are exactly fuzzCoverageExceptions" $ do
         corpus <- corpusConstructs es
         fuzz <- fuzzConstructs sample
-        checkExceptions "scalar" "fuzzCoverageExceptions" "deterministic bodies" Nothing corpus fuzz fuzzCoverageExceptions
-    , testCase "batched corpus constructs the agreement fuzzer misses are exactly batchedFuzzCoverageExceptions" $ do
+        checkExceptions "scalar" "fuzzCoverageExceptions" "deterministic bodies" Nothing maskedConstruct corpus fuzz fuzzCoverageExceptions
+    , testCase "batched corpus constructs the agreement fuzzers miss are exactly batchedFuzzCoverageExceptions" $ do
         corpus <- corpusConstructsWith (defaultCompilerConfig { batched = True }) inferenceBodies
                     [ e | e <- es, Batched `elem` ceBackends e ]
-        fuzz <- batchedFuzzConstructs sample
-        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of `batched`-declaring programs," Nothing corpus fuzz batchedFuzzCoverageExceptions
+        fuzz <- batchedSample
+        ir <- irGeneratorBatchedConstructs
+        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of `batched`-declaring programs," Nothing maskedConstruct corpus (ir : fuzz) batchedFuzzCoverageExceptions
+    , testCase "batchedCertifiedConstructs is exactly what the two batched arms reach" $ do
+        -- Batched reference compliance (CertifiedCensus): a `batched`
+        -- corpus program whose batched census lies in this list has no
+        -- batched-vs-expected check.
+        fuzz <- batchedSample
+        ir <- irGeneratorBatchedConstructs
+        let reached = sort (filter (not . maskedConstruct) (nub (concat (ir : fuzz))))
+            listed = sort (nub batchedCertifiedConstructs)
+            missing = reached \\ listed
+            stale = listed \\ reached
+        hPutStrLn stderr ("batched arms: the typed fuzzer's sample reaches " ++ show (length (nub (concat fuzz)))
+                          ++ " constructs, the IR generator's " ++ show (length ir) ++ ", together " ++ show (length reached))
+        if null missing && null stale then return () else assertFailure $ unlines $
+          [ "batchedCertifiedConstructs is out of date." ]
+          ++ (if null missing then [] else "Reached by a batched arm, not listed (add them):" : map ("  " ++) missing)
+          ++ (if null stale then [] else "Listed, but no batched arm reaches them any more (remove them):" : map ("  " ++) stale)
     ]
 
+-- | The compiler configs the corpus checks a program under (default, log
+-- space, the plan engine at materialization budget 0 in both spaces, branch
+-- counting, topK in both spaces, the unoptimized pipeline). Each emits
+-- different IR. Not part of the certified census (IR fuzz generator M5); the
+-- guard that the IR generator reaches everything the compiler emits under any
+-- of them, so that no config can emit an uncertifiable construct.
+generatorGuardConfigs :: [(String, CompilerConfig)]
+generatorGuardConfigs =
+  [ ("default", defaultCompilerConfig)
+  , ("log space", defaultCompilerConfig { logSpace = True })
+  , ("budget 0", defaultCompilerConfig { materializationCardinality = 0 })
+  , ("budget 0, log space", defaultCompilerConfig { materializationCardinality = 0, logSpace = True })
+  , ("branch counts", defaultCompilerConfig { countBranches = True })
+  , ("topK", defaultCompilerConfig { topKThreshold = Just 0.05 })
+  , ("topK, log space", defaultCompilerConfig { topKThreshold = Just 0.05, logSpace = True })
+  , ("-O0", defaultCompilerConfig { optimizerLevel = 0 })
+  ]
+
 -- | The IR fuzz generator's census (docs-repo design @ir-fuzz-generator@):
--- the constructs the deterministic bodies of the whole corpus (bar the
+-- the constructs every body (generate included, since M4) of the whole corpus (bar the
 -- programs slow for their own compile cost) compile to under any of
--- 'corpusCensusConfigs', that the generator's fixed-seed sample
+-- 'generatorGuardConfigs', that the generator's fixed-seed sample
 -- ('IRFuzz.irGeneratorConstructs') does not reach, are exactly
 -- 'irGeneratorDeferred'.
 irGeneratorCoverageTests :: Corpus -> IO TestTree
@@ -157,10 +197,10 @@ irGeneratorCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
   , sweepSelect = notSlowForCompileCost
   , sweepNote = "the constructs the corpus compiles to under any corpus config and the IR fuzz generator never draws are listed" } $ \es ->
   return $ testGroup "IRGeneratorCoverage" $
-  [ testCase "certifiedConstructs is exactly what the IR generator reaches, sampling primitives aside" $ do
+  [ testCase "certifiedConstructs is exactly what the IR generator reaches" $ do
       -- M2 of impact analysis (CertifiedCensus): a corpus program whose
       -- census lies in this list has no per-program Python or Julia check.
-      let reached = sort (nub irGeneratorConstructs) \\ samplingConstructs
+      let reached = sort (nub irGeneratorConstructs)
           listed = sort (nub certifiedConstructs)
           missing = reached \\ listed
           stale = listed \\ reached
@@ -169,18 +209,20 @@ irGeneratorCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
         ++ (if null missing then [] else "Reached by the IR generator, not listed (add them):" : map ("  " ++) missing)
         ++ (if null stale then [] else "Listed, but the IR generator no longer reaches them (remove them):" : map ("  " ++) stale)
   , testCase "corpus constructs under every corpus config the IR generator misses are exactly irGeneratorDeferred" $ do
-      perConfig <- forM corpusCensusConfigs $ \(cname, conf) -> do
-        cs <- corpusConstructsWith conf deterministicBodies es
+      perConfig <- forM generatorGuardConfigs $ \(cname, conf) -> do
+        cs <- corpusConstructsWith conf allBodies es
         return [ (n ++ " [" ++ cname ++ "]", c) | (n, c) <- cs ]
-      checkExceptions "IR generator" "irGeneratorDeferred" "deterministic bodies under every corpus config"
-        (Just "IRFuzz's fixed-seed sample") (concat perConfig) [irGeneratorConstructs] irGeneratorDeferred
+      -- No construct is masked here: the IR generator compares its draws
+      -- (generate bodies, by replay), where the typed fuzzer does not.
+      checkExceptions "IR generator" "irGeneratorDeferred" "every body under every corpus config"
+        (Just "IRFuzz's fixed-seed sample") (const False) (concat perConfig) [irGeneratorConstructs] irGeneratorDeferred
   ]
 
 -- | The census verdict: the constructs the corpus uses and the fuzz sample
 -- does not must be exactly @listed@.
-checkExceptions :: String -> String -> String -> Maybe String -> [(String, [String])] -> [[String]] -> [(String, String)] -> IO ()
-checkExceptions arm listName what sampleDesc corpus fuzz exceptions = do
-  let fuzzSet = filter (not . maskedConstruct) (nub (concat fuzz))
+checkExceptions :: String -> String -> String -> Maybe String -> (String -> Bool) -> [(String, [String])] -> [[String]] -> [(String, String)] -> IO ()
+checkExceptions arm listName what sampleDesc masked corpus fuzz exceptions = do
+  let fuzzSet = filter (not . masked) (nub (concat fuzz))
       used = sort (nub (concatMap snd corpus))
       uncovered = used \\ fuzzSet
       listed = map fst exceptions

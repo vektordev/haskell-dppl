@@ -12,7 +12,7 @@ import Data.List (groupBy)
 import Data.Function (on)
 import Control.Monad.Random
 import Data.Maybe
-import Data.List (intercalate, nub, isInfixOf, isPrefixOf, transpose, zip4)
+import Data.List (intercalate, nub, isInfixOf, isPrefixOf, transpose, zip4, sort)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -43,7 +43,7 @@ import IRInterpreter (generateRand, generateDet)
 import MockNN (evaluateMockNN, mockInputFor)
 import ImpactManifest
 import CorpusSweep
-import CertifiedCensus (programCensus, uncertifiedConstructs, corpusCensusConfigs)
+import CertifiedCensus (programCensus, uncertifiedConstructs, batchedProgramCensus, batchedUncertifiedConstructs)
 import qualified Data.Map as Map
 
 -- | M1 differential test (design pytorch-tensorizer): the IR select pass is a
@@ -1275,7 +1275,8 @@ batchedPythonFixtures :: [CorpusEntry]
                              , [(String, String, [BatchGroup], [NetMock])]
                              , ([(String, String, [BatchGroup], [NetMock])], [String])
                              , [(String, String, [BatchGroup], [NetMock])]
-                             , Maybe FilePath )
+                             , Maybe FilePath
+                             , [(String, [String])] )
 batchedPythonFixtures corpusEntries' = do
   -- `slow`-headered programs stay out of batched coverage by construction, the
   -- same way they stay out of the Interpreter groups (both sweeps' 'SkipSlow').
@@ -1298,9 +1299,14 @@ batchedPythonFixtures corpusEntries' = do
   -- ^C landing in whichever test happened to force one would have recorded
   -- that program as "crashed" for every other test too.
   let eligibility (n, p, _, tcs) = (,) n <$> batchedEligibility p tcs
-  declared <- parMapIO eligibility [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
+  declaredC <- parMapIO (\(n, p, _, tcs) -> (,) n <$> batchedEligibilityCensus p tcs)
+                        [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
   undeclared <- parMapIO eligibility [ e | e@(_, _, bs, _) <- entries, Batched `notElem` bs ]
-  let eligible = [ (n, src, gs, nets) | (n, Right (src, gs, nets)) <- declared ]
+  let declared = [ (n, fmap fst r) | (n, r) <- declaredC ]
+      -- Per eligible program, the constructs of its batched compile the
+      -- batched fuzz arm does not certify ('batchedUncertifiedConstructs').
+      censuses = [ (n, c) | (n, Right (_, c)) <- declaredC ]
+      eligible = [ (n, src, gs, nets) | (n, Right (src, gs, nets)) <- declared ]
       gained   = [ n | (n, Right _) <- undeclared ]
       topkEligible = topKEntries batchedDeclared
       -- M3: a program declaring `dense` must actually get dense entry points.
@@ -1317,7 +1323,7 @@ batchedPythonFixtures corpusEntries' = do
                       , takeWhile (/= '@') n `elem` denseNames
                       , not (null (denseEntryPoints src)) ]
   mpy <- findTorchPython
-  return (declared, gained, eligible, denseDeclared, topkEligible, denseTopK, mpy)
+  return (declared, gained, eligible, denseDeclared, topkEligible, denseTopK, mpy, censuses)
 
 -- | The cheap, always-on half of the batched-mode differential: pure-Haskell
 -- eligibility bookkeeping (no torch, no subprocess) plus the value
@@ -1332,9 +1338,19 @@ batchedPythonTests :: Corpus -> Manifest -> IO TestTree
 batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
   { sweepName = "BatchedPython", sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
   , sweepNote = "batched/dense eligibility of every program, and the batched value differentials" } $ \entries -> do
-  (declared, gained, eligible, denseDeclared, _, _, mpy) <- batchedPythonFixtures entries
+  (declared, gained, eligible, denseDeclared, _, _, mpy, censuses) <- batchedPythonFixtures entries
   mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
   let refused  = [ (n, msg) | (n, Left msg) <- declared ]
+      -- Batched reference compliance (docs-repo task
+      -- batched-backend-reference-compliance): the interpreter is the
+      -- reference, and the batched fuzz arm certifies the batched backend
+      -- against it construct by construct ('CertifiedCensus.batchedCertifiedConstructs').
+      -- A program's rows run on the batched backend only when its batched
+      -- census leaves that set; the check stays keyed with the torch
+      -- fingerprint. The gradient and generate checks are not certified by
+      -- the fuzzer and run on every eligible program.
+      uncertifiedBatched = [ n | (n, c) <- censuses, not (null c) ]
+      valueRouted = [ e | e@(n, _, _, _) <- eligible, n `elem` uncertifiedBatched ]
       denseNames = map (\(n, _, _, _) -> n) denseDeclared
       denseGained = [ n | (n, src, _, _) <- eligible
                         , n `notElem` denseNames, not (null (denseEntryPoints src)) ]
@@ -1348,7 +1364,8 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
         [ testProperty "torch-python-found" $ once $ ioProperty $
             noTorchProperty "BatchedPython value differential" ]
       Just (py, torch) ->
-        [ testProperty "batched-vs-expected" (once (cachedTorch manifest torch "batched-vs-expected" eligible (runBatchedPython py)))
+        [ testProperty "batched-vs-expected" (once (certifiedNote censuses (length eligible) valueRouted
+                                                     (cachedTorch manifest torch "batched-vs-expected" valueRouted (runBatchedPython py))))
         , testProperty "gradients-nan-free" (once (cachedTorch manifest torch "gradients-nan-free" eligible (runBatchedGradients py)))
         , testProperty "generate-density-matches-expected"
             (once (cachedTorch manifest torch "generate-density-matches-expected" eligible (runBatchedGenerate py))) ]
@@ -1389,7 +1406,7 @@ slowBatchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
   { sweepName = "Slow.BatchedPython (slow)", sweepTier = Slow, sweepSlow = IgnoreSlow
   , sweepSelect = \e -> Batched `elem` ceBackends e || Dense `elem` ceBackends e
   , sweepNote = "dense eligibility and values, and the batched topK differentials, recompiling every batched program per threshold" } $ \entries -> do
-  (_, _, eligible, denseDeclared, topkEligible, denseTopK, mpy) <- batchedPythonFixtures entries
+  (_, _, eligible, denseDeclared, topkEligible, denseTopK, mpy, _) <- batchedPythonFixtures entries
   mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
   let denseNames = map (\(n, _, _, _) -> n) denseDeclared
       denseRefused = [ n | n <- denseNames
@@ -1405,6 +1422,18 @@ slowBatchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
           , testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
           , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
+-- | @batched-vs-expected@ under batched reference compliance: a stderr note
+-- of how many eligible programs the batched fuzz arm certifies (their rows do
+-- not run on the batched backend) and which uncertified constructs keep the
+-- rest, then the check over the rest. With none left it passes on the note.
+certifiedNote :: [(String, [String])] -> Int -> [a] -> Property -> Property
+certifiedNote censuses nEligible routed check = ioProperty $ do
+  let uncertified = sort (nub (concatMap snd censuses))
+  hPutStrLn stderr ("BatchedPython.batched-vs-expected: " ++ show (nEligible - length routed) ++ " of "
+                    ++ show nEligible ++ " eligible programs are certified by the batched fuzz arms; "
+                    ++ show (length routed) ++ " run, for " ++ show uncertified)
+  return (if null routed then property True else check)
+
 -- | Everything the batched differential needs from one corpus program, or a
 -- diagnostic saying why batched mode cannot take it: the three eligibility
 -- conditions (a batched 'compile', a 'generateFunctionsBatched' emission, and
@@ -1412,13 +1441,18 @@ slowBatchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
 -- prob/cumulative points at all. Runs in IO so that a compiler @error@ (rather
 -- than a @Left@) becomes a named diagnostic instead of derailing the group.
 batchedEligibility :: Program -> [TestCase] -> IO (Either String (String, [BatchGroup], [NetMock]))
-batchedEligibility p tcs = do
-  r <- try (evaluate (force (go p tcs))) :: IO (Either SomeException (Either String (String, [BatchGroup], [NetMock])))
+batchedEligibility p tcs = fmap fst <$> batchedEligibilityCensus p tcs
+
+-- | 'batchedEligibility', with the constructs of the batched compile the
+-- batched fuzz arm does not certify ('batchedUncertifiedConstructs').
+batchedEligibilityCensus :: Program -> [TestCase] -> IO (Either String ((String, [BatchGroup], [NetMock]), [String]))
+batchedEligibilityCensus p tcs = do
+  r <- try (evaluate (force (go p tcs))) :: IO (Either SomeException (Either String ((String, [BatchGroup], [NetMock]), [String])))
   return $ either (\e -> Left ("crashed while compiling for batched mode: " ++ show e)) id r
   where
     force res = case res of
       Left msg              -> length msg `seq` res
-      Right (src, gs, nets) -> length src `seq` length gs `seq` length nets `seq` res
+      Right ((src, gs, nets), c) -> length src `seq` length gs `seq` length nets `seq` length (concat c) `seq` res
     go prog cs = do
       let qtcs = filter (\t -> isProbTestCase t || isCumulTestCase t) cs
           netNames = networkMocks prog
@@ -1429,7 +1463,8 @@ batchedEligibility p tcs = do
       srcLines <- generateFunctionsBatched True env
       groups <- maybe (Left "query samples are not structure-of-arrays batchable") Right
                       (batchGroups (not (null netNames)) qtcs)
-      return (intercalate "\n" srcLines, groups, netNames)
+      let census = batchedUncertifiedConstructs (batchedProgramCensus (Right env :: Either () IREnv))
+      return ((intercalate "\n" srcLines, groups, netNames), census)
 
 -- | The point of the @batched@ routing token: a program that declares it must
 -- still be batched-eligible. Each refusal names the program and quotes the
@@ -3729,15 +3764,14 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- interpreter never saw it (it is dynamically typed and forgiving), so the
     -- pre-existing "Interpreter Unoptimized" group could not catch the class.
     unoptEnvs = Map.fromList [ (ceName e, compile defaultCompilerConfig{optimizerLevel = 0} (ceProgram e)) | e <- entries ]
-    -- Every config the corpus checks a program under ('corpusCensusConfigs'),
-    -- the -O2 and -O0 compiles shared with the sweeps. A compile that raises
+    -- The compiles the text backends run (-O2 and -O0, shared with the
+    -- sweeps); not one per config (IR fuzz generator M5). A compile that raises
     -- leaves the program uncertified: its text-backend checks then run, and
     -- report it.
     programUncertified e = do
-      let census = uncertifiedConstructs (programCensus (opt e : unopt e : [ compile conf (ceProgram e) | conf <- otherCensusConfigs ]))
+      let census = uncertifiedConstructs (programCensus [opt e, unopt e])
       r <- try (evaluate (length (concat census) `seq` census))
       return (ceName e, either (\ex -> ["(census raised: " ++ takeWhile (/= '\n') (show (ex :: SomeException)) ++ ")"]) id r)
-    otherCensusConfigs = [ conf | (name, conf) <- corpusCensusConfigs, name `notElem` ["default", "-O0"] ]
     shaped = Map.fromList [ (ceName e, shapedCases e) | e <- entries ]
     opt e = optEnvs Map.! ceName e
     unopt e = unoptEnvs Map.! ceName e

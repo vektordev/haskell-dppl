@@ -139,8 +139,9 @@ other.
 
 Header lines, each optional and on its own line before the rows: `slow` (the
 program belongs to the opt-in Slow tier), `batched` (the program is expected to
-be batched-mode eligible, and its rows are checked on the batched backend
-too), `dense` (its query domain is finite, so batched mode emits dense entry
+be batched-mode eligible; its rows are checked on the batched backend too
+unless the batched fuzz arms certify every construct of its batched compile,
+see `docs/testing.md`, "Batched reference compliance"), `dense` (its query domain is finite, so batched mode emits dense entry
 points; list `batched` as well), and `no-normalization` (keep a neural program
 out of the Normalization sweep, which samples the output; say why in a leading
 comment).

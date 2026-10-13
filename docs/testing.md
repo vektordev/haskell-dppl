@@ -161,8 +161,10 @@ all.
 A `.tst` file may start with optional header lines, in any order: a
 standalone `slow` line; two opt-in tokens, `batched` (declares batched-mode
 eligibility, asserted by the `BatchedPython` group rather than filtered, and
-checks the rows on the batched backend) and `dense` (declares a finite query
-domain, presupposes `batched`), each a line of its own; `no-normalization`
+checks the rows on the batched backend when the batched fuzz arms do not
+certify the program, see "Impact analysis" below) and `dense` (declares a
+finite query domain, presupposes `batched`, and always checks the rows on the
+dense entry points), each a line of its own; `no-normalization`
 (keeps a program out of `End2End.Normalization`, which samples the output and
 cannot cover a wide support; the file's leading comment says why); and, for a
 `test/cases/known-issues/` file only, `expect-failure: <shape>` (design
@@ -584,9 +586,14 @@ tests (`PythonPrelude`, `SamplingPrimitives`). That holds for a program only
 when the fuzzers put every construct it emits through both backends. So
 `buildEnd2EndTree` takes each default-tier program's census
 (`CertifiedCensus.programCensus`): the `irConstructs` of every body, generate
-included, under every config of `corpusCensusConfigs` (the six beyond -O2 and
--O0 cost about a second over the default corpus, and are compiled in
-parallel before the tree is built), less the sampling primitives. A program
+included, of the compiles the text backends run (-O2 and -O0, already shared
+with the sweeps), the sampling primitives included (the IR fuzz generator
+compares generate bodies since its M4). The census is not taken per compiler
+config: certification is a statement about the backends alone, and a construct
+is certified if the IR generator reaches it whichever config emitted it. A
+Slow guard (`BackendCoverage.generatorGuardConfigs`, `irGeneratorDeferred`,
+empty) holds that the generator reaches everything the corpus compiles to
+under log space, budget 0, branch counts and topK too. A program
 with a construct outside `certifiedConstructs` keeps its `End2End.Python` and
 `End2End.Julia` checks (and the WriteLogits ones), keyed with the runtime as in
 the table above. `certifiedConstructs` is a static list of what the IR fuzz
@@ -596,11 +603,29 @@ Two checks stay on the text backends regardless:
 - `End2End.Python Unoptimized` and `End2End.Julia Unoptimized`, the -O0
   codegen smoke. The class they guard, a placeholder of the wrong type reaching
   a backend, is a typing fact a construct census cannot see.
-- The batched groups. Their tokens assert eligibility, and removing their row
-  checks is task `batched-backend-reference-compliance`.
+- The batched groups other than `batched-vs-expected` (next paragraph).
+
+**Batched reference compliance** (docs-repo task
+`batched-backend-reference-compliance`). The same argument, for the batched
+backend: `BatchedPython.batched-vs-expected` runs a `batched` program's rows on
+the batched backend only when its batched census
+(`CertifiedCensus.batchedProgramCensus`: the probability and integrate bodies
+of its `batched = True` compile, after the select pass) leaves
+`batchedCertifiedConstructs`, what the two batched fuzz arms compare (the
+typed fuzzer's and the IR generator's, `docs/fuzz-testing.md`). That list is
+held exact by `Slow.BackendAgreementCoverage`. The check stays keyed with the
+torch fingerprint, and a stderr line says how many programs it certified and
+which constructs keep the rest (today `AcTheta` and `AcSubtree`, the theta
+trees). The rest of the batched groups run regardless: the `batched` token's
+eligibility assertion, `gradients-nan-free` and
+`generate-density-matches-expected` (no arm compares gradients or batched
+generate), and the dense and topK checks in `BatchedPython (slow)`. `dense`
+keeps its row checks by decision: it is a corpus claim about the program, not
+backend testing.
 
 A census says nothing about effects or sharing either; for generate bodies
-that is `prop_Fuzz_BackendsAgree`'s generate arm (`docs/fuzz-testing.md`).
+that is `prop_Fuzz_BackendsAgree`'s generate arm and the replayed generate
+cases of `prop_Fuzz_IRBackendsAgree` (`docs/fuzz-testing.md`).
 
 **What is never skipped.** The compile always runs: the key is computed from
 its output. A compile that fails, or crashes while the key is rendered, has

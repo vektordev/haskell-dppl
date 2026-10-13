@@ -15,9 +15,10 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, (@?=))
 
 import SPLL.Prelude (compile)
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, IREnv)
+import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv)
 import ImpactManifest
-import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs)
+import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
+                        batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs)
 import End2EndTesting (interpreterKey, pythonKey, juliaKey, loadCorpusPair, networkMocks)
 import TestCaseParser (corpusPplPath, isProbTestCase, isCumulTestCase)
 
@@ -32,27 +33,48 @@ impactManifestTests = testGroup "ImpactManifest"
   , testCase "an unreadable manifest is an empty one" corruptManifest
   , testCase "the interpreter closure is the interpreter, not the compiler" closureIsNarrow
   , testCase "M2: a census leaving the certified constructs keeps the text backends" censusRouting
+  , testCase "batched compliance: a batched census leaving the certified constructs keeps batched-vs-expected" batchedCensusRouting
   ]
 
 -- | M2 (task impact-analysis-m2-drop-runtime-from-key): a corpus program runs
 -- on the scalar Python and Julia backends exactly when 'uncertifiedConstructs'
 -- of its census is non-empty. The census of a real corpus program sees its
--- constructs, generate bodies included, without the sampling primitives; a
--- construct outside 'certifiedConstructs' is reported, one inside is not.
+-- constructs, generate bodies and their draws included (certified since the
+-- IR fuzz generator's M4); a construct outside 'certifiedConstructs' is
+-- reported, one inside is not.
 censusRouting :: IO ()
 censusRouting = do
   path <- corpusPplPath "addNormals"
   (p, _) <- loadCorpusPair (path, take (length path - 4) path ++ ".tst")
   let census = programCensus [compile defaultCompilerConfig p]
   assertBool ("the census sees the program's IR: " ++ show census) ("IRExpr:IRVar" `elem` census)
-  assertBool ("the census leaves out the sampling primitives: " ++ show census)
-    (not (any (`elem` samplingConstructs) census))
+  assertBool ("the census sees the generate body's draws: " ++ show census)
+    (any (`elem` samplingConstructs) census)
   assertEqual "a corpus program's census is certified" [] (uncertifiedConstructs census)
   assertEqual "a refused compile contributes nothing" census
     (programCensus [compile defaultCompilerConfig p, Left "refused" :: Either String IREnv])
   assertEqual "a construct the fuzzers never reach is uncertified" ["Accessor:AcNotDrawn"]
     (uncertifiedConstructs ("Accessor:AcNotDrawn" : census))
   assertEqual "the certified list certifies itself" [] (uncertifiedConstructs certifiedConstructs)
+
+-- | Batched reference compliance (task batched-backend-reference-compliance):
+-- a @batched@ corpus program's rows run on the batched backend exactly when
+-- 'batchedUncertifiedConstructs' of its batched census is non-empty. The
+-- census is of the batched compile (after the select pass); a theta-tree
+-- read, which no batched arm compares, keeps the check.
+batchedCensusRouting :: IO ()
+batchedCensusRouting = do
+  let load n = do
+        path <- corpusPplPath n
+        fst <$> loadCorpusPair (path, take (length path - 4) path ++ ".tst")
+      census p = batchedProgramCensus (compile defaultCompilerConfig { batched = True } p)
+  plain <- census <$> load "addNormals"
+  assertBool ("the batched census sees the program's IR: " ++ show plain) ("IRExpr:IRDensity" `elem` plain)
+  assertEqual "a plain batched program is certified" [] (batchedUncertifiedConstructs plain)
+  theta <- census <$> load "theta"
+  assertEqual "a theta-tree read is not certified" ["Accessor:AcTheta"] (batchedUncertifiedConstructs theta)
+  assertEqual "a refused compile contributes nothing" [] (batchedProgramCensus (Left "refused" :: Either String IREnv))
+  assertEqual "the batched certified list certifies itself" [] (batchedUncertifiedConstructs batchedCertifiedConstructs)
 
 -- | Run a property once, quietly, and report whether it passed.
 runProp :: Property -> IO Bool

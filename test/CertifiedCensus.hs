@@ -12,11 +12,16 @@
 -- runtime fingerprint as under M1, exactly when 'uncertifiedConstructs' of its
 -- 'programCensus' is non-empty.
 --
--- The census is taken over every body a program emits (generate included:
--- the sampling primitives aside, a generate body is built from the same
--- constructs as the inference bodies, and the primitives have runtime tests of
--- their own, "TestSamplingPrimitives") and over every config the corpus checks
--- it under ('corpusCensusConfigs').
+-- The census is taken over every body a program emits, generate included
+-- (since the IR fuzz generator's M4 its generate bodies, draws and all, are
+-- compared on both backends by replaying each backend's draws through the
+-- interpreter), of the compiles the text backends are run on (-O2 and -O0).
+-- It is not taken per compiler config (IR fuzz generator M5): certification
+-- is a statement about the backends alone, a construct is certified if the
+-- IR generator reaches it whichever config emitted it, and the other configs
+-- are only checked on the interpreter. That the generator reaches everything
+-- the compiler emits under them is a guard of its own
+-- ('BackendCoverage.generatorGuardConfigs').
 --
 -- This is a leaf module: "End2EndTesting" needs it and the fuzz modules import
 -- "End2EndTesting", so it cannot live with them.
@@ -27,10 +32,12 @@ module CertifiedCensus
   , deterministicBodies
   , allBodies
   , samplingConstructs
-  , corpusCensusConfigs
   , certifiedConstructs
   , programCensus
   , uncertifiedConstructs
+  , batchedCertifiedConstructs
+  , batchedProgramCensus
+  , batchedUncertifiedConstructs
   ) where
 
 import Data.Char (isSpace)
@@ -111,45 +118,28 @@ samplingConstructs :: [String]
 samplingConstructs =
   [ "IRExpr:IRSample", "Sample:IRNormal", "Sample:IRUniform", "Builtin:BCategoricalIndex" ]
 
--- | The compiler configs the corpus checks a program under (default, log
--- space, the plan engine at materialization budget 0 in both spaces, branch
--- counting, topK in both spaces, the unoptimized pipeline). Each emits
--- different IR, so a census meant to cover what the corpus checks is taken
--- over all of them: the IR fuzz generator's ('BackendCoverage') and M2's
--- per-program one ('programCensus').
-corpusCensusConfigs :: [(String, CompilerConfig)]
-corpusCensusConfigs =
-  [ ("default", defaultCompilerConfig)
-  , ("log space", defaultCompilerConfig { logSpace = True })
-  , ("budget 0", defaultCompilerConfig { materializationCardinality = 0 })
-  , ("budget 0, log space", defaultCompilerConfig { materializationCardinality = 0, logSpace = True })
-  , ("branch counts", defaultCompilerConfig { countBranches = True })
-  , ("topK", defaultCompilerConfig { topKThreshold = Just 0.05 })
-  , ("topK, log space", defaultCompilerConfig { topKThreshold = Just 0.05, logSpace = True })
-  , ("-O0", defaultCompilerConfig { optimizerLevel = 0 })
-  ]
-
 -- | The constructs the agreement fuzzers compare across the interpreter,
 -- scalar Python and Julia: what the IR fuzz generator's fixed-seed sample
 -- reaches ('IRFuzz.irGeneratorConstructs', the sample
--- 'TestFuzz.prop_Fuzz_IRBackendsAgree' draws from), sampling primitives aside.
+-- 'TestFuzz.prop_Fuzz_IRBackendsAgree' draws from), the sampling primitives
+-- included since M4.
 -- A static list so the default tier need not draw the sample; kept exact by
 -- @Slow.IRGeneratorCoverage@, so a construct the generator stops reaching
 -- leaves it (and the programs using it get their Python and Julia checks
 -- back), and one it starts reaching must be added.
 --
 -- Only the IR generator's reach is counted. It reaches every construct the
--- corpus emits under any config but the sampling primitives
--- ('BackendCoverage.irGeneratorDeferred'), so the typed-program fuzzer's
--- sample, which is costly to draw, would add nothing a corpus program uses.
+-- corpus emits under any config ('BackendCoverage.irGeneratorDeferred' is
+-- empty), so the typed-program fuzzer's sample, which is costly to draw,
+-- would add nothing a corpus program uses.
 certifiedConstructs :: [String]
 certifiedConstructs =
-  -- Measured 2026-10-13 (IRFuzz's fixed-seed sample of 600 cases, after M3):
-  -- 78 constructs.
+  -- Measured 2026-10-13 (IRFuzz's fixed-seed sample of 600 cases, after M4):
+  -- 81 constructs.
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcSubtree",
     "Accessor:AcTail", "Accessor:AcTheta",
-    "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BMapList",
+    "Builtin:BCategoricalIndex", "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BMapList",
     "Builtin:BReduce ROpAdd", "Builtin:BReduce ROpLogSumExp", "Builtin:BReduce ROpMax",
     "Builtin:BTensor", "Builtin:BZip OpAnd", "Builtin:BZip OpApprox", "Builtin:BZip OpDiv",
     "Builtin:BZip OpEq", "Builtin:BZip OpGreaterThan", "Builtin:BZip OpLessThan",
@@ -163,21 +153,73 @@ certifiedConstructs =
     "IRExpr:IRApply", "IRExpr:IRBuiltin", "IRExpr:IRConformsTo", "IRExpr:IRConst",
     "IRExpr:IRConstruct", "IRExpr:IRCumulative", "IRExpr:IRDensity", "IRExpr:IRDestruct",
     "IRExpr:IRError", "IRExpr:IRIf", "IRExpr:IRIsPossible", "IRExpr:IRLambda", "IRExpr:IRLetIn",
-    "IRExpr:IROp", "IRExpr:IRSelect", "IRExpr:IRUnaryOp", "IRExpr:IRVar",
+    "IRExpr:IROp", "IRExpr:IRSample", "IRExpr:IRSelect", "IRExpr:IRUnaryOp", "IRExpr:IRVar",
     "Operand:OpAnd", "Operand:OpApprox", "Operand:OpDiv", "Operand:OpEq", "Operand:OpGreaterThan",
     "Operand:OpIntDiv", "Operand:OpLessThan", "Operand:OpMax", "Operand:OpMod", "Operand:OpMult",
+    "Operand:OpOr", "Operand:OpPlus", "Operand:OpSub",
+    "UnaryOperand:OpAbs", "UnaryOperand:OpExp", "UnaryOperand:OpIsAny", "UnaryOperand:OpLog",
+    "UnaryOperand:OpNeg", "UnaryOperand:OpNot", "UnaryOperand:OpSign",
+    "Sample:IRNormal", "Sample:IRUniform"
+  ]
+
+-- | A program's census: the constructs of every body of each of the compiles
+-- the text backends run (-O2 and -O0; a compile the compiler refuses
+-- contributes nothing, since nothing of it is run).
+programCensus :: [Either e IREnv] -> [String]
+programCensus envs =
+  sort (nub (concat [ irEnvConstructs allBodies env | Right env <- envs ]))
+
+-- | The constructs of a census the fuzzers do not certify.
+uncertifiedConstructs :: [String] -> [String]
+uncertifiedConstructs census = census \\ certifiedConstructs
+
+-- | The batched counterpart of 'certifiedConstructs' (docs-repo task
+-- @batched-backend-reference-compliance@): the constructs the two batched
+-- fuzz arms put through the batched backend and compare with the
+-- interpreter, in the probability and integrate bodies they call. Those are
+-- the typed-program fuzzer's batched arm ('TestFuzz.prop_Fuzz_BackendsAgree',
+-- over the fixed-seed sample of 'BackendCoverage') and the IR fuzz
+-- generator's ('IRFuzz.irGeneratorBatchedConstructs'). The typed arm carries
+-- nearly all of it: the IR generator's batched cases are few, and a body that
+-- calls a helper or holds a theta constant is refused there. Kept exact by
+-- @Slow.BackendAgreementCoverage@.
+--
+-- A corpus program declaring @batched@ has its @batched-vs-expected@ value
+-- check (its @.tst@ rows on the batched backend) exactly when
+-- 'batchedUncertifiedConstructs' of its 'batchedProgramCensus' is non-empty.
+-- Only that check: the arm compares @forward@ and @integrate@ at query
+-- points, never gradients, batched generate or the dense entry points, so
+-- @gradients-nan-free@, @generate-density-matches-expected@ and the dense and
+-- topK checks run regardless.
+batchedCertifiedConstructs :: [String]
+batchedCertifiedConstructs =
+  -- Measured 2026-10-13: the typed fuzzer's sample (1000 draws, 344
+  -- batched-compared) reaches 54 constructs, the IR generator's (600 cases,
+  -- 28 batched-compared) 49; together 58.
+  [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
+    "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcTail",
+    "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BReduce ROpAdd",
+    "Builtin:BReduce ROpLogSumExp", "Builtin:BTensor",
+    "ConTag:TgCons", "ConTag:TgLeft", "ConTag:TgRight", "ConTag:TgTuple",
+    "Cumulative:IRNormal Linear", "Cumulative:IRNormal Log", "Cumulative:IRUniform Linear",
+    "Density:IRNormal Linear", "Density:IRUniform Linear",
+    "IRExpr:IRApply", "IRExpr:IRBuiltin", "IRExpr:IRConformsTo", "IRExpr:IRConst",
+    "IRExpr:IRConstruct", "IRExpr:IRCumulative", "IRExpr:IRDensity", "IRExpr:IRDestruct",
+    "IRExpr:IRError", "IRExpr:IRIf", "IRExpr:IRIsPossible", "IRExpr:IRLambda",
+    "IRExpr:IRLetIn", "IRExpr:IROp", "IRExpr:IRSelect", "IRExpr:IRUnaryOp", "IRExpr:IRVar",
+    "Operand:OpAnd", "Operand:OpApprox", "Operand:OpDiv", "Operand:OpEq",
+    "Operand:OpGreaterThan", "Operand:OpLessThan", "Operand:OpMax", "Operand:OpMult",
     "Operand:OpOr", "Operand:OpPlus", "Operand:OpSub",
     "UnaryOperand:OpAbs", "UnaryOperand:OpExp", "UnaryOperand:OpIsAny", "UnaryOperand:OpLog",
     "UnaryOperand:OpNeg", "UnaryOperand:OpNot", "UnaryOperand:OpSign"
   ]
 
--- | A program's census: the constructs of every body of each of its compiles
--- (one per config it is checked under; a compile the compiler refuses
--- contributes nothing, since nothing of it is run), sampling primitives aside.
-programCensus :: [Either e IREnv] -> [String]
-programCensus envs =
-  sort (nub (concat [ irEnvConstructs allBodies env | Right env <- envs ])) \\ samplingConstructs
+-- | A program's batched census: the constructs of the probability and
+-- integrate bodies of its batched compile (after the select pass), which is
+-- what @batched-vs-expected@ calls. A refused compile contributes nothing.
+batchedProgramCensus :: Either e IREnv -> [String]
+batchedProgramCensus = either (const []) (irEnvConstructs inferenceBodies)
 
--- | The constructs of a census the fuzzers do not certify.
-uncertifiedConstructs :: [String] -> [String]
-uncertifiedConstructs census = census \\ certifiedConstructs
+-- | The constructs of a batched census the batched arm does not certify.
+batchedUncertifiedConstructs :: [String] -> [String]
+batchedUncertifiedConstructs census = census \\ batchedCertifiedConstructs
