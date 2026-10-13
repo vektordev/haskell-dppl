@@ -12,11 +12,11 @@
 -- runtime fingerprint as under M1, exactly when 'uncertifiedConstructs' of its
 -- 'programCensus' is non-empty.
 --
--- The census is taken over every body a program emits (generate included:
--- the sampling primitives aside, a generate body is built from the same
--- constructs as the inference bodies, and the primitives have runtime tests of
--- their own, "TestSamplingPrimitives") and over every config the corpus checks
--- it under ('corpusCensusConfigs').
+-- The census is taken over every body a program emits, generate included
+-- (since the IR fuzz generator's M4 its generate bodies, draws and all, are
+-- compared on both backends by replaying each backend's draws through the
+-- interpreter), and over every config the corpus checks it under
+-- ('corpusCensusConfigs').
 --
 -- This is a leaf module: "End2EndTesting" needs it and the fuzz modules import
 -- "End2EndTesting", so it cannot live with them.
@@ -132,24 +132,25 @@ corpusCensusConfigs =
 -- | The constructs the agreement fuzzers compare across the interpreter,
 -- scalar Python and Julia: what the IR fuzz generator's fixed-seed sample
 -- reaches ('IRFuzz.irGeneratorConstructs', the sample
--- 'TestFuzz.prop_Fuzz_IRBackendsAgree' draws from), sampling primitives aside.
+-- 'TestFuzz.prop_Fuzz_IRBackendsAgree' draws from), the sampling primitives
+-- included since M4.
 -- A static list so the default tier need not draw the sample; kept exact by
 -- @Slow.IRGeneratorCoverage@, so a construct the generator stops reaching
 -- leaves it (and the programs using it get their Python and Julia checks
 -- back), and one it starts reaching must be added.
 --
 -- Only the IR generator's reach is counted. It reaches every construct the
--- corpus emits under any config but the sampling primitives
--- ('BackendCoverage.irGeneratorDeferred'), so the typed-program fuzzer's
--- sample, which is costly to draw, would add nothing a corpus program uses.
+-- corpus emits under any config ('BackendCoverage.irGeneratorDeferred' is
+-- empty), so the typed-program fuzzer's sample, which is costly to draw,
+-- would add nothing a corpus program uses.
 certifiedConstructs :: [String]
 certifiedConstructs =
-  -- Measured 2026-10-13 (IRFuzz's fixed-seed sample of 600 cases, after M3):
-  -- 78 constructs.
+  -- Measured 2026-10-13 (IRFuzz's fixed-seed sample of 600 cases, after M4):
+  -- 81 constructs.
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcSubtree",
     "Accessor:AcTail", "Accessor:AcTheta",
-    "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BMapList",
+    "Builtin:BCategoricalIndex", "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BMapList",
     "Builtin:BReduce ROpAdd", "Builtin:BReduce ROpLogSumExp", "Builtin:BReduce ROpMax",
     "Builtin:BTensor", "Builtin:BZip OpAnd", "Builtin:BZip OpApprox", "Builtin:BZip OpDiv",
     "Builtin:BZip OpEq", "Builtin:BZip OpGreaterThan", "Builtin:BZip OpLessThan",
@@ -163,20 +164,21 @@ certifiedConstructs =
     "IRExpr:IRApply", "IRExpr:IRBuiltin", "IRExpr:IRConformsTo", "IRExpr:IRConst",
     "IRExpr:IRConstruct", "IRExpr:IRCumulative", "IRExpr:IRDensity", "IRExpr:IRDestruct",
     "IRExpr:IRError", "IRExpr:IRIf", "IRExpr:IRIsPossible", "IRExpr:IRLambda", "IRExpr:IRLetIn",
-    "IRExpr:IROp", "IRExpr:IRSelect", "IRExpr:IRUnaryOp", "IRExpr:IRVar",
+    "IRExpr:IROp", "IRExpr:IRSample", "IRExpr:IRSelect", "IRExpr:IRUnaryOp", "IRExpr:IRVar",
     "Operand:OpAnd", "Operand:OpApprox", "Operand:OpDiv", "Operand:OpEq", "Operand:OpGreaterThan",
     "Operand:OpIntDiv", "Operand:OpLessThan", "Operand:OpMax", "Operand:OpMod", "Operand:OpMult",
     "Operand:OpOr", "Operand:OpPlus", "Operand:OpSub",
     "UnaryOperand:OpAbs", "UnaryOperand:OpExp", "UnaryOperand:OpIsAny", "UnaryOperand:OpLog",
-    "UnaryOperand:OpNeg", "UnaryOperand:OpNot", "UnaryOperand:OpSign"
+    "UnaryOperand:OpNeg", "UnaryOperand:OpNot", "UnaryOperand:OpSign",
+    "Sample:IRNormal", "Sample:IRUniform"
   ]
 
 -- | A program's census: the constructs of every body of each of its compiles
 -- (one per config it is checked under; a compile the compiler refuses
--- contributes nothing, since nothing of it is run), sampling primitives aside.
+-- contributes nothing, since nothing of it is run).
 programCensus :: [Either e IREnv] -> [String]
 programCensus envs =
-  sort (nub (concat [ irEnvConstructs allBodies env | Right env <- envs ])) \\ samplingConstructs
+  sort (nub (concat [ irEnvConstructs allBodies env | Right env <- envs ]))
 
 -- | The constructs of a census the fuzzers do not certify.
 uncertifiedConstructs :: [String] -> [String]
