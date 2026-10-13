@@ -5900,7 +5900,16 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
                 f <- residueFactor meta exprBody boundName (rType occTI) value s
                 return [WFactor [] f]
           _ -> return []
-        return (Just [WWorld [applyTo guard s] (witnessSet value (IROp OpMult c0 (applyTo cov s))) factors])
+        -- A path through an '==' (or constructor test) observed False
+        -- recovers "any value but this one" as a 'VAnyExcept' sentinel.
+        -- 'witnessSet' turns the shapes it recognises into an exclusion set;
+        -- one it does not stays a point world, which measured the sentinel as
+        -- a point (@w@ through @draw v = w in v == 1@ at False answered 0).
+        -- That transport is declined: the structural cases invert through
+        -- the binding instead.
+        case witnessSet value (IROp OpMult c0 (applyTo cov s)) of
+          WPoint v _ | hasAnyExceptExpr v -> return Nothing
+          set -> return (Just [WWorld [applyTo guard s] set factors])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, dir) -> do
