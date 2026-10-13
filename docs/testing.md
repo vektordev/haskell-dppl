@@ -67,6 +67,10 @@ current list for whichever binary you run):
 - `test/BackendAgreement.hs` / `BackendCoverage.hs` — the batched backend
   drivers behind `prop_Fuzz_BackendsAgree`, and the corpus-minus-fuzz construct
   exception list (see `fuzz-testing.md`, "Backend agreement")
+- `test/IRFuzz.hs` — the IR fuzz generator behind `prop_Fuzz_IRBackendsAgree`
+  (Slow), with its filed refusal and disagreement families; its `IR fuzz
+  generator` group is in the default suite (see `fuzz-testing.md`, "IR-level
+  backend agreement")
 - `test/GenerateCensus.hs` — `Slow.GenerateCensus`: every non-sampling
   construct of a corpus generate body also occurs in a corpus inference body
   (exact list `generateOnlyConstructs`), the generate half of the

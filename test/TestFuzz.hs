@@ -83,6 +83,9 @@ import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.PType (PType(Bottom))
 import AdmissionOracle (Outcome(..), admissionCheck, AdmissionReport(..), Check(..), Mode(..), admitted, violations, overPromises, outcomeBucket, renderViolation)
 import Data.Number.Erf (erf)
+import IRFuzz (IRCase(..), InterpOutcome(..), genIRCase, shrinkIRCase, irCaseWellTyped, renderIRCase,
+               interpretIRCase, refusalKey, knownRefusal, knownDisagreement, renderIRDisagreement, IRDisagreement(..),
+               runIRCasesPython, runIRCasesJulia, checkedIRConstructs)
 
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))
@@ -1994,6 +1997,66 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
     kind q = bodyKind q
     wildcardTag :: IRValue -> String
     wildcardTag v = if v == VAny then " ANY" else if "VAny" `isInfixOf` show v then " partial ANY" else ""
+
+-- | The IR fuzz generator's agreement property (docs-repo design
+-- @ir-fuzz-generator@, M1): batches of drawn deterministic-value 'IREnv's
+-- ('IRFuzz.genIRCase'), each run through the interpreter and then through
+-- one Python and one Julia process. A disagreement fails unless its family is
+-- filed ('IRFuzz.knownDisagreements'); an interpreter refusal is tabulated by
+-- reason and fails unless that reason is filed ('IRFuzz.knownRefusals').
+--
+-- Budget (the design's review decision (4)): about the SPLL-level agreement
+-- property's 28-66 s; a batch takes ~1.6 s. @NEST_IRFUZZ_EXPLORE=<file>@
+-- appends every unfiled disagreement and every refusal to the file and passes
+-- regardless, for surveying a new production's findings in bulk (pair it with
+-- @NEST_FUZZ_SCALE@).
+irFuzzBatchSize, irFuzzBatches :: Int
+irFuzzBatchSize = 60
+irFuzzBatches = 20
+
+prop_Fuzz_IRBackendsAgree :: Property
+prop_Fuzz_IRBackendsAgree = withMaxSuccess (fuzzCases irFuzzBatches) $
+  forAllShrink (vectorOf irFuzzBatchSize genIRCase) shrinkIRBatch $ \batch -> ioProperty $
+    withinBudgetScaled "prop_Fuzz_IRBackendsAgree" 20 $
+      case [ (c, e) | c <- batch, Left e <- [irCaseWellTyped c] ] of
+        ((c, e) : _) -> return (counterexample ("the generator drew an ill-typed case: " ++ e ++ "\n" ++ renderIRCase c) False)
+        [] -> do
+          prepared <- mapM (\c -> (,) c <$> mapM (\a -> (,) a <$> interpretIRCase c a) (icArgs c)) batch
+          (pyL, pyD) <- runIRCasesPython prepared
+          julia <- findJulia
+          (jlL, jlD) <- case julia of
+            Just j -> runIRCasesJulia j prepared
+            Nothing -> do
+              noteOnce "prop_Fuzz_IRBackendsAgree: no julia on the PATH; the Julia arm is skipped (interpreter vs Python only)."
+              return ([], [])
+          let refusals = [ refusalKey r | (_, qs) <- prepared, (_, InterpRefusal r) <- qs ]
+              unknown = nub [ r | r <- refusals, not (isJust (knownRefusal r)) ]
+          classified <- mapM (\d -> (,) d <$> knownDisagreement d) (pyD ++ jlD)
+          let knownD = [ idBackend d ++ ": " ++ t | (d, Just t) <- classified ]
+              newD = [ d | (d, Nothing) <- classified ]
+          explore <- lookupEnv "NEST_IRFUZZ_EXPLORE"
+          case explore of
+            Just path -> appendFile path (concatMap (\d -> "=====\n" ++ renderIRDisagreement d) newD
+                                          ++ concat [ "=====REFUSAL " ++ r ++ "\n" ++ renderIRCase c | (c, qs) <- prepared, (_, InterpRefusal r) <- qs ])
+            Nothing -> return ()
+          return
+            $ tabulate "julia arm" [maybe "skipped (no julia)" (const "ran") julia]
+            $ tabulate "interpreter refusal (reason)" refusals
+            $ tabulate "known disagreement family (query; not a failure)" knownD
+            $ tabulate "python query" pyL
+            $ tabulate "julia query" jlL
+            $ tabulate "IR construct in a drawn body" (concatMap checkedIRConstructs batch)
+            $ counterexample (show (length newD) ++ " disagreement(s), " ++ show (length unknown)
+                              ++ " unfiled interpreter refusal reason(s) " ++ show unknown
+                              ++ " over " ++ show (length batch) ++ " cases; first:\n"
+                              ++ concatMap renderIRDisagreement (take 2 newD))
+            $ (isJust explore || (null newD && null unknown))
+
+-- | Cut a failing batch to each case alone, then shrink the singleton
+-- structurally ('shrinkIRCase'), as 'shrinkAgreementBatch' does.
+shrinkIRBatch :: [IRCase] -> [[IRCase]]
+shrinkIRBatch [c] = map (: []) (shrinkIRCase c)
+shrinkIRBatch cs = map (: []) cs
 
 return []
 

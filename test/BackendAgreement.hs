@@ -72,6 +72,12 @@ module BackendAgreement
   , parseAnswerLine
   , pythonDriver
   , juliaDriver
+  , pythonSerializer
+  , juliaSerializer
+  , readNum
+  , runBounded
+  , forcedSource
+  , oneLine
   , irConstructs
   , irEnvConstructs
   , inferenceBodies
@@ -311,6 +317,57 @@ forcedSource act = do
 oneLine :: String -> String
 oneLine = take 400 . map (\c -> if c == '\n' then ' ' else c)
 
+-- | The Python definition of @_ser@: a value as prefix tokens
+-- ('decodeSample'), for a driver that prints what a call returned. An ADT
+-- value is an instance of a class the module defined (so its name is bound to
+-- it in the module's namespace); its field values are in @_fields@, in order.
+-- Expects @_pl@ to be the imported @pythonLib@.
+pythonSerializer :: [String]
+pythonSerializer =
+  [ "def _ser(v, ns):"
+  , "    out = []"
+  , "    def go(v):"
+  , "        if isinstance(v, bool): out.append('b1' if v else 'b0')"
+  , "        elif isinstance(v, int): out.append('i' + repr(v))"
+  , "        elif isinstance(v, float): out.append('f' + repr(v))"
+  , "        elif v is None: out.append('u')"
+  , "        elif isinstance(v, _pl.T): out.append('t'); go(v.t1); go(v.t2)"
+  , "        elif isinstance(v, _pl.Left): out.append('l'); go(v.val)"
+  , "        elif isinstance(v, _pl.Right): out.append('r'); go(v.val)"
+  , "        elif isinstance(v, _pl.ConsInferenceList): out.append('c'); go(v.value); go(v.next)"
+  , "        elif isinstance(v, _pl.EmptyInferenceList): out.append('n')"
+  , "        elif ns.get(type(v).__name__) is type(v):"
+  , "            fs = getattr(v, '_fields', [])"
+  , "            out.append('a' + type(v).__name__); out.append(str(len(fs)))"
+  , "            for f in fs: go(f)"
+  , "        else: out.append('?' + type(v).__name__)"
+  , "    go(v)"
+  , "    return ' '.join(out)"
+  ]
+
+-- | The Julia definition of @_ser@, 'pythonSerializer''s twin: an ADT value
+-- is a struct of a program module (@ProgN@).
+juliaSerializer :: [String]
+juliaSerializer =
+  [ "function _ser(v, out)"
+  , "  if v isa Bool; push!(out, v ? \"b1\" : \"b0\")"
+  , "  elseif v isa Integer; push!(out, \"i\" * string(v))"
+  , "  elseif v isa AbstractFloat; push!(out, \"f\" * repr(Float64(v)))"
+  , "  elseif v === nothing; push!(out, \"u\")"
+  , "  elseif v isa JuliaSPPLLib.T; push!(out, \"t\"); _ser(v.t1, out); _ser(v.t2, out)"
+  , "  elseif v isa JuliaSPPLLib.Left; push!(out, \"l\"); _ser(v.val, out)"
+  , "  elseif v isa JuliaSPPLLib.Right; push!(out, \"r\"); _ser(v.val, out)"
+  , "  elseif v isa JuliaSPPLLib.ConsInferenceList; push!(out, \"c\"); _ser(v.value, out); _ser(v.next, out)"
+  , "  elseif v isa JuliaSPPLLib.EmptyInferenceList; push!(out, \"n\")"
+  , "  elseif isstructtype(typeof(v)) && startswith(string(nameof(parentmodule(typeof(v)))), \"Prog\")"
+  , "    push!(out, \"a\" * string(nameof(typeof(v)))); push!(out, string(nfields(v)))"
+  , "    for k in 1:nfields(v); _ser(getfield(v, k), out); end"
+  , "  else; push!(out, \"?\" * replace(string(typeof(v)), ' ' => '_'))"
+  , "  end"
+  , "  return out"
+  , "end"
+  ]
+
 -- | The Python driver. @programs@ holds, per program, the path of its emitted
 -- module (already prefixed with its identity mocks), the backend arguments
 -- and the queries. Output lines: @R i j prob dim imposs@, @E i j message@,
@@ -333,29 +390,7 @@ pythonDriver projectDir programs = unlines $
   , "def _vals(r):"
   , "    if hasattr(r, 't1') and hasattr(r, 't2'): return [r.t1, r.t2]"
   , "    return list(r)"
-  -- A sample as prefix tokens ('decodeSample'). An ADT value is an instance
-  -- of a class the module defined (so its name is bound to it in the
-  -- module's namespace); its field values are in '_fields', in order.
-  , "def _ser(v, ns):"
-  , "    out = []"
-  , "    def go(v):"
-  , "        if isinstance(v, bool): out.append('b1' if v else 'b0')"
-  , "        elif isinstance(v, int): out.append('i' + repr(v))"
-  , "        elif isinstance(v, float): out.append('f' + repr(v))"
-  , "        elif v is None: out.append('u')"
-  , "        elif isinstance(v, _pl.T): out.append('t'); go(v.t1); go(v.t2)"
-  , "        elif isinstance(v, _pl.Left): out.append('l'); go(v.val)"
-  , "        elif isinstance(v, _pl.Right): out.append('r'); go(v.val)"
-  , "        elif isinstance(v, _pl.ConsInferenceList): out.append('c'); go(v.value); go(v.next)"
-  , "        elif isinstance(v, _pl.EmptyInferenceList): out.append('n')"
-  , "        elif ns.get(type(v).__name__) is type(v):"
-  , "            fs = getattr(v, '_fields', [])"
-  , "            out.append('a' + type(v).__name__); out.append(str(len(fs)))"
-  , "            for f in fs: go(f)"
-  , "        else: out.append('?' + type(v).__name__)"
-  , "    go(v)"
-  , "    return ' '.join(out)"
-  ] ++ concat (zipWith program [0 :: Int ..] programs)
+  ] ++ pythonSerializer ++ concat (zipWith program [0 :: Int ..] programs)
   where
     program i (path, args, qs) =
       [ "_ns = {}"
@@ -411,25 +446,7 @@ juliaDriver projectDir programs = unlines $
   , "using Random"
   , "_msg(e) = first(replace(sprint(showerror, e), '\\n' => ' '), 400)"
   , "_vals(r) = r isa JuliaSPPLLib.T ? [r.t1, r.t2] : collect(r)"
-  -- 'pythonDriver''s @_ser@: an ADT value is a struct of a program module.
-  , "function _ser(v, out)"
-  , "  if v isa Bool; push!(out, v ? \"b1\" : \"b0\")"
-  , "  elseif v isa Integer; push!(out, \"i\" * string(v))"
-  , "  elseif v isa AbstractFloat; push!(out, \"f\" * repr(Float64(v)))"
-  , "  elseif v === nothing; push!(out, \"u\")"
-  , "  elseif v isa JuliaSPPLLib.T; push!(out, \"t\"); _ser(v.t1, out); _ser(v.t2, out)"
-  , "  elseif v isa JuliaSPPLLib.Left; push!(out, \"l\"); _ser(v.val, out)"
-  , "  elseif v isa JuliaSPPLLib.Right; push!(out, \"r\"); _ser(v.val, out)"
-  , "  elseif v isa JuliaSPPLLib.ConsInferenceList; push!(out, \"c\"); _ser(v.value, out); _ser(v.next, out)"
-  , "  elseif v isa JuliaSPPLLib.EmptyInferenceList; push!(out, \"n\")"
-  , "  elseif isstructtype(typeof(v)) && startswith(string(nameof(parentmodule(typeof(v)))), \"Prog\")"
-  , "    push!(out, \"a\" * string(nameof(typeof(v)))); push!(out, string(nfields(v)))"
-  , "    for k in 1:nfields(v); _ser(getfield(v, k), out); end"
-  , "  else; push!(out, \"?\" * replace(string(typeof(v)), ' ' => '_'))"
-  , "  end"
-  , "  return out"
-  , "end"
-  ] ++ concat (zipWith program [0 :: Int ..] programs)
+  ] ++ juliaSerializer ++ concat (zipWith program [0 :: Int ..] programs)
   where
     program i (path, args, qs) =
       let modName = "Prog" ++ show i
