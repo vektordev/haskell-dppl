@@ -15,7 +15,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
 
 import Control.Exception (evaluate)
-import Data.List (intercalate)
+import Data.List (intercalate, isInfixOf, isPrefixOf)
 import System.Timeout (timeout)
 
 import SPLL.Lang.Types (Program(..), Expr(..), ExprF(..), TypeInfo(..), ChainName)
@@ -141,7 +141,7 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" Integrate $
             mainPType "main = draw s = Normal in if s < 0.0 then s + 1.0 else 0.0"
       , testCase "a gated variable combined with a fresh draw is Bottom" $
-          -- The truncated law is no Normal, so tryNormalClosure must not fire;
+          -- The truncated law is no Normal, so it has no affine form;
           -- the floor sees two infinite-support latents and drops the density.
           assertEqual "" Bottom $
             mainPType "main = draw s = Normal in if s < 0.0 then s + Normal else 0.0"
@@ -740,7 +740,7 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
                 Expr _ (Apply h a) -> (chainName (getTypeInfo h), chainName (getTypeInfo a))
                 _ -> error "main is not a draw"
               argLaw = fromMaybe (error "no law for the argument") (Map.lookup argCN laws)
-              env = bindingLawEnv (reinferCtx fc p) headCN "x" argLaw Map.empty
+              env = bindingLawEnv (reinferCtx fc p) headCN "x" argCN argLaw Map.empty
           in case Map.lookup "x" env of
                Just (Law (IWit _) j) -> assertEqual "" "leaf Uniform" (renderJustification j)
                Just (Law _ j) -> assertFailure ("x bound unwitnessed, as " ++ renderJustification j)
@@ -748,7 +748,40 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
       , testCase "a random combination is unjustified (until the engine milestones)" $
           assertEqual "" "unjustified" (justAt [] "main = Normal + Uniform")
       ]
+  -- The affine Gaussian form as a certificate (task
+  -- affine-form-as-law-certificate, law-carrying-modality M4).
+  , testGroup "law certificates: the affine Gaussian form"
+      [ testCase "a sum of two leaves is affine in two latents" $
+          assertEqual "" 2 (latentCount (justAt [] "main = Normal + Normal"))
+      , testCase "two reads of one draw-bound Gaussian are one latent (x + x is 2x)" $
+          -- path: Apply [0] -> Lambda [0] = the body x + x
+          assertEqual "" 1 (latentCount (justAt [0, 0] "main = draw x = Normal in x + x"))
+      , testCase "a draw-bound Gaussian is bound at its form, keyed by its argument" $
+          assertEqual "" 1 (latentCount (justAt [0, 0, 0] "main = draw x = Normal in x * 2.0"))
+      , testCase "a scale by a constant keeps the form; a product of two latents has none" $ do
+          assertEqual "" 1 (latentCount (justAt [] "main = Normal * 3.0"))
+          assertEqual "" "unjustified" (justAt [] "main = Normal * Normal")
+      , testCase "fields sharing a marginal latent: the certificate says so, and the tuple is Bottom" $ do
+          let src = "main = draw x = Normal in (x + Normal, x + Normal)"
+          assertBool "no shared-latent certificate" ("sharing latent" `isInfixOf` justAt [] src)
+          assertEqual "" Bottom (mainPType src)
+      , testCase "two uses of one sum share both its latents" $
+          assertEqual "" Bottom (mainPType "main = draw x = Normal in draw y = Normal in (x + y, x + y)")
+      , testCase "a latent the observation recovers correlates nothing: (x, x + Normal) stays Integrate" $ do
+          let src = "main = draw x = Normal in (x, x + Normal)"
+          assertBool "x not recovered" ("recovered" `isInfixOf` justAt [0, 0] src)
+          assertBool "spurious shared-latent certificate" (not ("sharing latent" `isInfixOf` justAt [] src))
+          assertEqual "" Integrate (mainPType src)
+      , testCase "fields with independent latents are unaffected" $
+          assertEqual "" Integrate (mainPType "main = (Normal + Normal, Normal)")
+      ]
   ]
+
+-- | How many latents an @affine(...)@ justification names; -1 for any other.
+latentCount :: String -> Int
+latentCount j
+  | "affine(" `isPrefixOf` j = length (filter (== ',') j) + 1
+  | otherwise = -1
 
 -- | The modality pass's per-node certificates for a source program, with the
 -- program and certificate they were computed on.

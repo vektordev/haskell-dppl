@@ -45,13 +45,13 @@ import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
-import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw)
+import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf)
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
 import Control.Monad (foldM, forM, when, zipWithM)
 import Control.Monad.State.Strict (StateT, runStateT, get, gets, put, modify)
-import Control.Monad.Except (catchError, throwError)
+import Control.Monad.Except (catchError)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Char (isUpper)
@@ -124,13 +124,15 @@ data CompilerMetadata = CompilerMetadata {
   -- 'compilerConfig meta', for exactly this reason) automatically compiling
   -- under the overridden family with no change of its own.
   semiringFamily :: SemiringFamily,
-  -- | Lambda-bound variables marginalised analytically as affine Gaussian
-  -- forms rather than witnessed (task
-  -- affine-gaussian-closure-lost-across-let-bindings; the M1 slice of design
-  -- affine-gaussian-forms). A variable here has no runtime value in the
-  -- emitted code: it is only ever read through 'affineFormOf', i.e. inside
-  -- the one Gaussian density leaf that consumes it. See 'affineMarginalisable'
-  -- for when a binding is put here.
+  -- | The compiled coefficients of the 'lawEnv' bindings marginalised as
+  -- affine Gaussian forms rather than witnessed (task
+  -- affine-gaussian-closure-lost-across-let-bindings; design
+  -- affine-gaussian-forms). Which bindings those are is their certificate's
+  -- call ('affineMarginalisable' reads the argument's 'JAffine' law,
+  -- law-carrying-modality M4); this holds only the IR the certificate has no
+  -- room for. A variable here has no runtime value in the emitted code: it is
+  -- only ever read through 'affineFormOf', i.e. inside the one Gaussian
+  -- density leaf that consumes it. Folded into 'lawEnv' at M7.
   affineEnv :: [(String, AffineForm)],
   -- | What 'reinferRecovered' needs to re-run modality inference on a body
   -- under the recovered variables; built once per compile.
@@ -1841,9 +1843,10 @@ type LawEnv = ModalityInfer.Env
 -- certificate ('lawTable'); an argument the table does not hold (a node an
 -- engine synthesized) is taken at the law its annotation projects.
 withBindingLaw :: CompilerMetadata -> Binding -> String -> CompilerMetadata
-withBindingLaw meta b var = meta { lawEnv = bindingLawEnv (reinferContext meta) headCN var argLaw (lawEnv meta) }
+withBindingLaw meta b var = meta { lawEnv = bindingLawEnv (reinferContext meta) headCN var argCN argLaw (lawEnv meta) }
   where
     headCN = chainName (getTypeInfo (bindHead b))
+    argCN  = chainName (getTypeInfo (bindArg b))
     argLaw = nodeLaw meta (bindArg b)
 
 -- | A node's certificate ('lawTable'), or for a node the table does not hold
@@ -2403,11 +2406,15 @@ collapseAffine (AffineForm c coeffs) = case Map.elems coeffs of
   [a] -> (c, IRUnaryOp OpAbs a)
   as  -> (c, irSqrt (foldr1 (IROp OpPlus) [IROp OpMult a a | a <- as]))
 
--- | When the probabilistic Apply arm finds no inversion for a let-bound
--- variable, it can still marginalise the variable analytically if its law is
--- an affine Gaussian form and all of its uses flow into a single Gaussian
--- density leaf. Answers the bound variable and the body to compile, with the
--- variable to be put in 'affineEnv'.
+-- | When the probabilistic Apply arm finds no point inversion for a let-bound
+-- variable, it marginalises the variable analytically if its certificate says
+-- its law is an affine Gaussian form (the argument's 'JAffine' law, read by
+-- 'affineOf') and all of its uses flow into a single Gaussian density leaf.
+-- Answers the bound variable and the body to compile, with the variable to be
+-- put in 'affineEnv'. 'isAffineOver' stays as the check that this compiler
+-- can build the form's IR ('affineFormOf' is its twin), which a certificate
+-- issued over the program as written cannot promise inside a callee entered
+-- at a call site.
 --
 -- "A single leaf" is what makes dropping the variable sound: its latents are
 -- then integrated exactly once, inside one scalar Normal. It holds when every
@@ -2424,7 +2431,8 @@ affineMarginalisable meta rt b
   , let x = bindVar b
   , let lamBody = bindBody b
   , not (isTArrowType rt)
-  , pType (getTypeInfo v) == PNormal
+  , Just cert <- affineOf (chainName (getTypeInfo v)) (nodeLaw meta v)
+  , not (Map.null (acLatents cert))
   , isAffineOver meta envNames v
   , spineOK (Set.insert x envNames) x lamBody
   = Just (x, lamBody)
@@ -2558,12 +2566,6 @@ hasOwnInferenceHandler :: CompilerMetadata -> Expr -> Bool
 -- factors a Normal-derived computation into a helper function
 -- (task normal-shortcut-crashes-through-function-call).
 hasOwnInferenceHandler _    e | isTArrowType (rType (getTypeInfo e)) = True
--- A call reading a marginalised binding is, like a local bound in
--- 'affineEnv' below, a Gaussian whose law is an affine form, when the callee is
--- affine in it ('isAffineOver').
-hasOwnInferenceHandler meta e@(Expr _ (Apply _ _))
-  | mentionsAffineVar meta e
-  , isAffineOver meta (Set.fromList (map fst (affineEnv meta))) e = False
 hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
 -- A Var standing for a *local* binding -- a lambda parameter, or the variable a
 -- `let` binds -- has no (mu, sigma) to read off: the Normal that earned it its
@@ -2576,21 +2578,16 @@ hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
 -- catch-all took the inner `Var y` (task modality-arrow-apply-crashes, bug A).
 -- `Just (_, False)` is exactly the local-variable case the Var equation itself
 -- dispatches on: a top-level function carries True, and Normal/Uniform are not
--- in the environment at all.
--- A local bound in 'affineEnv' is the exception: it *has* a law to read, its
--- affine form, which 'toIRNormalParams' collapses.
-hasOwnInferenceHandler meta (Expr _ (Var n))
-  | Just (_, False) <- lookup n (typeEnv meta)
-  , isNothing (lookup n (affineEnv meta))                   = True
--- A top-level declaration whose body has no (mu, sigma) to read off -- a
--- @draw@, a call, a conditional ('isNormalExtractable') -- is answered by its
--- own probability function, which the Var equation calls: a helper with no
--- parameters, @h = draw x = Normal in x + x@, is a binding like any other
+-- in the environment at all. (A local marginalised as an affine form is read
+-- by the Gaussian catch-all through its certificate: 'readsMarginalised'.)
+-- Likewise a top-level declaration whose body has no (mu, sigma) to read off
+-- -- a @draw@, a call, a conditional ('isNormalExtractable') -- is answered by
+-- its own probability function, which the Var equation calls: a helper with
+-- no parameters, @h = draw x = Normal in x + x@, is a binding like any other
 -- (task binding-resolver-one-application-rule).
 hasOwnInferenceHandler meta (Expr _ (Var n))
-  | Just (_, True) <- lookup n (typeEnv meta)
-  , Just decl <- lookup n (functions (compilingProgram meta))
-  , not (isNormalExtractable decl)                          = True
+  | Just (_, top) <- lookup n (typeEnv meta) =
+      not top || maybe False (not . isNormalExtractable) (lookup n (functions (compilingProgram meta)))
 -- A conditional is a *mixture*, and a mixture of two Gaussians is not a
 -- Gaussian -- there is no (mu, sigma) to extract even when both arms have one,
 -- and toIRNormalParams has no equation for it at all, so the catch-all could
@@ -2604,6 +2601,20 @@ hasOwnInferenceHandler _    (Expr _ (IfThenElse _ _ _))     = True
 -- PNormal/PLogNormal catch-alls must not intercept them.
 hasOwnInferenceHandler meta (Expr _ (InjF (Named name) _)) = isFieldConstructor (adtDecls meta) name
 hasOwnInferenceHandler _    _                        = False
+
+-- | A PNormal node the Gaussian catch-all answers from its (mu, sigma): one
+-- reading a variable marginalised by its affine certificate, whose form
+-- 'toIRNormalParams' collapses, or any node without a handler of its own.
+gaussianLeaf :: CompilerMetadata -> Expr -> Bool
+gaussianLeaf meta e = readsMarginalised meta e || not (hasOwnInferenceHandler meta e)
+
+-- | Does this scalar expression read a binding marginalised as an affine form
+-- ('affineEnv'), with an affine form over it ('isAffineOver')?
+readsMarginalised :: CompilerMetadata -> Expr -> Bool
+readsMarginalised meta e =
+  not (isTArrowType (rType (getTypeInfo e)))
+    && mentionsAffineVar meta e
+    && isAffineOver meta (Set.fromList (map fst (affineEnv meta))) e
 
 -- | A Gaussian (or lognormal) leaf whose scale can be zero at run time is a
 -- point mass there, not a density: @z * Normal@ with @z = 0@ is the Dirac at
@@ -2716,11 +2727,11 @@ toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   -- cdf(True) = 1 is always attainable; cdf(False) inherits the False case.
   return (mkPResult (sealP (IRIf sample (srOne (semiringOf meta)) (unP (rProb false)))) const0 (rBranches false)
                   (IRIf sample constFalseIR (rImposs false)))
-toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler meta e) = do
+toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, gaussianLeaf meta e = do
   (mu, sigma0) <- toIRNormalParams meta e
   degenerateScaleGuard meta False TFloat mu sigma0 sample $ \sigma ->
     density (scaledNormalDensity (semiringOf meta) (IROp OpDiv (IROp OpSub sample mu) sigma) [sigma]) sample
-toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler meta e) = do
+toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, gaussianLeaf meta e = do
   (mu, sigma0) <- toIRNormalParams meta e
   degenerateScaleGuard meta True TFloat mu sigma0 sample $ \sigma ->
     mass (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma))
@@ -5358,11 +5369,8 @@ subtreeHasOcc occs e = let cns = subtreeCNs e in any (`elem` cns) occs
 -- | Entry point of the fallback, called from the probabilistic Apply arm after
 -- 'toInvExprMaybe' failed. Builds the constraint worlds for the observation and
 -- measures them against the bound distribution @v@.
--- | The last argument is what to do instead of refusing when the observation
--- has no set-valued inverse ('invertToWorlds' answers 'Nothing'); the affine
--- Gaussian marginalisation is the one caller that supplies one.
-setWitnessApply :: CompilerMetadata -> Bool -> RType -> Binding -> Maybe String -> IRExpr -> Maybe (CompilerMonad PResult) -> CompilerMonad PResult
-setWitnessApply meta0 cumulative rt binding planDiag sample fallback = do
+setWitnessApply :: CompilerMetadata -> Bool -> RType -> Binding -> Maybe String -> IRExpr -> CompilerMonad PResult
+setWitnessApply meta0 cumulative rt binding planDiag sample = do
   let sr = semiringOf meta0
   let Binding{bindHead = l, bindArg = v, bindLambda = lResolvedCN} = binding
   let userVar = case l of Expr _ (Lambda n _) -> n; _ -> bindVar binding
@@ -5391,12 +5399,9 @@ setWitnessApply meta0 cumulative rt binding planDiag sample fallback = do
         then WInterval WNegInf (WFinite sample)
         else WPoint sample const1
   -- Attempted in its own writer scope: a failed inversion's bindings are
-  -- dropped rather than leaking into the fallback's code, and a successful
-  -- one's are re-emitted unchanged, in order.
+  -- dropped, and a successful one's are re-emitted unchanged, in order.
   -- A sub-compile inside the inversion that refuses is a refusal of the
-  -- inversion as a whole: the fallback, when there is one, still gets its turn
-  -- (before refusals were a channel, such a sub-compile's lazy 'error' was
-  -- dropped with the failed attempt's bindings).
+  -- inversion as a whole.
   -- An interval is a set of SCALARS: a cumulative query of a structured value
   -- (a list, an Either, an ADT) has no interval to transport, and the
   -- membership guards compared structured values with @<@ -- @head (draw v0 =
@@ -5404,7 +5409,7 @@ setWitnessApply meta0 cumulative rt binding planDiag sample fallback = do
   -- @head@'s inverse as the interval @(-inf, -5 : ANY]@ on the list, and the
   -- constant folder crashed on @[-2] > -5 : ANY@ (task
   -- optimizer-folds-comparison-on-lists). Such a query takes the
-  -- no-inverse path below: the fallback, else the cumulative refusal.
+  -- no-inverse path below: the cumulative refusal.
   let intervalTarget = case rt of
         TFloat -> True
         TInt   -> True
@@ -5412,10 +5417,8 @@ setWitnessApply meta0 cumulative rt binding planDiag sample fallback = do
         _      -> False
   (worldsM, worldBinds) <- if cumulative && not intervalTarget then return (Nothing, []) else
     lift (runWriterT (invertToWorlds meta occs bodyExpr target))
-    `catchError` (\r -> if isJust fallback then return (Nothing, []) else throwError r)
   when (isJust worldsM) (setVariables worldBinds)
   case worldsM of
-    Nothing | Just alt <- fallback -> alt
     -- A cumulative query the engine cannot invert (e.g. the multivariate CDF of
     -- a correlated tuple) is refused like any other shape: only the integrate
     -- variant goes, so the probability variant of the same program is
@@ -8418,20 +8421,19 @@ applyBinding meta cumulative rt binding sample = do
      -- variable (intervals from comparisons, case splits from ifs,
      -- intersections across occurrences) and measure them against the bound
      -- distribution (design set-valued-witnesses).
-     -- Where the set-witness engine finds no inversion either, a Gaussian
-     -- binding all of whose uses flow affinely into one density leaf needs
-     -- no witness at all: it is integrated out analytically inside that leaf
-     -- (task affine-gaussian-closure-lost-across-let-bindings). Offered as
-     -- the engine's fallback rather than tried first, so every binding the
-     -- engine already answered keeps its emitted code.
-     Nothing -> setWitnessApply meta cumulative rt binding planDiag sample
-                  (affineMarginalise <$> affineMarginalisable meta rt binding)
-      where
-        affineMarginalise (x, lamBody) = do
+     -- Before that, a binding whose certificate is an affine Gaussian form,
+     -- all of whose uses flow affinely into one density leaf, needs no
+     -- witness at all: it is integrated out analytically inside that leaf
+     -- (task affine-gaussian-closure-lost-across-let-bindings; dispatched on
+     -- the certificate since law-carrying-modality M4, not offered as the
+     -- set-witness engine's fallback).
+     Nothing -> case affineMarginalisable meta rt binding of
+       Just (x, lamBody) -> do
           form <- affineFormOf meta v
           let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) x) binding x)
                            { affineEnv = (x, form) : affineEnv meta }
           toIRInference bodyMeta cumulative lamBody sample
+       Nothing -> setWitnessApply meta cumulative rt binding planDiag sample
      Just chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} -> do
       -- A cumulative query transports a bound, rounded at integer quotients
       -- (task cdf-through-discrete-inverse-wrong); a point query the point.

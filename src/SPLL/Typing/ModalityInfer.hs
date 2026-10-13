@@ -40,6 +40,9 @@ module SPLL.Typing.ModalityInfer
   , IMod(..)
   , Law(..)
   , Justification(..)
+  , AffineCert(..)
+  , Recovery(..)
+  , affineOf
   , LawTable
   , Env
   , renderJustification
@@ -358,10 +361,10 @@ data Law = Law
 -- which says nothing about its capability (that is 'lawMod''s job), only that
 -- no certificate backs it yet.
 --
--- This milestone issues the three that need no engine. The engine-backed
--- justifications are later milestones' (affine: M4; witnessed, worlds, plan,
--- enumerable: M5), and until they land the nodes they will describe are
--- 'JUnjustified'.
+-- The three that need no engine came first (M3); the affine Gaussian form is
+-- the first engine-backed one (M4). The rest are later milestones' (witnessed,
+-- worlds, plan, enumerable: M5), and until they land the nodes they will
+-- describe are 'JUnjustified'.
 data Justification
   = JDirac (Maybe Value)
     -- ^ A point mass: the node's capability is 'Exact'. Carries the value
@@ -374,7 +377,37 @@ data Justification
   | JStructured String [Law]
     -- ^ A field constructor (a tuple, @Cons@, a user-ADT constructor) and the
     -- laws of its fields, in order.
+  | JAffine AffineCert
+    -- ^ An affine Gaussian form (design @affine-gaussian-forms@ §2): the value
+    -- is an affine combination of the independent standard-normal latents
+    -- named. Consumed by the compiler's Gaussian collapse, which marginalises
+    -- a binding certified this way ('IRCompiler.affineMarginalisable').
+  | JSharedLatent String [ChainName] [Law]
+    -- ^ A field constructor, with its fields' laws, whose fields share the
+    -- 'Marginal' affine latents listed. Their joint law is a multivariate
+    -- Gaussian, which no engine implements (affine-gaussian-forms M2), so the
+    -- node is sample-only: this is the certificate saying so, and the lattice
+    -- floors on it ('sampleOnlyI').
   | JUnjustified
+
+-- | The certificate of an affine Gaussian form: the latents the value is an
+-- affine combination of, keyed by the chain name of the node that drew each
+-- (the keys @IRCompiler@'s own @AffineForm@ uses), each with whether it is
+-- recovered from the observation. The coefficients are not here: they are
+-- runtime quantities, which the compiler builds as IR from the expression the
+-- certificate is about.
+--
+-- Two reads of one @draw@-bound variable carry the same key ('bindParam'), so
+-- @x + x@ is one latent, while every other Gaussian leaf is a fresh one. An
+-- empty map is a constant.
+newtype AffineCert = AffineCert { acLatents :: Map ChainName Recovery }
+
+-- | Whether an affine latent is known given the observation. A latent is
+-- 'Recovered' when the binding that reads it alone is witnessed: recovering
+-- the binding recovers it ('bindParam'). Only a 'Marginal' latent has to be
+-- integrated out, so only those correlate two fields ('JSharedLatent').
+data Recovery = Marginal | Recovered
+  deriving (Eq, Ord, Show)
 
 -- | A law with no justification beyond its capability: 'JDirac' (value
 -- unknown) when the value is a point mass, 'JUnjustified' otherwise. A
@@ -400,12 +433,16 @@ renderJustification j = case j of
   JLeaf p []       -> "leaf " ++ p
   JLeaf p ls       -> "leaf " ++ p ++ args ls
   JStructured c ls -> c ++ args ls
+  JAffine c        -> "affine" ++ latents c
+  JSharedLatent c ks ls -> c ++ args ls ++ " sharing latent " ++ intercalate ", " ks
   JUnjustified     -> "unjustified"
   where args ls = "(" ++ intercalate ", " (map (renderJustification . lawJust) ls) ++ ")"
         renderValue (VFloat x) = show x
         renderValue (VInt n)   = show n
         renderValue (VBool b)  = show b
         renderValue v          = show v
+        latents (AffineCert m) = "(" ++ intercalate ", "
+          [ k ++ (if r == Recovered then " recovered" else "") | (k, r) <- Map.toList m ] ++ ")"
 
 -- | The per-node certificates of a program, keyed by chain name: what
 -- 'inferProgram' concluded at every node of the program as written (not at
@@ -527,15 +564,23 @@ inferE ctx env expr = case expr of
             zero = staticValue (if isZeroConstant a then a else b)
         in doneL (Law (IG gExact) (JDirac zero)) (Expr (setPType ti Deterministic) (InjF (Named fname) [a', b'])) (aAcc ++ bAcc)
 
+  -- An affine operator ('affineInjF') over operands that have affine forms
+  -- is Gaussian, and its law is the form: the family verdict is the form's
+  -- existence (design law-carrying-modality M4), not a table over the
+  -- operands' projected pTypes.
   Expr ti (InjF name@(Named fname) args) ->
     let rs   = map (inferE ctx env) args
         laws = [ al | (al,_,_) <- rs ]
         es'  = [ e  | (_,e,_) <- rs ]
         acc  = concat [ a | (_,_,a) <- rs ]
-        m    = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname (map lawMod laws)))
-        e'   = Expr (setPType ti (projectI m)) (InjF name es')
-        l | isFieldConstructor (icADTs ctx) fname = Law m (JStructured fname laws)
-          | otherwise                             = pointOr m e'
+        affine = case affineInjF fname (zipWith (affineOf . cnOf) args laws) of
+                   Just c | not (Map.null (acLatents c)) -> Just c
+                   _ -> Nothing
+        m0   = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname (isJust affine) (map lawMod laws)))
+        l | isFieldConstructor (icADTs ctx) fname = structuredLaw fname laws m0
+          | Just c <- affine                      = Law m0 (JAffine c)
+          | otherwise                             = pointOr m0 (Expr ti (InjF name es'))
+        e'   = Expr (setPType ti (projectI (lawMod l))) (InjF name es')
     in doneL l e' acc
 
   -- The arms are inferred under an environment in which every random variable
@@ -586,7 +631,7 @@ inferE ctx env expr = case expr of
          -- own slot) is untouched. The capability gate (@gCap /= Exact@) skips
          -- the FC query for deterministic and function-valued bindings.
          Expr lti (Lambda x body) ->
-           let (bodyLaw, body', ba) = inferE ctx (bindParam ctx (chainName lti) x argLaw env) body
+           let (bodyLaw, body', ba) = inferE ctx (bindParam ctx (chainName lti) x (cnOf arg) argLaw env) body
                bodyMod = lawMod bodyLaw
                -- The applied lambda node carries the body's pType (its result),
                -- matching @PInfer2@ and what @IRCompiler@ reads, not the outer
@@ -624,6 +669,65 @@ inferE ctx env expr = case expr of
           e' = Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])
       in doneL (pointOr (IG g) e') e' (aacc ++ bacc)
 
+-- | The affine form of a scalar value of law @l@ at node @cn@ (design
+-- affine-gaussian-forms §3): its certificate if it has one, a constant if it
+-- is a point mass, and otherwise, for a Gaussian, one fresh latent keyed by
+-- @cn@ -- a leaf, or a Gaussian no rule here sees into (a call, a neural
+-- read, a tuple field), which the compiler's scalar extractor answers as a
+-- leaf too. 'Nothing' for anything else.
+affineOf :: ChainName -> Law -> Maybe AffineCert
+affineOf cn (Law m j) = case projectI m of
+  Deterministic -> Just (AffineCert Map.empty)
+  PNormal -> Just (case j of
+    JAffine c -> c
+    _         -> AffineCert (Map.singleton cn Marginal))
+  _ -> Nothing
+
+-- | The affine algebra's rules (design affine-gaussian-forms §3): a sum adds
+-- per latent, a product with a constant scales, a negation negates. Which
+-- coefficients result is the compiler's concern; the latents are this.
+-- A latent recovered on either side is recovered.
+affineInjF :: String -> [Maybe AffineCert] -> Maybe AffineCert
+affineInjF "plus" [Just a, Just b] = Just (AffineCert (Map.unionWith max (acLatents a) (acLatents b)))
+affineInjF "mult" [Just a, Just b]
+  | Map.null (acLatents a) = Just b
+  | Map.null (acLatents b) = Just a
+affineInjF "neg"  [Just a] = Just a
+affineInjF _ _ = Nothing
+
+-- | The law of a field constructor over its fields' laws. Fields sharing a
+-- 'Marginal' affine latent have a joint, multivariate Gaussian law, not the
+-- product of their own: the structure is floored to sample-only, with the
+-- certificate naming the shared latents ('JSharedLatent'), until
+-- affine-gaussian-forms M2 gives that joint law an engine.
+structuredLaw :: String -> [Law] -> IMod -> Law
+structuredLaw fname laws m = case sharedLatents of
+  [] -> Law m (JStructured fname laws)
+  ks -> Law (sampleOnlyI m) (JSharedLatent fname ks laws)
+  where
+    sharedLatents = Map.keys (Map.filter (> (1 :: Int)) (Map.unionsWith (+)
+      [ Map.fromSet (const 1) (marginalLatents l) | l <- laws ]))
+
+-- | The 'Marginal' affine latents a value's law reads, through structure.
+marginalLatents :: Law -> Set.Set ChainName
+marginalLatents (Law _ j) = case j of
+  JAffine c             -> Map.keysSet (Map.filter (== Marginal) (acLatents c))
+  JStructured _ ls      -> Set.unions (map marginalLatents ls)
+  JSharedLatent _ _ ls  -> Set.unions (map marginalLatents ls)
+  _                     -> Set.empty
+
+-- | Floor every random part of a modality to (at most) sample-only, keeping
+-- its shape so accessors and the fixpoint's comparison still line up.
+sampleOnlyI :: IMod -> IMod
+sampleOnlyI (IG g)
+  | gCap g == Exact = IG g
+  | otherwise       = IG (groundMod (meetCap SampleOnly (gCap g)) (gFin g) FamNone)
+sampleOnlyI (IProd a b)  = IProd (sampleOnlyI a) (sampleOnlyI b)
+sampleOnlyI (ISum t a b) = ISum t (sampleOnlyI a) (sampleOnlyI b)
+sampleOnlyI (IRec s e)   = IRec s (sampleOnlyI e)
+sampleOnlyI (IWit m)     = sampleOnlyI m
+sampleOnlyI m@(IArr _ _) = m
+
 -- | The law of a node no more specific rule justifies: a point mass, with
 -- its value where the node's enumeration domain is a single value, or
 -- unjustified.
@@ -658,8 +762,20 @@ letBoundLaw ctx headCN argLaw@(Law argMod j)
 -- the argument's law, witnessed where 'letBoundLaw' says so. 'inferE''s
 -- @draw@/let rule, 'envAt' and the compiler's @lawEnv@ ('bindingLawEnv') all
 -- extend through it, so the three cannot disagree on what a binder means.
-bindParam :: ICtx -> ChainName -> String -> Law -> Env -> Env
-bindParam ctx headCN x argLaw = Map.insert x (letBoundLaw ctx headCN argLaw)
+--
+-- A Gaussian argument binds at its affine certificate ('affineOf' at the
+-- argument's chain name @argCN@), so every read of @x@ carries the same latent
+-- keys. A witnessed binding of an argument with a single 'Marginal' latent
+-- recovers that latent: the observation determines @x@, and so it.
+bindParam :: ICtx -> ChainName -> String -> ChainName -> Law -> Env -> Env
+bindParam ctx headCN x argCN argLaw = Map.insert x (affineBound (letBoundLaw ctx headCN argLaw))
+  where
+    affineBound l@(Law m _) = case affineOf argCN argLaw of
+      Just c | not (Map.null (acLatents c)) -> Law m (JAffine (if isWitI m then recoverSole c else c))
+      _ -> l
+    recoverSole (AffineCert ls) = case Map.keys (Map.filter (== Marginal) ls) of
+      [k] -> AffineCert (Map.insert k Recovered ls)
+      _   -> AffineCert ls
 
 -- | The law a free-standing lambda binds its parameter to: the representative
 -- of the parameter's type. Shared with 'envAt'.
@@ -676,7 +792,7 @@ lambdaParamLaw = bareLaw . lambdaParamMod
 -- holding the head, as in 'inferE'. A head in no declaration (a synthesized
 -- node) is one forward chaining never saw, which 'letBoundLaw' does not ask
 -- either, so the binding is unwitnessed.
-bindingLawEnv :: ReinferCtx -> ChainName -> String -> Law -> Env -> Env
+bindingLawEnv :: ReinferCtx -> ChainName -> String -> ChainName -> Law -> Env -> Env
 bindingLawEnv rc headCN = bindParam ctx headCN
   where
     ctx = case find (containsCN . snd) (rcDecls rc) of
@@ -855,8 +971,10 @@ compareGround plan enumA enumB indep a b
 
 -- | Modality of an 'InjF' application. Resolution order:
 --
---   1. 'tryNormalClosure' — the distribution-family-preserving operators
---      (affine shift/scale, neg, exp/log) keep 'PNormal'/'PLogNormal';
+--   1. the family-preserving operators keep 'PNormal'/'PLogNormal': an affine
+--      operator with an affine form (@gaussian@, decided by 'affineInjF' in
+--      'inferE') is 'PNormal', and 'tryNormalClosure' lists the log-normal
+--      ones;
 --   2. field constructors (tuples / @Cons@ / user-ADT, ≥2 fields) build a
 --      structured 'IProd' so the projection is the meet of independent fields
 --      and accessors can later recover a single field;
@@ -876,9 +994,9 @@ compareGround plan enumA enumB indep a b
 -- which also covers the same-latent shape without a ledger identity). Any
 -- fresh latent beyond one in the combination floors the result — that is what
 -- keeps the two-residual guard at 'Bottom'.
-injFMod :: [ADTDecl] -> String -> [IMod] -> IMod
-injFMod adtsDecl name mods =
-  case tryNormalClosure name (map projectI mods) of
+injFMod :: [ADTDecl] -> String -> Bool -> [IMod] -> IMod
+injFMod adtsDecl name gaussian mods =
+  case (if gaussian then Just PNormal else tryNormalClosure name (map projectI mods)) of
     Just pt -> witWrap (IG (fromClosurePType pt))
     Nothing
       | isFieldConstructor adtsDecl name, (m0:rest) <- mods -> foldl IProd m0 rest
@@ -959,13 +1077,12 @@ injFMod adtsDecl name mods =
 -- | The family-preserving operator table (design §6 @primSem@/@shiftSem@): which
 -- 'InjF's keep 'PNormal'/'PLogNormal' structure, and the result. Ported from
 -- @PInfer2.tryNormalClosure@ so the analytic-kernel cases stay byte-for-byte.
+--
+-- The Gaussian rows (@plus@, @mult@ by a constant, @neg@) are no longer here:
+-- an affine node is 'PNormal' exactly when its affine form can be built
+-- ('affineInjF'; law-carrying-modality M4), which is also what the compiler
+-- collapses.
 tryNormalClosure :: String -> [PType] -> Maybe PType
-tryNormalClosure "plus" [PNormal, PNormal]       = Just PNormal
-tryNormalClosure "plus" [PNormal, Deterministic] = Just PNormal
-tryNormalClosure "plus" [Deterministic, PNormal] = Just PNormal
-tryNormalClosure "mult" [PNormal, Deterministic] = Just PNormal
-tryNormalClosure "mult" [Deterministic, PNormal] = Just PNormal
-tryNormalClosure "neg"  [PNormal]                = Just PNormal
 tryNormalClosure "neg"  [Deterministic]          = Just Deterministic
 tryNormalClosure "exp"  [PNormal]                = Just PLogNormal
 tryNormalClosure "log"  [PLogNormal]             = Just PNormal
@@ -1140,7 +1257,7 @@ envAt ctx pins env cn e
         firstJust
           [ envAt ctx pins env cn arg
           , if cnOf f == cn then Just env else Nothing
-          , envAt ctx pins (pin x (bindParam ctx (chainName lti) x (argLaw arg) env)) cn body ]
+          , envAt ctx pins (pin x (bindParam ctx (chainName lti) x (cnOf arg) (argLaw arg) env)) cn body ]
       Expr ti (Lambda x body) ->
         envAt ctx pins (pin x (Map.insert x (bareLaw (lambdaParamMod ti)) env)) cn body
       Expr _ (IfThenElse c t f) ->

@@ -27,7 +27,7 @@ import SPLL.Prelude (compile, runProb, runInteg, runGen, uniform, constB, constF
 import SPLL.IntermediateRepresentation (CompilerConfig(..), defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
 import SPLL.IRCompiler (requireNoGenerateBacked, symbolCdfMessage)
 import TestSupport (expectVariantRefused)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage, accessorMismatchMessage)
@@ -1448,23 +1448,26 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
 -- rather than rewriting it away. The multi-use half is also filed as
 -- @correlated-gaussian-let-shares-latent@.
 --
--- The family layer admits both programs (@tryNormalClosure "plus"
--- [PNormal, PNormal]@ types each sum @PNormal@), and no engine compiles them:
+-- Each sum is Gaussian (it has an affine form), and no engine compiles them:
 -- @x@ has two uses, so substitution is unavailable — it would replace one
 -- shared draw with two independent ones and silently decorrelate the output —
 -- and the honest density is a *bivariate* Gaussian (covariance @[[2,1],[1,2]]@
 -- for the first program) that nothing in the compiler represents.
 --
 -- __When these fail, read them before changing them.__ Three landings move
--- them, and each wants a different edit:
+-- them, and each wants a different edit. The first two have landed:
 --
 -- * [[static-refusals-become-absent-variants]] (P1) makes a static refusal an
 --   absent variant. The refusal then arrives as @Right (Left …)@ and the whole
 --   compile survives, so 'assertSharedLatentRefusal' moves to the declined
 --   branch and the third case below inverts: @compile@ succeeds and @generate@
 --   works. That is the fix landing, and the cases must be updated, not deleted.
--- * [[engine-applicability-as-data]] (P3) floors a binding no engine claims, so
---   these type @Bottom@ and report a missing variant. Same edit.
+-- * The affine form as a law certificate (law-carrying-modality M4,
+--   [[affine-form-as-law-certificate]]) types these @Bottom@: the tuple's
+--   fields share a marginal latent, and its certificate says so
+--   ('JSharedLatent'). The probability variant is a missing variant, and
+--   @generate@ is unaffected. ([[engine-applicability-as-data]] (P3) would
+--   have had the same effect.)
 -- * A multivariate-Gaussian capability (@affine-gaussian-forms@) answers them
 --   for real. Then they stop
 --   being rejection cases and become corpus cases pinning the correlated
@@ -1489,32 +1492,32 @@ sharedLatentTwoUsesSrc =
 
 setWitnessSharedLatentTests :: TestTree
 setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
-  [ testCase "two sums over one latent are refused, never silently decorrelated" $
+  [ testCase "two sums over one latent are a missing variant, never silently decorrelated" $
       withParsed sharedLatentTwoSumsSrc $ \prog -> do
         res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
         assertSharedLatentRefusal "two sums over one latent" res
-  , testCase "two uses of one sum are refused, never silently decorrelated" $
+  , testCase "two uses of one sum are a missing variant, never silently decorrelated" $
       withParsed sharedLatentTwoUsesSrc $ \prog -> do
         res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
         assertSharedLatentRefusal "two uses of one sum" res
-  , testCase "the refusal is not eager: generate survives the refused probability variant" $
+  , testCase "generate survives the absent probability variant" $
       -- Inverted by static-refusals-become-absent-variants: the refusal used to
-      -- be a compile-time 'error' that took 'generate' down with it.
+      -- be a compile-time 'error' that took 'generate' down with it. Since
+      -- affine-form-as-law-certificate the variant is not compiled at all.
       withParsed sharedLatentTwoSumsSrc $ \prog -> do
         let compiled = compile defaultCompilerConfig prog
-        expectVariantRefused "main" "prob" setWitnessDiagnostic compiled
-        assertBool "generate was taken down with the refused probability variant"
+        assertBool "the probability variant of a shared-latent tuple was compiled"
+          (either (const False) (isNothing . probFun . lookupIREnv "main") compiled)
+        assertBool "generate was taken down with the absent probability variant"
           (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   ]
   where
-    -- Deliberately not 'setWitnessNestedLetTests's assertion: that one also
-    -- requires the "neither point-invertible" sentence, which is about the
-    -- nested-let path. Here the only claim is that the set-witness engine is
-    -- the stage that declines, and that no number comes back.
+    -- The modality pass types the tuple Bottom, so the answer is the
+    -- missing-variant one, and no number comes back.
     assertSharedLatentRefusal what res = case res of
       Right (Left e) -> assertBool
-        ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ e)
-        (setWitnessDiagnostic `isInfixOf` e)
+        ("expected the missing-variant answer for " ++ what ++ ", got: " ++ e)
+        ("has no compiled probability function" `isInfixOf` e)
       Left ex -> assertFailure
         (what ++ " crashed instead of recording a refusal: " ++ show ex)
       Right (Right v) -> assertFailure
