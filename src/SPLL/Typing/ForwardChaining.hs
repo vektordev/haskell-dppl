@@ -1174,7 +1174,7 @@ constructTopLevelEquivalenceClauses' :: [[HornClause]] -> [Expr] -> FnDecl -> [[
 constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (getTypeInfo expr) of
   TArrow _ _ -> concat $ evalSupply $ mapM (\otherExpr -> do
     let (_, bodyExpr) = asLambda "constructTopLevelEquivalenceClauses'" expr
-    let dependent = getDependentGroups clauses (getChainName bodyExpr)
+    let dependent = getDependentGroups (subtreeChainNames bodyExpr) clauses (getChainName bodyExpr)
     (varClauses, applyCnt) <- associateFunctionVariable name (getChainName expr) "" otherExpr
     let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
     return $ varClauses ++ taggedDependents) exprs
@@ -1216,7 +1216,7 @@ constructEquivalenceClauses clauses exprs (Expr TypeInfo{chainName=exCn} (Apply 
           Just vLambdaCn -> do
             let (_, vBody) = asLambda "constructEquivalenceClauses" (findExprWithCN exprs vLambdaCn)
             -- Get all horn clauses, which corresspond to expressions in the sub-AST of the lambda
-            let dependent = getDependentGroups clauses (getChainName vBody)
+            let dependent = getDependentGroups (subtreeChainNames vBody) clauses (getChainName vBody)
             -- Supply each invokation with a unique tag and create the corresponding clauses
             let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable lVar vLambdaCn lTag lBody
             -- Create a tagged copy of the dependent Hron clauses
@@ -1233,13 +1233,17 @@ constructEquivalenceClauses clauses exprs (Expr TypeInfo{chainName=exCn} (Apply 
       -- Easy if the applied value is no function, because it is constant across the program.
       _ ->
         -- We still need to create a tagged group if our original lambda was tagged
-        let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (getDependentGroups clauses (getChainName lBody)) in
+        let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (getDependentGroups (subtreeChainNames lBody) clauses (getChainName lBody)) in
         appliedGroup:taggedGroups ++ associateVariable lVar (getChainName v) lTag lBody
   where
     isLambdaExpr (Expr _ Lambda{}) = True
     isLambdaExpr _ = False
 constructEquivalenceClauses clauses exprs ex = concatMap (constructEquivalenceClauses clauses exprs) (getSubExprs ex)
 
+
+-- | The chain names of every node of an expression.
+subtreeChainNames :: Expr -> Set ChainName
+subtreeChainNames e = Set.insert (getChainName e) (Set.unions (map subtreeChainNames (getSubExprs e)))
 
 isInClauseSet :: [[HornClause]] -> ChainName -> Bool
 isInClauseSet clauses cn = any (\cs -> isEquivalenceHornClause (head cs) && premises (getForwardClauseOfGroup cs) == [cn]) clauses
@@ -1295,9 +1299,26 @@ tagHornClause tag (EquivalenceHornClause pre conc info inv) = EquivalenceHornCla
 tagHornClause tag (ParameterHornClause conc) = ParameterHornClause (conc ++ tag)
 
 
-getDependentGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
-getDependentGroups clauses cn = directDependence cn ++ concatMap (getDependentGroups clauses) (concatMap forwardPremises (directDependence cn))
+getDependentGroups :: Set ChainName -> [[HornClause]] -> ChainName -> [[HornClause]]
+getDependentGroups scope clauses cn0 = fst (go Set.empty cn0)
   where
+    go seen c
+      | c `Set.member` seen = ([], seen)
+      | otherwise =
+          let direct = filter (dependsOn c) clauses
+              -- An equivalence between two nodes of the copied body -- a
+              -- @draw@'s value and its variable's occurrences, the
+              -- application and the lambda body it reduces to -- is part of
+              -- the body, so the copy follows it (task
+              -- binding-resolver-one-application-rule). One that leaves the
+              -- body (a parameter bound at the call site, a call into another
+              -- function) is not: that is the copy's own boundary.
+              local = [ (g, other) | c `Set.member` scope, g <- equivalenceGroups
+                                   , Just other <- [equivalencePartner c g], other `Set.member` scope ]
+              nexts = concatMap forwardPremises direct ++ map snd local
+              step (acc, sn) n = let (gs, sn') = go sn n in (acc ++ gs, sn')
+              (rest, seen') = foldl step ([], Set.insert c seen) nexts
+          in (direct ++ map fst local ++ rest, seen')
     -- Variable equivalences work the other way around as other clauses
     --forwardConclusion cs = let fc = getForwardClauseOfGroup cs in if isEquivalenceHornClause fc && isVariableEquivalence (equivalenceType fc) then head $ premises fc else conclusion fc
     forwardConclusion = conclusion . getForwardClauseOfGroup
@@ -1308,8 +1329,6 @@ getDependentGroups clauses cn = directDependence cn ++ concatMap (getDependentGr
       -- exprToHornClauses), each deconstructing the container into one field:
       -- the fields are that group's sub-expressions.
       | otherwise = map conclusion cs
-    --forwardPremises = premises . getForwardClauseOfGroup
-    directDependence c = filter (dependsOn c) clauses
     dependsOn c cs
       | hasForwardClause cs = forwardConclusion cs == c
       -- Inverse-only (field constructor) group: it belongs to the container it
@@ -1319,6 +1338,12 @@ getDependentGroups clauses cn = directDependence cn ++ concatMap (getDependentGr
       -- (task named-function-list-head-witness-not-recovered).
       | otherwise = any (\cl -> isExprHornClause cl && premises cl == [c]) cs
     hasForwardClause = any ((== 0) . inversion)
+    equivalenceGroups = filter (\g -> not (null g) && all isEquivalenceHornClause g) clauses
+    equivalencePartner c g = case [ hc | hc@(EquivalenceHornClause [_] _ _ 0) <- g ] of
+      [EquivalenceHornClause [a] b _ _]
+        | a == c -> Just b
+        | b == c -> Just a
+      _ -> Nothing
 
 -- Some clause groups, like TCons, may not have a forward clause. You need to make sure this is not the case when incokink this function
 getForwardClauseOfGroup :: [HornClause] -> HornClause

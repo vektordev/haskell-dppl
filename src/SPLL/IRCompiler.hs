@@ -2547,6 +2547,15 @@ hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
 hasOwnInferenceHandler meta (Expr _ (Var n))
   | Just (_, False) <- lookup n (typeEnv meta)
   , isNothing (lookup n (affineEnv meta))                   = True
+-- A top-level declaration whose body has no (mu, sigma) to read off -- a
+-- @draw@, a call, a conditional ('isNormalExtractable') -- is answered by its
+-- own probability function, which the Var equation calls: a helper with no
+-- parameters, @h = draw x = Normal in x + x@, is a binding like any other
+-- (task binding-resolver-one-application-rule).
+hasOwnInferenceHandler meta (Expr _ (Var n))
+  | Just (_, True) <- lookup n (typeEnv meta)
+  , Just decl <- lookup n (functions (compilingProgram meta))
+  , not (isNormalExtractable decl)                          = True
 -- A conditional is a *mixture*, and a mixture of two Gaussians is not a
 -- Gaussian -- there is no (mu, sigma) to extract even when both arms have one,
 -- and toIRNormalParams has no equation for it at all, so the catch-all could
