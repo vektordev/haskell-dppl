@@ -1391,14 +1391,18 @@ floatAgrees a b
 -- (Python's @sign@ and uniform density answer ints; numerically that is the
 -- same value, and it is tabulated rather than failed).
 valueAgrees :: IRValue -> [String] -> Either String Bool
-valueAgrees v0 toks0 = case go v0 toks0 of
+valueAgrees = valueAgreesWith floatAgrees
+
+-- | 'valueAgrees' with the given float comparison.
+valueAgreesWith :: (Double -> Double -> Bool) -> IRValue -> [String] -> Either String Bool
+valueAgreesWith floatEq v0 toks0 = case go v0 toks0 of
   Right (lenient, []) -> Right lenient
   Right (_, rest) -> Left ("tokens left over: " ++ unwords rest)
   Left why -> Left why
   where
     go v toks = case (v, toks) of
       (VFloat x, ('f' : s) : rest) -> case readNum s of
-        Just y | floatAgrees x y -> Right (False, rest)
+        Just y | floatEq x y -> Right (False, rest)
         _ -> Left ("float " ++ show x ++ " against " ++ s)
       (VFloat x, ('i' : s) : rest) -> case readMaybe s :: Maybe Integer of
         -- An int has no signed zero, so only the number is compared.
@@ -1612,6 +1616,13 @@ knownDisagreements =
       (ByAnswer (\c _ _ -> icKind c == GenBody
                            && not (null [ () | x <- caseUniverse c, d <- hoistedEffects x, not (isPure d) ])))
       (genRepro [] ITFloat (IROp OpSub (IRSample IRUniform) (IRLetIn "l" (IRSample IRUniform) (IRVar "l"))))
+  -- Python's empty sum is the int 0, which has no negative zero: the IR's
+  -- @-(sum [])@ is -0.0 (found in M4). Recognised by the construct (a case
+  -- summing a tensor of static length 0) and a differing value.
+  , KnownFamily "python-empty-sum-answers-an-int" ["python"]
+      (ByAnswer (\c o a -> isValue o && isSampled a
+                           && not (null [ () | IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []] <- caseUniverse c ])))
+      (repro [] ITFloat (IROp OpDiv (IRUnaryOp OpNeg (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []])) (IRConst (VFloat 2))) [])
   -- M4, the batched arm (PResult bodies through the select pass and the
   -- batched backend).
   --
@@ -1647,11 +1658,23 @@ knownDisagreements =
   -- 'python-float-division-by-zero-raises'), and takes logs by @safe_log@,
   -- minus infinity at a negative or NaN operand where the IR's log is a NaN.
   , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
-      (AsIf (const (irMap (batchedLog . batchedDivision))))
+      (AsIf (const (irMap (batchedSign . batchedLog . batchedDivision))))
       (batchedRepro (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a0")) (VFloat 0))
   , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
-      (AsIf (const (irMap (batchedLog . batchedDivision))))
+      (AsIf (const (irMap (batchedSign . batchedLog . batchedDivision))))
       (batchedRepro (IRUnaryOp OpLog (IRVar "a0")) (VFloat (-1)))
+  -- The NaN of a zero divisor shows through a sign: torch's sign of a NaN is
+  -- 0 (the interpreter refuses one, 'knownRefusals'), so the rewrite gives
+  -- the sign that too.
+  , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
+      (AsIf (const (irMap (batchedSign . batchedLog . batchedDivision))))
+      (batchedRepro (IRIf (IROp OpEq (IRUnaryOp OpSign (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a0"))) (IRConst (VFloat 0)))
+                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 0))
+  -- torch's logsumexp is +inf when a term is +inf, where the interpreter's
+  -- pairwise fold makes it NaN next to a finite term.
+  , KnownFamily "logsumexp-reduction-nan-and-infinity-differ-across-engines" ["batched"]
+      (AsIf (const (irMap batchedLogSumExp)))
+      (batchedRepro (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRDensity IRNormal Linear (IRVar "a0")]]) (VFloat (1 / 0)))
   -- A rank-1 tensor's elements are read as floats: a tensor of booleans is
   -- built as a float tensor (so an element read out of it is no condition
   -- for @torch.where@), and one of tuples fails.
@@ -1664,6 +1687,14 @@ knownDisagreements =
       (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
                          || raisedWith "float() argument must be a string or a real number, not '" a))
       (batchedRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRConst (VInt 0)])) (VFloat 1))
+  -- The batched sum of one element is that element, where the IR's sum
+  -- adds it to 0.0, which turns a negative zero into 0.0. Recognised by the
+  -- answer agreeing once zeros are compared without their sign.
+  , KnownFamily "batched-sum-of-one-element-keeps-a-negative-zero" ["batched"]
+      (ByAnswer (\_ o a -> case (o, a) of
+                  (Interpreted v, Sampled toks) -> either (const False) (const True) (valueAgreesWith probAgrees v toks)
+                  _ -> False))
+      (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat (-0.0))]]) (VFloat 1))
   -- The batched type-tag check of a number literal renders a method call on
   -- it (@0.is_floating_point()@), which Python cannot parse.
   , KnownFamily "batched-conformsto-of-a-literal-fails-to-parse" ["batched"]
@@ -1683,7 +1714,8 @@ knownDisagreements =
   -- The batched categorical index reads its weights as a tensor, so a list
   -- of batched weights is indexed by a tuple.
   , KnownFamily "batched-categorical-index-over-batched-weights-fails" ["batched"]
-      (ByAnswer (\c _ a -> raisedWith "list indices must be integers or slices, not tuple" a
+      (ByAnswer (\c _ a -> (raisedWith "list indices must be integers or slices, not tuple" a
+                            || raisedWith "not supported between instances of 'tuple' and 'int'" a)
                          && not (null [ () | IRBuiltin (BCategoricalIndex _ _) _ <- caseUniverse c ])))
       (batchedRepro (IRIf (IROp OpEq (IRBuiltin (BCategoricalIndex 0 2) [IRConst (VFloat 0.5), IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat 1)]])
                                      (IRConst (VInt 0)))
@@ -1709,12 +1741,12 @@ knownDisagreements =
     isVar (IRVar _) = True
     isVar _ = False
     -- The draw counts agree (the first token after the tuple's).
-    -- What Python floats out of an expression to a statement before it: the
-    -- declaration of a let-binding, or a whole conditional, under a node
-    -- that is not itself a statement (a let or an if).
+    -- What Python floats out of an expression to statements before it: a
+    -- let-spine or a conditional under a node that is not itself a statement
+    -- (a let or an if).
     hoistedEffects x
       | isStatement x = []
-      | otherwise = [ d | IRLetIn _ d _ <- getIRSubExprs x ] ++ [ y | y@IRIf{} <- getIRSubExprs x ]
+      | otherwise = [ y | y <- getIRSubExprs x, isStatement y ]
     isStatement y = case y of
       IRLetIn{} -> True
       IRIf{} -> True
@@ -1903,6 +1935,23 @@ batchedDivision e = case e of
   IROp OpDiv a b ->
     IRLetIn "dv_a" a (IRLetIn "dv_b" b
       (IRIf (IROp OpEq (IRVar "dv_b") (floatE 0)) (floatE (0 / 0)) (IROp OpDiv (IRVar "dv_a") (IRVar "dv_b"))))
+  _ -> e
+
+-- | 'OpSign' as torch answers it at a NaN: 0.
+batchedSign :: IRExpr -> IRExpr
+batchedSign e = case e of
+  IRUnaryOp OpSign a -> IRLetIn "bs_a" a (IRIf (isNaNE (IRVar "bs_a")) (floatE 0) (IRUnaryOp OpSign (IRVar "bs_a")))
+  _ -> e
+
+-- | Log-sum-exp as torch reduces it: +inf when a term is +inf and none is a
+-- NaN.
+batchedLogSumExp :: IRExpr -> IRExpr
+batchedLogSumExp e = case e of
+  IRBuiltin (BReduce ROpLogSumExp 0) [t] ->
+    IRLetIn "blse_t" t $
+      IRIf (IROp OpAnd (countWhere (\x -> IROp OpEq x (floatE (1 / 0))) (IRVar "blse_t"))
+                       (IRUnaryOp OpNot (countWhere isNaNE (IRVar "blse_t"))))
+           (floatE (1 / 0)) (IRBuiltin (BReduce ROpLogSumExp 0) [IRVar "blse_t"])
   _ -> e
 
 -- | 'OpLog' as the batched backend's @safe_log@ answers it: minus infinity
