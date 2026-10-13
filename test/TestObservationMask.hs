@@ -332,17 +332,17 @@ pruneTests = testGroup "pruneObservation and the pipeline below it"
       m <- maskOf "main" progN ["snd.fst"]
       (prog, env) <- prunedEnv "main" m progN
       let q = VTuple (VFloat 0.9) (VTuple (VFloat 0.4) (VFloat 0.5))
-      assertProbDim "N (x+y, (_, y))" (runProbC prog env [] q) 1.0 2.0
+      assertProbDim "N (x+y, (_, y))" (runProbC prog env [] q) 1.0 2
 
   , testCase "B pruned at slot 1 answers 1.0 at dim 1" $ do
       m <- maskOf "main" progB ["fst"]
       (prog, env) <- prunedEnv "main" m progB
       let q = VTuple (VFloat 0.3) (VFloat 0.7)
-      assertProbDim "B (_, 1.0 - x)" (runProbC prog env [] q) 1.0 1.0
+      assertProbDim "B (_, 1.0 - x)" (runProbC prog env [] q) 1.0 1
   ]
 
 -- | Assert a probability query's (prob, dim) pair.
-assertProbDim :: String -> Either CompilerError IRValue -> Double -> Double -> IO ()
+assertProbDim :: String -> Either CompilerError IRValue -> Double -> Int -> IO ()
 assertProbDim what res expP expD = case res of
   Left err -> assertFailure (what ++ ": query failed: " ++ err)
   Right (VProbDim p d) -> do

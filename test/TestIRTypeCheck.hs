@@ -80,8 +80,8 @@ constructTests = testGroup "constructs"
       hasType "Float" (IRLetIn "x" (IRSample IRNormal) (IROp OpMult (v "x") (v "x")))
       hasType "Bool" (IRApply (IRLambda "x" (IRUnaryOp OpNot (v "x"))) (b False))
   , testCase "the PResult layout is an ordinary nested tuple" $
-      hasType "(Float, (Float, Bool))"
-        (IRConstruct TgTuple [IRDensity IRNormal Log (f 0), IRConstruct TgTuple [f 0, b False]])
+      hasType "(Float, (Int, Bool))"
+        (IRConstruct TgTuple [IRDensity IRNormal Log (f 0), IRConstruct TgTuple [i 0, b False]])
   , testCase "data constructors and their accessors" $ do
       hasType "[Int]" (IRConstruct TgCons [i 1, IRConst (VList EmptyList)])
       hasType "Int" (IRDestruct AcHead (IRConstruct TgCons [i 1, IRConst (VList EmptyList)]))

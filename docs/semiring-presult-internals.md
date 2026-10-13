@@ -14,6 +14,12 @@ nesting deepens; the zero-probability guard must still sit on the bound
 value rather than each projection, or a recursive call the guard exists to
 skip can run anyway (`dice` stops terminating).
 
+A dim counts dimensions, so it is an `Int` in the IR (`dim0`/`dim1`, never
+`const0`/`const1`, which are the float probability constants) and on every
+backend: a Python `int`, a Julia `Int`, a torch `int64` tensor batched.
+`VProbDim` matches only a `VInt` dim, so a stray float dim fails at its
+consumer instead of comparing unequal (task `presult-dim-as-int`).
+
 `enumSumP` reports a **mass**: dim 0, flag derived from the summed value.
 That is only right when every enumerated term is one. `enumMixP` is the
 enumerated *mixture* of a scalar real value: each term keeps its own dim and

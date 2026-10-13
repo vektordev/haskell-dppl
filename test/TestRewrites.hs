@@ -207,7 +207,7 @@ knownDivergence prog fam site =
 type Query = (IRValue, [IRValue])
 
 -- | What a program did at a list of query points.
-data Outcome = Answered [(Double, Double)] | Refused String
+data Outcome = Answered [(Double, Int)] | Refused String
 
 -- | Compile at the default config and answer every query. Any failure --
 -- a 'Left', a missing probability function, a crash or a timeout -- is
@@ -266,13 +266,13 @@ answer p env qs = either (Refused . ("refused: " ++) . shorten . takeWhile (/= '
     probDim v = Left ("not a probability result: " ++ show v)
 
 forceOutcome :: Outcome -> Outcome
-forceOutcome o@(Answered xs) = sum (map (\(a, b) -> a + b) xs) `seq` o
+forceOutcome o@(Answered xs) = sum (map (\(a, b) -> a + fromIntegral b) xs) `seq` o
 forceOutcome o@(Refused m) = length m `seq` o
 
 -- | Do two answers agree? Probability within 'probTolerance' (relative above
 -- 1, since densities can be large), dim exactly -- unless both are zero, where
 -- the dim carries no information. Two NaNs agree with each other only.
-agrees :: (Double, Double) -> (Double, Double) -> Bool
+agrees :: (Double, Int) -> (Double, Int) -> Bool
 agrees (p1, d1) (p2, d2)
   | isNaN p1 || isNaN p2 = isNaN p1 && isNaN p2 && d1 == d2
   | p1 == 0 && p2 == 0 = True
@@ -335,7 +335,7 @@ judgeWith hardRefusal known site origOut rewritten compiled qs = do
 -- query point where a window estimate is meaningful (a scalar or a tuple of
 -- scalars, with dim 0 or dim equal to the continuous coordinate count, and at
 -- most 1 -- a higher-dimensional estimate needs prohibitively many draws).
-samplingCheck :: Program -> IREnv -> [(Query, (Double, Double))] -> IO Verdict
+samplingCheck :: Program -> IREnv -> [(Query, (Double, Int))] -> IO Verdict
 samplingCheck p env rows = do
     results <- forM rows $ \((s, params), (pr, d)) ->
       if not (estimable s d) then return Nothing
@@ -350,7 +350,7 @@ samplingCheck p env rows = do
       drawn <- evalRandIO (replicateM n gen)
       let eps = if d == 0 then 1e-9 else 0.05
           inside = length (filter (within eps s) drawn)
-          est = fromIntegral inside / fromIntegral n / (eps ** d)
+          est = fromIntegral inside / fromIntegral n / (eps ^ d)
       if abs (est - pr) <= samplingTolerance then return (True, "")
       else if retries > 0 then estimateAgrees gen s pr d (2 * n) (retries - 1 :: Int)
       else return (False, "sampled " ++ show est ++ ", compiled " ++ show pr ++ " at " ++ show s)

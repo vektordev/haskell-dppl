@@ -347,8 +347,8 @@ harnessRoutingError backend tc =
 -- special case (see docs/testing.md, "`.tst` expectations", task
 -- tst-dim-unasserted-at-zero-probability) -- and not checked at all for
 -- 'Impossible', which asserts prob=0 and imposs=True instead of a dim.
-checkExpectation :: String -> String -> Expectation -> Double -> Double -> IRValue -> Property
-checkExpectation probLabel name (Possible (VFloat expectedProb) (VFloat expectedDim) mImp) outProb outDim res =
+checkExpectation :: String -> String -> Expectation -> Double -> Int -> IRValue -> Property
+checkExpectation probLabel name (Possible (VFloat expectedProb) expectedDim mImp) outProb outDim res =
   counterexample (probLabel ++ " differs for test case " ++ name ++ ". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
     counterexample ("Dimensionality differs for test case " ++ name ++ ". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outDim === expectedDim) .&&.
     checkImposs name mImp res
@@ -481,22 +481,74 @@ parMapIO f xs = do
     return v) xs
   mapM (\v -> takeMVar v >>= either (\e -> throwIO (e :: SomeException)) return) vars
 
+-- | A neural program's distribution is normalized at seeded inputs: discrete
+-- probabilities sum to one, continuous densities are not degenerate
+-- ('normalizationBranch' picks which).
+discreteProbsNormalized :: Program -> Either CompilerError IREnv -> Property
+discreteProbsNormalized p compiledE = case compiledE of
+  Left err -> counterexample ("Compilation failed: " ++ err) False
+  Right compiled -> ioProperty $ do
+    drawn <- normalizationResults p compiled
+    return $ case drawn of
+      Left err -> counterexample err False
+      Right (counts, t) -> case normalizationBranch t of
+        ExactSumToOne ->
+          -- Discrete (dim 0): with 500 draws from a small support, every distinct
+          -- value is observed, so the probabilities of the distinct observed values
+          -- should sum to (approximately) exactly 1. Checking both bounds catches
+          -- both missing mass (e.g. wrong probabilities) and double-counted /
+          -- unnormalized probabilities (sum > 1), neither of which the old
+          -- count-weighted sum (always >> 1 for small supports) could detect.
+          let totalProb = sum (map normalizationProb t)
+          in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < normalizationTolerance)
+        DensitiesNotDegenerate ->
+          -- Continuous: sampled values are (almost) all distinct, and a sum of
+          -- densities has no "=1" meaning - just check the densities aren't degenerate.
+          let sumProbSamples = sum (zipWith (\c r -> fromIntegral c * normalizationProb r) counts t)
+          in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
+  where
+    sufficientlyNormal = 0.99
+
+-- | Which of 'discreteProbsNormalized''s two checks a program's results select.
+data NormalizationBranch = ExactSumToOne | DensitiesNotDegenerate
+  deriving (Show, Eq)
+
+-- | The exact sum-to-one check applies when every result is a mass (dim 0).
+--
+-- Kept apart from 'discreteProbsNormalized' so a test can assert which branch
+-- a program takes: the check used to compare a 'VFloat' dim against @VInt 0@,
+-- which never held, so every discrete program silently got only the weak
+-- continuous check, and no test noticed (task presult-dim-as-int).
+normalizationBranch :: [IRValue] -> NormalizationBranch
+normalizationBranch t
+  | all ((== Just 0) . resultDim) t = ExactSumToOne
+  | otherwise                       = DensitiesNotDegenerate
+  where
+    resultDim (VProbDim _ d) = Just d
+    resultDim _              = Nothing
+
+normalizationProb :: IRValue -> Double
+normalizationProb (VProbDim pr _) = pr
+normalizationProb v = error ("not a probability result: " ++ show v)
+
+-- | The interpreter's answers 'discreteProbsNormalized' checks: 500 seeded
+-- samples of @main@, and the probability of each distinct sampled value, with
+-- how often it was drawn.
+--
 -- Samples are drawn with replacement from a small discrete support, so the same
 -- value tends to come up many times in 500 draws. generateDet's cost depends on
 -- the size of that support (it enumerates it), not on sampleCnt, so evaluating it
 -- once per *distinct* sampled value (weighted by how often it occurred) gives the
 -- exact same sum but skips the redundant repeat evaluations.
-discreteProbsNormalized :: Program -> Either CompilerError IREnv -> Property
-discreteProbsNormalized p compiledE = case compiledE of
-  Left err -> counterexample ("Compilation failed: " ++ err) False
-  Right compiled -> case (genFun (lookupIREnv "main" compiled), probFun (lookupIREnv "main" compiled)) of
+normalizationResults :: Program -> IREnv -> IO (Either String ([Int], [IRValue]))
+normalizationResults p compiled = case (genFun (lookupIREnv "main" compiled), probFun (lookupIREnv "main" compiled)) of
     -- A program with no probability function cannot have its normalization
     -- checked -- and for an inference compiler, a program we can only sample
     -- from is not a passing test, it is a missing feature. Fail loudly rather
     -- than crash on a partial match (the irrefutable Just-pattern this replaces)
     -- or silently pass. E.g. clevr3_predicate_spatial compares two continuous
     -- neural outputs, which currently yields Bottom and emits no main_prob.
-    (Just (genExpr, _), Just (probExpr, _)) -> ioProperty $ do
+    (Just (genExpr, _), Just (probExpr, _)) -> do
       let (params, randomParamsForSamples) = normalizationDraws p
           gens = map (\args -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
           pSamples = evalRand (sequence gens) (mkStdGen 42)
@@ -504,35 +556,8 @@ discreteProbsNormalized p compiledE = case compiledE of
           counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
       -- The per-sample prob queries are independent and pure; force them in parallel.
       probResults <- parEval (map (\sam -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
-      return $ case sequence probResults of
-          Left err -> counterexample err False
-          Right t
-            -- 'dim' answers a VFloat: this compared against VInt 0, so no result
-            -- ever counted as discrete and all 96 discrete programs got only the
-            -- (trivially passing) continuous check below instead of this one.
-            | all ((== VFloat 0) . dim) t ->
-                -- Discrete (dim 0): with 500 draws from a small support, every distinct
-                -- value is observed, so the probabilities of the distinct observed values
-                -- should sum to (approximately) exactly 1. Checking both bounds catches
-                -- both missing mass (e.g. wrong probabilities) and double-counted /
-                -- unnormalized probabilities (sum > 1), neither of which the old
-                -- count-weighted sum (always >> 1 for small supports) could detect.
-                let totalProb = sum (map prob t)
-                in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < normalizationTolerance)
-            | otherwise ->
-                -- Continuous: sampled values are (almost) all distinct, and a sum of
-                -- densities has no "=1" meaning - just check the densities aren't degenerate.
-                let sumProbSamples = sum (zipWith (\c r -> fromIntegral c * prob r) counts t)
-                in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
-    _ -> counterexample "main has no probability function (inference unavailable); only generate compiled" False
-  where
-    sufficientlyNormal = 0.99
-    prob :: IRValue -> Double
-    prob (VProbDim pr _) = pr
-    prob v = error ("not a probability result: " ++ show v)
-    dim :: IRValue -> IRValue
-    dim (VProbDim _ d) = VFloat d
-    dim v = error ("not a probability result: " ++ show v)
+      return ((,) counts <$> sequence probResults)
+    _ -> return (Left "main has no probability function (inference unavailable); only generate compiled")
 
 -- | Everything 'discreteProbsNormalized' feeds the interpreter besides the
 -- compiled program: the parameters of the probability queries, and the
@@ -1118,10 +1143,11 @@ juliaBatchTestCode projectDir allCases =
 -- The compiled result is (prob, (dim, impossible)) -- the trailing field is the
 -- internal impossibility flag (design inference-result-side-channels), which is
 -- not stripped from the emitted code, hence the nested dim access below. The
--- dim check line is emitted only when the .tst row's 'Expectation' actually
+-- dim's value is checked only when the .tst row's 'Expectation' actually
 -- states a dim ('Possible') -- unconditionally, not gated on the runtime
--- probability any more -- and omitted entirely for 'Impossible' rows, which
--- have none to check (see docs/testing.md, "`.tst` expectations").
+-- probability any more -- and not for 'Impossible' rows, which have none to
+-- check (see docs/testing.md, "`.tst` expectations"). Its type (an Int) is
+-- checked on every row.
 juliaModuleTestCases :: String -> [TestCase] -> String
 juliaModuleTestCases modName tcs =
   modName ++ ".main_gen(" ++ intercalate ", " (map jVal exampleParams) ++ ")\n" ++
@@ -1129,12 +1155,18 @@ juliaModuleTestCases modName tcs =
     let (name, sample, params, expct) = unpackTestCase tc
         call = modName ++ "." ++ mainName tc ++ "(" ++ jVal sample ++ ", " ++ intercalate ", " (map jVal params) ++ ")"
         outProb = VFloat (expectationProb expct)
-        dimCheck = case expectationDim expct of
-          Nothing -> ""
-          Just d  ->
-            "if tmp[2][1] != " ++ juliaVal (VFloat d) ++ "\n\
-            \  error(\"Dimensionality wrong: \" * string(tmp[2][1]) * \"/=\" * string(" ++ juliaVal (VFloat d) ++ ") * \"in test case " ++ name ++ "\")\n\
-            \end\n"
+        -- The dim is an Int on every row, 'Impossible' ones included: Julia's
+        -- @0 == 0.0@ holds, so a value comparison alone would pass a float dim.
+        dimCheck =
+          "if typeof(tmp[2][1]) != Int\n\
+          \  error(\"Dimensionality is not an Int: \" * repr(tmp[2][1]) * \" in test case " ++ name ++ "\")\n\
+          \end\n" ++
+          case expectationDim expct of
+            Nothing -> ""
+            Just d  ->
+              "if tmp[2][1] != " ++ show d ++ "\n\
+              \  error(\"Dimensionality wrong: \" * string(tmp[2][1]) * \"/=" ++ show d ++ " in test case " ++ name ++ "\")\n\
+              \end\n"
     in "tmp = " ++ call ++ "\n\
        \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > " ++ show probTolerance ++ "\n\
        \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
@@ -1193,18 +1225,25 @@ pythonTestCode src tcs =
     mainName (ProbTestCase _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
     mainName tc = error (harnessRoutingError "Python" tc)
-    -- Dim check line emitted only when the .tst row's 'Expectation' states a
-    -- dim ('Possible') -- unconditionally, not gated on the runtime
-    -- probability any more -- and omitted for 'Impossible' rows, which have
-    -- none to check (see docs/testing.md, "`.tst` expectations").
+    -- The dim's value is checked only when the .tst row's 'Expectation'
+    -- states a dim ('Possible') -- unconditionally, not gated on the runtime
+    -- probability any more -- and not for 'Impossible' rows, which have none
+    -- to check (see docs/testing.md, "`.tst` expectations"). Its type is
+    -- checked on every row.
     pyCase tc =
       let (name, sample, params, expct) = unpackTestCase tc
           outProb = VFloat (expectationProb expct)
-          dimCheck = case expectationDim expct of
-            Nothing -> ""
-            Just d  ->
-              "if tmp[1][0] != " ++ pyVal (VFloat d) ++ ":\n\
-              \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1][0]) + \"/=\" + str(" ++ pyVal (VFloat d) ++ ") + \"in test case " ++ name ++ "\")\n"
+          -- The dim is an int on every row, 'Impossible' ones included:
+          -- Python's @0 == 0.0@ holds, so a value comparison alone would
+          -- pass a float dim. @type(...) is int@ also refuses a bool.
+          dimCheck =
+            "if type(tmp[1][0]) is not int:\n\
+            \  raise ValueError(\"Dimensionality is not an int: \" + repr(tmp[1][0]) + \" in test case " ++ name ++ "\")\n" ++
+            case expectationDim expct of
+              Nothing -> ""
+              Just d  ->
+                "if tmp[1][0] != " ++ show d ++ ":\n\
+                \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1][0]) + \"/=" ++ show d ++ " in test case " ++ name ++ "\")\n"
       in
         "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
         \if abs(tmp[0] - " ++ pyVal outProb ++ ") > " ++ show probTolerance ++ ":\n\
@@ -2143,6 +2182,105 @@ normalTailPrecisionTests = testGroup "normal upper-tail precision (cumulative-no
     stubTorchModule = unpack . replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") . pack
 
 -- ===========================================================================
+-- A result's dim is an Int on every backend (task presult-dim-as-int)
+-- ===========================================================================
+--
+-- Python and Julia both hold @0 == 0.0@, so every harness that compares a
+-- backend's dim by value would pass a float one. These run one emitted module
+-- per backend and assert the dim's runtime type: a Python @int@ (a torch
+-- @int64@ tensor, batched), a Julia @Int@. The points take each dim through
+-- runtime arithmetic: the mixture's lower-dim-wins test, the ANY guard, and
+-- the sum of a product's two dims.
+
+resultDimIsIntTests :: TestTree
+resultDimIsIntTests = testGroup "result dim is an Int (presult-dim-as-int)"
+  [ testProperty "Interpreter" $ once $ conjoin
+      [ case compiledDim src of
+          Left err -> counterexample err False
+          Right (prog, env) -> conjoin
+            [ case runProbC prog env [] q of
+                Right (VProbDim _ d) -> counterexample (src ++ " at " ++ show q) (d === dim)
+                other -> counterexample (src ++ " at " ++ show q ++ ": no (prob, Int dim) result: " ++ show other) False
+            | (q, dim) <- pts ]
+      | (src, pts) <- dimCases ]
+  , testProperty "Python" $ once $ ioProperty $ runDims "python" (Just "python3") "py" pythonScript
+  , testProperty "BatchedPython" $ once $ ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorchProperty "result dim is an Int: BatchedPython"
+        Just py -> runDims "batched" (Just py) "py" batchedScript
+  , testProperty "Julia" $ once $ ioProperty $ runDims "julia" Nothing "jl" juliaScript
+  , testProperty "Normalization takes the exact branch on a discrete program, and only there" $ once $ ioProperty $ do
+      let branchOf name = do
+            prog <- corpusPplPath name >>= parseProgram
+            case compile defaultCompilerConfig prog of
+              Left e -> return (Left (name ++ ": " ++ show e))
+              Right env -> fmap (normalizationBranch . snd) <$> normalizationResults prog env
+      discrete <- branchOf "autoNeuralProbMnistAdd"
+      continuous <- branchOf "autoNeuralProbGaussian"
+      return $ counterexample "a discrete program's normalization check" (discrete === Right ExactSumToOne)
+          .&&. counterexample "a continuous program's normalization check" (continuous === Right DensitiesNotDegenerate)
+  ]
+  where
+    dimCases =
+      [ ("main = if Uniform < 0.5 then Normal else 1.0", [(VFloat 0.3, 1), (VFloat 1.0, 0)])
+      , ("main = (Normal, Normal)", [(VTuple (VFloat 0.1) (VFloat 0.2), 2), (VTuple (VFloat 0.4) (VFloat 0.5), 2)]) ]
+    compiledDim src = do
+      prog <- either (Left . ("parse: " ++) . show) Right (tryParseProgram "" src)
+      env <- either (Left . ("compile: " ++)) Right (compile defaultCompilerConfig prog)
+      return (prog, env)
+    -- Every script prints one line per point: the dim's runtime type, a tab, its value.
+    runDims name mpy ext mkScript = do
+      cwd <- getCurrentDirectory
+      case mapM (\(src, pts) -> fmap (\(_, env) -> (env, pts)) (compiledDim src)) dimCases of
+        Left err -> return (counterexample err False)
+        Right compiled -> case mkScript cwd compiled of
+          Left err -> return (counterexample (name ++ " codegen: " ++ err) False)
+          Right script -> do
+            (code, out, err) <- withSystemTempFile ("result_dim." ++ ext) $ \tmpPath tmpHandle -> do
+              hPutStr tmpHandle script
+              hClose tmpHandle
+              case mpy of
+                Just py -> readProcessWithExitCode py [tmpPath] ""
+                Nothing -> readProcessWithExitCode "julia" (juliaTestFlags ++ [tmpPath]) ""
+            let want = [ intType name ++ "\t" ++ show d | (_, pts) <- compiled, (_, d) <- pts ]
+            return $ case code of
+              ExitSuccess -> counterexample (name ++ ": (type, dim) per point") (lines out === want)
+              ExitFailure _ -> counterexample (name ++ " script failed:\n" ++ out ++ err) False
+    intType name = case name of
+      "julia" -> "Int64"
+      "batched" -> "torch.int64"
+      _ -> "int"
+    pythonScript cwd compiled = Right $ unlines $
+      [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")" ] ++
+      concat [ [ "_ns = {}"
+               , "exec(" ++ show (stubTorch (unlines (SPLL.CodeGenPyTorch.generateFunctions True env))) ++ ", _ns)" ] ++
+               [ "_d = eval(" ++ show ("main.forward(" ++ pyVal q ++ ")") ++ ", _ns)[1][0]\nprint(type(_d).__name__ + '\\t' + repr(_d))" | (q, _) <- pts ]
+             | (env, pts) <- compiled ]
+    -- One batch per program, every point in it. A dim folded to a constant
+    -- comes back as a plain int and is broadcast here, as the batched
+    -- harness's '_leaf' does.
+    batchedScript cwd compiled = do
+      blocks <- mapM (\(env, pts) -> do
+                        srcLines <- generateFunctionsBatched True env
+                        lit <- maybe (Left "no batch literal") Right (batchLiteral (map fst pts))
+                        return [ "_ns = {}"
+                               , "exec(" ++ show (unlines srcLines) ++ ", _ns)"
+                               , "_d = eval(" ++ show ("main.forward(" ++ lit ++ ")") ++ ", _ns)[1][0]"
+                               , "_d = _d if torch.is_tensor(_d) else torch.tensor([_d] * " ++ show (length pts) ++ ")"
+                               , "_d = _d.expand(" ++ show (length pts) ++ ") if _d.dim() == 0 else _d"
+                               , "for _x in _d.tolist():"
+                               , "    print(str(_d.dtype) + '\\t' + repr(_x))" ])
+                     compiled
+      return (unlines ([ "import sys, torch", "sys.path.insert(0, " ++ show cwd ++ ")" ] ++ concat blocks))
+    juliaScript cwd compiled = Right $ unlines $
+      [ "include(" ++ show (cwd ++ "/juliaLib.jl") ++ ")", "using .JuliaSPPLLib" ] ++
+      concat [ [ "module Prog" ++ show i, "using ..JuliaSPPLLib" ] ++ SPLL.CodeGenJulia.generateFunctions env ++ [ "end" ] ++
+               [ "_d = Base.invokelatest(Prog" ++ show i ++ ".main_prob, " ++ juliaVal q ++ ")[2][1]; println(string(typeof(_d)), \"\\t\", repr(_d))" | (q, _) <- pts ]
+             | (i, (env, pts)) <- zip [0 :: Int ..] compiled ]
+    stubTorch = unpack . replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") . pack
+
+-- ===========================================================================
 -- Enumeration bucketing (task batched-bucketing-splits-on-nullary-constructors)
 -- ===========================================================================
 --
@@ -2279,7 +2417,7 @@ data BatchGroup = BatchGroup
   , bgParamRows  :: [[IRValue]]
   , bgSamples    :: [IRValue]
   , bgExpProb    :: [Double]
-  , bgExpDim     :: [Double]
+  , bgExpDim     :: [Int]
   } deriving (Show)
 
 -- | Split a program's prob/cumulative test cases into batchable groups, or
@@ -2319,8 +2457,8 @@ batchGroups isNeural tcs = mapM build grouped
     -- 'Impossible' rows (no stated dim) fall through to the final wildcard and
     -- are simply not batched, the same treatment 'containsAnyExceptV' above
     -- gives a 'VAnyExcept'-carrying query point.
-    asQuery (ProbTestCase _ s ps (Possible (VFloat ep) (VFloat ed) _))  = Just (False, ps, s, ep, ed)
-    asQuery (CumulTestCase _ s ps (Possible (VFloat ep) (VFloat ed) _)) = Just (True,  ps, s, ep, ed)
+    asQuery (ProbTestCase _ s ps (Possible (VFloat ep) ed _))  = Just (False, ps, s, ep, ed)
+    asQuery (CumulTestCase _ s ps (Possible (VFloat ep) ed _)) = Just (True,  ps, s, ep, ed)
     asQuery _ = Nothing
 
 -- | Batch the positional symbol arguments of a neural program across points.
@@ -2805,7 +2943,7 @@ denseDriver accArg entries = unlines $
             Just lit | not ("T(" `isPrefixOf` lit) -> ", " ++ lit
             _ -> ""
       in [ "    _dense(" ++ show name ++ ", " ++ show method ++ ", _main, " ++ samples
-           ++ ", " ++ pyFloatList (bgExpProb g) ++ ", " ++ pyFloatList (bgExpDim g) ++ packed ++ ")"
+           ++ ", " ++ pyFloatList (bgExpProb g) ++ ", " ++ show (bgExpDim g) ++ packed ++ ")"
          | method `elem` denseEntryPoints src ]
     pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
 
@@ -3079,9 +3217,9 @@ runBatchedGenerate py eligible
 -- (@x == 0.0@ observed True; task
 -- sampling-matches-pdf-continuous-equality-density, by design), which sampling
 -- cannot reach, so the generate differential does not probe it.
-densityLivesOnScalar :: IRValue -> Double -> Bool
-densityLivesOnScalar (VFloat _) ed = round ed <= (1 :: Int)
-densityLivesOnScalar _ ed = round ed <= (0 :: Int)
+densityLivesOnScalar :: IRValue -> Int -> Bool
+densityLivesOnScalar (VFloat _) ed = ed <= 1
+densityLivesOnScalar _ ed = ed <= 0
 
 -- | Is this sample a bare scalar leaf (not a tuple)? 'isNum'/'isBoolV' already
 -- cover exactly float/int/bool between them (see 'batchLiteral').
@@ -3094,8 +3232,8 @@ isScalarSample v = isNum v || isBoolV v
 -- fresh per-point batch (the point's own read-logits symbol, repeated) and test
 -- that point alone. Single-shot rather than retried -- the batch size is
 -- fixed large enough, and the seed is pinned, to keep this non-flaky.
-generateDriver :: [(String, String, [(String, Double, Double)])]
-               -> [(String, String, [NetMock], [String], [(String, Double, Double, Int)])]
+generateDriver :: [(String, String, [(String, Double, Int)])]
+               -> [(String, String, [NetMock], [String], [(String, Double, Int, Int)])]
                -> String
 generateDriver nonNeuralProbes neuralProbes = unlines $
   [ "import torch, sys, traceback, inspect"
@@ -3282,7 +3420,7 @@ irNodes e = e : concatMap irNodes (getIRSubExprs e)
 
 -- | A program, its branch-counted compile, and one row per pinned query point
 -- carrying the interpreter's @(prob, dim, branchCount)@ for it.
-type BranchCountCase = (String, Program, IREnv, [(TestCase, Double, Double, Double)])
+type BranchCountCase = (String, Program, IREnv, [(TestCase, Double, Int, Double)])
 
 loadBranchCountCase :: String -> IO BranchCountCase
 loadBranchCountCase name = do
@@ -3311,7 +3449,7 @@ irAnyNode f e = f e || any (irAnyNode f) (getIRSubExprs e)
 -- With countBranches on the emitted result is @(prob, (dim, (bc, imposs)))@,
 -- one field deeper than the default @(prob, (dim, imposs))@ the other backend
 -- harnesses in this module read.
-branchCountPython :: String -> IREnv -> [(TestCase, Double, Double, Double)] -> Property
+branchCountPython :: String -> IREnv -> [(TestCase, Double, Int, Double)] -> Property
 branchCountPython name env rows = ioProperty $ do
   let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env)
       checks = concatMap (\(tc, p, d, bc) ->
@@ -3324,7 +3462,7 @@ branchCountPython name env rows = ioProperty $ do
              ++ "\ndef _chk(what, p, d, bc, ep, ed, ebc):\n\
                 \  if abs(p - ep) > " ++ show probTolerance ++ ":\n\
                 \    raise ValueError(what + ': prob ' + str(p) + ' != ' + str(ep))\n\
-                \  if p != 0 and abs(d - ed) > " ++ show probTolerance ++ ":\n\
+                \  if type(d) is not int or (p != 0 and d != ed):\n\
                 \    raise ValueError(what + ': dim ' + str(d) + ' != ' + str(ed))\n\
                 \  if abs(bc - ebc) > " ++ show probTolerance ++ ":\n\
                 \    raise ValueError(what + ': branch count ' + str(bc) + ' != ' + str(ebc))\n"
@@ -3347,7 +3485,7 @@ branchCountJulia loaded = ioProperty $ do
                 \  if abs(p - ep) > " ++ show probTolerance ++ "\n\
                 \    error(what * \": prob \" * string(p) * \" != \" * string(ep))\n\
                 \  end\n\
-                \  if p != 0 && abs(d - ed) > " ++ show probTolerance ++ "\n\
+                \  if typeof(d) != Int || (p != 0 && d != ed)\n\
                 \    error(what * \": dim \" * string(d) * \" != \" * string(ed))\n\
                 \  end\n\
                 \  if abs(bc - ebc) > " ++ show probTolerance ++ "\n\
@@ -3380,7 +3518,7 @@ branchCountJulia loaded = ioProperty $ do
 -- | exp() of the log-space branch-counted probability must reproduce the linear
 -- one, and the branch count -- which is never a log-space value -- must be
 -- identical.
-branchCountLogSpace :: String -> Program -> [(TestCase, Double, Double, Double)] -> Property
+branchCountLogSpace :: String -> Program -> [(TestCase, Double, Int, Double)] -> Property
 branchCountLogSpace name prog rows =
   case compile defaultCompilerConfig{countBranches = True, logSpace = True} prog of
     Left err -> counterexample (name ++ ": log-space compile failed: " ++ show err) False
@@ -3899,7 +4037,7 @@ topKRuntimeCutoffTests = testGroup "topK runtime cutoff"
       rows | length rows == length (expected src) ->
         conjoin [ counterexample (name ++ " t=" ++ show t ++ " " ++ show q ++ ": got " ++ show [gp, gd]
                                   ++ ", want " ++ show (p, d))
-                    (abs (gp - p) <= probTolerance && abs (gd - d) <= probTolerance)
+                    (abs (gp - p) <= probTolerance && gd == fromIntegral d)
                 | ((t, q, (p, d)), [gp, gd]) <- zip (expected src) rows ]
       _ -> counterexample (name ++ ": unexpected output\n" ++ out) False
     pythonFixture py cwd (name, src) = do

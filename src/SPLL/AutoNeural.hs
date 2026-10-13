@@ -307,7 +307,7 @@ makeProb adtDecls _conf plan = IRLambda vector (IRLambda queryParamName
     (m, dim, bc) = makeProbRec adtDecls plan 0 (IRVar queryParamName)
     probVar = "l_dec_p"
     dimVar  = "l_dec_dim"
-    imposs  = IRIf (IROp OpEq (IRVar dimVar) (IRConst (VFloat 0)))
+    imposs  = IRIf (IROp OpEq (IRVar dimVar) (IRConst (VInt 0)))
                    (IROp OpEq (IRVar probVar) (IRConst (VFloat 0)))
                    (IRConst (VBool False))
 
@@ -320,10 +320,10 @@ indexOf tag _ = error ("indexOf: expected an explicit enumeration, got " ++ show
 
 
 makeProbRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
-makeProbRec _adtDecls (Discretes _rty tag) ix sample = (noAny sample p, IRConst $ VFloat 0, IRConst (VFloat 0))
+makeProbRec _adtDecls (Discretes _rty tag) ix sample = (noAny sample p, IRConst (VInt 0), IRConst (VFloat 0))
   where
     p = IRBuiltin BListIndex [IRVar vector, IROp OpPlus (indexOf tag sample) (IRConst (VInt ix))]
-makeProbRec _adtDecls Continuous ix sample = (noAny sample p, noAny0 sample (IRConst $ VFloat 1), IRConst (VFloat 0))
+makeProbRec _adtDecls Continuous ix sample = (noAny sample p, noAnyDim0 sample (IRConst (VInt 1)), IRConst (VFloat 0))
   where
     -- density of μ + σ·z at x: φ((x − μ)/σ)/σ, with μ = vec[ix], σ = vec[ix+1]
     sigma = IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]
@@ -335,7 +335,7 @@ makeProbRec _adtDecls Continuous ix sample = (noAny sample p, noAny0 sample (IRC
 --  probabilities of the two tuple elements are multiplied.
 --  dims should be added.
 --  branch counts of both sides should be added.
-makeProbRec adtDecls (TuplePlan a b) ix sample = (noAny sample (IROp OpMult pa pb), noAny0 sample (IROp OpPlus dima dimb), noAny0 sample (IROp OpPlus bca bcb))
+makeProbRec adtDecls (TuplePlan a b) ix sample = (noAny sample (IROp OpMult pa pb), noAnyDim0 sample (IROp OpPlus dima dimb), noAny0 sample (IROp OpPlus bca bcb))
   where
     (pa, dima, bca) = makeProbRec adtDecls a ix (IRDestruct AcFst sample)
     (pb, dimb, bcb) = makeProbRec adtDecls b (ix + getSize a) (IRDestruct AcSnd sample)
@@ -344,13 +344,13 @@ makeProbRec adtDecls (EitherPlan a b) ix sample = (noAny sample
     (IROp OpMult pIsLeft aP)
     (IROp OpMult pIsRight bP)),
   -- Is choosing the bc here correct, or should they be added?
-  noAny0 sample (IRIf (IRDestruct AcIsLeft sample) aDim bDim), noAny0 sample (IRIf (IRDestruct AcIsLeft sample) aBc bBc))
+  noAnyDim0 sample (IRIf (IRDestruct AcIsLeft sample) aDim bDim), noAny0 sample (IRIf (IRDestruct AcIsLeft sample) aBc bBc))
   where
     (aP, aDim, aBc) = makeProbRec adtDecls a (ix + 1) (IRDestruct AcFromLeft sample)
     (bP, bDim, bBc) = makeProbRec adtDecls b (ix + 1 + getSize a) (IRDestruct AcFromRight sample)
     pIsLeft = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
     pIsRight = IROp OpSub (IRConst $ VFloat 1) pIsLeft
-makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0 sample dim, noAny0 sample bc)
+makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAnyDim0 sample dim, noAny0 sample bc)
   where
     adt = lookupADTDecl adtName adtDecls
     constrsInPlan = filter ((`elem` map fst plans) . fst) (constructors adt)
@@ -361,10 +361,16 @@ makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0
     -- A lone constructor has no flag slot: its flag is statically 1, so the
     -- factor is dropped rather than multiplied in (see 'adtFlagSlots').
     constrGuard constr constrFlag v = IRIf (IRApply (IRVar ("is" ++ fst constr)) sample) (maybe v (\f -> IROp OpMult f v) constrFlag) (IRConst $ VFloat 0)
-    constrProbFields constr cPlan cIx constrFlag = mapTup3 (constrGuard constr constrFlag) (makeProbADTConstr adtDecls cPlan constr cIx sample)
+    -- The dim is a count, not a weight: it is selected by the constructor test
+    -- but never scaled by the constructor's flag probability (which, applied to
+    -- a continuous field's dim 1, used to report a fractional dimension).
+    constrProbFields constr cPlan cIx constrFlag =
+      let (cp, cd, cbc) = makeProbADTConstr adtDecls cPlan constr cIx sample
+      in (constrGuard constr constrFlag cp, constrDimGuard constr cd, constrGuard constr constrFlag cbc)
+    constrDimGuard constr d = IRIf (IRApply (IRVar ("is" ++ fst constr)) sample) d (IRConst (VInt 0))
     constrProbsFields = map (uncurry4 constrProbFields) constrsWithPlanAndIxAndFlag
     opPlus3 (a1, b1, c1) (a2, b2, c2) = (IROp OpPlus a1 a2, IROp OpPlus b1 b2, IROp OpPlus c1 c2)
-    (p, dim, bc) = foldr opPlus3 (IRConst $ VFloat 0, IRConst $ VFloat 0, IRConst $ VFloat 0) constrProbsFields
+    (p, dim, bc) = foldr opPlus3 (IRConst $ VFloat 0, IRConst (VInt 0), IRConst $ VFloat 0) constrProbsFields
     flagProbs
       | adtFlagSlots plans == 0 = repeat Nothing
       | otherwise = map (\fIx -> Just (IRBuiltin BListIndex [IRVar vector, IRConst (VInt fIx)])) [ix ..]
@@ -373,7 +379,7 @@ makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0
 makeProbADTConstr :: [ADTDecl] -> [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
 makeProbADTConstr adtDecls plans (_cName, fields) ix sample = foldr multProbs prob1 fieldsProb
   where
-    prob1 = (IRConst (VFloat 1), IRConst (VFloat 0), IRConst (VFloat 0))
+    prob1 = (IRConst (VFloat 1), IRConst (VInt 0), IRConst (VFloat 0))
     multProbs (p0, d0, bc0) (p1, d1, bc1) = (IROp OpMult p0 p1, IROp OpPlus d0 d1, IROp OpPlus bc0 bc1)
     fieldIx = scanl (+) ix (map getSize plans)
     fieldsProb = map (\(plan, pIx, fName) -> makeProbRec adtDecls plan pIx (IRApply (IRVar fName) sample)) (zip3 plans fieldIx (map fst fields))
@@ -760,6 +766,10 @@ noAny sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 1)
 
 noAny0 :: IRExpr -> IRExpr -> IRExpr
 noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
+
+-- | 'noAny0' for a dimension, which is an Int.
+noAnyDim0 :: IRExpr -> IRExpr -> IRExpr
+noAnyDim0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst (VInt 0))
 
 ------------------------------------------------------------------------
 -- WriteLogits-mode Gaussian validation.

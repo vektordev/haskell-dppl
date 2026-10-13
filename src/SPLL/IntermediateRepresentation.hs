@@ -77,19 +77,24 @@ import SPLL.ReservedNames (genSuffix, functionVariantSuffixes, componentNormalNa
 -- probability to zero. It is not stripped from the emitted result yet, so
 -- consumers match through these patterns rather than on the tuple shape, which
 -- is the layout's only definition outside the compiler.
-pattern VProbDim :: Double -> Double -> IRValue
+--
+-- The dim is an 'Int' ('VInt'): it counts dimensions (task presult-dim-as-int).
+-- A result carrying a 'VFloat' dim matches neither pattern, so a leftover
+-- float dim fails loudly at its consumer instead of comparing unequal to an
+-- integer.
+pattern VProbDim :: Double -> Int -> IRValue
 pattern VProbDim p d <- (probDimOf -> Just (p, d))
 
-pattern VProbDimBC :: Double -> Double -> Double -> IRValue
+pattern VProbDimBC :: Double -> Int -> Double -> IRValue
 pattern VProbDimBC p d bc <- (probDimBCOf -> Just (p, d, bc))
 
-probDimOf :: IRValue -> Maybe (Double, Double)
-probDimOf (VTuple (VFloat p) (VTuple (VFloat d) _)) = Just (p, d)
-probDimOf _                                         = Nothing
+probDimOf :: IRValue -> Maybe (Double, Int)
+probDimOf (VTuple (VFloat p) (VTuple (VInt d) _)) = Just (p, d)
+probDimOf _                                       = Nothing
 
-probDimBCOf :: IRValue -> Maybe (Double, Double, Double)
-probDimBCOf (VTuple (VFloat p) (VTuple (VFloat d) (VTuple (VFloat bc) _))) = Just (p, d, bc)
-probDimBCOf _                                                             = Nothing
+probDimBCOf :: IRValue -> Maybe (Double, Int, Double)
+probDimBCOf (VTuple (VFloat p) (VTuple (VInt d) (VTuple (VFloat bc) _))) = Just (p, d, bc)
+probDimBCOf _                                                           = Nothing
 
 -- | The impossibility flag of a result, when the layout carries one.
 resultImpossible :: IRValue -> Maybe Bool

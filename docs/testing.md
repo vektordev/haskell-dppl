@@ -206,6 +206,12 @@ Expected values are compared with `probTolerance` (1e-4). A `p(...)`/
   density underflows to a hard `0.0` while `imposs` must stay `False` and
   `dim` must still state the true `1.0` (it's on-support, just a tiny
   density — dim is meaningful there and is checked like any other row).
+  The dim is an integer (the compiler's result carries it as an `Int`), so
+  `(0.35, 0)` and the corpus's older `(0.35, 0.0)` both parse, and a
+  non-integral or negative dim is a parse error. The Python and Julia row
+  checks assert the dim's runtime *type* too, on `is impossible` rows as
+  well: both languages hold `0 == 0.0`, so a value check alone would pass a
+  float dim (task `presult-dim-as-int`).
 
 - **`p(x) is impossible`** / **`cdf(x) is impossible`** — the dedicated
   shape for a genuinely impossible query point (wrong `Either` arm,

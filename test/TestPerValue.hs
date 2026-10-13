@@ -196,14 +196,16 @@ compileOrFail conf p = case compile conf p of
 
 -- | A per-value result, decoded: probabilities, dimensions, impossibility
 -- flags and the domain, all in domain order.
-data PerValue = PerValue { pvProbs :: [Double], pvDims :: [Double], pvImposs :: [Bool], pvValues :: [IRValue] }
+data PerValue = PerValue { pvProbs :: [Double], pvDims :: [Int], pvImposs :: [Bool], pvValues :: [IRValue] }
   deriving Show
 
 decodePerValue :: IRValue -> Either String PerValue
 decodePerValue (VTuple (VTensor _ ps) (VTuple (VTensor _ ds) (VTuple (VTensor _ is) (VTensor _ vs)))) =
-  PerValue <$> mapM float ps <*> mapM float ds <*> mapM bool is <*> pure vs
+  PerValue <$> mapM float ps <*> mapM int ds <*> mapM bool is <*> pure vs
   where float (VFloat x) = Right x
         float x = Left ("not a float: " ++ show x)
+        int (VInt x) = Right x
+        int x = Left ("not an int dim: " ++ show x)
         bool (VBool b) = Right b
         bool x = Left ("not a bool: " ++ show x)
 decodePerValue v = Left ("not a per-value result: " ++ show v)
@@ -213,7 +215,7 @@ perValueQuery p env f args q = case runProbNamedC p env f args q of
   Left err -> assertFailure (f ++ " at " ++ show q ++ ": " ++ err) >> error "unreachable"
   Right v -> either (\e -> assertFailure e >> error "unreachable") return (decodePerValue v)
 
-pointQuery :: Program -> IREnv -> String -> [IRValue] -> IRValue -> IO (Double, Double, Bool)
+pointQuery :: Program -> IREnv -> String -> [IRValue] -> IRValue -> IO (Double, Int, Bool)
 pointQuery p env f args q = case runProbNamedC p env f args q of
   Left err -> assertFailure (f ++ " at " ++ show q ++ ": " ++ err) >> error "unreachable"
   Right v@(VProbDim pr d) | Just imp <- resultImpossible v -> return (pr, d, imp)

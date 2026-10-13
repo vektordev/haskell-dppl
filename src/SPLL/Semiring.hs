@@ -42,7 +42,7 @@ module SPLL.Semiring (
   negInfIR, logSumExpIR, logSubExpIR, maskSR, fromLinearSR, measureDiffSR, sumAllSR,
   distDensity, distCumulative, scaledNormalDensity, upperTailComplement, complementWhen,
   -- * IR boolean/constant helpers
-  const0, const1, constTrueIR, constFalseIR, notIR, orIR, andIR,
+  const0, const1, dim0, dim1, constTrueIR, constFalseIR, notIR, orIR, andIR,
   outsideUnitInterval, anyGuardedDim,
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
@@ -144,6 +144,16 @@ const0 = IRConst (VFloat 0)
 const1 :: IRExpr
 const1 = IRConst (VFloat 1)
 
+-- | The dimension constants. A 'rDim' counts dimensions, so it is an 'Int'
+-- in the IR (and in every backend), never a 'VFloat': a float dim invites
+-- inexact comparisons on what is a count, and a test matching on @VInt 0@
+-- silently never fired against one (task presult-dim-as-int).
+dim0 :: IRExpr
+dim0 = IRConst (VInt 0)
+
+dim1 :: IRExpr
+dim1 = IRConst (VInt 1)
+
 constTrueIR :: IRExpr
 constTrueIR = IRConst (VBool True)
 
@@ -182,7 +192,7 @@ outsideUnitInterval sample =
 -- | Dimension of a continuous leaf: 1, except under a marginal (ANY) query,
 -- where the leaf contributes mass 1 and hence no dimension.
 anyGuardedDim :: IRExpr -> IRExpr
-anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) const0 const1
+anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) dim0 dim1
 
 -- ===== Semiring =====
 
@@ -484,7 +494,7 @@ density p sample = PResult (P p) (anyGuardedDim sample) const1 constFalseIR
 -- | A discrete probability mass / CDF value: dim 0, one branch. Possible by
 -- default; leaves that KNOW when their mass vanishes use 'impossibleWhen'.
 mass :: IRExpr -> PResult
-mass p = PResult (P p) const0 const1 constFalseIR
+mass p = PResult (P p) dim0 const1 constFalseIR
 
 -- | A result that resolves to no value of its own -- a closure, a lambda, an
 -- error: dim 0, and NO branch. Zero branches is the exception, not the rule:
@@ -495,14 +505,14 @@ mass p = PResult (P p) const0 const1 constFalseIR
 -- IRCompiler.hs's Var-is-a-local-variable case (task
 -- bc-recursive-prob-divergence).
 detP :: IRExpr -> PResult
-detP p = PResult (P p) const0 const0 constFalseIR
+detP p = PResult (P p) dim0 const0 constFalseIR
 
 -- | A structurally impossible event: the wrong Either arm, an empty world set,
 -- a failed guard. Probability zero (semiring zero, so linear 0.0 or log
 -- -infinity), and flagged as such so that a mixture drops it without having
 -- to recognise the zero numerically.
 impossibleP :: Semiring -> PResult
-impossibleP sr = PResult (P (srZero sr)) const0 const0 constTrueIR
+impossibleP sr = PResult (P (srZero sr)) dim0 const0 constTrueIR
 
 -- | An indicator leaf: mass 1 (semiring one) where @cond@ holds, and a flagged
 -- impossibility where it does not. The flag is the structural fact the
@@ -583,7 +593,7 @@ mapFlag f imp | imp == constFalseIR || imp == constTrueIR = imp
 guardP :: Semiring -> [IRExpr] -> PResult -> PResult
 guardP sr conds r = PResult
   (P (nest (srZero sr) (unP (rProb r))))
-  (nest const0 (rDim r))
+  (nest dim0 (rDim r))
   (nest const0 (rBranches r))
   (nest constTrueIR (rImposs r))
   where nest orElse e = foldr (\g acc -> IRIf g acc orElse) e conds
@@ -613,7 +623,7 @@ scaleCoV sr cumulative deriv r = onProb scale r
     -- (log mode: OpPlus) can combine it with the log-space probability x.
     scaleFactor s = if srLogSpace sr then IRUnaryOp OpLog s else s
     scale x = if not cumulative
-                then srTimes sr x (IRIf (IROp OpEq (rDim r) const0) (srOne sr) (scaleFactor (IRUnaryOp OpAbs deriv)))
+                then srTimes sr x (IRIf (IROp OpEq (rDim r) dim0) (srOne sr) (scaleFactor (IRUnaryOp OpAbs deriv)))
                 else IRIf (IROp OpGreaterThan deriv const0) x (srComplement sr x)
 
 -- | Cumulative 'scaleCoV' through a point inverse that may be decreasing,
@@ -633,7 +643,7 @@ scaleCoVAtom :: Semiring -> IRExpr -> PResult -> PResult -> PResult
 scaleCoVAtom sr deriv atom = onProb flipped
   where
     atomMass = IRIf (rImposs atom) (srZero sr)
-                 (IRIf (IROp OpEq (rDim atom) const0) (unP (rProb atom)) (srZero sr))
+                 (IRIf (IROp OpEq (rDim atom) dim0) (unP (rProb atom)) (srZero sr))
     flipped x = IRIf (IROp OpGreaterThan deriv const0) x
                   (srPlus sr (srComplement sr x) atomMass)
 
@@ -642,7 +652,7 @@ scaleCoVAtom sr deriv atom = onProb flipped
 anySafe :: Semiring -> IRExpr -> (IRExpr -> IRExpr) -> PResult -> PResult
 anySafe sr sample wrap (PResult p d bc imp) = PResult
   (P (IRIf isAnySample (srOne sr) (wrap (unP p))))
-  (IRIf isAnySample const0 (wrap d))
+  (IRIf isAnySample dim0 (wrap d))
   (IRIf isAnySample const0 (wrap bc))
   -- A marginal query over this expression is mass 1: possible, whatever the
   -- body would have said.
@@ -696,7 +706,7 @@ anySafeShared sr sample binds (PResult p d bc imp)
             Just k  -> projMany k (length readers) (IRVar v)
             Nothing -> IRIf isAnySample dflt e
       return (PResult (P (field (0 :: Int) (unP p) (srOne sr)))
-                      (field 1 d  const0)
+                      (field 1 d  dim0)
                       (field 2 bc const0)
                       (if imp == constFalseIR
                          then constFalseIR
@@ -707,7 +717,7 @@ anySafeShared sr sample binds (PResult p d bc imp)
     -- 'anySafe' gives it, guard and all.
     reads' e    = e /= constFalseIR && mentionsAny (map fst binds) e
     -- Each field beside the value a marginal (ANY) query gives it.
-    fields      = [(unP p, srOne sr), (d, const0), (bc, const0), (imp, constFalseIR)]
+    fields      = [(unP p, srOne sr), (d, dim0), (bc, const0), (imp, constFalseIR)]
     readers     = [ (i, e, dflt)
                   | (i, (e, dflt)) <- zip [0 :: Int ..] fields, reads' e ]
 
@@ -876,14 +886,14 @@ enumMixP sr withBranchCount wrap densityDim v vals packed = do
                               , tensorDomainSR vals ]
       field k = projMany k 4 (IRVar t)
       possible = notIR (field 2)
-      atom = andIR possible (IROp OpEq (field 1) const0)
+      atom = andIR possible (IROp OpEq (field 1) dim0)
       overTerms f = IRBuiltin BMap [IRLambda t f, IRVar n]
       countWhere cond = IRBuiltin (BReduce ROpAdd 0) [overTerms (IRIf cond const1 const0)]
       -- A possible term counts when it has the winning dimension: an atom if
       -- any atom is possible, otherwise any possible (density) term.
       counted = IRIf possible
                   (IRIf (IRVar hasAtom)
-                     (IRIf (IROp OpEq (field 1) const0) (field 0) (srZero sr))
+                     (IRIf (IROp OpEq (field 1) dim0) (field 0) (srZero sr))
                      (field 0))
                   (srZero sr)
       probSum = IRBuiltin (BReduce (srReduceOp sr) 0) [overTerms counted]
@@ -897,7 +907,7 @@ enumMixP sr withBranchCount wrap densityDim v vals packed = do
   let out k = projMany k 4 (IRVar paired)
       atomWon = out 1
   return (PResult (P (out 0))
-                  (IRIf atomWon const0 densityDim)
+                  (IRIf atomWon dim0 densityDim)
                   (out 3)
                   (orIR (out 2) (andIR atomWon (IROp OpEq (out 0) (srZero sr)))))
 
@@ -941,7 +951,7 @@ opaqueMass :: Semiring -> IRExpr -> IRExpr -> CompilerMonad PResult
 opaqueMass sr p bc = do
   s <- mkVariable "enum_mass"
   setVariables [(s, p)]
-  return (PResult (P (IRVar s)) const0 bc (IROp OpEq (IRVar s) (srZero sr)))
+  return (PResult (P (IRVar s)) dim0 bc (IROp OpEq (IRVar s) (srZero sr)))
 
 -- | Bind a sub-result's let-in block ONCE, under @guards@, and hand back
 -- projections off that single binding.
@@ -976,7 +986,7 @@ shareResult sr tag guards binds r
   -- result unconditionally shrank -O0 400x but grew the -O2 OUTPUT 2.7x.
   | length readers <= 1 = return (PResult
       (P (guarded (srZero sr)  (wrapIfRead (unP (rProb r)))))
-      (guarded const0      (wrapIfRead (rDim r)))
+      (guarded dim0        (wrapIfRead (rDim r)))
       -- The branch count is deliberately not guarded: an arm that cannot occur
       -- still reports the branches it would have traversed, as before.
       (                     wrapIfRead (rBranches r))
@@ -985,7 +995,7 @@ shareResult sr tag guards binds r
       v <- mkVariable tag
       let block = generateLetInExpr binds (packResult r)
       setVariables [(v, foldr (\g acc -> IRIf g acc (packResult (impossibleP sr))) block guards)]
-      let proj prj e = if reads' e then prj (IRVar v) else guarded const0 e
+      let proj prj e = if reads' e then prj (IRVar v) else guarded dim0 e
       return (PResult
         (P (IRDestruct AcFst (IRVar v)))
         (proj (IRDestruct AcFst . IRDestruct AcSnd) (rDim r))

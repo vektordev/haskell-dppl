@@ -175,7 +175,7 @@ bodyKind (QGen {}) = "generate"
 -- without raising); a backend answers it 'Sampled' (the sample's tokens, see
 -- 'decodeSample'), and a sample 'supportCheck' rejects is reported as
 -- 'BadSample' with the reason.
-data Answer = Answered Double Double Bool   -- ^ probability, dim, impossible
+data Answer = Answered Double Int Bool      -- ^ probability, dim, impossible
             | AnsweredVec [Maybe Double]
             | Raised String
             | Generates
@@ -440,7 +440,7 @@ pythonDriver projectDir programs = unlines $
       QInteg _ -> rLine
       QGen {} -> "'S " ++ show i ++ " " ++ show j ++ " ' + _ser(_r, _ns)"
       _ -> "'V " ++ show i ++ " " ++ show j ++ " ' + ' '.join(repr(float(x)) for x in _vals(_r))"
-      where rLine = "'R " ++ show i ++ " " ++ show j ++ " ' + repr(float(_r[0])) + ' ' + repr(float(_r[1][0])) + ' ' + str(bool(_r[1][1]))"
+      where rLine = "'R " ++ show i ++ " " ++ show j ++ " ' + repr(float(_r[0])) + ' ' + repr(_r[1][0]) + ' ' + str(bool(_r[1][1]))"
 
 -- | The Julia driver; same output protocol as 'pythonDriver'. Each program is
 -- a @module ProgN@ in its own file, @include@d inside a @try@ so a module
@@ -483,17 +483,23 @@ juliaDriver projectDir programs = unlines $
       QInteg _ -> rLine
       QGen {} -> "println(\"S " ++ show i ++ " " ++ show j ++ " \", join(_ser(r, String[]), \" \"))"
       _ -> "println(\"V " ++ show i ++ " " ++ show j ++ " \", join([repr(Float64(x)) for x in _vals(r)], \" \"))"
-      where rLine = "println(\"R " ++ show i ++ " " ++ show j ++ " \", repr(Float64(r[1])), \" \", repr(Float64(r[2][1])), \" \", Bool(r[2][2]))"
+      where rLine = "println(\"R " ++ show i ++ " " ++ show j ++ " \", repr(Float64(r[1])), \" \", repr(r[2][1]), \" \", Bool(r[2][2]))"
 
 -- | One line of driver output (@R@ an inference answer, @V@ a body query's
 -- vector): @(program, Just query, answer)@ for a query,
 -- @(program, Nothing, Raised msg)@ for a module that did not load.
 parseAnswerLine :: String -> Maybe (Int, Maybe Int, Answer)
 parseAnswerLine l = case words l of
+  -- The dim is printed as the backend returned it, not through a float
+  -- conversion, and must read back as an integer: @0 == 0.0@ holds in both
+  -- Python and Julia, so a converted or compared dim would hide a backend
+  -- that answers a float one (task presult-dim-as-int).
   ("R" : i : j : p : d : imp : _) -> do
     i' <- readMaybe i; j' <- readMaybe j
-    p' <- readNum p; d' <- readNum d; b <- readBool imp
-    return (i', Just j', Answered p' d' b)
+    p' <- readNum p; b <- readBool imp
+    return (i', Just j', case readMaybe d of
+      Just d' -> Answered p' d' b
+      Nothing -> Raised ("the dim is not an integer: " ++ d))
   ("V" : i : j : xs) -> do
     i' <- readMaybe i; j' <- readMaybe j
     vs <- mapM readNum xs
@@ -913,7 +919,7 @@ batchedDriver projectDir cases = unlines $
          , "        signal.setitimer(signal.ITIMER_REAL, 0)"
          , "        for _k in range(" ++ show n ++ "):"
          , "            try:"
-         , "                _out('R " ++ show i ++ " ' + " ++ ix ++ " + ' ' + repr(float(_leaf(_r[0], _k))) + ' ' + repr(float(_leaf(_r[1][0], _k))) + ' ' + str(bool(_leaf(_r[1][1], _k))))"
+         , "                _out('R " ++ show i ++ " ' + " ++ ix ++ " + ' ' + repr(float(_leaf(_r[0], _k))) + ' ' + repr(_leaf(_r[1][0], _k)) + ' ' + str(bool(_leaf(_r[1][1], _k))))"
          , "            except BaseException as _e:"
          , "                _out('E " ++ show i ++ " ' + " ++ ix ++ " + ' ' + _msg(_e))"
          , "    except BaseException as _e:"

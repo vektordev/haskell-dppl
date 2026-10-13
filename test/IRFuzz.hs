@@ -1170,8 +1170,8 @@ genPlan c sc n
       , (1, do k <- liftG (choose (0, 2)); PShare <$> replicateM k bool <*> sub)
       , (2, enumerated (\v dom body -> do bc <- liftG arbitrary; return (PEnumSum bc v dom body)))
       , (1, enumerated (\v dom body -> do bc <- liftG arbitrary
-                                          dd <- liftG (elements [IRConst (VFloat 1), IRConst (VFloat 0)])
-                                          dd' <- frequency' [(1, return dd), (1, (\x -> IRIf (IRUnaryOp OpIsAny x) (IRConst (VFloat 0)) (IRConst (VFloat 1))) <$> float)]
+                                          dd <- liftG (elements [dim1, dim0])
+                                          dd' <- frequency' [(1, return dd), (1, anyGuardedDim <$> float)]
                                           return (PEnumMix bc dd' v dom body)))
       ]
       ++ [ (1, PMixSub <$> half <*> half) | not (isMaxProduct c) ]
@@ -1215,11 +1215,11 @@ genPlan c sc n
       , (1, float) ]
 
 -- | The 'PResult' layout: @(prob, (dim, (branches, impossible)))@, or without
--- the branch count once stripped.
+-- the branch count once stripped. The dim is an 'ITInt'.
 presultType :: Bool -> IRType
 presultType stripped
-  | stripped = ITTuple ITFloat (ITTuple ITFloat ITBool)
-  | otherwise = ITTuple ITFloat (ITTuple ITFloat (ITTuple ITFloat ITBool))
+  | stripped = ITTuple ITFloat (ITTuple ITInt ITBool)
+  | otherwise = ITTuple ITFloat (ITTuple ITInt (ITTuple ITFloat ITBool))
 
 -- | A 'PResult'-body case: a probability or integrate body over zero to two
 -- parameters (the first a float, as a sample is), up to two constants.
