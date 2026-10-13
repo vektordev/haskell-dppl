@@ -1,0 +1,2 @@
+helper h0 = (\h1 -> Normal) h0
+main = helper (Uniform > Normal)
