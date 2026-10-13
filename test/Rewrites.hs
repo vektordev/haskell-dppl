@@ -25,6 +25,26 @@
 --   call @h v̄@ of a new top-level @h v̄ = t@. Call-by-value is @draw@
 --   semantics, so this is always sound.
 -- * 'AliasIntro': a binder's body @b@ becomes @draw y = x in b[x := y]@.
+--
+-- Milestone M3 of transformation-differential-testing (task
+-- transformation-differential-testing-m3-catalog-expansion) adds the rest of
+-- that design's starter catalog:
+--
+-- * 'IfFlip': @if c then a else b@ becomes @if not c then b else a@.
+-- * 'CompareFlip': @a < b@ becomes @b > a@ (and @a > b@ becomes @b < a@);
+--   where both operands are a variable or a constant, @a < b@ also becomes
+--   @not (b < a || b == a)@, which is @not (b <= a)@ spelled in the
+--   language's operators (it has no @<=@).
+-- * 'InjFIdentity': a Float- or Int-valued subterm @e@ becomes @e + 0@,
+--   @1 * e@ or @0 - (0 - e)@, and a @+@/@*@ call's operands are swapped.
+-- * 'AlphaRename': a binder is renamed, either to a fresh name or to the
+--   name of a binder of another declaration, which its body does not mention.
+-- * 'TupleLaw': @fst (a, b)@ becomes @a@ (and @snd (a, b)@ becomes @b@) when
+--   @b@ makes no call, and a first-order value @e@ becomes @fst (e, 0.0)@.
+--
+-- The catalog's fifth M3 entry, @of@-clause toggling, rewrites a neural
+-- declaration rather than an expression, so it is not a 'Family':
+-- 'ofToggles'.
 module Rewrites
   ( Family(..)
   , allFamilies
@@ -40,15 +60,22 @@ module Rewrites
   , programNames
   , commutativeInjFs
   , commuteSites
+  , ofToggles
   ) where
 
-import Data.List (nub)
+import Data.Foldable (toList)
+import Data.List (delete, isPrefixOf, nub)
+import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 import SPLL.Lang.Types
-import SPLL.Lang.Lang (freeVarsExpr, substituteVar, getSubExprs, setSubExprs)
+import SPLL.Lang.Lang (freeVarsExpr, substituteVar, renameFreeVar, getSubExprs, setSubExprs, resolveNeuralAnnotation, neuralValueType)
+import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.RInfer (tryAddRTypeInfo)
+import SPLL.ReservedNames (destructBinderPrefix, observeBinderPrefix, etaBinderPrefix)
 
 data Family = DrawIntro | LinearInline | HelperExtract | AliasIntro
+            | IfFlip | CompareFlip | InjFIdentity | AlphaRename | TupleLaw
   deriving (Show, Eq, Ord, Enum, Bounded)
 
 allFamilies :: [Family]
@@ -59,6 +86,11 @@ familyName DrawIntro = "draw-intro"
 familyName LinearInline = "linear-inline"
 familyName HelperExtract = "helper-extract"
 familyName AliasIntro = "alias-intro"
+familyName IfFlip = "if-flip"
+familyName CompareFlip = "compare-flip"
+familyName InjFIdentity = "injf-identity"
+familyName AlphaRename = "alpha-rename"
+familyName TupleLaw = "tuple-law"
 
 -- | One rewritten program, with a label naming the site so a divergence can
 -- be read back to the subterm that caused it.
@@ -69,8 +101,14 @@ data Variant = Variant
   }
 
 -- | What a site knows about where it sits: the local binders in scope,
--- outermost first, and whether the node is the callee of an 'Apply'.
-data Ctx = Ctx { ctxScope :: [String], ctxCallee :: Bool }
+-- outermost first, whether the node is the callee of an 'Apply', and the
+-- node's twin in the RType-annotated program, where inference typed the
+-- program and the twin has the node's shape ('typedTwin').
+data Ctx = Ctx { ctxScope :: [String], ctxCallee :: Bool, ctxTyped :: Maybe Expr, ctxDecl :: String }
+
+-- | The 'RType' inference gave a node, if the program typed.
+ctxRType :: Ctx -> Maybe RType
+ctxRType = fmap (rType . ann) . ctxTyped
 
 -- | Every name the program mentions, which a fresh name must avoid.
 programNames :: Program -> Set.Set String
@@ -93,12 +131,19 @@ variants :: Family -> Program -> [Variant]
 variants fam p =
   [ Variant fam (declName ++ ": " ++ siteLbl) (p { functions = replaceDecl declName e' (functions p) ++ extra })
   | (declName, body) <- functions p
-  , (siteLbl, e', extra) <- everySite (site fam) (Ctx [] False) body ]
+  , (siteLbl, e', extra) <- everySite (site fam) (Ctx [] False (typedTwin body =<< lookup declName typedDecls) declName) body ]
   where
     avoid = programNames p
     var' = freshName "rwv" avoid
     helper = freshName "rwh" avoid
+    renamed = freshName "rwa" avoid
+    -- The validator refuses a name bound twice in one declaration, even in
+    -- sibling scopes, so a reused name comes from another declaration.
+    bindersElsewhere d = nub [ x | (n, b) <- functions p, n /= d, x <- lambdaBinders b ]
     arity = [(n, lambdaArity b) | (n, b) <- functions p]
+    -- Only the type-directed families read it, so a program inference
+    -- refuses costs the others nothing.
+    typedDecls = either (const []) functions (tryAddRTypeInfo p)
     replaceDecl n e ds = [(m, if m == n then e else b) | (m, b) <- ds]
     site DrawIntro ctx e
       | ctxCallee ctx = []
@@ -109,22 +154,53 @@ variants fam p =
       | otherwise = let (call, decl) = extractHelper (ctxScope ctx) helper e
                     in [(lbl "extract" e, call, [(helper, decl)])]
     site AliasIntro _ e = [ (lbl "alias" e, e', []) | Just e' <- [aliasIntro var' e] ]
-    lbl what e = what ++ " " ++ truncateTo 80 (render e)
-    truncateTo n s = if length s > n then take n s ++ "..." else s
+    site IfFlip _ e = [ (lbl "if-flip" e, e', []) | Just e' <- [ifFlip e] ]
+    site CompareFlip ctx e = [ (lbl what e, e', []) | (what, e') <- compareFlips (ctxScope ctx) e ]
+    site InjFIdentity ctx e
+      | ctxCallee ctx = []
+      | otherwise = [ (lbl what e, e', []) | (what, e') <- injFIdentities (ctxRType ctx) e ]
+    site AlphaRename ctx e = [ (lbl what e, e', []) | (what, e') <- alphaRenames (bindersElsewhere (ctxDecl ctx)) (ctxScope ctx) renamed e ]
+    site TupleLaw ctx e
+      | ctxCallee ctx = []
+      | otherwise = [ (what, e', []) | (what, e') <- tupleLaws ctx arity e ]
+    lbl what e = what ++ " " ++ renderShort e
 
 -- | Apply a site function once at every node, rebuilding the path above it.
 everySite :: (Ctx -> Expr -> [(String, Expr, [FnDecl])]) -> Ctx -> Expr -> [(String, Expr, [FnDecl])]
 everySite f ctx e = f ctx e ++
   [ (lbl, setSubExprs e (replaceAt i c' cs), extra)
   | (i, c) <- zip [0 ..] cs
-  , (lbl, c', extra) <- everySite f (childCtx i) c ]
+  , (lbl, c', extra) <- everySite f (childCtx i c) c ]
   where
     cs = getSubExprs e
-    childCtx :: Int -> Ctx
-    childCtx i = case node e of
-      Lambda x _ -> Ctx (ctxScope ctx ++ [x]) False
-      Apply _ _ | i == 0 -> ctx { ctxCallee = True }
-      _ -> ctx { ctxCallee = False }
+    twinChild i c = ctxTyped ctx >>= \t -> let tcs = getSubExprs t
+                                           in if i < length tcs then typedTwin c (tcs !! i) else Nothing
+    childCtx :: Int -> Expr -> Ctx
+    childCtx i c = case node e of
+      Lambda x _ -> ctx { ctxScope = ctxScope ctx ++ [x], ctxCallee = False, ctxTyped = twinChild i c }
+      Apply _ _ | i == 0 -> ctx { ctxCallee = True, ctxTyped = twinChild i c }
+      _ -> ctx { ctxCallee = False, ctxTyped = twinChild i c }
+
+-- | @typedTwin e t@: @t@, the node inference annotated, if it has @e@'s shape
+-- at the root (the same constructor, variable, function name and arity).
+-- Inference does not rebuild the tree, but a monomorphized retry clones
+-- declarations; a mismatch drops the types below that point, so a
+-- type-directed rewrite only ever reads the type of the node it rewrites.
+typedTwin :: Expr -> Expr -> Maybe Expr
+typedTwin e t
+  | sameShape (node e) (node t) = Just t
+  | otherwise = Nothing
+  where
+    sameShape (Var a) (Var b) = a == b
+    sameShape (InjF a xs) (InjF b ys) = a == b && length xs == length ys
+    sameShape (Lambda a _) (Lambda b _) = a == b
+    sameShape (Constant a) (Constant b) = a == b
+    sameShape (ReadNN a _) (ReadNN b _) = a == b
+    sameShape (ThetaI _ i) (ThetaI _ j) = i == j
+    sameShape (Subtree _ i) (Subtree _ j) = i == j
+    sameShape IfThenElse{} IfThenElse{} = True
+    sameShape Apply{} Apply{} = True
+    sameShape _ _ = False
 
 -- | The binary built-in functions whose operands commute: @f a b@ and
 -- @f b a@ denote the same value for every @a@, @b@, so swapping the operands
@@ -145,12 +221,16 @@ commuteSites :: Program -> [(String, Program)]
 commuteSites p =
   [ (declName ++ ": " ++ lbl, p { functions = [ (m, if m == declName then e' else b) | (m, b) <- functions p ] })
   | (declName, body) <- functions p
-  , (lbl, e', _) <- everySite site (Ctx [] False) body ]
+  , (lbl, e', _) <- everySite site (Ctx [] False Nothing declName) body ]
   where
     site _ e = case node e of
       InjF (Named f) [a, b] | f `elem` commutativeInjFs, a /= b ->
         [("commute " ++ render e, e { node = InjF (Named f) [b, a] }, [])]
       _ -> []
+
+-- | 'render', cut to a label's length.
+renderShort :: Expr -> String
+renderShort e = let s = render e in if length s > 80 then take 80 s ++ "..." else s
 
 -- | An unannotated node, as the parser would build it.
 mkExpr :: ExprF Expr -> Expr
@@ -299,3 +379,178 @@ aliasIntro y (Expr t (Lambda x b))
   | x `Set.member` freeVarsExpr b =
       Just (Expr t (Lambda x (mkExpr (Apply (mkExpr (Lambda y (substituteVar x (mkExpr (Var y)) b))) (mkExpr (Var x))))))
 aliasIntro _ _ = Nothing
+
+-- ---------------------------------------------------------------------------
+-- If-flips and comparison rewrites
+-- ---------------------------------------------------------------------------
+
+-- | @if c then a else b@ to @if not c then b else a@. @not@ is total on
+-- Bool, and each arm still runs exactly when it did.
+ifFlip :: Expr -> Maybe Expr
+ifFlip (Expr t (IfThenElse c a b)) = Just (Expr t (IfThenElse (injF' "not" [c]) b a))
+ifFlip _ = Nothing
+
+-- | The comparison rewrites at one node. @a < b@ and @b > a@ are the same
+-- relation, so the operand swap is always sound. The negated spelling
+-- @not (b < a || b == a)@ reads each operand twice, so it applies only where
+-- a second read is the same value: a local variable (a binding is one value,
+-- however often it is read) or a constant. Not a top-level name: a nullary
+-- definition is re-run at every read (@coin ++ coin@ sums two coins).
+compareFlips :: [String] -> Expr -> [(String, Expr)]
+compareFlips scope (Expr t (InjF (Named f) [a, b]))
+  | f == "lt" = swapped "gt" ++ negated a b
+  | f == "gt" = swapped "lt" ++ negated b a
+  where
+    swapped g = [("compare-swap", Expr t (InjF (Named g) [b, a]))]
+    -- lo < hi as not (hi < lo || hi == lo)
+    negated lo hi
+      | duplicable lo && duplicable hi =
+          [("compare-negate", Expr t (InjF (Named "not")
+              [injF' "or" [injF' "lt" [hi, lo], injF' "eq" [hi, lo]]]))]
+      | otherwise = []
+    duplicable (Expr _ (Var v)) = v `elem` scope
+    duplicable (Expr _ (Constant _)) = True
+    duplicable _ = False
+compareFlips _ _ = []
+
+-- ---------------------------------------------------------------------------
+-- InjF identities
+-- ---------------------------------------------------------------------------
+
+-- | The arithmetic identities at a node inference typed @Float@ or @Int@:
+-- @e + 0@, @1 * e@ and @0 - (0 - e)@ (exact in IEEE arithmetic as in the
+-- integers, and each evaluates @e@ once), plus swapping the operands of a
+-- @+@/@*@ call ('commutativeInjFs' minus the Boolean and comparison ones,
+-- which the task does not name). A constant is not rewritten: the optimizer
+-- folds it straight back.
+injFIdentities :: Maybe RType -> Expr -> [(String, Expr)]
+injFIdentities ty e = case node e of
+  Constant _ -> commuted
+  Lambda _ _ -> []
+  _ -> identities ++ commuted
+  where
+    identities = case ty of
+      Just TFloat -> wrap "plus" "neg" (VFloat 0) (VFloat 1) "mult"
+      Just TInt -> wrap "plusI" "negI" (VInt 0) (VInt 1) "multI"
+      _ -> []
+    wrap plus neg zero one mult =
+      [ ("plus-zero", injF' plus [e, c zero])
+      , ("one-times", injF' mult [c one, e])
+      , ("double-negate", injF' plus [c zero, injF' neg [injF' plus [c zero, injF' neg [e]]]]) ]
+    c = mkExpr . Constant
+    commuted = case node e of
+      InjF (Named f) [a, b] | f `elem` ["plus", "plusI", "mult", "multI"], a /= b ->
+        [("commute", e { node = InjF (Named f) [b, a] })]
+      _ -> []
+
+injF' :: String -> [Expr] -> Expr
+injF' f = mkExpr . InjF (Named f)
+
+-- ---------------------------------------------------------------------------
+-- Alpha renaming
+-- ---------------------------------------------------------------------------
+
+-- | At a binder @\\x -> b@ with @x@ free in @b@: @\\y -> b[x := y]@, for
+-- @y@ a name fresh for the program, and for @y@ the first binder name of
+-- another declaration (@binders@, in program order) that is not in scope here
+-- and that @b@ neither reads nor binds. The second is the capture check: it
+-- gives a caller's and a callee's variables one name, which is how helper
+-- extraction found the @enumerateAppliedLambda@ capture. A name from the same
+-- declaration is not an option: the validator refuses a name bound twice in
+-- one declaration, shadowing or not. Desugaring
+-- binders (patterns, @observe@, eta expansion) keep their names: their prefix
+-- is part of what the parser emitted, and renaming one tests the
+-- reserved-name scheme, not the compiler.
+alphaRenames :: [String] -> [String] -> String -> Expr -> [(String, Expr)]
+alphaRenames binders scope fresh (Expr t (Lambda x b))
+  | x `Set.member` freeVarsExpr b, not (desugared x) =
+      [ ("alpha-fresh", rename fresh) ] ++
+      [ ("alpha-reuse " ++ y, rename y) | y <- take 1 reusable ]
+  where
+    names = allNamesInExpr b
+    rename y = Expr t (Lambda y (renameFreeVar x y b))
+    reusable = [ y | y <- binders, y /= x, y `notElem` scope, not (desugared y), not (y `Set.member` names) ]
+    desugared n = any (`isPrefixOf` n) [destructBinderPrefix, observeBinderPrefix, etaBinderPrefix]
+alphaRenames _ _ _ _ = []
+
+-- | Every binder of an expression, in traversal order.
+lambdaBinders :: Expr -> [String]
+lambdaBinders (Expr _ (Lambda x b)) = x : lambdaBinders b
+lambdaBinders (Expr _ f) = concatMap lambdaBinders (toList f)
+
+-- | Every name an expression mentions, free or bound ('allNamesExpr' of
+-- "SPLL.Lang.Lang", which it does not export).
+allNamesInExpr :: Expr -> Set.Set String
+allNamesInExpr (Expr _ (Var v)) = Set.singleton v
+allNamesInExpr (Expr _ (Lambda x b)) = Set.insert x (allNamesInExpr b)
+allNamesInExpr (Expr _ f) = foldr (Set.union . allNamesInExpr) Set.empty f
+
+-- ---------------------------------------------------------------------------
+-- Tuple laws
+-- ---------------------------------------------------------------------------
+
+-- | The tuple laws at one node. Projection of a pair: @fst (a, b)@ is @a@,
+-- and dropping the unread @b@ is sound because the language has no effects;
+-- the one way @b@ could still matter is by failing to terminate or raising,
+-- so @b@ must make no call (no 'Apply', no network read). Pairing: at each
+-- position the node evaluates once ('strictPositions'), a first-order child
+-- @e@ becomes @fst (e, 0.0)@. A higher-order built-in's operands are left
+-- alone (they may be functions), as is a child inference typed as a function.
+tupleLaws :: Ctx -> [(String, Int)] -> Expr -> [(String, Expr)]
+tupleLaws ctx arity p = projections ++ pairings
+  where
+    projections = case node p of
+      InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, b])] | callFree b -> [("fst-pair " ++ renderShort p, a)]
+      InjF (Named "snd") [Expr _ (InjF (Named "TCons") [a, b])] | callFree a -> [("snd-pair " ++ renderShort p, b)]
+      _ -> []
+    pairings = case node p of
+      InjF (Named f) _ | f `elem` higherOrderInjFs -> []
+      _ -> [ ("pair-fst " ++ renderShort c, setSubExprs p (replaceAt i (injF' "fst" [injF' "TCons" [c, mkExpr (Constant (VFloat 0))]]) cs))
+           | i <- strictPositions p, let c = cs !! i, firstOrder i c ]
+    cs = getSubExprs p
+    twins = maybe [] getSubExprs (ctxTyped ctx)
+    firstOrder i c = case node c of
+      Lambda _ _ -> False
+      Constant _ -> False
+      Var v | Just n <- lookup v arity, n > 0 -> False
+      _ -> case (if i < length twins then Just (rType (ann (twins !! i))) else Nothing) of
+             Just (TArrow _ _) -> False
+             _ -> True
+    callFree e = case node e of
+      Apply _ _ -> False
+      ReadNN _ _ -> False
+      _ -> all callFree (getSubExprs e)
+
+-- | The built-ins whose operands may be functions.
+higherOrderInjFs :: [String]
+higherOrderInjFs = ["apply", "map", "mapLeft", "mapEither"]
+
+-- ---------------------------------------------------------------------------
+-- of-clause toggling
+-- ---------------------------------------------------------------------------
+
+-- | Every program obtained from @p@ by toggling one neural declaration's @of@
+-- clause: a written clause is removed (with the registry entry the parser
+-- made of it), and a declaration with none gets the clause its annotation
+-- resolves to written out. Only where the toggled declaration round-trips --
+-- it resolves to the same 'MultiValue' afterwards ('resolveNeuralAnnotation')
+-- -- and so does every other declaration: then the two programs denote the
+-- same networks with the same output annotation, so the compiler owes them
+-- the same module. (A written clause that pins a value set narrower than its
+-- type's auto-derivation does not round-trip and has no toggle.)
+ofToggles :: Program -> [(String, Program)]
+ofToggles p =
+  [ (name ++ (if hasClause then ": of removed" else ": of written"), p')
+  | (i, decl@(name, ty, tag)) <- zip [0 :: Int ..] (neurals p)
+  , name /= "writeLogits"
+  , Right mv <- [resolveNeuralAnnotation (adts p) (writeLogitsDecls p) decl]
+  , let hasClause = tag /= Nothing
+        sugar = case (tag, neuralValueType ty) of
+          (Just m, Just target) -> [(target, m)]
+          _ -> []
+        p' = p { neurals = replaceAt i (name, ty, if hasClause then Nothing else Just mv) (neurals p)
+               , writeLogitsDecls = if hasClause then foldr delete (writeLogitsDecls p) sugar
+                                    else [ (target, mv) | Just target <- [neuralValueType ty] ] ++ writeLogitsDecls p }
+  , resolvedAll p' == resolvedAll p ]
+  where
+    resolvedAll q = Map.fromList [ (n, resolveNeuralAnnotation (adts q) (writeLogitsDecls q) d) | d@(n, _, _) <- neurals q ]

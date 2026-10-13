@@ -1,0 +1,2 @@
+inner ts x = (x + (theta ts @ 0))
+main thetas = (inner thetas) Uniform

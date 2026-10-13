@@ -1,0 +1,1 @@
+main = if not (Normal == 0.5) then 2 else 1

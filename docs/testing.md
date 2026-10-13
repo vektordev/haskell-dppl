@@ -54,8 +54,8 @@ current list for whichever binary you run):
 - `test/End2EndTesting.hs` — `.ppl`/`.tst` integration against interpreter,
   Julia and Python, plus the batched groups (see `batched-mode-pytorch-tensorizer.md`)
 - `test/Rewrites.hs` / `test/TestRewrites.hs` — the rewrite-invariance net
-  (groups `RewriteInvariance` and `RewriteInvarianceCorpus`; see "Rewrite
-  invariance" below)
+  (groups `RewriteInvariance`, `RewriteInvarianceCorpus` and
+  `OfToggleCompilesIdentically`; see "Rewrite invariance" below)
 - `test/TestKnownIssues.hs` — drives `test/cases/known-issues/`: pinned
   repros of open compiler bugs, each declaring which failure shape
   it demonstrates (see "Known-issues corpus" below)
@@ -392,8 +392,8 @@ multi-assertion sibling is `TestRejection.SetWitnessSharedLatent`.
 
 ## Rewrite invariance
 
-`test/Rewrites.hs` holds four semantics-preserving source rewrites (task
-`rewrite-invariance-net-draw-apply-helper-alias`, law-carrying-modality M0):
+`test/Rewrites.hs` holds semantics-preserving source rewrites. Four come from
+task `rewrite-invariance-net-draw-apply-helper-alias` (law-carrying-modality M0):
 draw introduction (`C[e]` → `draw z = e in C[z]`, only where `C` evaluates `e`
 once and unconditionally -- never out of an `if` arm or a function body),
 linear inlining (its inverse, when the variable occurs once and not under a
@@ -402,18 +402,40 @@ function over its free locals) and alias introduction (`draw y = x in
 b[x := y]`). The task's "`draw x = e in b` ⇄ `(\x -> b) e`" is not one of them:
 the two spellings parse to the same AST, which a unit test pins.
 
+Five more families are milestone M3 of transformation-differential-testing
+(task `transformation-differential-testing-m3-catalog-expansion`): if-flip
+(`if c then a else b` → `if not c then b else a`), compare-flip (`a < b` →
+`b > a`, and → `not ((b < a) || (b == a))` where both operands are local
+variables or constants, since that spelling reads them twice; the language has
+no `<=`), injf-identity (a subterm RInfer types `Float` or `Int` becomes
+`e + 0`, `1 * e` or `0 - (0 - e)`, and a `+`/`*` call's operands swap; a
+program that does not type gets only the swap), alpha-rename (a binder renamed
+to a fresh name, and to the name of a binder of another declaration that its
+body does not mention -- the validator refuses a name bound twice in one
+declaration, so it is not a variant)
+and tuple-law (`fst (a, b)` → `a` when `b` makes no call, and a first-order
+operand `e` → `fst (e, 0.0)`). They enter log-only. `of`-clause toggling is not
+a family: no `of`, `of _` and the written clause resolve to one annotation
+before anything reads it, so `Slow.OfToggleCompilesIdentically` asserts the
+stronger thing, that removing a written clause or writing out a missing one
+(where the declaration round-trips) compiles to an identical `IREnv`.
+
 `TestRewrites` applies every family at every site of every interpreter-routed,
-non-neural, non-slow corpus program (one test per program, ~4000 variants,
-~50 CPU-s; group `RewriteInvarianceCorpus`, which lives in the opt-in `Slow`
-group) and to the ten probe pairs (group `RewriteInvariance`, default suite) of law-carrying-modality's evidence table,
-judging each pair with the three-outcome oracle: both answer → probability and
-dim must agree (hard); original answers, rewrite does not → logged, unless
-`refusalIsHard` has promoted that family (each flips in the commit of the
-law-carrying milestone that claims it); original does not, rewrite does → the
-rewrite is checked against its own forward sampler. Known disagreements are
-listed in `knownDivergences` with their tracking task and a
-`known-issues/` pin; an entry that stops diverging fails, so the list cannot
-rot. The logged frontier is visible with `TASTY_HIDE_SUCCESSES=false`.
+non-neural, non-slow corpus program (one test per program; group
+`RewriteInvarianceCorpus`, which lives in the opt-in `Slow` group) and to the
+ten probe pairs (group `RewriteInvariance`, default suite) of
+law-carrying-modality's evidence table, judging each pair with the
+three-outcome oracle: both answer → probability and dim must agree (hard);
+original answers, rewrite does not → logged, unless `refusalIsHard` has
+promoted that family (each flips in the commit of the law-carrying milestone
+that claims it); original does not, rewrite does → the rewrite is checked
+against its own forward sampler. Known disagreements are listed in
+`knownDivergences` with their tracking task and a `known-issues/` pin; an
+entry that stops diverging fails, so the list cannot rot. The logged frontier
+is visible with `TASTY_HIDE_SUCCESSES=false`. Since most of the corpus became
+`slow` (below), the sweep sees 37 programs (about 150 test-s); with
+`IgnoreSlow` it would see 419 (about 1220 test-s), which is where M3 found its
+divergences (docs-repo task `rewrite-invariance-sweep-covers-only-non-slow-programs`).
 
 Helper extraction names a helper's parameters after the caller's variables,
 which is how it found `enumerateAppliedLambda`'s capture: the loop bound the
@@ -543,7 +565,7 @@ its own key (`sourcesFingerprint`), so editing it reruns that sweep only.
 | `BatchedPython.<differential>` (per program, inside each of the four torch batches) | the program's name, batched source, query groups and network mocks as the driver renders them, and the torch fingerprint: `pythonLibBatched.py`, and the torch python's path, Python version and torch version. An all-unchanged differential starts no python |
 | `KnownIssues` (`broken` and `wrong-result` pins) | the `expect-failure` header, the backends checked, the `IREnv` with the program fields and rows, the interpreter fingerprint, and on Python each row's exact script and the Python runtime; `TestKnownIssues.hs` joins the harness |
 | `Corpus.LogSpaceMatchesLinear` (one test per program) | the program's log-space `IREnv`, its fields, its p() rows and the tolerance, and the interpreter fingerprint; `TestCorpus.hs` joins the harness |
-| `Slow.RewriteInvarianceCorpus` | the rows, and for the original and every variant (family and site) its program fields and its compile, a refusal's message included, and the interpreter fingerprint; `TestRewrites.hs` and `Rewrites.hs` join the harness. A variant whose compile timed out or crashed leaves the program unkeyed |
+| `Slow.RewriteInvarianceCorpus` | the rows, and for the original and every variant (family and site) its program fields and its compile, a refusal's message included, and the interpreter fingerprint; `TestRewrites.hs` and `Rewrites.hs` join the harness. A variant whose compile timed out, or whose shown environment crashed or timed out, leaves the program unkeyed |
 
 The **interpreter fingerprint** (M1 of the task) is the source of every
 `src/` module that `IRInterpreter` transitively imports (13 of 39, read off the

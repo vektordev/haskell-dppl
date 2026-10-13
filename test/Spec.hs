@@ -33,7 +33,7 @@ import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedNestedSelectTests, normalTailPrecisionTests, batchedEnumBucketingTests, branchCountBackendTests, topKRuntimeCutoffTests)
 import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
 import ScalingCheck (scalingCheckTests)
-import TestRewrites (rewriteTests, rewriteCorpusTests)
+import TestRewrites (rewriteTests, rewriteCorpusTests, ofToggleCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestSamplingPrimitives (samplingPrimitiveTests)
 import TestCLI (cliTests)
@@ -558,12 +558,15 @@ main = do
   -- programs, each compiled and queried) was a quarter of the default run's
   -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
   rewriteCorpus <- rewriteCorpusTests corpus manifest
+  -- of-clause toggling compiles identically (task
+  -- transformation-differential-testing-m3-catalog-expansion): compile-only.
+  ofToggleCorpus <- ofToggleCorpusTests corpus
   backendCoverage <- backendCoverageTests corpus
   irGeneratorCoverage <- irGeneratorCoverageTests corpus
   generateCensus <- generateCensusTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
-        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
+        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, ofToggleCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it

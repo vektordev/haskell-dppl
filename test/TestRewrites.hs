@@ -21,8 +21,10 @@
 -- ten probe pairs of law-carrying-modality's evidence table, in both
 -- directions; @Corpus@ applies every family at every site of every
 -- interpreter-routed, non-neural, non-slow corpus program and compares at that
--- program's own @.tst@ query points.
-module TestRewrites (rewriteTests, rewriteCorpusTests) where
+-- program's own @.tst@ query points. A fourth, @OfToggleCompilesIdentically@,
+-- toggles neural declarations' @of@ clauses ('ofToggles'; M3 of
+-- transformation-differential-testing) and compares the compiles themselves.
+module TestRewrites (rewriteTests, rewriteCorpusTests, ofToggleCorpusTests) where
 
 import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -79,6 +81,14 @@ refusalIsHard AliasIntro = False
 refusalIsHard HelperExtract = False
 refusalIsHard DrawIntro = False
 refusalIsHard LinearInline = False
+-- The M3 families of transformation-differential-testing (task
+-- transformation-differential-testing-m3-catalog-expansion) enter log-only,
+-- as that design's oracle prescribes: no milestone claims their frontier.
+refusalIsHard IfFlip = False
+refusalIsHard CompareFlip = False
+refusalIsHard InjFIdentity = False
+refusalIsHard AlphaRename = False
+refusalIsHard TupleLaw = False
 
 -- | A divergence where both sides answer and disagree, pinned in
 -- @test/cases/known-issues/@ and tracked by the named document. Matched on
@@ -128,8 +138,34 @@ knownDivergences =
   -- at abc449c); exposed when gaussianTrajectory4 joined the corpus.
   , Known "gaussianTrajectory4" DrawIntro "" aliasChainJacobian
   , Known "gaussianTrajectory4" AliasIntro "" aliasChainJacobian
+  -- The M3 families (task transformation-differential-testing-m3-catalog-expansion).
+  -- A structured draw read twice, one read through `fst (e, 0.0)`: a field's
+  -- constraint or dimension is lost (`draw e = (Normal, Uniform) in (fst (fst
+  -- (e, 0.0)), snd e)` answers dim 1, not 2).
+  , Known "drawDestructuredShared" TupleLaw "pair-fst" fstPairWrapper
+  , Known "setWitnessTupleDisjointFields" TupleLaw "pair-fst" fstPairWrapper
+  , Known "letBoundEitherDestructure" TupleLaw "pair-fst" fstPairWrapper
+  , Known "observeMaybePayloadRightAny" TupleLaw "pair-fst" fstPairWrapper
+  -- The same impossible (0.7, 0.6) answered 1.0 as the other families above.
+  , Known "maskSwappedWrapper" TupleLaw "pair-fst" variantsSilenceReread
+  -- `draw z = Normal in 0.0 * z` is a point mass since M6; under `+ 0.0`,
+  -- `0 - (0 - .)` or a helper it answers impossible at 0.
+  , Known "drawBoundRandomTimesLiteralZero" HelperExtract "extract (mult 0.0 z)" diracLawLost
+  , Known "drawBoundRandomTimesLiteralZero" InjFIdentity "plus-zero (mult 0.0 z)" diracLawLost
+  , Known "drawBoundRandomTimesLiteralZero" InjFIdentity "double-negate (mult 0.0 z)" diracLawLost
+  -- `1.0 > NaN` answers p(True) = 1 (the mirrored `NaN < 1.0` is right).
+  , Known "nanConstantMixture" CompareFlip "compare-swap" nanComparison
+  -- Null-set conventions do not survive negation: `not (Normal == 0.5)` drops
+  -- the equality's density convention, and `not (v < b || v == b)` the
+  -- set-witness interval's closed boundary.
+  , Known "observeContinuousEqualsLetfree" IfFlip "if-flip" nullSetNegation
+  , Known "observeDisjointTails" CompareFlip "compare-negate" nullSetNegation
   ]
   where
+    fstPairWrapper = "fst-of-pair-wrapper-loses-structured-draw-constraint"
+    diracLawLost = "dirac-law-point-lost-under-plus-or-helper"
+    nanComparison = "nan-operand-comparison-measured-through-cdf"
+    nullSetNegation = "null-set-conventions-not-preserved-under-negation"
     aliasDoubleJacobian = "aliased-draw-scaled-sibling-double-jacobian"
     aliasChainJacobian = "aliased-draw-chain-scaled-step-double-jacobian"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
@@ -163,7 +199,7 @@ runQueries p qs = compileTimed p >>= \c -> runCompiled p c qs
 -- force it: forcing all of it could crash on a part no query reads.
 compileTimed :: Program -> IO (Either String IREnv)
 compileTimed p = do
-  r <- timeout (20 * 1000000) (try (evaluate (compile defaultCompilerConfig p)))
+  r <- timedTry (20 * 1000000) (evaluate (compile defaultCompilerConfig p))
   return $ case r of
     Nothing -> Left "timeout (20s)"
     Just (Left ex) -> Left ("crash: " ++ firstLine (show (ex :: SomeException)))
@@ -174,11 +210,23 @@ compileTimed p = do
 runCompiled :: Program -> Either String IREnv -> [Query] -> IO Outcome
 runCompiled _ (Left why) _ = return (Refused why)
 runCompiled p (Right env) qs = do
-  r <- timeout (20 * 1000000) (try (evaluate (forceOutcome (answer p env qs))))
+  r <- timedTry (20 * 1000000) (evaluate (forceOutcome (answer p env qs)))
   return $ case r of
     Nothing -> Refused "timeout (20s)"
     Just (Left ex) -> Refused ("crash: " ++ firstLine (show (ex :: SomeException)))
     Just (Right o) -> o
+
+-- | 'timeout' around 'try', the other way round: an action run as
+-- @timeout n (try act)@ catches 'timeout''s own exception, so a timeout came
+-- back as @Just (Left <<timeout>>)@, a crash, and was keyed and judged as one.
+-- 'Nothing' is a timeout; 'Just' the action's result or its exception.
+timedTry :: Int -> IO a -> IO (Maybe (Either SomeException a))
+timedTry n act = do
+  r <- try (timeout n act)
+  return $ case r of
+    Left ex -> Just (Left ex)
+    Right Nothing -> Nothing
+    Right (Just x) -> Just (Right x)
 
 firstLine :: String -> String
 firstLine = shorten . takeWhile (/= '\n')
@@ -480,10 +528,81 @@ unitTests = testGroup "Units"
         @?= ["main: draw-intro Normal", "main: draw-intro 1.0"]
   , testCase "draw intro: the callee of an application is not bound" $
       sitesOf DrawIntro "f x = x\nmain = f 1.0" @?= ["main: draw-intro 1.0"]
+  -- If-flip: the condition is negated and the arms swap.
+  , testCase "if flip: negates the condition and swaps the arms" $
+      sitesOf IfFlip "main = if Uniform < 0.5 then Normal else Uniform"
+        @?= ["main: if-flip (if (lt Uniform 0.5) then Normal else Uniform)"]
+  , testCase "if flip: the rewritten program is if not c then b else a" $
+      map (render' . variantProgram) (variants IfFlip (parseSrc "u" "main = if Uniform < 0.5 then Normal else Uniform"))
+        @?= [render' (parseSrc "v" "main = if not (Uniform < 0.5) then Uniform else Normal")]
+  -- Comparison rewrites: the negated spelling reads each operand twice, so it
+  -- applies to variables and constants only.
+  , testCase "compare flip: a random operand is swapped, never duplicated" $
+      sitesOf CompareFlip "main = Normal < 0.5" @?= ["main: compare-swap (lt Normal 0.5)"]
+  , testCase "compare flip: a top-level name is not duplicated (each read re-runs it)" $
+      sitesOf CompareFlip "coin = Uniform\nmain = coin < 0.5" @?= ["main: compare-swap (lt coin 0.5)"]
+  , testCase "compare flip: a variable operand is also negated" $
+      map (render' . variantProgram) (variants CompareFlip (parseSrc "u" "main = draw x = Normal in x < 0.5"))
+        @?= map (render' . parseSrc "v") [ "main = draw x = Normal in 0.5 > x"
+                                         , "main = draw x = Normal in not ((0.5 < x) || (0.5 == x))" ]
+  , testCase "compare flip: > negates with its operands in order" $
+      map (render' . variantProgram) (variants CompareFlip (parseSrc "u" "main = draw x = Normal in x > 0.5"))
+        @?= map (render' . parseSrc "v") [ "main = draw x = Normal in 0.5 < x"
+                                         , "main = draw x = Normal in not ((x < 0.5) || (x == 0.5))" ]
+  -- InjF identities: only at a node inference typed Float or Int.
+  , testCase "injf identity: a Float site gets the three identities, a Bool site none" $
+      sitesOf InjFIdentity "main = Uniform < 0.5"
+        @?= ["main: plus-zero Uniform", "main: one-times Uniform", "main: double-negate Uniform"]
+  , testCase "injf identity: an Int site uses the Int operators" $
+      map (render' . variantProgram) (take 1 (variants InjFIdentity (parseSrc "u" "f n = n\nmain = f 3")))
+        @?= [render' (parseSrc "v" "f n = n ++ 0\nmain = f 3")]
+  , testCase "injf identity: a + call's operands commute, a constant is not wrapped" $
+      sitesOf InjFIdentity "main = draw x = Normal in x + 1.0"
+        @?= [ "main: plus-zero (draw x = Normal in (plus x 1.0))", "main: one-times (draw x = Normal in (plus x 1.0))"
+            , "main: double-negate (draw x = Normal in (plus x 1.0))", "main: plus-zero (plus x 1.0)", "main: one-times (plus x 1.0)", "main: double-negate (plus x 1.0)"
+            , "main: commute (plus x 1.0)", "main: plus-zero x", "main: one-times x", "main: double-negate x"
+            , "main: plus-zero Normal", "main: one-times Normal", "main: double-negate Normal" ]
+  , testCase "injf identity: a program that does not type gets only the commutation" $
+      sitesOf InjFIdentity "f x = x + 1.0\nmain = f True" @?= ["f: commute (plus x 1.0)"]
+  -- Alpha renaming: fresh, and shadowing an enclosing binder the body ignores.
+  , testCase "alpha rename: fresh, and reusing another scope's binder name" $
+      map (render' . variantProgram) (variants AlphaRename (parseSrc "u" "f a = a + 1.0\nmain = draw b = Uniform in f b"))
+        @?= map (render' . parseSrc "v") [ "f rwa0 = rwa0 + 1.0\nmain = draw b = Uniform in f b"
+                                         , "f b = b + 1.0\nmain = draw b = Uniform in f b"
+                                         , "f a = a + 1.0\nmain = draw rwa0 = Uniform in f rwa0"
+                                         , "f a = a + 1.0\nmain = draw a = Uniform in f a" ]
+  , testCase "alpha rename: a binder of the same declaration is never reused" $
+      sitesOf AlphaRename "main = draw a = Normal in draw b = Uniform in b + 1.0 + (draw c = Normal in c)"
+        @?= ["main: alpha-fresh (\\b -> (plus (plus b 1.0) (draw c = Normal in c)))", "main: alpha-fresh (\\c -> c)"]
+  , testCase "alpha rename: a name the body reads is not reused" $
+      sitesOf AlphaRename "main = draw a = Normal in draw b = Uniform in a + b"
+        @?= ["main: alpha-fresh (\\a -> (draw b = Uniform in (plus a b)))", "main: alpha-fresh (\\b -> (plus a b))"]
+  , testCase "alpha rename: an unused binder has no site" $
+      sitesOf AlphaRename "main = draw a = Normal in 1.0" @?= []
+  -- Tuple laws: projection drops a call-free component; pairing wraps a
+  -- first-order operand.
+  , testCase "tuple law: a call-free pair projects" $
+      map (render' . variantProgram) (filter (("fst-pair" `isInfixOf`) . variantSite) (variants TupleLaw (parseSrc "u" "main = fst (Normal, Uniform)")))
+        @?= [render' (parseSrc "v" "main = Normal")]
+  , testCase "tuple law: a pair whose dropped half calls does not project" $
+      filter ("fst-pair" `isInfixOf`) (sitesOf TupleLaw "f x = x\nmain = fst (Normal, f 1.0)") @?= []
+  , testCase "tuple law: a constant or a function-valued operand is not paired" $
+      sitesOf TupleLaw "main = map (\\v -> v + 1.0) [Normal]" @?= ["main: pair-fst v", "main: pair-fst Normal"]
+  -- of-clause toggling: a round-trip in both directions; a narrowing clause has none.
+  , testCase "of toggle: a clause equal to its auto-derivation is removed, a missing one written" $ do
+      let decl d = "neural n :: (Symbol -> (Bool, Bool))" ++ d ++ "\nmain s = draw x = n s in if fst x then 1 else 0"
+          tagOf q = [t | (_, _, t) <- neurals q]
+      map (tagOf . snd) (ofToggles (parseSrc "u" (decl " of ([True, False], _)"))) @?= [[Nothing]]
+      map (tagOf . snd) (ofToggles (parseSrc "u" (decl ""))) @?= [[Just (MultiTuple (MultiDiscretes [VBool True, VBool False]) (MultiDiscretes [VBool True, VBool False]))]]
+      map fst (ofToggles (parseSrc "u" (decl " of ([True], _)"))) @?= []
   ]
   where
     paramsOf (Expr _ (Lambda v b)) = v : paramsOf b
     paramsOf _ = []
+    -- A program's declarations, annotations dropped, to compare a rewrite's
+    -- output with the program the rewrite should have produced.
+    render' q = show [ (n, stripExpr b) | (n, b) <- functions q ]
+    stripExpr (Expr _ f) = Expr makeTypeInfo (fmap stripExpr f)
 
 -- ---------------------------------------------------------------------------
 -- Corpus sweep
@@ -544,8 +663,46 @@ rewriteKey m p qs orig vs
       Left why -> "timeout" `isPrefixOf` why
       Right _ -> False
     renderTimed c = do
-      r <- timeout (20 * 1000000) (try (evaluate (let str = show c in length str `seq` str)))
+      r <- timedTry (20 * 1000000) (evaluate (let str = show c in length str `seq` str))
       return $ case r of
         Just (Right str) -> Just str
         Just (Left (_ :: SomeException)) -> Nothing
         Nothing -> Nothing
+
+-- ---------------------------------------------------------------------------
+-- of-clause toggling
+-- ---------------------------------------------------------------------------
+
+-- | Toggling a neural declaration's @of@ clause ('ofToggles') must not change
+-- the compile at all: no @of@, @of _@ and the written clause resolve to one
+-- annotation before anything reads it (task
+-- of-annotation-and-auto-derived-enumeration-divergence), so the oracle here
+-- is stricter than the three outcomes: the two 'IREnv's, or the two
+-- refusals, must 'show' identically. One test per corpus program with a
+-- neural declaration that round-trips. Compile-only, so uncached; a compile
+-- that runs out of time is logged.
+ofToggleCorpusTests :: Corpus -> IO TestTree
+ofToggleCorpusTests corpus = corpusSweep corpus SweepSpec
+  { sweepName = "Slow.OfToggleCompilesIdentically", sweepTier = Slow, sweepSlow = SkipSlow
+  , sweepSelect = \e -> not (null (ofToggles (ceProgram e)))
+  , sweepNote = "removing or writing out a round-tripping of clause compiles to the same IREnv" } $ \e ->
+    testCaseInfo (ceName e) $ do
+      let p = ceProgram e
+      orig <- shownCompile p
+      results <- forM (ofToggles p) $ \(lbl, p') -> do
+        toggled <- shownCompile p'
+        return $ case (orig, toggled) of
+          (Just a, Just b) | a == b -> Right Nothing
+                           | otherwise -> Left (lbl ++ ": the compile changed")
+          _ -> Right (Just (lbl ++ ": timed out (60s), not compared"))
+      case [m | Left m <- results] of
+        [] -> return (show (length results) ++ " toggles, identical"
+                       ++ concatMap ("\n    " ++) [m | Right (Just m) <- results])
+        bad -> assertFailure (unlines bad) >> return ""
+  where
+    shownCompile q = do
+      r <- timedTry (60 * 1000000) (evaluate (let s = show (compile defaultCompilerConfig q) in length s `seq` s))
+      return $ case r of
+        Nothing -> Nothing
+        Just (Left (ex :: SomeException)) -> Just ("crash: " ++ show ex)
+        Just (Right s) -> Just s
