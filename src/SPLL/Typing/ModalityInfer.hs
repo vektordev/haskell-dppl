@@ -383,8 +383,9 @@ data Justification
     -- named. Consumed by the compiler's Gaussian collapse, which marginalises
     -- a binding certified this way ('IRCompiler.affineMarginalisable').
   | JSharedLatent String [ChainName] [Law]
-    -- ^ A field constructor, with its fields' laws, whose fields share the
-    -- 'Marginal' affine latents listed. Their joint law is a multivariate
+    -- ^ A field constructor, with its fields' laws, two of whose density
+    -- factors integrate the same 'Marginal' affine latents, listed
+    -- ('structuredLaw'). Their joint law is a multivariate
     -- Gaussian, which no engine implements (affine-gaussian-forms M2), so the
     -- node is sample-only: this is the certificate saying so, and the lattice
     -- floors on it ('sampleOnlyI').
@@ -400,14 +401,28 @@ data Justification
 -- Two reads of one @draw@-bound variable carry the same key ('bindParam'), so
 -- @x + x@ is one latent, while every other Gaussian leaf is a fresh one. An
 -- empty map is a constant.
-newtype AffineCert = AffineCert { acLatents :: Map ChainName Recovery }
+data AffineCert = AffineCert
+  { acLatents :: Map ChainName Recovery
+  , acFactors :: Map ChainName (Set.Set ChainName)
+    -- ^ The density factors of the witnessed bindings the value reads, keyed
+    -- by the binding's 'Recovered' latent: the 'Marginal' latents each one's
+    -- density integrates out. The positional ledger counts each once,
+    -- wherever the binding is read.
+  }
 
--- | Whether an affine latent is known given the observation. A latent is
--- 'Recovered' when the binding that reads it alone is witnessed: recovering
--- the binding recovers it ('bindParam'). Only a 'Marginal' latent has to be
--- integrated out, so only those correlate two fields ('JSharedLatent').
+-- | Whether an affine latent is known given the observation. A witnessed
+-- binding is one 'Recovered' latent to everything that reads it
+-- ('bindParam'). Only a 'Marginal' latent has to be integrated out, so only
+-- those can correlate two density factors ('JSharedLatent').
 data Recovery = Marginal | Recovered
   deriving (Eq, Ord, Show)
+
+constantCert :: AffineCert
+constantCert = AffineCert Map.empty Map.empty
+
+-- | The 'Marginal' latents of a form.
+marginalsOf :: AffineCert -> Set.Set ChainName
+marginalsOf = Map.keysSet . Map.filter (== Marginal) . acLatents
 
 -- | A law with no justification beyond its capability: 'JDirac' (value
 -- unknown) when the value is a point mass, 'JUnjustified' otherwise. A
@@ -441,7 +456,7 @@ renderJustification j = case j of
         renderValue (VInt n)   = show n
         renderValue (VBool b)  = show b
         renderValue v          = show v
-        latents (AffineCert m) = "(" ++ intercalate ", "
+        latents (AffineCert m _) = "(" ++ intercalate ", "
           [ k ++ (if r == Recovered then " recovered" else "") | (k, r) <- Map.toList m ] ++ ")"
 
 -- | The per-node certificates of a program, keyed by chain name: what
@@ -677,10 +692,10 @@ inferE ctx env expr = case expr of
 -- leaf too. 'Nothing' for anything else.
 affineOf :: ChainName -> Law -> Maybe AffineCert
 affineOf cn (Law m j) = case projectI m of
-  Deterministic -> Just (AffineCert Map.empty)
+  Deterministic -> Just constantCert
   PNormal -> Just (case j of
     JAffine c -> c
-    _         -> AffineCert (Map.singleton cn Marginal))
+    _         -> AffineCert (Map.singleton cn Marginal) Map.empty)
   _ -> Nothing
 
 -- | The affine algebra's rules (design affine-gaussian-forms §3): a sum adds
@@ -688,33 +703,42 @@ affineOf cn (Law m j) = case projectI m of
 -- coefficients result is the compiler's concern; the latents are this.
 -- A latent recovered on either side is recovered.
 affineInjF :: String -> [Maybe AffineCert] -> Maybe AffineCert
-affineInjF "plus" [Just a, Just b] = Just (AffineCert (Map.unionWith max (acLatents a) (acLatents b)))
+affineInjF "plus" [Just a, Just b] =
+  Just (AffineCert (Map.unionWith max (acLatents a) (acLatents b)) (Map.union (acFactors a) (acFactors b)))
 affineInjF "mult" [Just a, Just b]
   | Map.null (acLatents a) = Just b
   | Map.null (acLatents b) = Just a
 affineInjF "neg"  [Just a] = Just a
 affineInjF _ _ = Nothing
 
--- | The law of a field constructor over its fields' laws. Fields sharing a
--- 'Marginal' affine latent have a joint, multivariate Gaussian law, not the
--- product of their own: the structure is floored to sample-only, with the
--- certificate naming the shared latents ('JSharedLatent'), until
--- affine-gaussian-forms M2 gives that joint law an engine.
+-- | The law of a field constructor over its fields' laws. Its density is a
+-- product of factors: each witnessed binding's own density, counted once
+-- wherever it is read, and each field's residual density given those. A
+-- product is only right when no two factors integrate the same 'Marginal'
+-- latent; where two do, the joint law is a multivariate Gaussian, not the
+-- product. The structure is then floored to sample-only, with the certificate
+-- naming the shared latents ('JSharedLatent'), until affine-gaussian-forms M2
+-- gives that joint law an engine.
 structuredLaw :: String -> [Law] -> IMod -> Law
 structuredLaw fname laws m = case sharedLatents of
   [] -> Law m (JStructured fname laws)
   ks -> Law (sampleOnlyI m) (JSharedLatent fname ks laws)
   where
+    (residuals, bindings) = unzip (map densityFactors laws)
+    factors = concat residuals ++ Map.elems (Map.unions bindings)
     sharedLatents = Map.keys (Map.filter (> (1 :: Int)) (Map.unionsWith (+)
-      [ Map.fromSet (const 1) (marginalLatents l) | l <- laws ]))
+      [ Map.fromSet (const 1) f | f <- factors ]))
 
--- | The 'Marginal' affine latents a value's law reads, through structure.
-marginalLatents :: Law -> Set.Set ChainName
-marginalLatents (Law _ j) = case j of
-  JAffine c             -> Map.keysSet (Map.filter (== Marginal) (acLatents c))
-  JStructured _ ls      -> Set.unions (map marginalLatents ls)
-  JSharedLatent _ _ ls  -> Set.unions (map marginalLatents ls)
-  _                     -> Set.empty
+-- | The density factors of a value's law, through structure: the 'Marginal'
+-- latents of each scalar part's residual, and those of each witnessed binding
+-- read (keyed by the binding, so one read twice is one factor).
+densityFactors :: Law -> ([Set.Set ChainName], Map ChainName (Set.Set ChainName))
+densityFactors (Law _ j) = case j of
+  JAffine c             -> ([marginalsOf c], acFactors c)
+  JStructured _ ls      -> fields ls
+  JSharedLatent _ _ ls  -> fields ls
+  _                     -> ([], Map.empty)
+  where fields ls = let (rs, bs) = unzip (map densityFactors ls) in (concat rs, Map.unions bs)
 
 -- | Floor every random part of a modality to (at most) sample-only, keeping
 -- its shape so accessors and the fixpoint's comparison still line up.
@@ -765,17 +789,16 @@ letBoundLaw ctx headCN argLaw@(Law argMod j)
 --
 -- A Gaussian argument binds at its affine certificate ('affineOf' at the
 -- argument's chain name @argCN@), so every read of @x@ carries the same latent
--- keys. A witnessed binding of an argument with a single 'Marginal' latent
--- recovers that latent: the observation determines @x@, and so it.
+-- keys. A witnessed binding is instead one 'Recovered' latent keyed @argCN@:
+-- the observation determines @x@. Its density, which integrates the
+-- argument's 'Marginal' latents, is recorded as its factor ('acFactors').
 bindParam :: ICtx -> ChainName -> String -> ChainName -> Law -> Env -> Env
 bindParam ctx headCN x argCN argLaw = Map.insert x (affineBound (letBoundLaw ctx headCN argLaw))
   where
     affineBound l@(Law m _) = case affineOf argCN argLaw of
-      Just c | not (Map.null (acLatents c)) -> Law m (JAffine (if isWitI m then recoverSole c else c))
+      Just c | not (Map.null (acLatents c)) -> Law m (JAffine (if isWitI m then recovered c else c))
       _ -> l
-    recoverSole (AffineCert ls) = case Map.keys (Map.filter (== Marginal) ls) of
-      [k] -> AffineCert (Map.insert k Recovered ls)
-      _   -> AffineCert ls
+    recovered c = AffineCert (Map.singleton argCN Recovered) (Map.insert argCN (marginalsOf c) (acFactors c))
 
 -- | The law a free-standing lambda binds its parameter to: the representative
 -- of the parameter's type. Shared with 'envAt'.
