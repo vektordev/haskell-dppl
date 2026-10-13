@@ -110,7 +110,7 @@ fully-annotated AST after each pipeline stage to stderr via
 | After Enum Annotation | `DiscreteValues` tags appear |
 | After Draw Sinking | printed **only** when a `draw` was moved (see `enumeration.md`, "Stacked draws are sunk into their operands") |
 | After Forward Chaining | `chainName` fields filled |
-| After Modality Inference | `pType` populated; each node ends in `law: …`, the justification of its law (`dirac [value]`, `leaf <primitive>`, `<constructor>(…)` over the fields, or `unjustified`; `ModalityInfer.Law`) |
+| After Modality Inference | `pType` populated; each node ends in `law: …`, the justification of its law (`dirac [value]`, `leaf <primitive>`, `<constructor>(…)` over the fields, `affine(…)`, `plan <reads>`, on a `draw`'s lambda `binding: <engines>`, or `unjustified`; `ModalityInfer.Law`) |
 | After IR Compilation (pre-optimization) | Pseudo-code IR before any optimizer passes |
 | After Select Pass | `IRIf` → `IRSelect` retagging (a no-op unless `--batched`) |
 | After Optimization | Pseudo-code IR after constant folding, CSE, let-in optimization |

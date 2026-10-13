@@ -452,7 +452,9 @@ facts the engines decide on instead of the head's syntax:
 
 The modality engine asks the witness question of the same resolved lambda for
 every head (`ModalityInfer.letBoundLaw`), so a helper's parameter is `IWit`
-like a `draw`'s. The engines:
+like a `draw`'s. Each engine's applicability is a predicate both sides read
+(`modality-and-admission.md`, "Engine applicability"), and `applyBinding`
+tries them as a declared list. The engines:
 
 - **point inversion** folds the body inline where `bindInline`, else uses
   `namedCall` where the variable reaches a field, else the single witness. The

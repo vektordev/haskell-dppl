@@ -133,6 +133,44 @@ the optimizer having folded `exp`'s applicability guard on the sentinel into
 witness, and the optimizer now picks an `IRIf` arm only on a Bool constant. A
 multi-use binding keeps the refusal.
 
+### Engine applicability, and the floor on a binding no engine handles
+
+Each engine of a probabilistic application answers whether it applies with a
+pure predicate that returns its certificate, and the modality engine's let
+rule and IRCompiler's dispatch read the same predicates (task
+`engine-applicability-as-data`, design `law-carrying-modality` M5). In dispatch
+order:
+
+| engine | predicate | certificate |
+|---|---|---|
+| enumeration | `Analysis.enumerableApplication` (a conditional head, `isConditional`, over a random enumerable argument) | the domain |
+| plan-guided enumeration | `AutoNeural.planReadOf` (a neural read whose declaration yields a plan) | the network |
+| point inversion | `ForwardChaining.pointWitnessCert` (`toInvExprMaybe`, seeded at the lambda's body) | the inverse, and the root-seeded witness verdict |
+| affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |
+| set-valued witnesses | `ForwardChaining.worldsShape`, `invertToWorlds`' shape walk without its IR | the shape |
+
+For a `draw` (a lambda in place) whose argument is random, not a function of
+witnessed variables alone (`determinedByWitnesses`), and read by the body,
+`letBinding` lists the certificates on the applied lambda (`JBinding`, shown
+by `-d`, and per binding by `-v`). Where the list is empty it binds the
+variable sample-only and re-infers the body, so the function is `Bottom`: no
+inference variant is promised, and `bindingWithoutEngine` records the reason
+on the absent variants. `applyBinding` tries the engines as a declared list
+(`dispatchEngines`); enumeration is tried earlier, at the `Apply` arm's first
+equation.
+
+The plan traversal and the set-witness IR can still decline what their
+predicate admits (a transported sentinel, an x-free factor reading a random
+local, a plan node outside the traversal), so their predicates are necessary
+conditions and the refusal stays the net. The predicates are permissive where
+the compiler might know more: a part with no fresh randomness of its own counts
+as deterministic (`permissiveDet`), since an enclosing variable may be
+recovered by the time the body is compiled. A named callee's binding is not
+floored, so a call no engine handles is still admitted and refused. The plan
+closed form of `compareGround` is the plan certificate too: both operands must
+project from plan reads through bindings (`JPlan`, `planDependent`), where
+any declaration containing a `ReadNN` used to qualify.
+
 ## A static refusal is an absent variant, never a compile-killing error
 
 When an engine declines a shape -- the set-witness diagnostic, a plan
