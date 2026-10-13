@@ -23,6 +23,7 @@ import TestObservationMask (observationMaskTests, slowVariantCorpusTests)
 import TestPerValue (perValueTests)
 import TestMonomorphize (monomorphizeTests)
 import TestIRTypeCheck (irTypeCheckTests)
+import IRFuzz (irFuzzGeneratorTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestModalityInfer (modalityInferTests)
@@ -600,6 +601,7 @@ main = do
     , rejectionTests
     , monomorphizeTests
     , irTypeCheckTests
+    , irFuzzGeneratorTests
     , modalityTests
     , modalityInfer
     , detTests

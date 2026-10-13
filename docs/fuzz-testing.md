@@ -896,3 +896,48 @@ disagreement; the families are filed (see the task doc in the docs repo). With g
 (2026-10-13), a run asks ~280-290 generate queries per backend, and in three
 runs 99-100% of the samples were judged in support (the rest: the interpreter
 raised at the sample); none disagreed.
+
+## IR-level backend agreement (`prop_Fuzz_IRBackendsAgree`)
+
+Design `ir-fuzz-generator`, milestone M1 (`test/IRFuzz.hs`). Where
+`prop_Fuzz_BackendsAgree` reaches the backends only through IR the compiler
+emits, this property draws `IREnv`s directly, within the IR type contract
+(`SPLL.IRTypeCheck`), so a construct is checked because it has a production.
+
+- **A case** is one group `main` whose normal or writeLogits body is a plain
+  value expression over zero to three parameters and up to two top-level
+  constants, with four argument vectors. Types: `Bool`, `Int`, `Float`, `()`,
+  lists, tuples, `Either`, and theta trees as accessor operands only. Values
+  lean on boundaries: 0, -0, the infinities, NaN, 1e300, the smallest
+  subnormal, the empty list. Ints stay small, and `OpIntDiv`/`OpMod` are drawn
+  only in the guarded shape the compiler emits (the preconditions are listed
+  at `IRTypeCheck.inferExpr`). No production yet: `IRSample` (M4),
+  `IRBuiltin` (M3), ADT values (M3), symbol constants (no text backend renders
+  one); `IRFuzz.noProduction` records why.
+- **Oracle.** The interpreter answers each query with a value, a program
+  raise (a partial destructor outside its domain, an `IRError`), or a
+  refusal (anything else). A backend must answer the value (floats by
+  `probAgrees` plus the sign of a zero; Python's int at a float slot is
+  accepted numerically and tabulated) or raise where the interpreter raises.
+  A refusal is not compared. It is tabulated by reason, and a reason not in
+  `IRFuzz.knownRefusals` fails the property.
+- **Filed families.** `IRFuzz.knownDisagreements` lists each known
+  disagreement family with its docs-repo ticket. A family is recognised by
+  the backend's answer, or, more exactly, *as if*: a rewrite of the case into
+  the backend's semantics for the one construct (short-circuit `&&`/`||`,
+  Python's or Julia's `max`, ...) under which the interpreter answers what the
+  backend did. Each entry, and each filed refusal, carries a minimal repro,
+  and the default-tier group `IR fuzz generator` checks that every repro
+  still reproduces on exactly its backends. A fixed bug fails that check, so
+  its entry cannot outlive it.
+- **Shrinking** cuts a batch to single cases, then to one argument vector,
+  then replaces body nodes by children, keeping only candidates the checker
+  accepts at the drawn type.
+- **Budget:** 20 batches of 60 cases, ~32 s (one `python3` and one `julia`
+  process per batch). `NEST_IRFUZZ_EXPLORE=<file>` appends every unfiled
+  disagreement and refusal to the file and passes, for surveying a new
+  production's findings in bulk.
+- The default tier also checks that drawn cases and shrink candidates
+  type-check, and that a fixed-seed sample reaches every `Operand`,
+  `UnaryOperand`, `Accessor` and drawn `IRExpr` constructor, and every
+  density and cumulative leaf.

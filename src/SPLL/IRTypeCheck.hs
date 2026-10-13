@@ -413,6 +413,13 @@ closedScheme t = Scheme (nub (varsOf t)) [] t
 --   'expectBuiltinArgs').
 --
 -- 'OpEq' accepts 'ITSymbol', which the interpreter's 'OpEq' has no case for.
+--
+-- Value preconditions the types do not carry (the IR fuzz generator draws
+-- within them; docs task ir-fuzz-generator-m1-deterministic-scalar):
+-- 'OpIntDiv' and 'OpMod' are defined only for a nonzero divisor that divides
+-- the dividend, the shape the compiler emits them in (the backends round
+-- differently elsewhere, and the interpreter throws on a zero divisor);
+-- and 'ITInt' arithmetic stays inside 64 bits (Python's ints do not wrap).
 inferExpr :: Ctx -> IRExpr -> TC IRType
 inferExpr ctx expr = case expr of
   IRIf c a b -> conditional c a b
