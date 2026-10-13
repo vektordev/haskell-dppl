@@ -37,16 +37,17 @@ impactManifestTests = testGroup "ImpactManifest"
 -- | M2 (task impact-analysis-m2-drop-runtime-from-key): a corpus program runs
 -- on the scalar Python and Julia backends exactly when 'uncertifiedConstructs'
 -- of its census is non-empty. The census of a real corpus program sees its
--- constructs, generate bodies included, without the sampling primitives; a
--- construct outside 'certifiedConstructs' is reported, one inside is not.
+-- constructs, generate bodies and their draws included (certified since the
+-- IR fuzz generator's M4); a construct outside 'certifiedConstructs' is
+-- reported, one inside is not.
 censusRouting :: IO ()
 censusRouting = do
   path <- corpusPplPath "addNormals"
   (p, _) <- loadCorpusPair (path, take (length path - 4) path ++ ".tst")
   let census = programCensus [compile defaultCompilerConfig p]
   assertBool ("the census sees the program's IR: " ++ show census) ("IRExpr:IRVar" `elem` census)
-  assertBool ("the census leaves out the sampling primitives: " ++ show census)
-    (not (any (`elem` samplingConstructs) census))
+  assertBool ("the census sees the generate body's draws: " ++ show census)
+    (any (`elem` samplingConstructs) census)
   assertEqual "a corpus program's census is certified" [] (uncertifiedConstructs census)
   assertEqual "a refused compile contributes nothing" census
     (programCensus [compile defaultCompilerConfig p, Left "refused" :: Either String IREnv])

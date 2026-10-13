@@ -3,7 +3,8 @@
 module IRInterpreter (
 generateDet,
 generateRand,
-generateRandE
+generateRandE,
+generateReplay
 ) where
 
 import Statistics.Distribution (quantile)
@@ -15,6 +16,7 @@ import SPLL.AutoNeural
 
 import Control.Monad.Random
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
+import Control.Monad.State.Strict (StateT, runStateT, get, put)
 import Statistics.Distribution.Normal (normalDistr)
 import Data.Number.Erf
 import Data.Maybe (fromJust, fromMaybe, isJust)
@@ -149,6 +151,34 @@ generateRandE neurals' registry env params e =
     f = RandomFunctions {
       uniformGen = lift (irSample IRUniform),
       normalGen = lift (irSample IRNormal),
+      failWith = throwError,
+      raise = throwError}
+    startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
+    (IREnv _ adts' _) = env
+
+-- | Like 'generateDet', but every 'IRSample' takes the next value of a given
+-- stream instead of failing: uniforms from the first list, normals from the
+-- second. Answers the value and how many draws it took. A run out of either
+-- stream is a 'Left' "draw stream exhausted". This replays a backend's own
+-- draws through the interpreter (the IR fuzz generator's generate bodies), so
+-- a backend's sample can be checked against the interpreter's value under the
+-- same randomness, in the interpreter's evaluation order.
+generateReplay :: [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> ([Double], [Double]) -> [IRExpr] -> IRExpr -> Either String (IRValue, Int)
+generateReplay neurals' registry env (us0, ns0) params e =
+  (\(v, (n, _, _)) -> (v, n)) <$> runStateT (generate f neurals' registry adts' (globalEnvFrom startingEnv) [] params e) (0, us0, ns0)
+  where
+    f :: RandomFunctions (StateT (Int, [Double], [Double]) (Either String)) a
+    f = RandomFunctions {
+      uniformGen = do
+        (n, us, ns) <- get
+        case us of
+          (u : rest) -> put (n + 1, rest, ns) >> return (VFloat u)
+          [] -> throwError "draw stream exhausted",
+      normalGen = do
+        (n, us, ns) <- get
+        case ns of
+          (x : rest) -> put (n + 1, us, rest) >> return (VFloat x)
+          [] -> throwError "draw stream exhausted",
       failWith = throwError,
       raise = throwError}
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'

@@ -420,6 +420,12 @@ closedScheme t = Scheme (nub (varsOf t)) [] t
 -- the dividend, the shape the compiler emits them in (the backends round
 -- differently elsewhere, and the interpreter throws on a zero divisor);
 -- and 'ITInt' arithmetic stays inside 64 bits (Python's ints do not wrap).
+-- Both arms of an 'IRSelect' are evaluated by the batched backend (a
+-- @torch.where@), so neither may raise where the condition does not select
+-- it: no partial destructor ('AcHead', 'AcTail', 'AcFromLeft', 'AcFromRight')
+-- or index ('BIndex', 'BListIndex') outside its domain. An 'IRError' arm is
+-- masked (@poison()@), and scalar consumers lower a select to a lazy if (docs
+-- task ir-fuzz-generator-m4-generate-and-batched).
 inferExpr :: Ctx -> IRExpr -> TC IRType
 inferExpr ctx expr = case expr of
   IRIf c a b -> conditional c a b

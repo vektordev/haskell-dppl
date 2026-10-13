@@ -2,9 +2,11 @@
 
 -- | The IR fuzz generator (docs-repo design @ir-fuzz-generator@), milestones
 -- M1 (deterministic-value IR), M2 ('PResult' bodies in every semiring, see
--- "PResult bodies" below) and M3 (builtins, tensors, ADTs and function groups,
--- see "Function groups" below) on the scalar Python and Julia backends, with
--- the interpreter as the oracle.
+-- "PResult bodies" below), M3 (builtins, tensors, ADTs and function groups,
+-- see "Function groups" below) and M4 (generate bodies judged by replaying
+-- the backends' draws, see "Generate bodies"; and the batched arm, see "The
+-- batched arm") on the scalar Python and Julia backends and the batched
+-- PyTorch one, with the interpreter as the oracle.
 --
 -- 'prop_Fuzz_BackendsAgree' reaches the backends only through what the SPLL
 -- compiler emits from programs its generator can draw. This module draws
@@ -57,6 +59,9 @@ module IRFuzz
   , renderIRDisagreement
   , runIRCasesPython
   , runIRCasesJulia
+  , BatchedIRCase(..)
+  , prepareBatchedIRCase
+  , runIRCasesBatched
   , checkedIRConstructs
   , caseFeatures
   , irGeneratorConstructs
@@ -69,7 +74,7 @@ import Control.Exception (SomeException, SomeAsyncException(..), ErrorCall(..), 
 import Control.Monad (replicateM)
 import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, lift, State, execState, evalState, modify)
 import Data.Char (isSpace, toLower)
-import Data.List (intercalate, isPrefixOf, isInfixOf, nub, sort)
+import Data.List (intercalate, isPrefixOf, isInfixOf, isSuffixOf, nub, sort)
 import Data.Maybe (mapMaybe, isJust, fromMaybe)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as M
@@ -77,12 +82,17 @@ import System.Directory (getCurrentDirectory, findExecutable)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Timeout (timeout)
+import System.IO (Handle, hPutStrLn, hFlush, hGetLine, hIsEOF, hSetBuffering, BufferMode(..), openFile, IOMode(..))
+import System.IO.Unsafe (unsafePerformIO)
+import System.Process (createProcess, proc, CreateProcess(std_in, std_out, std_err), StdStream(..), ProcessHandle, terminateProcess)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import Data.IORef (newIORef, readIORef, modifyIORef')
 import Test.QuickCheck
 import Test.QuickCheck.Gen (unGen)
 import Test.QuickCheck.Random (mkQCGen)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck (testProperty)
-import Test.Tasty.HUnit (testCase, testCaseInfo, assertEqual, assertFailure)
+import Test.Tasty.HUnit (testCase, testCaseInfo, assertEqual, assertFailure, assertBool)
 import Text.Read (readMaybe)
 import Data.Text (pack, unpack, replace)
 
@@ -93,12 +103,15 @@ import SPLL.Semiring
 import SPLL.IRCompiler (stripBranchCount)
 import Control.Monad.Writer.Lazy (runWriterT)
 import SPLL.Typing.RType (RType(..), TVarR(..), shapeNumel)
-import IRInterpreter (generateDet)
+import IRInterpreter (generateDet, generateReplay)
 import qualified SPLL.CodeGenPyTorch as Py
 import qualified SPLL.CodeGenJulia as Jl
-import BackendAgreement (Answer(..), parseAnswerLine, pythonSerializer, juliaSerializer,
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
+import SPLL.IRSelectPass (selectPassEnv)
+import BackendAgreement (Answer(..), parseAnswerLine, pythonSerializer, juliaSerializer, batchedRefusalReason,
                          readNum, runBounded, forcedSource, oneLine, probAgrees, irConstructs)
-import End2EndTesting (juliaTestFlags, qualifyConstructors)
+import End2EndTesting (juliaTestFlags, qualifyConstructors, findTorchPython, noTorch)
+import Data.Either (rights)
 
 -- ---------------------------------------------------------------------------
 -- Cases
@@ -107,7 +120,11 @@ import End2EndTesting (juliaTestFlags, qualifyConstructors)
 -- function, its writeLogits function, or (a 'PResult'-shaped body, M2) its
 -- probability or integrate function. All are plain functions of the group's
 -- parameters; they differ in the method name each backend emits.
-data BodyKind = NormalBody | WriteLogitsBody | ProbBody | IntegBody deriving (Show, Eq)
+--
+-- A generate body (M4, 'GenBody') is a value expression that may draw
+-- ('IRSample'). It is judged by replaying the backend's draws through the
+-- interpreter ('icDraws'): see "Generate bodies" below.
+data BodyKind = NormalBody | WriteLogitsBody | ProbBody | IntegBody | GenBody deriving (Show, Eq)
 
 -- | The semiring a 'PResult' body was built in ('presultSemiring').
 data SemiringChoice = SRLinear | SRLog | SRMaxLinear | SRMaxLog deriving (Show, Eq, Enum, Bounded)
@@ -124,6 +141,10 @@ data IRCase = IRCase
   , icArgs   :: [[IRValue]]           -- ^ one argument vector per query
   , icHelpers :: [Helper]             -- ^ the other function groups (M3), in definition order
   , icADTs   :: [ADTDecl]             -- ^ the env's ADT declarations (M3)
+  , icDraws  :: ([Double], [Double])
+    -- ^ a generate body's random stream (M4): what each backend's @rand()@
+    -- and @randn()@ return, in call order, and what the interpreter's draws
+    -- take ('interpretIRCase'). Empty for a deterministic body.
   } deriving (Show)
 
 -- | A helper function group (M3): a normal-parameter function @main@ (and
@@ -134,6 +155,7 @@ data Helper = Helper
   , hResult :: IRType
   , hBody   :: IRExpr                 -- ^ under the parameter lambdas
   , hShape  :: HelperShape
+  , hGen    :: Bool                   -- ^ a generate function (M4): called as @<name>_gen@, and may draw
   } deriving (Show)
 
 -- | How a helper was drawn: a plain body, or one of the recursion shapes,
@@ -147,7 +169,12 @@ data HelperShape
 
 -- | The name a helper is called by.
 helperRef :: Helper -> String
-helperRef h = hName h ++ "_normal"
+helperRef h = hName h ++ helperSuffix (hGen h)
+
+-- | The suffix a helper is called by: a generate function's, or a normal
+-- function's.
+helperSuffix :: Bool -> String
+helperSuffix gen = if gen then "_gen" else "_normal"
 
 helperType :: Helper -> IRType
 helperType h = foldr (ITArrow . snd) (hResult h) (hParams h)
@@ -167,14 +194,14 @@ onBodies f c = c { icBody = f (icBody c), icHelpers = [ h { hBody = f (hBody h) 
 irCaseEnv :: IRCase -> IREnv
 irCaseEnv c = IREnv (map helperGroup (icHelpers c) ++ [group]) (icADTs c) (icConsts c)
   where
-    helperGroup h = IRFunGroup
-      { groupName = hName h, genFun = Nothing, writeLogitsFun = Nothing
-      , normalFun = Just (foldr IRLambda (hBody h) (map fst (hParams h)), "")
+    helperGroup h = let hdecl = Just (foldr IRLambda (hBody h) (map fst (hParams h)), "") in IRFunGroup
+      { groupName = hName h, genFun = if hGen h then hdecl else Nothing, writeLogitsFun = Nothing
+      , normalFun = if hGen h then Nothing else hdecl
       , probFun = Nothing, integFun = Nothing
       , groupDoc = "", refusedVariants = [], sampleDomain = Nothing, maskVariantOf = Nothing }
     decl = Just (irCaseFunction c, "")
     group = IRFunGroup
-      { groupName = "main", genFun = Nothing
+      { groupName = "main", genFun = if icKind c == GenBody then decl else Nothing
       , writeLogitsFun = if icKind c == WriteLogitsBody then decl else Nothing
       , normalFun = if icKind c == NormalBody then decl else Nothing
       , probFun = if icKind c == ProbBody then decl else Nothing
@@ -191,6 +218,7 @@ bodySuffix k = case k of
   WriteLogitsBody -> "_writeLogits"
   ProbBody -> "_prob"
   IntegBody -> "_integ"
+  GenBody -> "_gen"
 
 -- | The checker's type for the body, printed; 'Left' with its message when it
 -- rejects the case.
@@ -251,12 +279,24 @@ renderIRCase c = unlines $
 -- property of the source language, not of the IR the compiler emits). The
 -- state also carries the case's ADT declarations, which types and values are
 -- drawn over.
-data GS = GS { gsNext :: !Int, gsADTs :: [ADTDecl] }
+--
+-- 'gsDraws' says whether the body being drawn may draw ('IRSample'): a
+-- generate body or a generate helper's (M4), not a deterministic one.
+data GS = GS { gsNext :: !Int, gsADTs :: [ADTDecl], gsDraws :: Bool }
 
 type G = StateT GS Gen
 
 runG :: [ADTDecl] -> G a -> Gen a
-runG ds m = evalStateT m (GS 0 ds)
+runG ds m = evalStateT m (GS 0 ds False)
+
+-- | Run a generator with draws allowed or not, restoring the setting after.
+withDraws :: Bool -> G a -> G a
+withDraws d m = do
+  old <- gets gsDraws
+  modify (\st -> st { gsDraws = d })
+  r <- m
+  modify (\st -> st { gsDraws = old })
+  return r
 
 fresh :: String -> G String
 fresh pre = do
@@ -467,8 +507,14 @@ genExpr sc t n
   | n <= 0 = leaf sc t
   | otherwise = do
       ds <- adtsG
-      frequencyG (general ++ calls ++ anyBuiltins ++ adtAccessors ds ++ specific ds)
+      draws <- gets gsDraws
+      frequencyG (general ++ calls ++ anyBuiltins ++ adtAccessors ds ++ specific ds ++ sampling draws)
   where
+    -- A draw (M4), only where the body may draw: a float, transformed by
+    -- whatever the context makes of it.
+    sampling draws = [ (6, drawG) | draws, t == ITFloat ]
+                  -- a coin flip, the shape a Bernoulli draw compiles to
+                  ++ [ (4, ltE (IRSample IRUniform) <$> genExpr sc ITFloat (n - 1)) | draws, t == ITBool ]
     half = n `div` 2
     third = n `div` 3
     general =
@@ -691,7 +737,10 @@ genExpr sc t n
       asTensor <- liftG arbitrary
       w <- if asTensor then return (IRBuiltin (BTensor [EFixed m]) ws)
            else (\rest -> foldr consE rest ws) <$> genExpr sc (ITList ITFloat) third
-      u <- frequencyG
+      draws <- gets gsDraws
+      u <- frequencyG $
+        -- the shape the neural categorical sampler emits ('SPLL.AutoNeural')
+        [ (3, return (IRSample IRUniform)) | draws ] ++
         [ (2, floatE <$> liftG (frequency [(3, choose (0, 0.999)), (1, elements [0, 0.5, 0.999999])]))
         , (1, do v <- fresh "u"
                  e <- genExpr sc ITFloat third
@@ -709,9 +758,12 @@ genExpr sc t n
 -- | A leaf: a variable of the type in scope, or a constant (a closure for a
 -- function type, a structure of leaves for a type holding one).
 leaf :: Scope -> IRType -> G IRExpr
-leaf sc t = case [ v | (v, t') <- sc, t' == t ] of
-  [] -> build
-  vs -> frequencyG [(3, IRVar <$> liftG (elements vs)), (1, build)]
+leaf sc t = do
+  draws <- gets gsDraws
+  let drawn = [ (4, drawG) | draws, t == ITFloat ]
+  case [ v | (v, t') <- sc, t' == t ] of
+    [] -> frequencyG ((2, build) : drawn)
+    vs -> frequencyG ([(3, IRVar <$> liftG (elements vs)), (1, build)] ++ drawn)
   where
     build = case t of
       ITArrow a b -> do
@@ -726,6 +778,10 @@ leaf sc t = case [ v | (v, t') <- sc, t' == t ] of
       _ -> do
         ds <- adtsG
         IRConst <$> liftG (genValue ds t)
+
+-- | A random draw: a uniform or a standard normal.
+drawG :: G IRExpr
+drawG = IRSample <$> liftG (frequency [(3, return IRUniform), (2, return IRNormal)])
 
 rTypeOf :: IRType -> RType
 rTypeOf t = case t of
@@ -796,7 +852,17 @@ genHelpers = do
       go (i - 1) (acc ++ new)
 
 genHelper :: HelperShape -> Scope -> G [Helper]
-genHelper shape sc = case shape of
+genHelper shape sc0 = do
+  -- Where draws are allowed (a generate case), half the helpers are generate
+  -- functions, which may draw. A normal helper may not, and so may not call
+  -- a generate helper either.
+  draws <- gets gsDraws
+  gen <- if draws then liftG arbitrary else return False
+  let sc = if gen then sc0 else [ b | b@(v, _) <- sc0, not ("_gen" `isSuffixOf` v) ]
+  withDraws gen (genHelperOf gen shape sc)
+
+genHelperOf :: Bool -> HelperShape -> Scope -> G [Helper]
+genHelperOf gen shape sc = case shape of
   HPlain -> do
     name <- fresh "hf"
     np <- liftG (choose (0, 2))
@@ -804,7 +870,7 @@ genHelper shape sc = case shape of
     rt <- genTy 2
     size <- liftG (choose (1, 8))
     body <- genExpr (ps ++ sc) rt size
-    return [Helper name ps rt body HPlain]
+    return [Helper name ps rt body HPlain gen]
   HCountdown -> do
     name <- fresh "hf"
     s <- genTy 1
@@ -812,8 +878,8 @@ genHelper shape sc = case shape of
     nv <- fresh "hn"
     xv <- fresh "hx"
     rv <- fresh "hr"
-    body <- countdownBody sc (IRVar (name ++ "_normal")) nv xv rv s t
-    return [Helper name [(nv, ITInt), (xv, s)] t body HCountdown]
+    body <- countdownBody sc (IRVar (name ++ helperSuffix gen)) nv xv rv s t
+    return [Helper name [(nv, ITInt), (xv, s)] t body HCountdown gen]
   HListRec -> do
     name <- fresh "hf"
     a <- genTySuchThat 1 isEquatable
@@ -826,8 +892,8 @@ genHelper shape sc = case shape of
     step <- genExpr ((hd, a) : (rv, t) : (xs, ITList a) : sc) t 4
     let body = IRIf (IROp OpEq xsV (IRConst (VList EmptyList))) base
                  (IRLetIn hd (IRDestruct AcHead xsV)
-                   (IRLetIn rv (IRApply (IRVar (name ++ "_normal")) (IRDestruct AcTail xsV)) step))
-    return [Helper name [(xs, ITList a)] t body HListRec]
+                   (IRLetIn rv (IRApply (IRVar (name ++ helperSuffix gen)) (IRDestruct AcTail xsV)) step))
+    return [Helper name [(xs, ITList a)] t body HListRec gen]
   HMutual -> do
     f <- fresh "hf"
     g <- fresh "hf"
@@ -839,10 +905,10 @@ genHelper shape sc = case shape of
     n2 <- fresh "hn"
     x2 <- fresh "hx"
     r2 <- fresh "hr"
-    bf <- countdownBody sc (IRVar (g ++ "_normal")) n1 x1 r1 s t
-    bg <- countdownBody sc (IRVar (f ++ "_normal")) n2 x2 r2 s t
-    return [ Helper f [(n1, ITInt), (x1, s)] t bf HMutual
-           , Helper g [(n2, ITInt), (x2, s)] t bg HMutual ]
+    bf <- countdownBody sc (IRVar (g ++ helperSuffix gen)) n1 x1 r1 s t
+    bg <- countdownBody sc (IRVar (f ++ helperSuffix gen)) n2 x2 r2 s t
+    return [ Helper f [(n1, ITInt), (x1, s)] t bf HMutual gen
+           , Helper g [(n2, ITInt), (x2, s)] t bg HMutual gen ]
 
 -- | @if n < 1 then base else if n > recursionCap then base' else let r =
 -- callee (n - 1) x' in step@.
@@ -862,33 +928,75 @@ countdownBody sc callee nv xv rv s t = do
 caseSize :: Int
 caseSize = 14
 
--- | A case: a value body (M1) or a 'PResult' body (M2), in equal parts. Both
--- draw the case's ADTs and helpers (M3) first.
+-- | A case: a value body (M1), a 'PResult' body (M2) or a generate body
+-- (M4), in parts 2:2:1. All draw the case's ADTs and helpers (M3) first.
 genIRCase :: Gen IRCase
-genIRCase = oneof [genValueCase, genPResultCase]
+genIRCase = frequency [(2, genValueCase), (2, genPResultCase), (1, genGenCase)]
 
 -- | A value-body case: zero to three parameters, up to two top-level
 -- constants, a body and four argument vectors.
 genValueCase :: Gen IRCase
-genValueCase = do
+genValueCase = frequency [(3, return NormalBody), (1, return WriteLogitsBody)] >>= genBodyCase
+
+-- ---------------------------------------------------------------------------
+-- Generate bodies (M4)
+--
+-- A generate body is a value body that may draw: 'IRSample' is a float
+-- production wherever the body is drawn (leaves included), so draws are
+-- let-bound and read twice, sit in 'IRIf' arms, in lambdas a 'BMap' applies
+-- per element, in recursive helpers and in the uniform of a categorical index.
+-- Half the case's helpers are generate functions (@<name>_gen@), which may
+-- draw too; a normal helper may not.
+--
+-- The check is by support, with a witness. Each backend's @rand()@ and
+-- @randn()@ are replaced, in the driver, by reads of a fixed stream
+-- ('icDraws'), and the backend reports its sample with how many draws it
+-- took. The interpreter replays the same stream ('IRInterpreter.generateReplay')
+-- and must answer the same sample and the same count: the backend's draws are
+-- then a witness that its sample lies in the body's support (every stream
+-- value lies in its primitive's support). A body that re-evaluates a let-bound
+-- draw, or evaluates a draw the interpreter does not (or in another order),
+-- answers a different sample or count. That is stricter than support (an
+-- evaluation order that differs but samples the same distribution
+-- disagrees), and it makes a generate body comparable exactly like a
+-- deterministic one, known families' as-if rewrites included.
+
+-- | How many values of each primitive a case's stream holds. A body that
+-- draws more raises "draw stream exhausted" on every engine.
+drawStreamLength :: Int
+drawStreamLength = 64
+
+genGenCase :: Gen IRCase
+genGenCase = do
+  c <- genBodyCase GenBody
+  us <- vectorOf drawStreamLength (choose (0, 0.9999999))
+  ns <- vectorOf drawStreamLength (frequency [(6, choose (-3, 3)), (1, choose (-8, 8))])
+  return c { icDraws = (us, ns) }
+
+genBodyCase :: BodyKind -> Gen IRCase
+genBodyCase kind = do
   ds <- genADTs
-  kind <- frequency [(3, return NormalBody), (1, return WriteLogitsBody)]
   np <- choose (0, 3)
   ptys <- vectorOf np (genValueType ds 2)
   nc <- frequency [(3, return 0), (1, choose (1, 2))]
   ctys <- vectorOf nc (genValueType ds 1)
   cvals <- mapM (genValue ds) ctys
-  rt <- genValueType ds 2
+  -- A generate body's result leans to holding a float, where draws are
+  -- produced.
+  rt <- if kind == GenBody
+          then frequency [ (2, return ITFloat), (1, ITTuple ITFloat <$> genValueType ds 1)
+                         , (1, ITList <$> elements [ITFloat, ITBool]), (3, genValueType ds 2) ]
+          else genValueType ds 2
   size <- choose (2, caseSize)
   let params = zip [ "a" ++ show i | i <- [0 :: Int ..] ] ptys
       consts = zip [ "k" ++ show i | i <- [0 :: Int ..] ] cvals
       sc = params ++ zip (map fst consts) ctys
-  (helpers, body) <- runG ds $ do
+  (helpers, body) <- runG ds $ withDraws (kind == GenBody) $ do
     hs <- genHelpers
     b <- genExpr (sc ++ helperScope hs) rt size
     return (hs, b)
   args <- replicateM 4 (mapM (genValue ds) ptys)
-  return (IRCase kind Nothing params rt consts body args helpers ds)
+  return (IRCase kind Nothing params rt consts body args helpers ds ([], []))
 
 -- ---------------------------------------------------------------------------
 -- PResult bodies (M2)
@@ -1133,7 +1241,7 @@ genPResultCase = do
     pl <- genPlan c (sc ++ helperScope hs) size
     return (hs, pl)
   args <- replicateM 4 (mapM (genValue ds) ptys)
-  let unstripped = IRCase kind (Just (c, stripped)) params (presultType False) consts (buildPlan c plan) args helpers ds
+  let unstripped = IRCase kind (Just (c, stripped)) params (presultType False) consts (buildPlan c plan) args helpers ds ([], [])
   return $ if stripped then stripCase unstripped else unstripped
 
 -- | The case with its body's branch count stripped, by the compiler's own
@@ -1201,14 +1309,14 @@ data InterpOutcome = Interpreted IRValue
 -- | The messages of the interpreter's @raise@ sites: run-time failures of a
 -- well-typed program, which the backends raise on too.
 raiseMessages :: [String]
-raiseMessages = ["head of an empty list", "tail of an empty list", "fromLeft of a Right", "fromRight of a Left"]
+raiseMessages = ["head of an empty list", "tail of an empty list", "fromLeft of a Right", "fromRight of a Left", "draw stream exhausted"]
 
 interpreterMicros :: Int
 interpreterMicros = 2 * 1000 * 1000
 
 interpretIRCase :: IRCase -> [IRValue] -> IO InterpOutcome
 interpretIRCase c args = do
-  r <- try (timeout interpreterMicros (evaluate (forced (generateDet [] [] (irCaseEnv c) (map IRConst args) (irCaseFunction c)))))
+  r <- try (timeout interpreterMicros (evaluate (forced (run (irCaseEnv c) (map IRConst args) (irCaseFunction c)))))
   case r of
     Left (e :: SomeException)
       | Just (SomeAsyncException _) <- fromException e -> throwIO e
@@ -1222,6 +1330,11 @@ interpretIRCase c args = do
   where
     forced x = length (show x) `seq` x
     firstLine = takeWhile (/= '\n')
+    -- A generate body answers its sample with how many draws it took, as
+    -- the drivers report a backend's ('VTuple' of the count and the sample).
+    run env as f
+      | icKind c == GenBody = (\(v, k) -> VTuple (VInt k) v) <$> generateReplay [] [] env (icDraws c) as f
+      | otherwise = generateDet [] [] env as f
 
 -- | A refusal's reason with the offending values cut off, for tabulation.
 refusalKey :: String -> String
@@ -1249,7 +1362,19 @@ knownRefusal r = case [ t | (r', t, _) <- knownRefusals, r' == r ] of
 
 -- | A one-query case, for a pin.
 repro :: [(String, IRType)] -> IRType -> IRExpr -> [IRValue] -> IRCase
-repro params rt body args = IRCase NormalBody Nothing params rt [] body [args] [] []
+repro params rt body args = IRCase NormalBody Nothing params rt [] body [args] [] [] ([], [])
+
+-- | A one-query probability case for a batched pin: @main a0@ answers the
+-- given probability, dimension 0, possible.
+batchedRepro :: IRExpr -> IRValue -> IRCase
+batchedRepro p a0 = (repro [("a0", ITFloat)] (presultType True)
+                       (IRConstruct TgTuple [p, IRConstruct TgTuple [IRConst (VFloat 0), IRConst (VBool False)]]) [a0])
+                    { icKind = ProbBody, icShape = Just (SRLinear, True) }
+
+-- | A one-query generate case over no arguments, with a short stream, for a
+-- pin.
+genRepro :: [(String, IRType)] -> IRType -> IRExpr -> IRCase
+genRepro params rt body = (repro params rt body []) { icKind = GenBody, icDraws = ([0.25, 0.5, 0.75], [0.5, -1.5, 2.5]) }
 
 -- ---------------------------------------------------------------------------
 -- Comparing a backend's answer
@@ -1266,14 +1391,18 @@ floatAgrees a b
 -- (Python's @sign@ and uniform density answer ints; numerically that is the
 -- same value, and it is tabulated rather than failed).
 valueAgrees :: IRValue -> [String] -> Either String Bool
-valueAgrees v0 toks0 = case go v0 toks0 of
+valueAgrees = valueAgreesWith floatAgrees
+
+-- | 'valueAgrees' with the given float comparison.
+valueAgreesWith :: (Double -> Double -> Bool) -> IRValue -> [String] -> Either String Bool
+valueAgreesWith floatEq v0 toks0 = case go v0 toks0 of
   Right (lenient, []) -> Right lenient
   Right (_, rest) -> Left ("tokens left over: " ++ unwords rest)
   Left why -> Left why
   where
     go v toks = case (v, toks) of
       (VFloat x, ('f' : s) : rest) -> case readNum s of
-        Just y | floatAgrees x y -> Right (False, rest)
+        Just y | floatEq x y -> Right (False, rest)
         _ -> Left ("float " ++ show x ++ " against " ++ s)
       (VFloat x, ('i' : s) : rest) -> case readMaybe s :: Maybe Integer of
         -- An int has no signed zero, so only the number is compared.
@@ -1366,6 +1495,16 @@ knownDisagreements =
       (repro [("a0", ITFloat), ("a1", ITFloat)] (ITTuple ITBool ITFloat)
          (IRConstruct TgTuple [IRConformsTo TFloat (IRUnaryOp OpSign (IRVar "a0")), IRUnaryOp OpSign (IRVar "a1")])
          [VFloat 2, VFloat (-0.0)])
+  -- The same ticket, where Python's int sign meets an operator the
+  -- interpreter takes floats only for (found in M4): the rewrite above then
+  -- stops the interpreter, so the family is recognised by the construct and
+  -- a differing value instead, as Python's uniform functions are below.
+  , KnownFamily "opsign-nan-negative-zero-and-int-results-differ-across-engines" ["python"]
+      (ByAnswer (\c o a -> isValue o && isSampled a && not (null [ () | IRUnaryOp OpSign _ <- caseUniverse c ])))
+      (repro [("a0", ITFloat)] ITBool
+         (IRLetIn "s" (IRUnaryOp OpSign (IRVar "a0"))
+            (IRConformsTo TFloat (IRIf (IROp OpApprox (IRVar "s") (IRConst (VFloat 1))) (IRVar "s") (IRConst (VFloat 0)))))
+         [VFloat 2])
   , KnownFamily "python-float-division-by-zero-raises" ["python"]
       (ByAnswer (\_ o a -> isValue o && raisedWith "ZeroDivisionError" a))
       (repro [("a0", ITFloat)] ITFloat (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a0")) [VFloat 0])
@@ -1413,6 +1552,19 @@ knownDisagreements =
   , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
       (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
       (repro [] ITFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList))) [])
+  -- The same ticket (found in M4): Julia's @prod@ multiplies left to right,
+  -- the standard library right to left, which differs where an underflow
+  -- meets an infinity.
+  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
+      (ByAnswer (\c o a -> isValue o && isSampled a && not (null [ () | IRVar "listProd" <- caseUniverse c ])))
+      (repro [] ITFloat (IRApply (IRVar "listProd")
+         (IRConst (VList (ListCont (VFloat (-1 / 0)) (ListCont (VFloat 1e300) (ListCont (VFloat (-0.29)) (ListCont (VFloat 5e-324) EmptyList))))))) [])
+  -- The same ticket, Python's side (found in M4): its empty product is the
+  -- int 1, which only a type-tag check tells from 1.0. Julia raises as above.
+  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["python", "julia"]
+      (ByAnswer (\c o a -> isValue o && isSampled a
+                           && not (null [ () | IRConformsTo _ x <- caseUniverse c, IRVar "listProd" <- universe x ])))
+      (repro [] ITBool (IRConformsTo TFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList)))) [])
   -- After the ConformsTo entry above, whose repro fails to parse the same way.
   , KnownFamily "python-let-in-a-comprehension-iterable-fails-to-parse" ["python"]
       (ByAnswer (\_ _ a -> raisedWith "assignment expression cannot be used in a comprehension iterable expression" a))
@@ -1433,10 +1585,148 @@ knownDisagreements =
   , KnownFamily "text-backends-uncurry-lambdas-and-application-chains" ["python", "julia"]
       (ByAnswer (\_ o a -> isValue o && (  (raisedWith "TypeError" a && raisedWith "positional argument" a)
                                         || (raisedWith "MethodError: no method matching" a
-                                            && (raisedWith "var\"#" a || raisedWith "_normal(" a)))))
+                                            && (raisedWith "var\"#" a || raisedWith "_normal(" a || raisedWith "_gen(" a)))))
       (repro [] ITFloat
          (IRLetIn "g" (IRApply (IRLambda "x" (IRLambda "y" (IROp OpPlus (IRVar "x") (IRVar "y")))) (IRConst (VFloat 1)))
             (IRApply (IRVar "g") (IRConst (VFloat 2)))) [])
+  -- M4 (generate bodies, judged by replaying the backend's draws).
+  --
+  -- Both text backends lower a type-tag check by repeating its operand
+  -- (@isAny(x) or isinstance(x, float)@), so an operand that draws draws
+  -- again. Recognised by the construct: a generate body whose check has an
+  -- operand with an effect ('isPure'), answering a sample.
+  , KnownFamily "text-backends-conformsto-reevaluates-its-operand" ["python", "julia"]
+      (ByAnswer (\c o a -> icKind c == GenBody && isValue o && isSampled a
+                           && not (null [ () | IRConformsTo _ x <- caseUniverse c, not (isPure x) ])))
+      (genRepro [] ITBool (IRConformsTo TFloat (IRSample IRUniform)))
+  -- The interpreter evaluates a cons's tail before its head; both text
+  -- backends evaluate the head first. Only the order of the draws differs.
+  , KnownFamily "interpreter-cons-evaluates-its-tail-before-its-head" ["python", "julia"]
+      (AsIf (const (irMap consHeadFirst)))
+      (genRepro [] (ITList ITFloat)
+         (IRConstruct TgCons [IRSample IRUniform, IRConstruct TgCons [IRSample IRUniform, IRConst (VList EmptyList)]]))
+  -- Python's codegen floats a let-binding, or an 'IRIf' it spills, nested in
+  -- an expression out to a statement before it, so its draws come before the
+  -- draws of whatever precedes it in the expression. Only the order of the
+  -- draws differs, but that can steer a branch elsewhere. Recognised by the
+  -- construct alone (a reorder can shift every later draw, so any answer
+  -- can follow): a generate body with a drawing let or if under another
+  -- node.
+  , KnownFamily "python-let-hoisting-reorders-draws" ["python"]
+      (ByAnswer (\c _ _ -> icKind c == GenBody
+                           && not (null [ () | x <- caseUniverse c, d <- hoistedEffects x, not (isPure d) ])))
+      (genRepro [] ITFloat (IROp OpSub (IRSample IRUniform) (IRLetIn "l" (IRSample IRUniform) (IRVar "l"))))
+  -- Python's empty sum is the int 0, which has no negative zero: the IR's
+  -- @-(sum [])@ is -0.0 (found in M4). Recognised by the construct (a case
+  -- summing a tensor of static length 0) and a differing value.
+  , KnownFamily "python-empty-sum-answers-an-int" ["python"]
+      (ByAnswer (\c o a -> isValue o && isSampled a
+                           && not (null [ () | IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []] <- caseUniverse c ])))
+      (repro [] ITFloat (IROp OpDiv (IRUnaryOp OpNeg (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []])) (IRConst (VFloat 2))) [])
+  -- M4, the batched arm (PResult bodies through the select pass and the
+  -- batched backend).
+  --
+  -- The batched backend lowers a list index as a tensor slot read
+  -- (@xs[..., k]@), which a cons list does not take.
+  , KnownFamily "batched-blistindex-reads-a-cons-list-as-a-tensor" ["batched"]
+      (ByAnswer (\c _ a -> raisedWith "not supported between instances of 'tuple' and 'int'" a
+                         && not (null [ () | IRBuiltin BListIndex _ <- caseUniverse c ])))
+      (batchedRepro (IRBuiltin BListIndex [IRConstruct TgCons [IRConst (VFloat 0.5), IRConst (VList EmptyList)], IRConst (VInt 0)]) (VFloat 1))
+  -- The batched runtime defines none of the list functions of the standard
+  -- library the backend calls.
+  , KnownFamily "batched-runtime-lacks-the-list-standard-library" ["batched"]
+      (ByAnswer (\_ _ a -> any (\f -> raisedWith ("NameError: name '" ++ f ++ "' is not defined") a) ["listProd", "indexOf", "listConcat"]))
+      (batchedRepro (IRApply (IRVar "listProd") (IRConstruct TgCons [IRConst (VFloat 0.5), IRConst (VList EmptyList)])) (VFloat 1))
+  -- The batched @isclose@ scales its tolerance by the operands' magnitude, so
+  -- an infinity is close to every number.
+  , KnownFamily "batched-isclose-holds-at-an-infinity" ["batched"]
+      (AsIf (const (irMap batchedApprox)))
+      (batchedRepro (IRIf (IROp OpApprox (IRVar "a0") (IRConst (VFloat 1))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat (-1 / 0)))
+  -- The batched runtime's tuple has no order.
+  , KnownFamily "batched-tuple-comparison-has-no-order" ["batched"]
+      (ByAnswer (\_ _ a -> raisedWith "not supported between instances of 'T' and 'T'" a))
+      (batchedRepro (IRIf (IROp OpLessThan (IRConst (VTuple (VFloat 1) (VInt 1))) (IRConst (VTuple (VFloat 2) (VInt 0))))
+                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
+  -- The batched runtime's densities take a tensor: of a plain Python number,
+  -- the uniform one is a bool (which has no @.to@) and the normal one calls
+  -- @torch.exp@ on a float.
+  , KnownFamily "batched-math-on-a-constant-operand-fails" ["batched"]
+      (ByAnswer (\_ _ a -> raisedWith "'bool' object has no attribute 'to'" a || raisedWith "must be Tensor, not float" a))
+      (batchedRepro (IRDensity IRUniform Linear (IRConst (VFloat 0.5))) (VFloat 1))
+  -- The batched backend divides by @safe_div@, a NaN at a zero divisor where
+  -- the IR's division answers an infinity (Python raises there,
+  -- 'python-float-division-by-zero-raises'), and takes logs by @safe_log@,
+  -- minus infinity at a negative or NaN operand where the IR's log is a NaN.
+  , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
+      (AsIf (const (irMap (batchedSign . batchedLog . batchedDivision))))
+      (batchedRepro (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a0")) (VFloat 0))
+  , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
+      (AsIf (const (irMap (batchedSign . batchedLog . batchedDivision))))
+      (batchedRepro (IRUnaryOp OpLog (IRVar "a0")) (VFloat (-1)))
+  -- The NaN of a zero divisor shows through a sign: torch's sign of a NaN is
+  -- 0 (the interpreter refuses one, 'knownRefusals'), so the rewrite gives
+  -- the sign that too.
+  , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
+      (AsIf (const (irMap (batchedSign . batchedLog . batchedDivision))))
+      (batchedRepro (IRIf (IROp OpEq (IRUnaryOp OpSign (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a0"))) (IRConst (VFloat 0)))
+                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 0))
+  -- torch's logsumexp is +inf when a term is +inf, where the interpreter's
+  -- pairwise fold makes it NaN next to a finite term.
+  , KnownFamily "logsumexp-reduction-nan-and-infinity-differ-across-engines" ["batched"]
+      (AsIf (const (irMap batchedLogSumExp)))
+      (batchedRepro (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRDensity IRNormal Linear (IRVar "a0")]]) (VFloat (1 / 0)))
+  -- A rank-1 tensor's elements are read as floats: a tensor of booleans is
+  -- built as a float tensor (so an element read out of it is no condition
+  -- for @torch.where@), and one of tuples fails.
+  , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
+      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
+                         || raisedWith "float() argument must be a string or a real number, not '" a))
+      (batchedRepro (IRIf (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VBool False)], IRConst (VInt 0)])
+                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
+  , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
+      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
+                         || raisedWith "float() argument must be a string or a real number, not '" a))
+      (batchedRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRConst (VInt 0)])) (VFloat 1))
+  -- The batched sum of one element is that element, where the IR's sum
+  -- adds it to 0.0, which turns a negative zero into 0.0. Recognised by the
+  -- answer agreeing once zeros are compared without their sign.
+  , KnownFamily "batched-sum-of-one-element-keeps-a-negative-zero" ["batched"]
+      (ByAnswer (\_ o a -> case (o, a) of
+                  (Interpreted v, Sampled toks) -> either (const False) (const True) (valueAgreesWith probAgrees v toks)
+                  _ -> False))
+      (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat (-0.0))]]) (VFloat 1))
+  -- The batched type-tag check of a number literal renders a method call on
+  -- it (@0.is_floating_point()@), which Python cannot parse.
+  , KnownFamily "batched-conformsto-of-a-literal-fails-to-parse" ["batched"]
+      (ByAnswer (\c _ a -> raisedWith "module did not load" a && raisedWith "SyntaxError" a
+                         && not (null [ () | IRConformsTo _ (IRConst _) <- caseUniverse c ])))
+      (batchedRepro (IRIf (IRConformsTo TFloat (IRConst (VInt 0))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
+  -- A reduction stacks its elements, which fails when a constant (a 0-d
+  -- tensor) sits next to a batched ([B]) one.
+  , KnownFamily "batched-reduction-over-constant-and-batched-elements-fails" ["batched"]
+      (ByAnswer (\_ _ a -> raisedWith "stack expects each tensor to be equal size" a))
+      (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 2]) [IRUnaryOp OpLog (IRConst (VFloat 0.25)), IRVar "a0"]]) (VFloat 0.5))
+  -- A select over two tuples is one torch.where over two T's.
+  , KnownFamily "batched-guarded-select-over-tuple-result" ["batched"]
+      (ByAnswer (\_ _ a -> raisedWith "got (Tensor, T, T)" a))
+      (batchedRepro (IRDestruct AcSnd (IRSelect (IROp OpLessThan (IRVar "a0") (IRConst (VFloat 0.5)))
+                                         (IRConst (VTuple (VFloat 0.1) (VFloat 0.2))) (IRConst (VTuple (VFloat 0.3) (VFloat 0.4))))) (VFloat 1))
+  -- The batched categorical index reads its weights as a tensor, so a list
+  -- of batched weights is indexed by a tuple.
+  , KnownFamily "batched-categorical-index-over-batched-weights-fails" ["batched"]
+      (ByAnswer (\c _ a -> (raisedWith "list indices must be integers or slices, not tuple" a
+                            || raisedWith "not supported between instances of 'tuple' and 'int'" a)
+                         && not (null [ () | IRBuiltin (BCategoricalIndex _ _) _ <- caseUniverse c ])))
+      (batchedRepro (IRIf (IROp OpEq (IRBuiltin (BCategoricalIndex 0 2) [IRConst (VFloat 0.5), IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat 1)]])
+                                     (IRConst (VInt 0)))
+                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
+  -- The batched backend evaluates both arms of a conditional it lowers to a
+  -- @torch.where@, so a partial destructor in the arm not taken raises.
+  , KnownFamily "batched-conditional-evaluates-a-partial-arm" ["batched"]
+      (ByAnswer (\c _ a -> any (`raisedWith` a) ["IndexError", "fromLeft", "fromRight", "Item is not a Left", "Item is not a Right"]
+                         && not (null [ () | x <- caseUniverse c, arms <- conditionalArms x, any partialExpr arms ])))
+      (batchedRepro (IRIf (IROp OpLessThan (IRVar "a0") (IRConst (VFloat 2))) (IRConst (VFloat 0.5))
+                          (IRUnaryOp OpAbs (IRLetIn "l" (IRDestruct AcHead (IRConst (VList EmptyList))) (IRVar "a0")))) (VFloat 1))
   ]
   where
     isValue (Interpreted _) = True
@@ -1450,6 +1740,21 @@ knownDisagreements =
       _ -> False
     isVar (IRVar _) = True
     isVar _ = False
+    -- The draw counts agree (the first token after the tuple's).
+    -- What Python floats out of an expression to statements before it: a
+    -- let-spine or a conditional under a node that is not itself a statement
+    -- (a let or an if).
+    hoistedEffects x
+      | isStatement x = []
+      | otherwise = [ y | y <- getIRSubExprs x, isStatement y ]
+    isStatement y = case y of
+      IRLetIn{} -> True
+      IRIf{} -> True
+      _ -> False
+    conditionalArms x = case x of
+      IRIf _ a b -> [[a, b]]
+      IRSelect _ a b -> [[a, b]]
+      _ -> []
     isSampled (Sampled _) = True
     isSampled _ = False
     linearUniform x = case x of
@@ -1598,6 +1903,72 @@ functionOperandFirst e = case e of
     isLambda' (IRLambda _ _) = True
     isLambda' _ = False
 
+-- | 'OpApprox' as the batched backend's @isclose@ answers it: also true when
+-- either operand is infinite and neither is a NaN.
+batchedApprox :: IRExpr -> IRExpr
+batchedApprox e = case e of
+  IROp OpApprox a b ->
+    IRLetIn "ap_a" a (IRLetIn "ap_b" b
+      (IROp OpOr (IROp OpApprox x y)
+         (IROp OpAnd (IROp OpOr (isInf x) (isInf y)) (IROp OpAnd (IROp OpEq x x) (IROp OpEq y y)))))
+  _ -> e
+  where
+    x = IRVar "ap_a"
+    y = IRVar "ap_b"
+    isInf v = IROp OpOr (IROp OpEq v (floatE (1 / 0))) (IROp OpEq v (floatE (-1 / 0)))
+
+-- | Whether an expression holds a partial destructor or index: one that
+-- raises outside its domain.
+partialExpr :: IRExpr -> Bool
+partialExpr x = not (null [ () | y <- universe x, isPartial y ])
+  where
+    isPartial y = case y of
+      IRDestruct ac _ -> ac `elem` [AcHead, AcTail, AcFromLeft, AcFromRight]
+      IRBuiltin (BIndex _) _ -> True
+      IRBuiltin BListIndex _ -> True
+      _ -> False
+
+-- | 'OpDiv' as the batched backend's @safe_div@ answers it: a NaN at a zero
+-- divisor.
+batchedDivision :: IRExpr -> IRExpr
+batchedDivision e = case e of
+  IROp OpDiv a b ->
+    IRLetIn "dv_a" a (IRLetIn "dv_b" b
+      (IRIf (IROp OpEq (IRVar "dv_b") (floatE 0)) (floatE (0 / 0)) (IROp OpDiv (IRVar "dv_a") (IRVar "dv_b"))))
+  _ -> e
+
+-- | 'OpSign' as torch answers it at a NaN: 0.
+batchedSign :: IRExpr -> IRExpr
+batchedSign e = case e of
+  IRUnaryOp OpSign a -> IRLetIn "bs_a" a (IRIf (isNaNE (IRVar "bs_a")) (floatE 0) (IRUnaryOp OpSign (IRVar "bs_a")))
+  _ -> e
+
+-- | Log-sum-exp as torch reduces it: +inf when a term is +inf and none is a
+-- NaN.
+batchedLogSumExp :: IRExpr -> IRExpr
+batchedLogSumExp e = case e of
+  IRBuiltin (BReduce ROpLogSumExp 0) [t] ->
+    IRLetIn "blse_t" t $
+      IRIf (IROp OpAnd (countWhere (\x -> IROp OpEq x (floatE (1 / 0))) (IRVar "blse_t"))
+                       (IRUnaryOp OpNot (countWhere isNaNE (IRVar "blse_t"))))
+           (floatE (1 / 0)) (IRBuiltin (BReduce ROpLogSumExp 0) [IRVar "blse_t"])
+  _ -> e
+
+-- | 'OpLog' as the batched backend's @safe_log@ answers it: minus infinity
+-- at a non-positive or NaN operand.
+batchedLog :: IRExpr -> IRExpr
+batchedLog e = case e of
+  IRUnaryOp OpLog a ->
+    IRLetIn "lg_a" a (IRIf (IROp OpGreaterThan (IRVar "lg_a") (floatE 0)) (IRUnaryOp OpLog (IRVar "lg_a")) (floatE (-1 / 0)))
+  _ -> e
+
+-- | A cons as both text backends evaluate it: the head first, then the tail.
+-- The interpreter evaluates the tail first.
+consHeadFirst :: IRExpr -> IRExpr
+consHeadFirst e = case e of
+  IRConstruct TgCons [hd, tl] | not (isPure hd) -> IRLetIn "cons_hd" hd (IRConstruct TgCons [IRVar "cons_hd", tl])
+  _ -> e
+
 -- | 'IRConformsTo' as both text backends lower it: a unit, theta-tree or
 -- ADT slot is not checked (any value conforms), where the interpreter checks
 -- it.
@@ -1674,7 +2045,21 @@ knownDisagreement d = do
         o <- interpretIRCase (onBodies rewrite c) (idArgs d)
         return $ case o of
           InterpRefusal _ -> False
-          _ -> either (const False) (const True) (judge o (idAnswer d))
+          _ -> either (const False) (const True) (judgeOn (idBackend d) o (idAnswer d))
+
+-- | 'judge', for the given backend: on the batched arm, a NaN result raises
+-- by design (every return goes through @check_result@), so that raise agrees
+-- with an interpreter answer holding a NaN.
+judgeOn :: String -> InterpOutcome -> Answer -> Either String Bool
+judgeOn backend o a = case (o, a) of
+  (Interpreted v, Raised m) | backend == "batched", "result is NaN" `isInfixOf` m, valueHasNaN v -> Right False
+  _ -> judge o a
+
+valueHasNaN :: IRValue -> Bool
+valueHasNaN v = case v of
+  VFloat x -> isNaN x
+  VTuple a b -> valueHasNaN a || valueHasNaN b
+  _ -> False
 
 -- | Judge one query: 'Nothing' if it agrees (with whether the Python
 -- int-at-a-float-slot leniency applied), else the reason.
@@ -1728,15 +2113,22 @@ runCases backend emit ext driver run cases = withSystemTempDirectory ("nest-irfu
                , (j, (args, o)) <- zip [0 ..] qs
                , let a = either (\e -> Raised ("codegen threw: " ++ e)) (const (answerFor i j)) src
                , let (lbl, d) = case judge o a of
-                       Right lenient -> (outcomeLabel o ++ (if lenient then " (int at a float slot)" else ""), Nothing)
+                       Right lenient -> (outcomeLabel c o ++ (if lenient then " (int at a float slot)" else ""), Nothing)
                        Left why -> ("disagreement", Just (IRDisagreement backend c args o a why (either id id src)))
                ]
   return (map fst judged, [ d | (_, Just d) <- judged ])
   where
-    outcomeLabel o = case o of
+    outcomeLabel c o = case o of
+      Interpreted (VTuple (VInt k) _) | icKind c == GenBody -> "agrees: generate sample, " ++ drawBucket k
+      InterpRaise "draw stream exhausted" -> "agrees: both exhaust the draw stream"
       Interpreted _ -> "agrees: value"
       InterpRaise _ -> "agrees: both raise"
       InterpRefusal _ -> "interpreter refused (not compared)"
+    drawBucket k
+      | k == 0 = "no draw"
+      | k == 1 = "1 draw"
+      | k <= 4 = "2-4 draws"
+      | otherwise = "5+ draws"
 
 -- | The text backends emit a module per case; 'irCaseEnv' has no networks.
 emitPython :: Int -> IRCase -> IO (Either String String)
@@ -1748,6 +2140,16 @@ methodOf NormalBody = "normal_params"
 methodOf WriteLogitsBody = "writeLogits"
 methodOf ProbBody = "forward"
 methodOf IntegBody = "integrate"
+methodOf GenBody = "generate"
+
+-- | A stream as a list literal both Python and Julia read.
+streamLiteral :: [Double] -> String
+streamLiteral xs = "[" ++ intercalate ", " (map show xs) ++ "]"
+
+-- | How the Python driver prefixes a generate body's sample: with the draw
+-- count, so the tokens read as the interpreter's @(count, sample)@ tuple.
+pyCountPrefix :: IRCase -> String
+pyCountPrefix c = if icKind c == GenBody then "'t i' + str(_D['k']) + ' ' + " else ""
 
 pythonIRDriver :: FilePath -> [(Int, FilePath, IRCase)] -> String
 pythonIRDriver projectDir entries = unlines $
@@ -1762,12 +2164,23 @@ pythonIRDriver projectDir entries = unlines $
   , "    sys.stdout.write(s + '\\n'); sys.stdout.flush()"
   , "def _msg(e):"
   , "    return (type(e).__name__ + ': ' + str(e)).replace('\\n', ' ')[:400]"
+  -- A generate body's draws come from the case's stream ('icDraws').
+  , "_D = {'u': [], 'n': [], 'iu': 0, 'in': 0, 'k': 0}"
+  , "def _draw(which):"
+  , "    i = 'i' + which"
+  , "    if _D[i] >= len(_D[which]): raise Exception('draw stream exhausted')"
+  , "    x = _D[which][_D[i]]; _D[i] += 1; _D['k'] += 1"
+  , "    return x"
+  , "def _rand(): return _draw('u')"
+  , "def _randn(): return _draw('n')"
   ] ++ pythonSerializer ++ concatMap entry entries
   where
     entry (i, path, c) =
       [ "_ns = {}"
       , "try:"
       , "    exec(compile(open(" ++ show path ++ ").read(), " ++ show path ++ ", 'exec'), _ns)"
+      , "    _ns['rand'] = _rand; _ns['randn'] = _randn"
+      , "    _D['u'] = " ++ streamLiteral (fst (icDraws c)) ++ "; _D['n'] = " ++ streamLiteral (snd (icDraws c))
       , "    _loaded = True"
       , "except BaseException as _e:"
       , "    _out('L " ++ show i ++ " ' + _msg(_e))"
@@ -1776,10 +2189,11 @@ pythonIRDriver projectDir entries = unlines $
       ] ++ concat (zipWith (query i c) [0 :: Int ..] (icArgs c)) ++ ["    pass"]
     query i c j args =
       [ "    try:"
+      , "        _D['iu'] = 0; _D['in'] = 0; _D['k'] = 0"
       , "        signal.setitimer(signal.ITIMER_REAL, 10.0)"
       , "        _r = eval(" ++ show ("main." ++ methodOf (icKind c) ++ "(" ++ intercalate ", " (map Py.pyVal args) ++ ")") ++ ", _ns)"
       , "        signal.setitimer(signal.ITIMER_REAL, 0)"
-      , "        _out('S " ++ show i ++ " " ++ show j ++ " ' + _ser(_r, _ns))"
+      , "        _out('S " ++ show i ++ " " ++ show j ++ " ' + " ++ pyCountPrefix c ++ "_ser(_r, _ns))"
       , "    except BaseException as _e:"
       , "        signal.setitimer(signal.ITIMER_REAL, 0)"
       , "        _out('E " ++ show i ++ " " ++ show j ++ " ' + _msg(_e))"
@@ -1790,6 +2204,18 @@ juliaIRDriver projectDir entries = unlines $
   [ "include(" ++ show (projectDir </> "juliaLib.jl") ++ ")"
   , "using .JuliaSPPLLib"
   , "_msg(e) = first(replace(sprint(showerror, e), '\\n' => ' '), 400)"
+  -- A generate body's draws come from the case's stream ('icDraws'); each
+  -- program module defines its own rand() and randn() as these.
+  , "const _DU = Float64[]"
+  , "const _DN = Float64[]"
+  , "const _DI = [0, 0, 0]"
+  , "function _jdraw(xs, k)"
+  , "  _DI[k] >= length(xs) && error(\"draw stream exhausted\")"
+  , "  _DI[k] += 1; _DI[3] += 1"
+  , "  return xs[_DI[k]]"
+  , "end"
+  , "_jrand() = _jdraw(_DU, 1)"
+  , "_jrandn() = _jdraw(_DN, 2)"
   ] ++ juliaSerializer ++ concatMap entry entries
   where
     entry (i, path, c) =
@@ -1798,14 +2224,18 @@ juliaIRDriver projectDir entries = unlines $
       , "catch e"
       , "  println(\"L " ++ show i ++ " \", _msg(e)); flush(stdout)"
       , "end"
+      , "empty!(_DU); append!(_DU, Float64" ++ streamLiteral (fst (icDraws c)) ++ ")"
+      , "empty!(_DN); append!(_DN, Float64" ++ streamLiteral (snd (icDraws c)) ++ ")"
       ] ++ concat [ [ "try"
+                    , "  _DI .= 0"
                     , "  r = Base.invokelatest(" ++ intercalate ", " (("Prog" ++ show i ++ "." ++ fn c) : map (Jl.juliaVal . qualifyConstructors ("Prog" ++ show i)) args) ++ ")"
-                    , "  println(\"S " ++ show i ++ " " ++ show j ++ " \", join(_ser(r, String[]), \" \")); flush(stdout)"
+                    , "  println(\"S " ++ show i ++ " " ++ show j ++ " \", " ++ jlCountPrefix c ++ "join(_ser(r, String[]), \" \")); flush(stdout)"
                     , "catch e"
                     , "  println(\"E " ++ show i ++ " " ++ show j ++ " \", _msg(e)); flush(stdout)"
                     , "end" ]
                   | (j, args) <- zip [0 :: Int ..] (icArgs c) ]
     fn c = "main" ++ bodySuffix (icKind c)
+    jlCountPrefix c = if icKind c == GenBody then "\"t i\", _DI[3], \" \", " else ""
 
 -- | Each case carries the interpreter's outcome per argument vector.
 runIRCasesPython :: [(IRCase, [([IRValue], InterpOutcome)])] -> IO ([String], [IRDisagreement])
@@ -1816,8 +2246,221 @@ runIRCasesJulia :: FilePath -> [(IRCase, [([IRValue], InterpOutcome)])] -> IO ([
 runIRCasesJulia julia cases = runCases "julia" emit ".jl" juliaIRDriver
   (\f -> (\(_, o, e) -> (o, e)) <$> runBounded julia (juliaTestFlags ++ [f])) cases
   where
-    emit i c = fmap (fmap (\src -> "module Prog" ++ show i ++ "\nusing ..JuliaSPPLLib\n" ++ src ++ "\nend\n"))
+    emit i c = fmap (fmap (\src -> "module Prog" ++ show i ++ "\nusing ..JuliaSPPLLib\n"
+                                  ++ "rand() = Main._jrand()\nrandn() = Main._jrandn()\n" ++ src ++ "\nend\n"))
                   (forcedSource (return (Jl.generateFunctions (irCaseEnv c))))
+
+-- ---------------------------------------------------------------------------
+-- The batched arm (M4)
+--
+-- A 'PResult' case's probability or integrate body is put through the batched
+-- PyTorch backend the way batched mode compiles one: the select pass
+-- ('selectPassEnv', so @IRIf@s over the tensor fragment become 'IRSelect's)
+-- and then 'generateFunctionsBatched', so the batched backend sees
+-- select-shaped IR without the compiler's batched admission. Drawn
+-- 'IRSelect's (a production since M1) reach it directly too.
+--
+-- The batch is over the first parameter, a float as a sample is: one point per
+-- argument vector, the other parameters taken from the first vector and
+-- broadcast. The batch literal is float64, so no point is rounded. Every
+-- point the interpreter answers with a value is compared, value against
+-- value. Every batched return goes through @check_result@, which raises on a
+-- NaN by design: such a raise agrees with an interpreter answer holding a NaN
+-- ('judgeOn'), and when the whole batch raises each point is called alone, so
+-- one point's NaN does not take the others with it. A case the batched
+-- backend refuses is tabulated by reason ('batchedRefusalReason'), not
+-- failed, as the typed fuzzer's batched arm does. Value and generate bodies
+-- have no batched counterpart compared here: the batched backend emits no
+-- @normal_params@ or @writeLogits@, and its generate draws a whole batch with
+-- torch's own randomness, which the replay of 'icDraws' does not reach.
+
+-- | A case the batched backend took: the emitted module, and the compared
+-- points with the interpreter's answers.
+data BatchedIRCase = BatchedIRCase
+  { bicCase    :: IRCase
+  , bicEnv     :: IREnv                    -- ^ after the select pass
+  , bicSource  :: String
+  , bicRest    :: [IRValue]                -- ^ the broadcast parameters
+  , bicPoints  :: [(IRValue, IRValue)]     -- ^ (first parameter, interpreter's answer)
+  }
+
+-- | 'Left' is why the case is not compared on the batched arm.
+prepareBatchedIRCase :: IRCase -> IO (Either String BatchedIRCase)
+prepareBatchedIRCase c
+  | icKind c `notElem` [ProbBody, IntegBody] = return (Left "not a PResult body")
+  | null (icParams c) || null (icArgs c) = return (Left "no sample parameter")
+  | otherwise = do
+      let rest = drop 1 (head (icArgs c))
+          firsts = nub' [ a | (a : _) <- icArgs c ]
+      answered <- mapM (\a -> (,) a <$> interpretIRCase c (a : rest)) firsts
+      let points = [ (a, v) | (a, Interpreted v) <- answered ]
+          env = selectPassEnv (irCaseEnv c)
+      if null points then return (Left "no point the interpreter answers with a value")
+      else if partialSelect then return (Left "a drawn select has a partial arm (outside the select's precondition)")
+      else do
+        emitted <- try (evaluate (forceEither (generateFunctionsBatched True env)))
+        return $ case emitted of
+          Left (e :: SomeException) -> Left ("batched codegen crashed: " ++ batchedRefusalReason (show e))
+          Right (Left err) -> Left ("refused: " ++ batchedRefusalReason (show err))
+          Right (Right src) -> Right (BatchedIRCase c env (intercalate "\n" src) rest points)
+  where
+    forceEither r = length (show r) `seq` r
+    -- A drawn select whose arm may raise is outside the IR contract's select
+    -- precondition ('SPLL.IRTypeCheck.inferExpr'): the batched backend
+    -- evaluates both arms.
+    partialSelect = not (null [ () | IRSelect _ a b <- caseUniverse c, partialExpr a || partialExpr b ])
+    -- Points compare by their printed form, so two NaN arguments are one.
+    nub' xs = foldr (\x acc -> if show x `elem` map show acc then acc else x : acc) [] (reverse xs)
+
+-- | The batched driver: every case in one torch process, each module in its
+-- own namespace, each case one call under a 20 s alarm. A point's answer is
+-- printed as 'pythonSerializer''s tokens, read off the batched result at the
+-- point's index.
+batchedIRDriver :: FilePath -> [BatchedIRCase] -> String
+batchedIRDriver projectDir cases = unlines $
+  [ "import sys, signal"
+  , "sys.path.insert(0, " ++ show projectDir ++ ")"
+  , "import torch"
+  , "import pythonLibBatched as _plb"
+  , "sys.setrecursionlimit(20000)"
+  , "class _Timeout(Exception): pass"
+  , "def _alarm(signum, frame): raise _Timeout('batch exceeded its time limit')"
+  , "signal.signal(signal.SIGALRM, _alarm)"
+  , "def _out(s):"
+  , "    sys.stdout.write(s + '\\n'); sys.stdout.flush()"
+  , "def _msg(e):"
+  , "    return (type(e).__name__ + ': ' + str(e)).replace('\\n', ' ')[:400]"
+  , "def _bser(v, k):"
+  , "    out = []"
+  , "    def go(v):"
+  , "        if isinstance(v, _plb.T): out.append('t'); go(v.t1); go(v.t2)"
+  , "        elif torch.is_tensor(v): go((v[k] if v.dim() > 0 else v).item())"
+  , "        elif isinstance(v, bool): out.append('b1' if v else 'b0')"
+  , "        elif isinstance(v, int): out.append('i' + repr(v))"
+  , "        elif isinstance(v, float): out.append('f' + repr(v))"
+  , "        else: out.append('?' + type(v).__name__)"
+  , "    go(v)"
+  , "    return ' '.join(out)"
+  ] ++ concat (zipWith entry [0 :: Int ..] cases)
+  where
+    entry i bc =
+      let c = bicCase bc
+          n = length (bicPoints bc)
+          lit ps = "torch.tensor([" ++ intercalate ", " (map Py.pyVal ps) ++ "], dtype=torch.float64)"
+          call ps = "main." ++ methodOf (icKind c) ++ "(" ++ intercalate ", " (lit ps : map Py.pyVal (bicRest bc)) ++ ")"
+          points = map fst (bicPoints bc)
+      -- The whole batch in one call; if that raises (one point's NaN fails
+      -- the whole return), each point alone, so the raise is the point's.
+      in [ "_ns = {}"
+         , "try:"
+         , "    exec(compile(" ++ show (bicSource bc) ++ ", " ++ show ("prog" ++ show i) ++ ", 'exec'), _ns)"
+         , "    _loaded = True"
+         , "except BaseException as _e:"
+         , "    _loaded = False"
+         , "    for _k in range(" ++ show n ++ "):"
+         , "        _out('E " ++ show i ++ " ' + str(_k) + ' module did not load: ' + _msg(_e))"
+         , "if _loaded:"
+         , "  try:"
+         , "    signal.setitimer(signal.ITIMER_REAL, 20.0)"
+         , "    _r = eval(" ++ show (call points) ++ ", _ns)"
+         , "    signal.setitimer(signal.ITIMER_REAL, 0)"
+         , "    for _k in range(" ++ show n ++ "):"
+         , "        try:"
+         , "            _out('S " ++ show i ++ " ' + str(_k) + ' ' + _bser(_r, _k))"
+         , "        except BaseException as _e:"
+         , "            _out('E " ++ show i ++ " ' + str(_k) + ' ' + _msg(_e))"
+         , "  except BaseException as _e:"
+         , "    signal.setitimer(signal.ITIMER_REAL, 0)"
+         ] ++ concat
+         [ [ "    try:"
+           , "        signal.setitimer(signal.ITIMER_REAL, 20.0)"
+           , "        _r = eval(" ++ show (call [p]) ++ ", _ns)"
+           , "        signal.setitimer(signal.ITIMER_REAL, 0)"
+           , "        _out('S " ++ show i ++ " " ++ show k ++ " ' + _bser(_r, 0))"
+           , "    except BaseException as _e:"
+           , "        signal.setitimer(signal.ITIMER_REAL, 0)"
+           , "        _out('E " ++ show i ++ " " ++ show k ++ " ' + _msg(_e))" ]
+         | (k, p) <- zip [0 :: Int ..] points ]
+
+-- | Run every batched case through one torch-enabled Python process; return
+-- each point's outcome label and the disagreements (backend @batched@).
+runIRCasesBatched :: FilePath -> [BatchedIRCase] -> IO ([String], [IRDisagreement])
+runIRCasesBatched py cases = withSystemTempDirectory "nest-irfuzz-batched" $ \dir -> do
+  projectDir <- getCurrentDirectory
+  let driverPath = dir </> "driver.py"
+  writeFile driverPath (batchedIRDriver projectDir cases)
+  (out, err) <- runOnTorchWorker py projectDir driverPath
+  let parsed = mapMaybe parseAnswerLine (lines out)
+      tailErr = oneLine (unwords (err : [ l | l <- lines out, "W " `isPrefixOf` l ]))
+      answerFor i j = case [ a | (i', Just j', a) <- parsed, i' == i, j' == j ] of
+        (a : _) -> a
+        [] -> case [ a | (i', Nothing, a) <- parsed, i' == i ] of
+          (a : _) -> a
+          [] -> Raised ("no answer from the batched process; stderr: " ++ tailErr)
+      judged = [ case judgeOn "batched" (Interpreted v) a of
+                   Right lenient -> ((if valueHasNaN v then "agrees: NaN" else "agrees: value") ++ (if lenient then " (int at a float slot)" else ""), Nothing)
+                   Left why -> ("disagreement", Just (IRDisagreement "batched" (bicCase bc) (p : bicRest bc) (Interpreted v) a why (bicSource bc)))
+               | (i, bc) <- zip [0 :: Int ..] cases
+               , (j, (p, v)) <- zip [0 ..] (bicPoints bc)
+               , let a = answerFor i j ]
+  return (map fst judged, [ d | (_, Just d) <- judged ])
+
+-- | One long-lived torch process runs every batched driver of the test
+-- process, so torch is imported once rather than once per property batch (it
+-- takes ~2 s, which twenty batches would add to the property's budget). The
+-- worker reads a driver path per line, runs it in a fresh namespace and ends
+-- its output with @\@\@DONE@. A worker that dies or overruns
+-- 'workerTimeoutMicros' is killed, and the next call starts a fresh one.
+data TorchWorker = TorchWorker Handle Handle ProcessHandle
+
+{-# NOINLINE torchWorker #-}
+torchWorker :: MVar (Maybe (FilePath, TorchWorker))
+torchWorker = unsafePerformIO (newMVar Nothing)
+
+workerTimeoutMicros :: Int
+workerTimeoutMicros = 300 * 1000 * 1000
+
+-- | The driver's output and, when the worker failed, why.
+runOnTorchWorker :: FilePath -> FilePath -> FilePath -> IO (String, String)
+runOnTorchWorker py projectDir driverPath = modifyMVar torchWorker $ \cur -> do
+  w@(TorchWorker hin hout _) <- case cur of
+    Just (py', w) | py' == py -> return w
+    _ -> do
+      mapM_ (stopWorker . snd) cur
+      startWorker
+  acc <- newIORef []
+  let readUntilDone = do
+        eof <- hIsEOF hout
+        if eof then return False else do
+          l <- hGetLine hout
+          if l == "@@DONE" then return True else modifyIORef' acc (l :) >> readUntilDone
+  r <- try (timeout workerTimeoutMicros (hPutStrLn hin driverPath >> hFlush hin >> readUntilDone))
+  out <- unlines . reverse <$> readIORef acc
+  case r of
+    Right (Just True) -> return (Just (py, w), (out, ""))
+    Right (Just False) -> stopWorker w >> return (Nothing, (out, "the torch worker exited"))
+    Right Nothing -> stopWorker w >> return (Nothing, (out, "the torch worker exceeded " ++ show workerTimeoutMicros ++ "us"))
+    Left (e :: SomeException) -> stopWorker w >> return (Nothing, (out, "the torch worker failed: " ++ show e))
+  where
+    startWorker = do
+      devNull <- openFile "/dev/null" WriteMode
+      (Just hin, Just hout, _, ph) <- createProcess (proc py ["-u", "-c", workerScript])
+        { std_in = CreatePipe, std_out = CreatePipe, std_err = UseHandle devNull }
+      hSetBuffering hin LineBuffering
+      return (TorchWorker hin hout ph)
+    stopWorker (TorchWorker _ _ ph) = terminateProcess ph
+    workerScript = unlines
+      [ "import sys"
+      , "sys.path.insert(0, " ++ show projectDir ++ ")"
+      , "import torch, pythonLibBatched"
+      , "for _line in sys.stdin:"
+      , "    _path = _line.rstrip('\\n')"
+      , "    try:"
+      , "        exec(compile(open(_path).read(), _path, 'exec'), {'__name__': '__irfuzz_batch__'})"
+      , "    except BaseException as _e:"
+      , "        sys.stdout.write('W ' + (type(_e).__name__ + ': ' + str(_e)).replace('\\n', ' ')[:400] + '\\n')"
+      , "    sys.stdout.write('@@DONE\\n'); sys.stdout.flush()"
+      ]
 
 -- ---------------------------------------------------------------------------
 -- Coverage
@@ -1836,12 +2479,13 @@ irGeneratorConstructs = sort (nub (concatMap checkedIRConstructs fixedSample))
 -- production, and why.
 noProduction :: [(String, String)]
 noProduction =
-  [ ("IRExpr:IRSample", "random draws: generate bodies are M4")
-  , ("Builtin:BTensor/BReduce/BIndex at rank > 1 or axis > 0",
+  [ ("Builtin:BTensor/BReduce/BIndex at rank > 1 or axis > 0",
      "neither text backend emits them (CodeGenPyTorch/CodeGenJulia refuse with rankUnsupported/axisUnsupported); the interpreter is their only consumer, and the compiler emits rank 1, axis 0")
   , ("Builtin:BZip OpIntDiv, BZip OpMod",
      "the value precondition of OpIntDiv/OpMod (an exact, nonzero divisor; IRTypeCheck.inferExpr) cannot be drawn elementwise; the compiler never zips them")
   , ("ITSymbol values", "neither text backend can render a VSymbol constant (pyVal/juliaVal have no case); symbols reach the backends only as network inputs")
+  , ("generate bodies on the batched arm",
+     "the batched backend draws a whole batch with torch's own rand(n)/randn(n), which the replayed stream (icDraws) does not reach; generate bodies are compared on the text backends")
   , ("function-typed parameters, results and constants of main",
      "the driver has no way to pass a closure to a backend or serialise one back; function types are drawn inside bodies and at helpers' parameters and results")
   ]
@@ -1897,7 +2541,17 @@ caseFeatures c = nub $
   ++ [ "tensor parameter" | any (isTensor . snd) (icParams c) ]
   ++ [ "tensor result" | isTensor (icResult c) ]
   ++ [ "standard library " ++ f | f <- ["indexOf", "listProd", "listConcat"], f `elem` vars ]
+  -- M4: where the draws of a generate body sit.
+  ++ [ "generate helper" | h <- icHelpers c, hGen h ]
+  ++ [ "draw let-bound and read twice" | IRLetIn v d b <- caseUniverse c, hasDraw d, length (filter (== v) (varsOf b)) > 1 ]
+  ++ [ "draw inside a lambda" | IRLambda _ b <- caseUniverse c, hasDraw b ]
+  ++ [ "draw in a map's function" | IRBuiltin bi [f, _] <- caseUniverse c, bi `elem` [BMap, BMapList], hasDraw f ]
+  ++ [ "draw in an if arm" | IRIf _ a b <- caseUniverse c, hasDraw a || hasDraw b ]
+  ++ [ "draw in a recursive generate helper" | h <- icHelpers c, hGen h, hShape h /= HPlain, hasDraw (hBody h) ]
+  ++ [ "drawn categorical index" | IRBuiltin (BCategoricalIndex _ _) (IRSample _ : _) <- caseUniverse c ]
   where
+    varsOf e = [ v | IRVar v <- universe e ]
+    hasDraw e = not (null [ () | IRSample _ <- universe e ])
     vars = [ v | IRVar v <- caseUniverse c ]
     ctors = [ k | d <- icADTs c, (k, _) <- constructors d ]
     isADT t = case t of { ITADT _ -> True; _ -> False }
@@ -1908,15 +2562,24 @@ featureLabels =
   [ "helper " ++ show s | s <- [minBound .. maxBound :: HelperShape] ] ++
   [ "helper call", "closure passed (function-typed helper parameter)", "closure returned (function-typed helper result)"
   , "nullary helper", "ADT constructor", "ADT test", "ADT field accessor", "ADT parameter", "ADT result"
-  , "tensor parameter", "tensor result", "standard library indexOf", "standard library listProd", "standard library listConcat" ]
+  , "tensor parameter", "tensor result", "standard library indexOf", "standard library listProd", "standard library listConcat"
+  , "generate helper", "draw let-bound and read twice", "draw inside a lambda"
+  , "draw in a map's function", "draw in an if arm", "draw in a recursive generate helper", "drawn categorical index" ]
 
--- | The 'IRExpr' constructors with a production: all but 'IRSample'
--- ('noProduction').
+-- | Every 'IRExpr' constructor (all have a production since M4) and both
+-- sampling primitives.
 exprLabels :: [String]
 exprLabels = map ("IRExpr:" ++)
   [ "IRIf", "IRSelect", "IROp", "IRUnaryOp", "IRConst", "IRConstruct", "IRDestruct", "IRDensity"
   , "IRCumulative", "IRLetIn", "IRVar", "IRLambda", "IRApply", "IRIsPossible", "IRError", "IRConformsTo"
-  , "IRBuiltin" ]
+  , "IRBuiltin", "IRSample" ]
+  ++ [ "Sample:IRUniform", "Sample:IRNormal" ]
+  where
+    _complete e = case e of
+      IRIf{} -> (); IRSelect{} -> (); IROp{} -> (); IRUnaryOp{} -> (); IRConst{} -> (); IRConstruct{} -> ()
+      IRDestruct{} -> (); IRDensity{} -> (); IRCumulative{} -> (); IRLetIn{} -> (); IRVar{} -> ()
+      IRLambda{} -> (); IRApply{} -> (); IRIsPossible{} -> (); IRError{} -> (); IRConformsTo{} -> ()
+      IRBuiltin{} -> (); IRSample{} -> ()
 
 -- | A fixed-seed sample of plans per semiring, as the plan coverage check
 -- reads it.
@@ -1954,9 +2617,17 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
       (_, pyD) <- runIRCasesPython cases
       julia <- findExecutable "julia"
       jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
-      let backends = "python" : maybe [] (const ["julia"]) julia
+      -- The batched arm needs torch: missing it fails, unless
+      -- NEST_SKIP_TORCH=1 skips the arm.
+      torch <- findTorchPython
+      bD <- case torch of
+        Just py -> do
+          bcases <- rights <$> mapM (prepareBatchedIRCase . kfRepro) knownDisagreements
+          if null bcases then return [] else snd <$> runIRCasesBatched py bcases
+        Nothing -> noTorch "IR fuzz generator batched pins" >>= maybe (return []) assertFailure
+      let backends = "python" : maybe [] (const ["julia"]) julia ++ maybe [] (const ["batched"]) torch
       sequence_
-        [ do let ds = [ d | d <- pyD ++ jlD, idBackend d == b, show (idCase d) == show (kfRepro kf) ]
+        [ do let ds = [ d | d <- pyD ++ jlD ++ bD, idBackend d == b, show (idCase d) == show (kfRepro kf) ]
              if b `elem` kfBackends kf
                then case ds of
                  [d] -> do t <- knownDisagreement d
@@ -1964,8 +2635,13 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
                  [] -> assertFailure (kfTicket kf ++ ": the repro no longer disagrees on " ++ b
                                      ++ "; if the bug is fixed, drop (or narrow) its knownDisagreements entry")
                  _ -> assertFailure (kfTicket kf ++ ": two entries share this repro; give each its own")
-               else assertEqual (kfTicket kf ++ ": the repro disagrees on " ++ b ++ ", which the entry does not list")
-                                [] (map idWhy ds)
+               -- Elsewhere a repro may disagree only as another filed
+               -- family: a batched NaN at a zero divisor cannot be shown
+               -- without Python's division raising there.
+               else do
+                 others <- mapM knownDisagreement ds
+                 assertEqual (kfTicket kf ++ ": the repro disagrees on " ++ b ++ ", which the entry does not list, and not as another filed family")
+                             [] [ idWhy d | (d, t) <- zip ds others, maybe True (== kfTicket kf) t ]
         | kf <- knownDisagreements, b <- backends ]
       return (maybe "no julia on the PATH: the Julia arm was skipped" (const "") julia)
   , testCase "a fixed-seed sample of plans reaches every PResult combinator, in every semiring" $
@@ -1995,6 +2671,19 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
           wanted = [ "Builtin:BMapList", "Builtin:BIndex", "Builtin:BListIndex" ]
       assertEqual "unreached (semiring, builtin)" []
         [ (sr, l) | sr <- [minBound .. maxBound], let r = inside sr, l <- wanted, l `notElem` r ]
+  -- M4: the batched arm sees select-shaped IR: selects the generator drew,
+  -- and selects the select pass made out of drawn ifs, in bodies the batched
+  -- backend emits.
+  , testCase "a fixed-seed sample puts drawn and select-pass selects through the batched backend" $ do
+      let emitted = [ (c, env) | c <- fixedSample, icKind c `elem` [ProbBody, IntegBody]
+                               , let env = selectPassEnv (irCaseEnv c)
+                               , either (const False) (const True) (generateFunctionsBatched True env) ]
+          selects e = length [ () | IRSelect{} <- universe e ]
+          drawn = [ c | (c, _) <- emitted, any ((> 0) . selects) (caseBodies c) ]
+          made = [ c | (c, IREnv gs _ _) <- emitted
+                     , sum [ selects b | g <- gs, Just (b, _) <- [probFun g, integFun g] ] > sum (map selects (caseBodies c)) ]
+      assertBool ("batched-emitted PResult cases with a drawn select: " ++ show (length drawn)) (length drawn >= 5)
+      assertBool ("batched-emitted PResult cases with a select the pass made: " ++ show (length made)) (length made >= 5)
   , testCase "a fixed-seed sample reaches both densities and cumulatives in both spaces" $ do
       let reached = nub (concatMap checkedIRConstructs fixedSample)
           wanted = [ k ++ ":" ++ d ++ " " ++ ls | k <- ["Density", "Cumulative"], d <- ["IRNormal", "IRUniform"], ls <- ["Linear", "Log"] ]

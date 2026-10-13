@@ -900,7 +900,7 @@ raised at the sample); none disagreed.
 
 ## IR-level backend agreement (`prop_Fuzz_IRBackendsAgree`)
 
-Design `ir-fuzz-generator`, milestones M1 to M3 (`test/IRFuzz.hs`). Where
+Design `ir-fuzz-generator`, milestones M1 to M4 (`test/IRFuzz.hs`). Where
 `prop_Fuzz_BackendsAgree` reaches the backends only through IR the compiler
 emits, this property draws `IREnv`s directly, within the IR type contract
 (`SPLL.IRTypeCheck`), so a construct is checked because it has a production.
@@ -916,7 +916,7 @@ emits, this property draws `IREnv`s directly, within the IR type contract
   `IRTypeCheck.inferExpr`). Value preconditions of the builtins are kept the
   same way: a tensor or list index in range, a categorical index's uniform in
   [0, 1) and its weights finite and non-negative. No production:
-  `IRSample` (M4), rank > 1 and axis > 0 (neither text backend emits them),
+  rank > 1 and axis > 0 (neither text backend emits them),
   symbol constants (no text backend renders one), function-typed parameters
   or results of `main`; `IRFuzz.noProduction` records why.
 - **Builtins, ADTs and function groups** (M3). Every `Builtin` has a
@@ -942,6 +942,34 @@ emits, this property draws `IREnv`s directly, within the IR type contract
   impossibility flag are covered without compiling through those configs.
   Half the bodies have their branch count stripped by the compiler's own
   `stripBranchCount`, so both result layouts are drawn.
+- **A generate case** (M4, a fifth of the draws) is a value body that may
+  draw: `IRSample` is a float production everywhere in it, leaves included,
+  a coin flip (`rand < p`) a boolean one, and a categorical index may take a
+  drawn uniform. So draws are let-bound and read twice, sit in `if` arms, in
+  lambdas a map applies, in recursion. Half its helpers are generate
+  functions (`<name>_gen`, which may draw); a normal helper may not draw nor
+  call one. **Judged by replay:** each case carries a stream of uniforms and
+  normals (`icDraws`), the drivers replace the program's `rand()`/`randn()`
+  by reads of it and report the sample with the number of draws taken, and
+  the interpreter replays the same stream (`IRInterpreter.generateReplay`).
+  The backend must answer the interpreter's sample and count: its own draws
+  witness that the sample lies in the body's support, and a re-evaluated
+  let-bound draw shows as a different count or value. This is stricter than
+  support (an evaluation order that differs but samples the same
+  distribution disagrees; two such orders are filed as decisions), and it
+  makes a generate body comparable like a deterministic one.
+- **The batched arm** (M4). A `PResult` case is put through
+  `IRSelectPass.selectPassEnv` and `generateFunctionsBatched`, so the batched
+  backend sees select-shaped IR (drawn selects and ones the pass made) without
+  the compiler's batched admission, and called on a float64 batch of its
+  first parameter, the others broadcast. A refusal is tabulated by reason. A
+  NaN result raises by design (`check_result`), which agrees with an
+  interpreter answer holding a NaN; when a whole batch raises, each point is
+  called alone. A case with a drawn select whose arm may raise is skipped
+  (both arms of a select are evaluated; the precondition is stated at
+  `IRTypeCheck.inferExpr`). The arm runs in one long-lived torch process per
+  test process, so torch is imported once. No torch fails the property
+  unless `NEST_SKIP_TORCH=1`.
 - **Oracle.** The interpreter answers each query with a value, a program
   raise (a partial destructor outside its domain, an `IRError`), or a
   refusal (anything else). A backend must answer the value (floats by
@@ -962,8 +990,8 @@ emits, this property draws `IREnv`s directly, within the IR type contract
   then drops helpers, then replaces body nodes (of `main` and of each helper)
   by children, keeping only candidates the checker accepts at the drawn
   type.
-- **Budget:** 20 batches of 60 cases, ~60 s (one `python3` and one `julia`
-  process per batch). `NEST_IRFUZZ_EXPLORE=<file>` appends every unfiled
+- **Budget:** 20 batches of 60 cases, ~50 s (one `python3` and one `julia`
+  process per batch, and the shared torch worker). `NEST_IRFUZZ_EXPLORE=<file>` appends every unfiled
   disagreement and refusal to the file and passes, for surveying a new
   production's findings in bulk.
 - The default tier also checks that drawn cases and shrink candidates
@@ -973,11 +1001,18 @@ emits, this property draws `IREnv`s directly, within the IR type contract
   every combinator in every semiring; that both `PResult` bodies, both
   layouts and every semiring's reduction are drawn; that every `Builtin` (at
   every operator it is drawn with), every helper shape, closures passed and
-  returned, and the ADT constructions are reached; and that the list and
-  tensor builtins are reached inside `PResult` bodies of every semiring.
+  returned, and the ADT constructions are reached; that the list and
+  tensor builtins are reached inside `PResult` bodies of every semiring;
+  that both sampling primitives and the places draws sit in (let-bound and
+  read twice, in a lambda, a map's function, an `if` arm, a recursive
+  generate helper, a categorical index) are reached; and that drawn selects
+  and select-pass selects reach the batched backend.
 - **Census** (Slow, `Slow.IRGeneratorCoverage` in `test/BackendCoverage.hs`):
-  the constructs the deterministic bodies of the corpus compile to under any
-  corpus config (default, log space, budget 0 in both spaces, branch counts,
-  topK in both spaces, `-O0`) that the generator's fixed-seed sample does not
-  reach must be exactly `BackendCoverage.irGeneratorDeferred`, each entry
-  naming the milestone that owns it.
+  the constructs every body of the corpus (generate included, since M4)
+  compiles to under any corpus config (default, log space, budget 0 in both
+  spaces, branch counts, topK in both spaces, `-O0`) that the generator's
+  fixed-seed sample does not reach must be exactly
+  `BackendCoverage.irGeneratorDeferred`, which is empty since M4. The same
+  sweep holds `CertifiedCensus.certifiedConstructs`, which gates impact
+  analysis's per-program Python and Julia checks, exactly equal to the
+  generator's reach, the sampling primitives included since M4.

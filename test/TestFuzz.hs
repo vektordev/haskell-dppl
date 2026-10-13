@@ -74,6 +74,7 @@ import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, interp
                          BatchedCase(..), BatchedGroup(..), prepareBatchedCase,
                          runBatchedPythonBatch, batchedComparedBodies,
                          Disagreement(..), Answer(..))
+import CertifiedCensus (irEnvConstructs, inferenceBodies)
 import Control.Monad.Random (Rand, getRandom, getRandomR)
 import System.Random (StdGen)
 import End2EndTesting (resolveNeuralParams, networkNames, findTorchPython, noTorch)
@@ -85,7 +86,8 @@ import AdmissionOracle (Outcome(..), admissionCheck, AdmissionReport(..), Check(
 import Data.Number.Erf (erf)
 import IRFuzz (IRCase(..), InterpOutcome(..), genIRCase, shrinkIRCase, irCaseWellTyped, renderIRCase,
                interpretIRCase, refusalKey, knownRefusal, knownDisagreement, renderIRDisagreement, IRDisagreement(..),
-               runIRCasesPython, runIRCasesJulia, checkedIRConstructs)
+               runIRCasesPython, runIRCasesJulia, checkedIRConstructs,
+               BatchedIRCase(..), prepareBatchedIRCase, runIRCasesBatched)
 
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))
@@ -2029,9 +2031,21 @@ prop_Fuzz_IRBackendsAgree = withMaxSuccess (fuzzCases irFuzzBatches) $
             Nothing -> do
               noteOnce "prop_Fuzz_IRBackendsAgree: no julia on the PATH; the Julia arm is skipped (interpreter vs Python only)."
               return ([], [])
+          -- The batched arm (M4): PResult bodies through the select pass and
+          -- the batched backend, all in one torch process. No torch is a
+          -- failure unless NEST_SKIP_TORCH=1 skips it, as for every other
+          -- torch-dependent check.
+          batchedPrep <- mapM prepareBatchedIRCase batch
+          let bcases = rights batchedPrep
+          torch <- cachedTorchPython
+          (batchedArm, noTorchFailure, (bL, bD)) <- case torch of
+            Just py -> (,,) "ran" Nothing <$> (if null bcases then return ([], []) else runIRCasesBatched py bcases)
+            Nothing -> do
+              why <- noTorch "prop_Fuzz_IRBackendsAgree batched arm"
+              return (maybe "skipped (NEST_SKIP_TORCH=1)" (const "no torch python") why, why, ([], []))
           let refusals = [ refusalKey r | (_, qs) <- prepared, (_, InterpRefusal r) <- qs ]
               unknown = nub [ r | r <- refusals, not (isJust (knownRefusal r)) ]
-          classified <- mapM (\d -> (,) d <$> knownDisagreement d) (pyD ++ jlD)
+          classified <- mapM (\d -> (,) d <$> knownDisagreement d) (pyD ++ jlD ++ bD)
           let knownD = [ idBackend d ++ ": " ++ t | (d, Just t) <- classified ]
               newD = [ d | (d, Nothing) <- classified ]
           explore <- lookupEnv "NEST_IRFUZZ_EXPLORE"
@@ -2046,6 +2060,11 @@ prop_Fuzz_IRBackendsAgree = withMaxSuccess (fuzzCases irFuzzBatches) $
             $ tabulate "known disagreement family (query; not a failure)" knownD
             $ tabulate "python query" pyL
             $ tabulate "julia query" jlL
+            $ tabulate "batched arm" [batchedArm]
+            $ tabulate "batched eligibility of a case" [ either id (const "compared") r | r <- batchedPrep ]
+            $ tabulate "batched point" bL
+            $ tabulate "IR construct in a batched-compared body" (concat [ irEnvConstructs inferenceBodies (bicEnv b) | b <- bcases ])
+            $ maybe id (\msg -> const (counterexample msg False)) noTorchFailure
             $ tabulate "IR construct in a drawn body" (concatMap checkedIRConstructs batch)
             $ counterexample (show (length newD) ++ " disagreement(s), " ++ show (length unknown)
                               ++ " unfiled interpreter refusal reason(s) " ++ show unknown

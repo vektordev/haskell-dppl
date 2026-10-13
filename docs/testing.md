@@ -564,7 +564,8 @@ when the fuzzers put every construct it emits through both backends. So
 (`CertifiedCensus.programCensus`): the `irConstructs` of every body, generate
 included, under every config of `corpusCensusConfigs` (the six beyond -O2 and
 -O0 cost about a second over the default corpus, and are compiled in
-parallel before the tree is built), less the sampling primitives. A program
+parallel before the tree is built), the sampling primitives included (the IR
+fuzz generator compares generate bodies since its M4). A program
 with a construct outside `certifiedConstructs` keeps its `End2End.Python` and
 `End2End.Julia` checks (and the WriteLogits ones), keyed with the runtime as in
 the table above. `certifiedConstructs` is a static list of what the IR fuzz
@@ -578,7 +579,8 @@ Two checks stay on the text backends regardless:
   checks is task `batched-backend-reference-compliance`.
 
 A census says nothing about effects or sharing either; for generate bodies
-that is `prop_Fuzz_BackendsAgree`'s generate arm (`docs/fuzz-testing.md`).
+that is `prop_Fuzz_BackendsAgree`'s generate arm and the replayed generate
+cases of `prop_Fuzz_IRBackendsAgree` (`docs/fuzz-testing.md`).
 
 **What is never skipped.** The compile always runs: the key is computed from
 its output. A compile that fails, or crashes while the key is rendered, has
