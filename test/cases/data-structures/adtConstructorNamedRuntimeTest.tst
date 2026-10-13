@@ -1,4 +1,3 @@
-backends: interpreter, julia, python
 p(Any)=(0.3, 0.0, False)
 p(Possible)=(0.35, 0.0, False)
 p(Nil)=(0.35, 0.0, False)

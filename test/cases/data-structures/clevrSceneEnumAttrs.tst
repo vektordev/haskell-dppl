@@ -1,5 +1,5 @@
 slow
-backends: interpreter, julia, python, batched
+batched
 p([])=(0.25, 0.0)
 p([(Cube, (Small, (Red, (Metal, 0.5))))])=(0.000792146985219674, 1.0)
 p([(Sphere, (Large, (Yellow, (Rubber, -1.0))))])=(4.4660612240349695e-05, 1.0)

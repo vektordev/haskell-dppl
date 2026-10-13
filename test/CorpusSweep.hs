@@ -55,7 +55,7 @@ import Test.Tasty.Runners (TestTree(..))
 import Text.Printf (printf)
 
 import SPLL.Lang.Types (Program)
-import TestCaseParser (Backend, ExpectFailure, TestCase, parseProgram, parseTestCases, listCorpusPplFiles)
+import TestCaseParser (Backend, ExpectFailure, TestCase, TstFile(..), parseProgram, parseTstFile, listCorpusPplFiles)
 
 -- | Which run a sweep belongs to (docs/testing.md, "Slow and Aspirational
 -- tests"). 'Default' always builds; 'Slow' needs @NEST_SLOW_TESTS@ and
@@ -114,6 +114,7 @@ data CorpusEntry = CorpusEntry
   , ceBackends      :: [Backend]
   , ceSlow          :: Bool
   , ceExpectFailure :: Maybe ExpectFailure
+  , ceNoNormalization :: Bool      -- ^ the @no-normalization@ header line
   , ceCases         :: [TestCase]
   }
 
@@ -154,8 +155,9 @@ loadCorpus = do
   files <- getAllTestFiles
   entries <- forM files $ \(ppl, tst) -> do
     prog <- parseProgram ppl
-    (bs, slow, ef, tcs) <- parseTestCases tst
-    return (CorpusEntry (takeBaseName ppl) ppl tst prog bs slow ef tcs)
+    t <- parseTstFile tst
+    return (CorpusEntry (takeBaseName ppl) ppl tst prog (tstBackends t) (tstSlow t) (tstExpectFailure t)
+                        (tstNoNormalization t) (tstCases t))
   let stale = [ n | n <- slowForCompileCost, n `notElem` [ ceName e | e <- entries, ceSlow e ] ]
   when (not (null stale)) $
     error ("CorpusSweep.slowForCompileCost names no slow corpus program: " ++ intercalate ", " stale)

@@ -5,7 +5,6 @@
 -- a density of dimension 3. The recursive spelling of the same chain
 -- (known-issues/ouChainRecursive) does not compile yet.
 slow
-backends: interpreter, julia, python
 p([0.0, 0.0, 0.0])=(0.25397454, 3.0)
 p([0.5, 0.2, -0.1])=(0.16909049, 3.0)
 p([1.0, 0.9, 0.81])=(0.15404335, 3.0)

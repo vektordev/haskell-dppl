@@ -1,5 +1,5 @@
 slow
-backends: interpreter, julia, python, batched
+batched
 p(Left ())=(0.0, 0.0)
 p(Left ANY)=(0.0, 0.0)
 p(Right ANY)=(1.0, 0.0)

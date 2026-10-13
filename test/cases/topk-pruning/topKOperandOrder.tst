@@ -7,7 +7,7 @@
 -- The commuted spelling z + (x + y) guards on p(z = 1) = 0.3 instead and keeps
 -- 0.027. Corpus.TopKOperandOrder (Slow) requires that divergence to be seen
 -- here, so a fix to the pruning rule shows up as a stale entry.
-backends: interpreter, julia, python, batched
+batched
 p(0)=(0.343, 0.0)
 p(1)=(0.441, 0.0)
 p(2)=(0.189, 0.0)

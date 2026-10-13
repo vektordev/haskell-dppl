@@ -1,5 +1,5 @@
 slow
-backends: interpreter, julia, python, batched
+batched
 p(Left 1)=(1.0, 0.0, False)
 p(Right 1) is impossible
 p(Left 0) is impossible

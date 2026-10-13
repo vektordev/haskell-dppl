@@ -5,7 +5,7 @@
 -- the total `fromLeft` returns an Either and is deliberately not reduced.
 -- The answer is the control's N(1, 1).
 slow
-backends: interpreter, julia, python, batched
+batched
 p(0.5)=(0.3520653, 1.0, False)
 p(1.0)=(0.3989423, 1.0, False)
 cdf(1.0)=(0.5, 0.0)

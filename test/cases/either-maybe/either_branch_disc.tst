@@ -1,5 +1,6 @@
 slow
-backends: interpreter, julia, python, batched, dense
+batched
+dense
 p(Left 1)=(0.3, 0.0)
 p(Right 0)=(0.7, 0.0)
 p(Left 0)=(0.0, 0.0)

@@ -3,6 +3,6 @@
 -- contributing arm prunes away at threshold 0.1. Before the fix p(False)
 -- answered 1.0 under topK; Corpus.TopKNeverInflates pins <= 0.95.
 slow
-backends: interpreter, julia, python, batched
+batched
 p(True)=(0.05, 0.0)
 p(False)=(0.95, 0.0)

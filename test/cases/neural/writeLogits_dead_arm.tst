@@ -1,5 +1,4 @@
 slow
-backends: interpreter, julia, python
 writeLogits_len[main](True)=5
 writeLogits_len[main](False)=5
 writeLogits_len[side](True)=5

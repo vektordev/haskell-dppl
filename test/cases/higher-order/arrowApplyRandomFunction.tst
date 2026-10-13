@@ -4,7 +4,7 @@
 -- normalisation this type-checked and compiled, then died at run time
 -- multiplying the 0.5 branch weight by a VClosure.
 slow
-backends: interpreter, julia, python, batched
+batched
 p(4.0)=(0.5, 0.0, False)
 p(6.0)=(0.5, 0.0, False)
 p(5.0) is impossible

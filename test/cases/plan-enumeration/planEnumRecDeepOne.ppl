@@ -1,10 +1,6 @@
 -- M2 lazy path at depth 10, threaded-bool scan (exactly one green among up
 -- to 10 objects): quadratically many worlds via memoized specialization.
--- Interpreter-only: the compiled probability function is large enough that
--- the extra backend compiles are not worth the redundant coverage (the
--- backend surface -- logit-slice reads -- is already pinned by the
--- planEnumInline* and depth-3 planEnumRec* cases). Expected values from the
--- independent DP oracle.
+-- Expected values from the independent DP oracle.
 data Color = Red | Green | Blue
 data Size = Small | Large
 data Object = Obj color::Color, size::Size

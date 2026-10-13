@@ -129,6 +129,7 @@ tests:
     - End2EndTesting
     - TestTolerances
     - ImpactManifest
+    - CertifiedCensus
     - Rewrites
     ghc-options:
     - -threaded

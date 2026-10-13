@@ -6,7 +6,7 @@
 -- `match (readC s)` compiled. The spine is now enumerated over its last
 -- argument (IRCompiler.enumerateCurriedArgument).
 -- p(1) = P(readC s = Red).
-backends: interpreter, julia, python, batched
+batched
 p(1, (2, [0.6, 0.3, 0.1]))=(0.6, 0.0)
 p(0, (2, [0.6, 0.3, 0.1]))=(0.4, 0.0)
 p(2, (2, [0.6, 0.3, 0.1])) is impossible

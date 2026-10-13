@@ -1,5 +1,5 @@
 slow
-backends: interpreter, julia, python, batched
+batched
 p((Left 0.5, 0.5))=(0.5, 2.0)
 p((Right 0.0, 0.5))=(0.199471, 2.0)
 cdf((Left 1.0, 1.0))=(0.5, 0.0)

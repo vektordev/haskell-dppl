@@ -60,7 +60,8 @@ fixed now"). It trades the "which exact mechanism regressed" signal that
 shifting a pinned message or number.
 
 The rows are checked on every backend the `backends:` header declares (no
-header means interpreter, julia, python, as everywhere else) that the harness
+header means interpreter, julia, python; unlike the ordinary corpus, a
+known-issues pin still names its backends) that the harness
 can evaluate: the interpreter, Python via the emitted module, and batched via
 the corpus's batched driver (it needs a torch-enabled Python, as every
 batched check does). A failure names the backend. So declare where the bug
@@ -124,7 +125,25 @@ genuinely bespoke, multi-assertion regression (e.g. one that also checks a
 This mechanism is for the common single-diagnostic shape only.
 
 ## What is tested
-The automatic End-to-End testing framework tests that every program provided compiles correctly and produces a value in the generative direction. We test that for given sample values in the TST file, the value of the PDF matches the provided expected value. All of these steps are done with the built-in interpreter and a version of the program compiled into Python as well as Julia.
+The automatic End-to-End testing framework tests that every program provided compiles correctly and produces a value in the generative direction. We test that for given sample values in the TST file, the value of the PDF matches the provided expected value.
+
+The built-in interpreter is the default and only oracle: every row of every
+program here is checked on it, and a `.tst` file names no backends. Whether
+the compiled Python and Julia agree with the interpreter is checked by the
+backend-agreement fuzzers, not by re-running these rows. A program whose IR
+uses a construct the fuzzers never compare runs its rows on Python and Julia
+too, automatically (`docs/testing.md`, "Impact analysis"). A `backends:` line
+is the exception, for a program the interpreter cannot serve
+(`End2EndTesting.interpreterServesExempt`, empty today); a test fails on any
+other.
+
+Header lines, each optional and on its own line before the rows: `slow` (the
+program belongs to the opt-in Slow tier), `batched` (the program is expected to
+be batched-mode eligible, and its rows are checked on the batched backend
+too), `dense` (its query domain is finite, so batched mode emits dense entry
+points; list `batched` as well), and `no-normalization` (keep a neural program
+out of the Normalization sweep, which samples the output; say why in a leading
+comment).
 
 Further tests are employed for programs that declare neural networks. The Interpreter is capable of mimicking the functionality of neural networks. These Mock-Neural Networks have two modes: an NN outputting completely random results or a NN producing a probability spike at a given value.
 

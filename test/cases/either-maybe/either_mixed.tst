@@ -1,5 +1,4 @@
 slow
-backends: interpreter
 -- Mixed Either (discrete Left arm, continuous Right arm). encode is refused for a
 -- continuous arm inside an Either/ADT (the arm-conditional Gaussian params are not yet
 -- generated), so there is no honest writeLogits_len to assert here. Kept as a compile smoke

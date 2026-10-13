@@ -862,9 +862,10 @@ Each run tabulates the IR constructs (`irConstructs`: `IRExpr` constructors,
 `ConTag`s, `Accessor`s) of the bodies it compared. The Slow unit test
 `BackendAgreementCoverage` (`test/BackendCoverage.hs`) computes the same set over
 a fixed-seed sample of the property's draws and over the corpus, and requires
-the corpus-minus-fuzz difference to be exactly `fuzzCoverageExceptions`: the
-generator's to-do list, and the exception list for
-`emitted-code-test-impact-analysis` M2. The corpus side counts every
+the corpus-minus-fuzz difference to be exactly `fuzzCoverageExceptions`, the
+generator's to-do list. (Impact analysis M2 certifies by the IR fuzz
+generator's reach instead, `CertifiedCensus.certifiedConstructs`, which covers
+these too; `docs/testing.md`, "Impact analysis".) The corpus side counts every
 probability, integrate, writeLogits and normal body (`deterministicBodies`);
 the fuzz side counts the bodies the property evaluates (`comparedBodies`:
 every group's inference bodies, and the normal and writeLogits bodies of the

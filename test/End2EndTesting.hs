@@ -43,6 +43,7 @@ import IRInterpreter (generateRand, generateDet)
 import MockNN (evaluateMockNN, mockInputFor)
 import ImpactManifest
 import CorpusSweep
+import CertifiedCensus (programCensus, uncertifiedConstructs, corpusCensusConfigs)
 import qualified Data.Map as Map
 
 -- | M1 differential test (design pytorch-tensorizer): the IR select pass is a
@@ -880,14 +881,14 @@ testJuliaAll programCases = ioProperty $ do
 -- The sweep runs without julia installed: it only reads the emitted text. It
 -- lives in Slow and reads the `slow`-headered programs too ('IgnoreSlow')
 -- (docs-repo task demote-tick-redundant-corpus-programs-to-slow): the check
--- needs more than 100 Julia-routed programs, so as not to go vacuous, and the
+-- needs more than 100 programs, so as not to go vacuous, and the
 -- default corpus left after the tick-redundant programs were demoted has
 -- fewer. Its long-run home is backend agreement over synthetic IR (docs-repo
 -- task ir-fuzz-generator), which can draw adversarial names.
 juliaFreeNamesTests :: Corpus -> IO TestTree
 juliaFreeNamesTests corpus = corpusSweepAll corpus SweepSpec
   { sweepName = "Slow.Julia free names are escaped", sweepTier = Slow, sweepSlow = IgnoreSlow
-  , sweepSelect = \e -> Julia `elem` ceBackends e && notSlowForCompileCost e
+  , sweepSelect = notSlowForCompileCost
   , sweepNote = "no free name of an emitted Julia module collides with a Julia builtin" } $ \es ->
     return $ testProperty "Julia free names are escaped"
       (once $ testJuliaFreeNamesEscaped
@@ -3495,22 +3496,37 @@ slowEnd2EndTests corpus manifest =
   buildEnd2EndTree corpus manifest "Slow.End2End (slow)" "End2End (slow)" Slow OnlySlow False
 
 -- | Corpus programs the interpreter cannot serve at the default -O, each with
--- why (task impact-analysis-m2-drop-runtime-from-key, precondition "the
--- interpreter supports every corpus case"). Every other program's every
--- @.tst@ row is answered by the interpreter: the routed ones by the
--- @Interpreter@ group, the rest by @Interpreter serves unrouted@, whatever the
--- file's @backends:@ header says. The -O0 group's own exemptions
--- ('unoptimizedRecompileExempt') are a separate matter: they concern the
--- optimizer differential, not whether the interpreter can answer.
+-- why (task impact-analysis-m2-drop-runtime-from-key). The interpreter is the
+-- corpus's implicit and only oracle, so an ordinary corpus @.tst@ names no
+-- backends; a program listed here is the exception, and its file's
+-- @backends:@ line names the text backends its rows run on instead
+-- ('headerBackendsTests' holds the two together). The -O0 group's own
+-- exemptions ('unoptimizedRecompileExempt') are a separate matter: they
+-- concern the optimizer differential, not whether the interpreter can answer.
 --
--- Empty as measured 2026-10-09: the only unrouted programs,
--- @drawProductReadPerField@ and @drawProductReadPerField20@ (@backends:
--- python@), are left off the interpreter because End2End's Normalization
--- sweep, which every interpreter-routed neural program joins, samples a 2^14
--- (2^20) support; the interpreter answers their rows. An entry here must be
--- a program the interpreter genuinely cannot answer, with its ticket.
+-- Empty as measured 2026-10-09 and at the migration (2026-10-13): the
+-- interpreter answers every row of every corpus program at -O2. An entry here
+-- must be a program the interpreter genuinely cannot answer, with its ticket.
 interpreterServesExempt :: [(String, String)]
 interpreterServesExempt = []
+
+-- | The ordinary corpus names no backends (impact analysis M2): a @.tst@ file
+-- carries a @backends:@ line exactly when its program is in
+-- 'interpreterServesExempt', and that line leaves the interpreter out.
+-- (@batched@, @dense@ and @slow@ are standalone header lines.)
+headerBackendsTests :: [CorpusEntry] -> TestTree
+headerBackendsTests es = testProperty "a .tst names backends only for a program the interpreter cannot serve" $ once $ ioProperty $ do
+  withLine <- fmap concat $ forM es $ \e -> do
+    src <- readFile (ceTst e)
+    return [ ceName e | any ("backends:" `isPrefixOf`) (lines src) ]
+  let exempt = map fst interpreterServesExempt
+      unlisted = filter (`notElem` exempt) withLine
+      lineless = [ n | n <- exempt, n `elem` map ceName es, n `notElem` withLine ]
+      routed = [ ceName e | e <- es, ceName e `elem` exempt, Interpreter `elem` ceBackends e ]
+  return $ conjoin
+    [ counterexample ("a `backends:` line on a program the interpreter serves (drop the line; the interpreter is implicit): " ++ show unlisted) (null unlisted)
+    , counterexample ("interpreterServesExempt programs without a `backends:` line: " ++ show lineless) (null lineless)
+    , counterexample ("interpreterServesExempt programs whose `backends:` line names the interpreter: " ++ show routed) (null routed) ]
 
 -- | Programs whose -O0 recompilation is disproportionately expensive relative
 -- to the regression class the "Interpreter Unoptimized" group exists to catch
@@ -3598,23 +3614,17 @@ unoptimizedCodegenSmoke =
 -- compiles are shared by every sweep below ('optEnvs', 'unoptEnvs').
 buildEnd2EndTree :: Corpus -> Manifest -> String -> String -> Tier -> SlowHeader -> Bool -> IO TestTree
 buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
+  -- The M2 census of every program the text-backend sweeps may select (see
+  -- 'textRouted'): six compiles beyond the shared -O2 and -O0 ones, about a
+  -- second each over the default corpus, so spread over the capabilities.
+  censuses <- if not includeBackends then return Map.empty else
+    Map.fromList <$> parMapIO programUncertified [ e | e <- entries, not (ceSlow e) ]
   interp <- corpusSweep corpus SweepSpec
     { sweepName = path ++ ".Interpreter", sweepTier = tier, sweepSlow = slowH
     , sweepSelect = interpreterRouted
     , sweepNote = "every .tst row against the interpreter, at -O2" } $ \e ->
       let n = ceName e; p = ceProgram e; c = opt e; tcs = rows e
       in testProperty n (once $ cachedProperty manifest (check "Interpreter") n (interpreterKey manifest p c tcs)
-                                  (conjoin (map (testInterpreter p c) tcs)))
-  -- The interpreter serves the programs whose header leaves it out too (task
-  -- impact-analysis-m2-drop-runtime-from-key, precondition): with the group
-  -- above, every corpus program's every row is answered by the interpreter
-  -- at -O2, bar 'interpreterServesExempt'.
-  interpUnrouted <- corpusSweep corpus SweepSpec
-    { sweepName = path ++ ".Interpreter serves unrouted", sweepTier = tier, sweepSlow = slowH
-    , sweepSelect = \e -> not (interpreterRouted e) && ceName e `notElem` map fst interpreterServesExempt
-    , sweepNote = "every .tst row of a program its header does not route to the interpreter, against the interpreter at -O2" } $ \e ->
-      let n = ceName e; p = ceProgram e; c = opt e; tcs = rows e
-      in testProperty n (once $ cachedProperty manifest (check "Interpreter serves unrouted") n (interpreterKey manifest p c tcs)
                                   (conjoin (map (testInterpreter p c) tcs)))
   -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
   interpUnopt <- corpusSweep corpus SweepSpec
@@ -3627,7 +3637,7 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
   backends <- if not includeBackends then return [] else sequence
     [ corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Normalization", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> interpreterRouted e && neural e
+        , sweepSelect = \e -> interpreterRouted e && neural e && not (ceNoNormalization e)
         , sweepNote = "a neural program's discrete probabilities sum to one at seeded inputs" } $ \e ->
           let n = ceName e; p = ceProgram e; c = opt e
           in testProperty n (once $ cachedProperty manifest (check "Normalization") n (normalizationKey manifest p c)
@@ -3639,8 +3649,8 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- Round-robin shards run as parallel tests instead.
     , corpusSweepAll corpus SweepSpec
         { sweepName = path ++ ".Julia", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> routed Julia e && hasQueries e
-        , sweepNote = "every p()/cdf() row against the emitted Julia, in round-robin shards" } $ \es ->
+        , sweepSelect = \e -> textRouted censuses Julia e && hasQueries e
+        , sweepNote = "every p()/cdf() row against the emitted Julia, in round-robin shards, of a program the fuzzers do not certify" } $ \es ->
           return $ testGroup "Julia"
             [ testProperty ("shard " ++ show (i + 1) ++ "/" ++ show juliaShards)
                 (once $ cachedBatch manifest (check "Julia")
@@ -3653,8 +3663,8 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- 'juliaFreeNamesTests', in Slow.
     , corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Python", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> routed Python e && hasQueries e
-        , sweepNote = "every p()/cdf() row against the emitted Python" } $ \e ->
+        , sweepSelect = \e -> textRouted censuses Python e && hasQueries e
+        , sweepNote = "every p()/cdf() row against the emitted Python, of a program the fuzzers do not certify" } $ \e ->
           let (n, c, tcs, nets) = routedQuery e
           in testProperty n (once $ cachedProperty manifest (check "Python") n (pythonKey manifest nets c tcs)
                                       (testPython nets c tcs))
@@ -3663,15 +3673,15 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- crashing (task writelogits-text-backends-broken).
     , corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Python WriteLogits", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> routed Python e && hasWriteLogits e
-        , sweepNote = "every writeLogits row against the emitted Python" } $ \e ->
+        , sweepSelect = \e -> textRouted censuses Python e && hasWriteLogits e
+        , sweepNote = "every writeLogits row against the emitted Python, of a program the fuzzers do not certify" } $ \e ->
           let n = ceName e; nets = networkMocks (ceProgram e); c = opt e; wl = writeLogitsRows e
           in testProperty n (once $ cachedProperty manifest (check "Python WriteLogits") n (pythonWriteLogitsKey manifest nets c wl)
                                       (testPythonWriteLogits nets c wl))
     , corpusSweepAll corpus SweepSpec
         { sweepName = path ++ ".Julia WriteLogits", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> routed Julia e && hasWriteLogits e
-        , sweepNote = "every writeLogits row against the emitted Julia, in one batch" } $ \es ->
+        , sweepSelect = \e -> textRouted censuses Julia e && hasWriteLogits e
+        , sweepNote = "every writeLogits row against the emitted Julia, in one batch, of a program the fuzzers do not certify" } $ \es ->
           return $ testProperty "Julia WriteLogits"
             (once $ cachedBatch manifest (check "Julia WriteLogits")
                       [ (ceName e, juliaWriteLogitsKey manifest c wl nets, (c, wl, nets))
@@ -3683,7 +3693,7 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- (non-mock-resolved) test cases.
     , corpusSweepAll corpus SweepSpec
         { sweepName = path ++ ".Julia Unoptimized", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = unoptSmoke Julia
+        , sweepSelect = unoptSmoke
         , sweepNote = "the -O0 codegen smoke subset against the emitted Julia" } $ \es ->
           return $ testProperty "Julia Unoptimized"
             (once $ cachedBatch manifest (check "Julia Unoptimized")
@@ -3691,13 +3701,14 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
                       testJuliaAll)
     , corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Python Unoptimized", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = unoptSmoke Python
+        , sweepSelect = unoptSmoke
         , sweepNote = "the -O0 codegen smoke subset against the emitted Python" } $ \e ->
           let n = ceName e
           in testProperty n (once $ cachedProperty manifest (check "Python Unoptimized") n (pythonKey manifest [] (unopt e) (queries e))
                                       (testPython [] (unopt e) (queries e)))
     ]
-  return $ testGroup treeName ([interp, interpUnrouted, interpUnopt] ++ backends)
+  let headers = [ headerBackendsTests entries | includeBackends ]
+  return $ testGroup treeName ([interp, interpUnopt] ++ headers ++ backends)
   where
     -- The manifest slot prefix: the sweep's full group name.
     check grp = treeName ++ "." ++ grp
@@ -3718,13 +3729,32 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- interpreter never saw it (it is dynamically typed and forgiving), so the
     -- pre-existing "Interpreter Unoptimized" group could not catch the class.
     unoptEnvs = Map.fromList [ (ceName e, compile defaultCompilerConfig{optimizerLevel = 0} (ceProgram e)) | e <- entries ]
+    -- Every config the corpus checks a program under ('corpusCensusConfigs'),
+    -- the -O2 and -O0 compiles shared with the sweeps. A compile that raises
+    -- leaves the program uncertified: its text-backend checks then run, and
+    -- report it.
+    programUncertified e = do
+      let census = uncertifiedConstructs (programCensus (opt e : unopt e : [ compile conf (ceProgram e) | conf <- otherCensusConfigs ]))
+      r <- try (evaluate (length (concat census) `seq` census))
+      return (ceName e, either (\ex -> ["(census raised: " ++ takeWhile (/= '\n') (show (ex :: SomeException)) ++ ")"]) id r)
+    otherCensusConfigs = [ conf | (name, conf) <- corpusCensusConfigs, name `notElem` ["default", "-O0"] ]
     shaped = Map.fromList [ (ceName e, shapedCases e) | e <- entries ]
     opt e = optEnvs Map.! ceName e
     unopt e = unoptEnvs Map.! ceName e
     rows e = shaped Map.! ceName e
     recompiledUnopt e = ceName e `notElem` unoptimizedRecompileExempt
     neural e = not (null (neurals (ceProgram e)))
-    routed b e = b `elem` ceBackends e
+    -- Impact analysis M2 (docs-repo task impact-analysis-m2-drop-runtime-from-key):
+    -- the interpreter is the corpus's oracle, and a program's rows run on
+    -- the scalar Python and Julia backends only when its census leaves what
+    -- the agreement fuzzers certify ('CertifiedCensus'), or when its header
+    -- names those backends because the interpreter cannot serve it
+    -- ('interpreterServesExempt'). Either way the check is keyed with the
+    -- runtime fingerprint, as under M1.
+    textRouted cs b e = (not (interpreterRouted e) && b `elem` ceBackends e) || not (null (uncertified cs e))
+    -- No census means not certified (only the slow programs have none, and
+    -- the text-backend sweeps skip those before asking).
+    uncertified cs e = Map.findWithDefault ["(no census)"] (ceName e) cs
     isQuery x = isProbTestCase x || isCumulTestCase x
     queries e = filter isQuery (rows e)
     hasQueries e = any isQuery (ceCases e)
@@ -3754,7 +3784,11 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     routedQuery e =
       let p = ceProgram e
       in (ceName e, opt e, if null (neurals p) then queries e else map (resolveNeuralTestCase p) (queries e), networkMocks p)
-    unoptSmoke b e = routed b e && recompiledUnopt e && not (neural e)
+    -- Not gated on the census (M2): the class this smoke exists for, a
+    -- placeholder of the wrong type reaching a backend at -O0, is a typing
+    -- fact about the IR that a construct census cannot see. It stays on both
+    -- text backends, keyed with their runtimes.
+    unoptSmoke e = recompiledUnopt e && not (neural e)
                      && ceName e `elem` unoptimizedCodegenSmoke
                      && ceName e `notElem` unoptimizedCodegenExempt
                      && hasQueries e
