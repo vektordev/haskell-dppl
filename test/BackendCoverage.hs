@@ -31,12 +31,13 @@
 -- and simple, and its non-random IR is built from the constructs this census
 -- certifies. That is stated in the task docs rather than encoded here, since a
 -- construct list cannot express it.
-module BackendCoverage (backendCoverageTests, fuzzCoverageExceptions, batchedFuzzCoverageExceptions) where
+module BackendCoverage (backendCoverageTests, irGeneratorCoverageTests, fuzzCoverageExceptions, batchedFuzzCoverageExceptions, irGeneratorDeferred, corpusCensusConfigs) where
 
 import Control.Exception (SomeException, try, evaluate)
 import Control.Monad (forM)
 import Data.Either (rights)
 import Data.List (sort, nub, (\\), intercalate)
+import Data.Maybe (fromMaybe)
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 import Test.QuickCheck (arbitrary, resize, vectorOf)
@@ -52,6 +53,7 @@ import BackendAgreement (AgreementCase, irConstructs, irEnvConstructs, determini
                          inferenceBodies, batchedComparedBodies)
 import CorpusSweep
 import TestCaseParser (Backend(Batched))
+import IRFuzz (irGeneratorConstructs)
 import TestFuzz (prepareAgreementCase, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize)
 
 -- | Corpus constructs the agreement property does not reach, each with why.
@@ -94,6 +96,44 @@ batchedFuzzCoverageExceptions =
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (gaussianTrajectory4, theta)")
   ]
 
+-- | The compiler configs the corpus checks a program under (default, log
+-- space, the plan engine at materialization budget 0 in both spaces, branch
+-- counting, topK in both spaces, the unoptimized pipeline): the census the IR
+-- fuzz generator ('IRFuzz') is measured against. It is per config because
+-- each emits different IR, and the IR generator draws below the compiler, so
+-- one census over all of them is what it has to reach (docs-repo design
+-- @ir-fuzz-generator@, milestone M2).
+corpusCensusConfigs :: [(String, CompilerConfig)]
+corpusCensusConfigs =
+  [ ("default", defaultCompilerConfig)
+  , ("log space", defaultCompilerConfig { logSpace = True })
+  , ("budget 0", defaultCompilerConfig { materializationCardinality = 0 })
+  , ("budget 0, log space", defaultCompilerConfig { materializationCardinality = 0, logSpace = True })
+  , ("branch counts", defaultCompilerConfig { countBranches = True })
+  , ("topK", defaultCompilerConfig { topKThreshold = Just 0.05 })
+  , ("topK, log space", defaultCompilerConfig { topKThreshold = Just 0.05, logSpace = True })
+  , ("-O0", defaultCompilerConfig { optimizerLevel = 0 })
+  ]
+
+-- | Constructs some corpus config compiles to that the IR fuzz generator has
+-- no production for yet, each with the milestone that owns it. Exact, like
+-- 'fuzzCoverageExceptions': a construct the generator starts reaching must
+-- leave the list.
+irGeneratorDeferred :: [(String, String)]
+irGeneratorDeferred =
+  -- Measured 2026-10-13 at M2 (567 programs x 8 configs): the corpus uses 68
+  -- constructs, the generator reaches all but these. M2's PResult bodies
+  -- reach the enumerated sum's BTensor, BMap and BReduce (all three
+  -- reductions); the other builtins are M3's.
+  [ ("Builtin:BIndex",      "M3 (builtins and tensors): agreement fusion's indexed read (categoricalProductFusion)")
+  , ("Builtin:BListIndex",  "M3 (builtins and tensors): a neural read's slot of a logits list (floatInputGaussian)")
+  , ("Builtin:BMapList",    "M3 (builtins and functions): list map (mapMultList)")
+  , ("Builtin:BZip OpMult", "M3 (builtins and tensors): agreement fusion's elementwise product (categoricalProductFusion)")
+  , ("Builtin:BZip OpPlus", "M3 (builtins and tensors): agreement fusion's elementwise product in log space (categoricalProductFusion)")
+  , ("IRExpr:IRSample",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
+  , ("Sample:IRNormal",     "M4 (generate bodies): writeLogits dead-arm noise, a random draw")
+  ]
+
 -- | How many draws the fixed-seed sample takes, and from which seed. Large
 -- enough that a construct the generator reaches at all is in it: a run of the
 -- property compares ~150 programs, this sample ~4x that.
@@ -119,18 +159,37 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
     [ testCase "corpus constructs the agreement fuzzer misses are exactly fuzzCoverageExceptions" $ do
         corpus <- corpusConstructs es
         fuzz <- fuzzConstructs sample
-        checkExceptions "scalar" "fuzzCoverageExceptions" "deterministic bodies" corpus fuzz fuzzCoverageExceptions
+        checkExceptions "scalar" "fuzzCoverageExceptions" "deterministic bodies" Nothing corpus fuzz fuzzCoverageExceptions
     , testCase "batched corpus constructs the agreement fuzzer misses are exactly batchedFuzzCoverageExceptions" $ do
         corpus <- corpusConstructsWith (defaultCompilerConfig { batched = True }) inferenceBodies
                     [ e | e <- es, Batched `elem` ceBackends e ]
         fuzz <- batchedFuzzConstructs sample
-        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of `batched`-declaring programs," corpus fuzz batchedFuzzCoverageExceptions
+        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of `batched`-declaring programs," Nothing corpus fuzz batchedFuzzCoverageExceptions
     ]
+
+-- | The IR fuzz generator's census (docs-repo design @ir-fuzz-generator@):
+-- the constructs the deterministic bodies of the whole corpus (bar the
+-- programs slow for their own compile cost) compile to under any of
+-- 'corpusCensusConfigs', that the generator's fixed-seed sample
+-- ('IRFuzz.irGeneratorConstructs') does not reach, are exactly
+-- 'irGeneratorDeferred'.
+irGeneratorCoverageTests :: Corpus -> IO TestTree
+irGeneratorCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
+  { sweepName = "Slow.IRGeneratorCoverage", sweepTier = Slow, sweepSlow = IgnoreSlow
+  , sweepSelect = notSlowForCompileCost
+  , sweepNote = "the constructs the corpus compiles to under any corpus config and the IR fuzz generator never draws are listed" } $ \es ->
+  return $ testGroup "IRGeneratorCoverage" $ (: []) $
+   testCase "corpus constructs under every corpus config the IR generator misses are exactly irGeneratorDeferred" $ do
+    perConfig <- forM corpusCensusConfigs $ \(cname, conf) -> do
+      cs <- corpusConstructsWith conf deterministicBodies es
+      return [ (n ++ " [" ++ cname ++ "]", c) | (n, c) <- cs ]
+    checkExceptions "IR generator" "irGeneratorDeferred" "deterministic bodies under every corpus config"
+      (Just "IRFuzz's fixed-seed sample") (concat perConfig) [irGeneratorConstructs] irGeneratorDeferred
 
 -- | The census verdict: the constructs the corpus uses and the fuzz sample
 -- does not must be exactly @listed@.
-checkExceptions :: String -> String -> String -> [(String, [String])] -> [[String]] -> [(String, String)] -> IO ()
-checkExceptions arm listName what corpus fuzz exceptions = do
+checkExceptions :: String -> String -> String -> Maybe String -> [(String, [String])] -> [[String]] -> [(String, String)] -> IO ()
+checkExceptions arm listName what sampleDesc corpus fuzz exceptions = do
   let fuzzSet = filter (not . maskedConstruct) (nub (concat fuzz))
       used = sort (nub (concatMap snd corpus))
       uncovered = used \\ fuzzSet
@@ -142,8 +201,9 @@ checkExceptions arm listName what corpus fuzz exceptions = do
                     ++ intercalate ", " (take 3 (users c)) ++ ")"
   hPutStrLn stderr ("backend agreement coverage (" ++ arm ++ "): corpus uses " ++ show (length used)
                     ++ " constructs in " ++ what ++ " over " ++ show (length corpus)
-                    ++ " programs; the fuzz sample (" ++ show (length fuzz) ++ " compared of "
-                    ++ show coverageDraws ++ " drawn) covers " ++ show (length (used \\ uncovered))
+                    ++ " programs; the fuzz sample ("
+                    ++ fromMaybe (show (length fuzz) ++ " compared of " ++ show coverageDraws ++ " drawn") sampleDesc
+                    ++ ") covers " ++ show (length (used \\ uncovered))
                     ++ "; uncovered: " ++ show uncovered)
   if null new && null stale then return () else assertFailure $ unlines $
     [ listName ++ " is out of date." ]

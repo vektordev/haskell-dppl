@@ -65,6 +65,8 @@ LIST_FLOAT_PATH = {"logsumexp"}
 # Everything else: structure, control flow and sampling, not on the float
 # path -- a tensor never flows through these as a differentiable quantity
 # (listProd multiplies whatever its elements are, and is tensor-transparent).
+# The sampling primitives' distributions are checked by the SamplingPrimitives
+# group (test/TestSamplingPrimitives.hs).
 NOT_FLOAT_PATH = {
   "rand", "randn", "categorical_index", "isAny", "eq", "isclose", "throw",
   "fromLeft", "fromRight", "toList", "mapList", "indexOf", "listProd",

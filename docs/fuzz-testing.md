@@ -899,21 +899,32 @@ raised at the sample); none disagreed.
 
 ## IR-level backend agreement (`prop_Fuzz_IRBackendsAgree`)
 
-Design `ir-fuzz-generator`, milestone M1 (`test/IRFuzz.hs`). Where
+Design `ir-fuzz-generator`, milestones M1 and M2 (`test/IRFuzz.hs`). Where
 `prop_Fuzz_BackendsAgree` reaches the backends only through IR the compiler
 emits, this property draws `IREnv`s directly, within the IR type contract
 (`SPLL.IRTypeCheck`), so a construct is checked because it has a production.
 
-- **A case** is one group `main` whose normal or writeLogits body is a plain
+- **A value case** (M1) is one group `main` whose normal or writeLogits body is a plain
   value expression over zero to three parameters and up to two top-level
   constants, with four argument vectors. Types: `Bool`, `Int`, `Float`, `()`,
   lists, tuples, `Either`, and theta trees as accessor operands only. Values
   lean on boundaries: 0, -0, the infinities, NaN, 1e300, the smallest
   subnormal, the empty list. Ints stay small, and `OpIntDiv`/`OpMod` are drawn
   only in the guarded shape the compiler emits (the preconditions are listed
-  at `IRTypeCheck.inferExpr`). No production yet: `IRSample` (M4),
-  `IRBuiltin` (M3), ADT values (M3), symbol constants (no text backend renders
-  one); `IRFuzz.noProduction` records why.
+  at `IRTypeCheck.inferExpr`). No production yet: `IRSample` (M4), the
+  builtins other than the enumerated sum's (M3), ADT values (M3), symbol
+  constants (no text backend renders one); `IRFuzz.noProduction` records why.
+- **A `PResult` case** (M2, half the draws) is a probability or integrate
+  body returning a packed `PResult`. It is drawn as a plan, a tree of
+  `SPLL.Semiring` combinator names (`density`, `indicatorP`, `prodP`, `mixP`,
+  `mixSubP`, `guardP`, `scaleCoV`, `anySafeShared`, `shareResult`,
+  `enumSumP`, `enumMixP`, `sumAllSR`, `measureDiffSR`, `complementWhen`, ...),
+  whose leaves' operands are value expressions. The plan is built by those
+  combinators in a drawn semiring: linear or log-space sum-product, or one of
+  the max-product instances. So log space, max-product, dims and the
+  impossibility flag are covered without compiling through those configs.
+  Half the bodies have their branch count stripped by the compiler's own
+  `stripBranchCount`, so both result layouts are drawn.
 - **Oracle.** The interpreter answers each query with a value, a program
   raise (a partial destructor outside its domain, an `IRError`), or a
   refusal (anything else). A backend must answer the value (floats by
@@ -933,11 +944,19 @@ emits, this property draws `IREnv`s directly, within the IR type contract
 - **Shrinking** cuts a batch to single cases, then to one argument vector,
   then replaces body nodes by children, keeping only candidates the checker
   accepts at the drawn type.
-- **Budget:** 20 batches of 60 cases, ~32 s (one `python3` and one `julia`
+- **Budget:** 20 batches of 60 cases, ~50 s (one `python3` and one `julia`
   process per batch). `NEST_IRFUZZ_EXPLORE=<file>` appends every unfiled
   disagreement and refusal to the file and passes, for surveying a new
   production's findings in bulk.
 - The default tier also checks that drawn cases and shrink candidates
   type-check, and that a fixed-seed sample reaches every `Operand`,
   `UnaryOperand`, `Accessor` and drawn `IRExpr` constructor, and every
-  density and cumulative leaf.
+  density and cumulative leaf; that a fixed-seed sample of plans reaches
+  every combinator in every semiring; and that both `PResult` bodies, both
+  layouts and every semiring's reduction are drawn.
+- **Census** (Slow, `Slow.IRGeneratorCoverage` in `test/BackendCoverage.hs`):
+  the constructs the deterministic bodies of the corpus compile to under any
+  corpus config (default, log space, budget 0 in both spaces, branch counts,
+  topK in both spaces, `-O0`) that the generator's fixed-seed sample does not
+  reach must be exactly `BackendCoverage.irGeneratorDeferred`, each entry
+  naming the milestone that owns it.
