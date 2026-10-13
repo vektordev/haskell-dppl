@@ -979,7 +979,7 @@ densityAgreementCase name p target explicitArgs = testCase caseName $ do
           Right (VProbDim pr d) -> return (pr, d)
           other -> assertFailure (name ++ ": prob(" ++ show x ++ ") returned " ++ show other) >> return (0, 0)
         (pDec, dDec) <- case readBack vec x of
-          Right (VTuple (VFloat pr) (VTuple (VFloat d) _)) -> return (pr, d)
+          Right (VTuple (VFloat pr) (VTuple (VInt d) _)) -> return (pr, d)
           other -> assertFailure (name ++ ": plan reader at " ++ show x ++ " returned " ++ show other) >> return (0, 0)
         assertBool (caseName ++ ": prob differs at sample " ++ show x
                     ++ ": own " ++ show pOwn ++ " vs read-back " ++ show pDec)

@@ -2760,7 +2760,7 @@ toIRInference meta cumulative e sample
 toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   false <- toIRInference meta False expr (IRConst (VBool False))
   -- cdf(True) = 1 is always attainable; cdf(False) inherits the False case.
-  return (mkPResult (sealP (IRIf sample (srOne (semiringOf meta)) (unP (rProb false)))) const0 (rBranches false)
+  return (mkPResult (sealP (IRIf sample (srOne (semiringOf meta)) (unP (rProb false)))) dim0 (rBranches false)
                   (IRIf sample constFalseIR (rImposs false)))
 -- A node whose certificate is a point mass of known value ('lawPoint'): the
 -- value is compared against the sample, as for a literal 'Constant'. This is
@@ -3042,7 +3042,7 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
     -- normal upper tail keeps its precision ('upperTailComplement')
     returnExpr <- complementWhen (semiringOf meta) (notIR sample) (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
-    return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
+    return (mkPResult (sealP returnExpr) dim0 (rBranches integ) constFalseIR)
   | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
@@ -3052,7 +3052,7 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
     -- normal upper tail keeps its precision ('upperTailComplement')
     returnExpr <- complementWhen (semiringOf meta) sample (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
-    return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
+    return (mkPResult (sealP returnExpr) dim0 (rBranches integ) constFalseIR)
 toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
@@ -3063,7 +3063,7 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     -- normal upper tail keeps its precision ('upperTailComplement')
     returnExpr <- complementWhen (semiringOf meta) sample (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
-    return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
+    return (mkPResult (sealP returnExpr) dim0 (rBranches integ) constFalseIR)
   | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
@@ -3073,7 +3073,7 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     -- normal upper tail keeps its precision ('upperTailComplement')
     returnExpr <- complementWhen (semiringOf meta) (notIR sample) (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
-    return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
+    return (mkPResult (sealP returnExpr) dim0 (rBranches integ) constFalseIR)
 -- A comparison against a random but enumerable bound (task
 -- uniform-below-random-threshold-no-forward): a Bernoulli whose rate is
 -- itself random, @Uniform < (if b then 0.9 else 0.1)@ once DrawSinking has
@@ -3832,7 +3832,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
                           (IRVar topKCutoffParamName))
     let returnExpr   = IRIf cutoffOk (wrapR (srTimes sr pLeft pRight)) (srZero sr)
     let branchesExpr = IRIf cutoffOk (IRConst (VFloat 1)) (IRConst (VFloat 0))
-    return (mkPResult (sealP returnExpr) const0 branchesExpr (notIR cutoffOk))
+    return (mkPResult (sealP returnExpr) dim0 branchesExpr (notIR cutoffOk))
     )) <&> generateLetInBlock meta
   uniquePrefix <- mkVariable ""
   let applyUnique = irMap (uniqueify [x2, x3] uniquePrefix)
@@ -4955,7 +4955,7 @@ forwardOrInfer meta cumulative whole sample operands forward
       if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole))
         then return res
         else do
-          let isMass = orIR (rImposs res) (IROp OpEq (rDim res) const0)
+          let isMass = orIR (rImposs res) (IROp OpEq (rDim res) dim0)
               refusal = IRError $ "probability-mode inference of an enumerated conditional (chain name "
                           ++ chainName (getTypeInfo whole) ++ ") met a continuous density: given the"
                           ++ " enumerated latents the query measures a fresh continuous draw, and an"
@@ -5536,7 +5536,7 @@ measureSet meta v (WInterval lo hi) = do
         _              -> const1
   -- An interval that came out empty at runtime carries no possibility.
   return (impossibleWhen (notIR nonEmpty)
-            (mkPResult (sealP clamped) const0 bc constFalseIR))
+            (mkPResult (sealP clamped) dim0 bc constFalseIR))
 measureSet meta _ WFull  = return (mass (srOne (semiringOf meta)))
 measureSet meta _ WEmpty = return (impossibleP (semiringOf meta))
 -- The set's measure minus the removed point's, where the point lies in the
@@ -5637,7 +5637,7 @@ measureIntInterval meta v lo hi = do
     pVar <- mkVariable "ivl_mass"
     dVar <- mkVariable "ivl_dim"
     setVariables [(pVar, unP (rProb diff)), (dVar, rDim diff)]
-    let zeroMass = IRIf (IROp OpEq (IRVar dVar) const0)
+    let zeroMass = IRIf (IROp OpEq (IRVar dVar) dim0)
                         (notIR (IROp OpGreaterThan (IRVar pVar) (srZero sr)))
                         constFalseIR
     return (impossibleWhen zeroMass diff { rProb = sealP (IRVar pVar), rDim = IRVar dVar })
@@ -8171,7 +8171,7 @@ measurePlanWorlds sr raws worlds
         -- sum over all of them regardless of which one carries the mixture's mass.
         (m:ms) -> foldM (mixP sr branchSum) m ms
   where
-    dimC d = IRConst (VFloat (fromIntegral d))
+    dimC d = IRConst (VInt d)
     sumUp [] = const0
     sumUp xs = foldr1 (IROp OpPlus) xs
     worldMass = planWorldMass sr raws

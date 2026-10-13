@@ -74,7 +74,7 @@ import Rewrites (commuteSites)
 -- that corpus instead: every interpreter-routed, non-neural prob/cdf case.
 -- Neural programs are excluded because their parameters are mock symbols that
 -- only End2EndTesting knows how to construct.
-type CorpusProbCase = (String, (Program, IRValue, [IRValue], (IRValue, IRValue)))
+type CorpusProbCase = (String, (Program, IRValue, [IRValue], (Double, Int)))
 
 -- | The slice every Corpus sweep selects.
 corpusPoolEntry :: CorpusEntry -> Bool
@@ -89,21 +89,21 @@ corpusPoolEntry e = Interpreter `elem` ceBackends e && null (neurals (ceProgram 
 -- (its own "a === 0 .||. d === outDim" checks), so those rows contributed
 -- nothing to this pool's properties even when they were included.
 probCasesOf :: [CorpusEntry] -> [CorpusProbCase]
-probCasesOf es = [ (ceName e, (ceProgram e, queryPoint, params, (prob, dim)))
+probCasesOf es = [ (ceName e, (ceProgram e, queryPoint, params, (expectedProb e prob, dim)))
                  | e <- es, ProbTestCase _ queryPoint params (Possible prob dim _) <- ceCases e ]
 
 -- | The cdf(...) rows of the same slice, for the invariants that hold
 -- of a CDF as much as of a point probability ('TopKNeverInflatesCdf').
 cdfCasesOf :: [CorpusEntry] -> [CorpusProbCase]
-cdfCasesOf es = [ (ceName e, (ceProgram e, queryPoint, params, (prob, dim)))
+cdfCasesOf es = [ (ceName e, (ceProgram e, queryPoint, params, (expectedProb e prob, dim)))
                 | e <- es, CumulTestCase _ queryPoint params (Possible prob dim _) <- ceCases e ]
 
--- | A .tst probability expectation is always a (prob, dim) pair of floats;
--- anything else means the corpus parser handed us a malformed row, which is a
--- broken fixture rather than a property counterexample.
-expectedProbDim :: (IRValue, IRValue) -> (Double, Double)
-expectedProbDim (VFloat out, VFloat outDim) = (out, outDim)
-expectedProbDim other = error ("malformed probability expectation in .tst corpus: " ++ show other)
+-- | A .tst probability expectation is always a float (the parser makes the
+-- dim an 'Int'); anything else means the corpus parser handed us a malformed
+-- row, which is a broken fixture rather than a property counterexample.
+expectedProb :: CorpusEntry -> IRValue -> Double
+expectedProb _ (VFloat out) = out
+expectedProb e other = error ("malformed probability expectation in .tst corpus (" ++ ceName e ++ "): " ++ show other)
 
 -- Corpus-driven metamorphic properties. Each property enumerates its whole
 -- selected slice deterministically (interpreter-routed, non-neural prob/cdf
@@ -146,7 +146,7 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
       testProperty "SamplingMatchesPDF" $ once $ conjoin
       [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool
-      , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1
+      , sampleable inp, outDim == 0 || outDim == 1
       , densityLivesOnSamples inp outDim ]
   , corpusProperty SweepSpec
       { sweepName = "Corpus.TopKInterprets", sweepTier = Default, sweepSlow = SkipSlow
@@ -277,7 +277,7 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
     -- Enumerate the whole (filtered) pool deterministically so any failing corpus
     -- case surfaces on every run, rather than only when a random draw selects it.
     forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f n tc) | (n, tc) <- pool]
-    samplingEps outDim = if outDim == VFloat 0 then 1e-9 else 0.05
+    samplingEps outDim = if outDim == 0 then 1e-9 else 0.05
 
 -- | Bump when 'checkLogSpaceMatchesLinear' changes.
 logSpaceCheckVersion :: String
@@ -288,7 +288,7 @@ logSpaceCheckVersion = "corpus-log-space-v1"
 -- expectation) and the tolerance, with the interpreter fingerprint; this
 -- module's source joins the harness. A refused compile has no key, so the
 -- check runs (and fails, as it always did).
-logSpaceKey :: Manifest -> Program -> Either CompilerError IREnv -> [(Program, IRValue, [IRValue], (IRValue, IRValue))] -> IO (Maybe String)
+logSpaceKey :: Manifest -> Program -> Either CompilerError IREnv -> [(Program, IRValue, [IRValue], (Double, Int))] -> IO (Maybe String)
 logSpaceKey _ _ (Left _) _ = return Nothing
 logSpaceKey m p (Right env) rows = do
   h <- harnessFingerprint m
@@ -298,12 +298,12 @@ logSpaceKey m p (Right env) rows = do
     [ logSpaceCheckVersion, h, src, i, show env, programRuntimeFields p
     , show [ (inp, params, expected) | (_, inp, params, expected) <- rows ], show probTolerance ]
 
-checkValidPrograms :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkValidPrograms :: (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkValidPrograms (p, _, _, _) = case validateProgram p of
   Right _ -> property True
   Left err -> counterexample err False
 
-checkTopKInterprets :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKInterprets :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkTopKInterprets envs n (p, inp, params, _) = ioProperty $ do
   let actualOutput = irDensityC envs n p params inp
   return $ actualOutput `reasonablyClose` actualOutput  -- No clue what the correct value should be here. Just test that is interprets to any value
@@ -311,9 +311,9 @@ checkTopKInterprets envs n (p, inp, params, _) = ioProperty $ do
 -- Expected values in .tst files are rounded to ~4 digits, so compare with the
 -- corpus-wide probTolerance (as the End2End checks do), and skip the dim check
 -- for zero probability (a zero result carries no meaningful dimension).
-checkProbTestCasesWithBC :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkProbTestCasesWithBC :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkProbTestCasesWithBC envs n (p, inp, params, expected) = ioProperty $ do
-  let (out, outDim) = expectedProbDim expected
+  let (out, outDim) = expected
   let actualOutput = irDensityC envs n p params inp
   case actualOutput of
     VProbDimBC a d _ -> return $
@@ -321,9 +321,9 @@ checkProbTestCasesWithBC envs n (p, inp, params, expected) = ioProperty $ do
       .&&. (a === 0 .||. d === outDim)
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkLogSpaceMatchesLinear envs n (p, inp, params, expected) = ioProperty $ do
-  let (out, outDim) = expectedProbDim expected
+  let (out, outDim) = expected
   let actualOutput = irDensityC envs n p params inp
   case actualOutput of
     VProbDim logP d ->
@@ -339,7 +339,7 @@ checkLogSpaceMatchesLinear envs n (p, inp, params, expected) = ioProperty $ do
 -- the wrong oracle here, since topK genuinely prunes (see
 -- checkTopKZeroMatchesExact/checkTopKNeverInflates for the analogous
 -- linear-only shape).
-checkTopKLogSpaceMatchesLinear :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKLogSpaceMatchesLinear :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkTopKLogSpaceMatchesLinear logEnvs linEnvs n (p, inp, params, _) = ioProperty $ do
   let logResult = irDensityC logEnvs n p params inp
   let linResult = irDensityC linEnvs n p params inp
@@ -357,7 +357,7 @@ checkTopKLogSpaceMatchesLinear logEnvs linEnvs n (p, inp, params, _) = ioPropert
 -- rewrites (constant folding, CSE, let-in), so this is an equality, not a
 -- tolerance -- and a mismatch is as likely to be a crash (a dangling reference
 -- the folder happened to delete) as a wrong number.
-checkUnoptimizedMatchesOptimized :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkUnoptimizedMatchesOptimized :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkUnoptimizedMatchesOptimized unoptEnvs optEnvs n (p, inp, params, _) = ioProperty $ do
   let unoptResult = irDensityC unoptEnvs n p params inp
   let optResult   = irDensityC optEnvs n p params inp
@@ -412,7 +412,7 @@ checkTopKOperandOrder known origCompiled p rows = do
         Just (Left ex) -> Left ("compile crash: " ++ firstLine (show (ex :: SomeException)))
         Just (Right (Left err)) -> Left ("refused: " ++ firstLine err)
         Just (Right (Right env)) -> Right env
-    answerAt :: Program -> Either String IREnv -> Double -> IO (Either String [(Double, Double)])
+    answerAt :: Program -> Either String IREnv -> Double -> IO (Either String [(Double, Int)])
     answerAt _ (Left why) _ = return (Left why)
     answerAt q (Right env) t = do
       let env' = withTopKCutoff t env
@@ -421,7 +421,7 @@ checkTopKOperandOrder known origCompiled p rows = do
             Right v -> Left ("not a probability result: " ++ firstLine (show v))
             Left err -> Left ("refused: " ++ firstLine err)
           answers = mapM one rows
-          force x = either length (\xs -> length [ () | (a, b) <- xs, a + b == a + b ]) x `seq` x
+          force x = either length (\xs -> length [ () | (a, b) <- xs, a + fromIntegral b == a + fromIntegral b ]) x `seq` x
       r <- timeout (20 * 1000000) (try (evaluate (force answers)))
       return $ case r of
         Nothing -> Left "timeout (20s)"
@@ -442,7 +442,7 @@ checkTopKOperandOrder known origCompiled p rows = do
       | otherwise = abs (p1 - p2) <= probTolerance * max 1 (abs p1) && d1 == d2
     firstLine m = let l = takeWhile (/= '\n') m in if length l > 160 then take 160 l ++ "..." else l
 
-checkProbAny :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkProbAny :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkProbAny envs n (p, _, params, _) = ioProperty $ do
   let actualOutput = irDensityC envs n p params VAny
   case actualOutput of
@@ -576,9 +576,8 @@ subsetsOfSize k (x:xs) = map (x:) (subsetsOfSize (k - 1) xs) ++ subsetsOfSize k 
 -- sample lands on such an event, so the empirical estimate is 0 whatever the
 -- density is: the comparison is a category error, not a weak check. A general
 -- rule on the result's shape, not a list of programs.
-densityLivesOnSamples :: IRValue -> IRValue -> Bool
-densityLivesOnSamples inp (VFloat d) = round d <= floatCoordCount inp
-densityLivesOnSamples _ _ = True
+densityLivesOnSamples :: IRValue -> Int -> Bool
+densityLivesOnSamples inp d = d <= floatCoordCount inp
 
 -- Shapes testSamplingProb can estimate a PDF for; everything else is discarded.
 sampleable :: IRValue -> Bool
@@ -589,8 +588,8 @@ sampleable (VList l) = all sampleable l
 sampleable _ = False
 
 --Sample PDF against expected PDF. Retry specific number of times with double the samples each time
-testSamplingProb :: CompiledPrograms -> String -> Double -> Int -> Int -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-testSamplingProb envs n epsilon samples retries tc@(p, inp, params, (VFloat out, VFloat outDim))
+testSamplingProb :: CompiledPrograms -> String -> Double -> Int -> Int -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
+testSamplingProb envs n epsilon samples retries tc@(p, inp, params, (out, outDim))
   | sampleable inp = ioProperty $ evalRandIO $ do
     let compiledEnv = either error id (lookupCompiled envs n)
     let gen = runGenC p compiledEnv params
@@ -603,8 +602,8 @@ testSamplingProb envs n epsilon samples retries tc@(p, inp, params, (VFloat out,
     let estimateOn sel =
           let countInside = length (filter (sampleMatchesOn sel epsilon inp) drawn)
               ratioInside = fromIntegral countInside / fromIntegral samples
-          in ratioInside / (epsilon ** outDim)
-    let windows = coordinateSubsets (floatCoordCount inp) (round outDim)
+          in ratioInside / (epsilon ^ outDim)
+    let windows = coordinateSubsets (floatCoordCount inp) outDim
     -- On a manifold the ambient window no longer carries the measure, so it
     -- serves as the support test instead: no draw inside it means the query is
     -- off-support and the density is 0. Where the ambient window IS the only
@@ -623,18 +622,18 @@ testSamplingProb envs n epsilon samples retries tc@(p, inp, params, (VFloat out,
 testSamplingProb _ _ _ _ _ _ = False ==> False
 
 -- Threshold=0 never prunes any branch, so results must match exact inference.
-checkTopKZeroMatchesExact :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKZeroMatchesExact :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkTopKZeroMatchesExact topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
   let topKResult = irDensityC topKEnvs n p params inp
   let exactResult = irDensityC defEnvs n p params inp
   case (topKResult, exactResult) of
     (VProbDim topKP topKD, VProbDim exactP exactD) ->
       return $ VFloat topKP `reasonablyClose` VFloat exactP
-          .&&. VFloat topKD `reasonablyClose` VFloat exactD
+          .&&. topKD === exactD
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- Pruning can only zero out branches, never inflate probability above the exact value.
-checkTopKNeverInflates :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKNeverInflates :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkTopKNeverInflates topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
   let topKResult = irDensityC topKEnvs n p params inp
   let exactResult = irDensityC defEnvs n p params inp
@@ -645,7 +644,7 @@ checkTopKNeverInflates topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
 -- and the cumulative path has its own complement site (the change-of-variables
 -- flip under a decreasing inverse, 'scaleCoV') that the point-query pool never
 -- exercises -- 'topKComplementCdfFlip' is its canary.
-checkTopKNeverInflatesCdf :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKNeverInflatesCdf :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
 checkTopKNeverInflatesCdf topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
   let topKResult = irCumulativeC topKEnvs n p params inp
   let exactResult = irCumulativeC defEnvs n p params inp

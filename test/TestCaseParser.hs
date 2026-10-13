@@ -113,7 +113,11 @@ defaultBackends = [Interpreter, Julia, Python]
 --   zero-probability, impossible point -- 'pTupleExpectation' refuses a
 --   @(0.0, dim, True)@ tuple, so a .tst author can never write a dim number
 --   that silently goes unchecked.
-data Expectation = Possible IRValue IRValue (Maybe Bool)
+--
+-- The dim is an 'Int', as the compiler's result carries it (task
+-- presult-dim-as-int). A .tst row may spell it @0@ or @0.0@;
+-- 'pTupleExpectation' refuses a non-integral or negative one.
+data Expectation = Possible IRValue Int (Maybe Bool)
                   | Impossible
   deriving (Show, Eq)
 
@@ -126,9 +130,8 @@ expectationProb Impossible = 0.0
 -- | The expected dim, when the shape states one. 'Impossible' states none --
 -- callers that need a dim to compare against should skip such rows, not
 -- invent a placeholder.
-expectationDim :: Expectation -> Maybe Double
-expectationDim (Possible _ (VFloat d) _) = Just d
-expectationDim (Possible _ other _) = error ("expected dim must be a float, got: " ++ show other)
+expectationDim :: Expectation -> Maybe Int
+expectationDim (Possible _ d _) = Just d
 expectationDim Impossible = Nothing
 
 -- | The expected impossibility flag. 'Impossible' always declares 'True';
@@ -233,6 +236,14 @@ pTupleExpectation = do
   resD <- pIRValue
   mImp <- optional (symbol "," >> pIRValue)
   symbol ")"
+  -- A dim counts dimensions. The corpus predates the Int dim and spells it as
+  -- a float (@0.0@), which stays readable; anything that is not a whole,
+  -- non-negative number is a typo, not a value to round.
+  dim <- case resD of
+    VInt d | d >= 0 -> return d
+    VFloat d | d >= 0, d == fromIntegral (round d :: Int) -> return (round d)
+    other -> fail ("the second component of an expected result is the dimension, "
+                   ++ "a non-negative integer (0 for a mass, n for an n-variate density), got: " ++ show other)
   mImp' <- case mImp of
     Nothing        -> return Nothing
     Just (VBool b) -> return (Just b)
@@ -243,7 +254,7 @@ pTupleExpectation = do
       ("a row whose probability is 0 and impossibility flag is True is a genuinely "
        ++ "impossible point and must be spelled `is impossible`, not a (prob, dim, True) "
        ++ "tuple -- the tuple's dim would go unchecked and misleading")
-    _ -> return (Possible resP resD mImp')
+    _ -> return (Possible resP dim mImp')
 
 pProbTestCase :: MonadParser m => String -> m TestCase
 pProbTestCase name = do

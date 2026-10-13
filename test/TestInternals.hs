@@ -41,7 +41,7 @@ import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet, generateRand)
-import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectationProb, defaultBackends,
+import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectationProb, expectationDim, defaultBackends,
                         parseTestCasesFromString, corpusPplPath, corpusTstPath, TstFile(..), parseTstFileFromString)
 import CorpusSweep (Corpus, CorpusEntry(..), SweepSpec(..), Tier(..), SlowHeader(..), corpusSweepAll, sweepLoaderNames)
 import System.Directory (listDirectory)
@@ -69,12 +69,12 @@ import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAn
 
 -- | The (prob, dim) pair a probability query must return; a different shape
 -- is a compiler bug rather than a wrong number, so say which.
-probDimOf :: IRValue -> (Double, Double)
+probDimOf :: IRValue -> (Double, Int)
 probDimOf (VProbDim p d) = (p, d)
 probDimOf v = error ("probability query returned " ++ show v ++ ", not a (prob, dim) pair")
 
 -- | As 'probDimOf', for a countBranches build's (prob, dim, branchCount).
-probDimBCOf :: IRValue -> (Double, Double, Double)
+probDimBCOf :: IRValue -> (Double, Int, Double)
 probDimBCOf (VProbDimBC p d bc) = (p, d, bc)
 probDimBCOf v = error ("probability query returned " ++ show v ++ ", not a (prob, dim, bc) triple")
 
@@ -644,7 +644,7 @@ test_farTailEitherDensityNotZeroed = testCase "farTailEitherDensityNotZeroed" $ 
   case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 7.0))) of
     Right (VProbDim p d) -> do
       assertBool ("expected a nonzero far-tail density, got exactly " ++ show p) (p > 0)
-      assertEqual "far-tail density must keep dim=1 (continuous)" 1.0 d
+      assertEqual "far-tail density must keep dim=1 (continuous)" 1 d
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
 -- The same program past the float underflow floor -- the residual half of the
@@ -661,7 +661,7 @@ test_underflowedTailKeepsDimension = testCase "underflowedTailKeepsDimension" $ 
   case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 39.0))) of
     Right res@(VProbDim p d) -> do
       assertEqual "the density underflows to a true float zero at this depth" 0.0 p
-      assertEqual "but the branch is possible, so the mixture keeps dim=1" 1.0 d
+      assertEqual "but the branch is possible, so the mixture keeps dim=1" 1 d
       assertEqual "and the result is not flagged impossible" (Just False) (resultImpossible res)
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
@@ -799,7 +799,7 @@ test_letBoundEitherDestructureUsesSample = testCase "letBoundEitherDestructureUs
   case runProb defaultCompilerConfig prog [] (VEither (Right (VFloat 0.3))) of
     Right (VProbDim p d) -> do
       assertBool ("expected 0.5*phi(0.3) =~ 0.1907, got " ++ show p) (abs (p - 0.5 * phi 0.3) < 0.0001)
-      assertEqual "continuous arm keeps dim=1" 1.0 d
+      assertEqual "continuous arm keeps dim=1" 1 d
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
   case runProb defaultCompilerConfig prog [] (VEither (Left VUnit)) of
     Right (VProbDim p _) ->
@@ -841,7 +841,7 @@ test_setWitnessMergesComplementaryTupleFields = testCase "setWitnessMergesComple
   case runProb defaultCompilerConfig prog [] (VTuple (VFloat 0.3) (VFloat 0.7)) of
     Right (VProbDim p d) -> do
       assertBool ("expected phi(0.3)*1 =~ 0.3814, got " ++ show p) (abs (p - phi 0.3) < 0.0001)
-      assertEqual "both fields recovered => dim=2 (two independent continuous slots)" 2.0 d
+      assertEqual "both fields recovered => dim=2 (two independent continuous slots)" 2 d
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
 -- AutoNeural: auto-derivation of MultiValue annotations for the "Nothing" (no "of ...")
@@ -944,7 +944,48 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   , test_makePartitionPlanNothingTuple
   , test_makePartitionPlanWildcardMatchesNothing
   , test_makePartitionPlanMixedExplicitAuto
+  , test_neuralAdtContinuousFieldDim
   ]
+
+-- The read-logits reader of a multi-constructor neural ADT selects a
+-- constructor's (prob, dim, branches) by its constructor test. It used to
+-- scale all three by the constructor's flag probability, so a continuous
+-- field's dim 1 came back as the flag's 0.6 (task presult-dim-as-int).
+test_neuralAdtContinuousFieldDim :: TestTree
+test_neuralAdtContinuousFieldDim = testCase "a neural ADT's continuous field has dim 1, not its flag probability" $ do
+  prog <- either (\e -> assertFailure ("parse: " ++ show e) >> error "unreachable") return $ tryParseProgram "<inline>" $ unlines
+    [ "data Color = Red | Green"
+    , "data Attrs = Nil | Obj color::Color, px::Float"
+    , "neural readAttrs :: (Symbol -> Attrs) of {Nil | Obj {Red | Green} Real}"
+    , "main s = readAttrs s" ]
+  env <- either (\e -> assertFailure ("compile: " ++ show e) >> error "unreachable") return (compile defaultCompilerConfig prog)
+  -- P(Nil) = 0.4, P(Obj) = 0.6; P(Red) = 0.75; px ~ Normal(0, 1).
+  let logits = VTuple (VInt 2) (constructVList (map VFloat [0.4, 0.6, 0.75, 0.25, 0.0, 1.0]))
+  case runProbC prog env [logits] (VADT "Obj" [VADT "Red" [], VFloat 0.5]) of
+    Right (VProbDim p d) -> do
+      assertEqual "Obj Red 0.5: a density" 1 d
+      assertBool ("Obj Red 0.5: 0.6 * 0.75 * N(0.5), got " ++ show p)
+        (abs (p - 0.6 * 0.75 * exp (-0.125) / sqrt (2 * pi)) < 1e-9)
+    other -> assertFailure ("Obj Red 0.5: " ++ show other)
+  case runProbC prog env [logits] (VADT "Nil" []) of
+    Right (VProbDim p d) -> assertEqual "Nil: a mass" (0.4, 0) (p, d)
+    other -> assertFailure ("Nil: " ++ show other)
+
+-- A .tst dim is an Int (task presult-dim-as-int): written @0@ or, as the
+-- older corpus does, @0.0@; a non-integral or negative dim is a typo the
+-- parser refuses rather than rounds.
+test_tstDimIsInt :: TestTree
+test_tstDimIsInt = testCase "tstDimIsInt" $ do
+  let dimOf src = case parseTestCasesFromString "dim.tst" src of
+        Left err -> Left err
+        Right (_, _, _, [ProbTestCase _ _ _ e]) -> Right (expectationDim e)
+        Right (_, _, _, tcs) -> Left ("expected one row, got " ++ show tcs)
+  assertEqual "an integer dim" (Right (Just 1)) (dimOf "p(0.5)=(0.35, 1)\n")
+  assertEqual "a float spelling of an integral dim" (Right (Just 2)) (dimOf "p(0.5)=(0.35, 2.0)\n")
+  assertEqual "with an impossibility flag" (Right (Just 0)) (dimOf "p(0.5)=(0.35, 0, False)\n")
+  let refused src = either (const True) (const False) (dimOf src)
+  assertBool "a non-integral dim is refused" (refused "p(0.5)=(0.35, 0.5)\n")
+  assertBool "a negative dim is refused" (refused "p(0.5)=(0.35, -1)\n")
 
 -- .tst files may carry an optional `backends:` header that routes the file's
 -- cases to a subset of the End2End backends; no header means the three scalar
@@ -1298,7 +1339,7 @@ anyRefusalTests = testGroup "witnessed-inference ANY refusal"
         -- the binding left random.
         expectMarginalAnswer noVariants
           "main = draw x = Uniform in draw z = x + 1.0 in (z, Uniform)"
-          (VTuple VAny (VFloat 0.5)) 1.0 1.0
+          (VTuple VAny (VFloat 0.5)) 1.0 1
     , testCase "ANY reached through an Either arm's deconstruction refuses, naming x" $
         -- Here the wildcard is read by `fst`, not by arithmetic: fromLeft of
         -- `Left ANY` is ANY, and the tuple deconstruction that follows has no
@@ -1336,19 +1377,19 @@ anyRefusalTests = testGroup "witnessed-inference ANY refusal"
     , testCase "O (0.3, (ANY, 2.7)): y is re-witnessed from the last slot" $
         expectMarginalAnswer defaultCompilerConfig
           "main = draw x = Uniform in draw y = Uniform in (x, (x+y+3.0, x+y+2.0))"
-          (VTuple (VFloat 0.3) (VTuple VAny (VFloat 2.7))) 1.0 2.0
+          (VTuple (VFloat 0.3) (VTuple VAny (VFloat 2.7))) 1.0 2
     , testCase "N (ANY, (0.4, 0.5)): both latents witnessed by the remaining slots" $
         expectMarginalAnswer defaultCompilerConfig
           "main = draw x = Uniform in draw y = Uniform in (x+y, (x, y))"
-          (VTuple VAny (VTuple (VFloat 0.4) (VFloat 0.5))) 1.0 2.0
+          (VTuple VAny (VTuple (VFloat 0.4) (VFloat 0.5))) 1.0 2
     , testCase "S Left ANY: the payload's latents integrate out" $
         expectMarginalAnswer defaultCompilerConfig
           "main = draw x = Uniform in left (x, x + Uniform)"
-          (VEither (Left VAny)) 1.0 0.0
+          (VEither (Left VAny)) 1.0 0
     , testCase "the alias (ANY, 1.5): x is re-witnessed through y + 1.0" $
         expectMarginalAnswer defaultCompilerConfig
           "main = draw x = Uniform in draw y = x in (y, y + 1.0)"
-          (VTuple VAny (VFloat 1.5)) 1.0 1.0
+          (VTuple VAny (VFloat 1.5)) 1.0 1
     ]
   ]
   where
@@ -1389,10 +1430,10 @@ expectRuntimeRefusal conf src sample = do
     Right (Left cerr) -> assertFailure ("expected runtime refusal, got compile error: " ++ show cerr)
     Right (Right v) -> assertFailure ("expected runtime refusal, got value: " ++ show v)
 
-expectMarginalAnswer :: CompilerConfig -> String -> IRValue -> Double -> Double -> IO ()
+expectMarginalAnswer :: CompilerConfig -> String -> IRValue -> Double -> Int -> IO ()
 expectMarginalAnswer conf src sample p0 d0 =
   case runProb conf (either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)) [] sample of
-    Right (VTuple (VFloat p) (VTuple (VFloat d) _)) -> do
+    Right (VProbDim p d) -> do
       assertBool ("probability " ++ show p ++ ", expected " ++ show p0) (abs (p - p0) < 1e-9)
       assertEqual "dim" d0 d
     other -> assertFailure ("expected the marginal, got " ++ show other)
@@ -3689,18 +3730,18 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
       -- left out: the letfree CDF at 1 answers a possible zero mass at dim 0
       -- rather than the density, a convention of the InjF engine's cumulative
       -- `IfThenElse` (task letfree-cdf-density-atom-reports-zero-mass).
-      let impossibleA = Answered 0.0 0.0 True
+      let impossibleA = Answered 0.0 0 True
           rightI k = VEither (Right (VInt k))
           leftU = VEither (Left VUnit)
           rows = [ ("observeContinuousEqualsLetfree",
-                     [ (rightI 1, Answered 0.3520653267642995 1.0 False)
+                     [ (rightI 1, Answered 0.3520653267642995 1 False)
                      , (rightI 2, impossibleA)
-                     , (leftU,    Answered 1.0 0.0 False) ])
+                     , (leftU,    Answered 1.0 0 False) ])
                  , ("observeContinuousEqualsLetBound",
-                     [ (rightI 0, Answered 0.3989422804014327 1.0 False)
+                     [ (rightI 0, Answered 0.3989422804014327 1 False)
                      , (rightI 2, impossibleA)
-                     , (leftU,    Answered 1.0 0.0 False)
-                     , (VEither (Right VAny), Answered 0.3989422804014327 1.0 False) ]) ]
+                     , (leftU,    Answered 1.0 0 False)
+                     , (VEither (Right VAny), Answered 0.3989422804014327 1 False) ]) ]
       acs <- forM rows $ \(name, qs) -> do
         prog <- loadCorpusProgram name
         env <- either (\e -> assertFailure (name ++ ": " ++ show e)) return (compile noMaterializationConfig prog)
@@ -4323,7 +4364,7 @@ showcaseProb prog params sample = fst <$> showcaseProbDim prog params sample
 -- | 'showcaseProb', keeping the dimension: whether a marginal came back as a
 -- discrete mass or as a density is part of what makes it right, and the
 -- number alone does not say.
-showcaseProbDim :: Program -> [IRValue] -> IRValue -> IO (Double, Double)
+showcaseProbDim :: Program -> [IRValue] -> IRValue -> IO (Double, Int)
 showcaseProbDim prog params sample = case runProb defaultCompilerConfig prog params sample of
   Right (VProbDim p d) -> return (p, d)
   other -> assertFailure ("expected a probability tuple, got: " ++ show other)
@@ -4852,10 +4893,10 @@ test_observeContinuousRenormalizes = testCase "observeContinuousRenormalizes" $
       let expectedZ = normalCDF hi - normalCDF lo
       assertBool (name ++ ": p(Just ANY) = " ++ show z ++ ", expected the interval mass "
                    ++ show expectedZ) (abs (z - expectedZ) < 1e-9)
-      assertEqual (name ++ ": p(Just ANY) must be a discrete mass, not a density") 0.0 zDim
+      assertEqual (name ++ ": p(Just ANY) must be a discrete mass, not a density") 0 zDim
       forM_ inside $ \x -> do
         (px, pxDim) <- showcaseProbDim prog [] (VEither (Right (VFloat x)))
-        assertEqual (name ++ ": p(Just " ++ show x ++ ") must stay a density") 1.0 pxDim
+        assertEqual (name ++ ": p(Just " ++ show x ++ ") must stay a density") 1 pxDim
         assertBool (name ++ ": p(Just " ++ show x ++ ")/p(Just ANY) = " ++ show (px / z)
                      ++ " is not the truncated density " ++ show (stdNormalPdf x / expectedZ))
                    (abs (px / z - stdNormalPdf x / expectedZ) < 1e-9)
@@ -5590,6 +5631,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , planOverCouplingRefusalTests
   , planFactorExternalsTests
   , test_tstBackendsHeader
+  , test_tstDimIsInt
   , test_tstExpectFailureHeader
   , optimizerPurityTests
   , stochasticCallTests

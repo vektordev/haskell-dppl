@@ -424,8 +424,8 @@ checkStillBroken name caseName expct er = do
         (not (matchesExpectation expct outProb outDim res))
     Right (Right _) -> return ()      -- not a prob/dim result: still broken
 
-matchesExpectation :: Expectation -> Double -> Double -> IRValue -> Bool
-matchesExpectation (Possible (VFloat expectedProb) (VFloat expectedDim) mImp) outProb outDim res =
+matchesExpectation :: Expectation -> Double -> Int -> IRValue -> Bool
+matchesExpectation (Possible (VFloat expectedProb) expectedDim mImp) outProb outDim res =
   abs (outProb - expectedProb) < probTolerance
     && outDim == expectedDim
     && matchesImposs mImp res

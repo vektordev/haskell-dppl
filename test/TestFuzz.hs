@@ -283,7 +283,7 @@ discardVacuous = False ==> True
 -- Pulls (prob, dim) out of the standard IRValue result shape, tolerating the
 -- countBranches variant's extra third tuple component.
 probDim :: IRValue -> Maybe (Double, Double)
-probDim (VProbDim pr d) = Just (pr, d)
+probDim (VProbDim pr d) = Just (pr, fromIntegral d)
 probDim _ = Nothing
 
 -- | The compiler is not (yet) known to terminate on arbitrary/ill-typed
