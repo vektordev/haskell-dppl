@@ -100,7 +100,7 @@ import SPLL.Lang.Lang (toStub, getTypeInfo)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.Infer (addTypeInfo)
-import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
+import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genExtremeProgram, genTypedExpr, Ty(..),
                       InjFSig(..), injFCatalog, injFExcluded, InjFExclusion(..),
                       injFNamesOf, injFLeafApp, tyOfTypedExpr,
                       shrinkTypedProgram, shrinkTypedExpr,
@@ -588,6 +588,22 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize f
 -- (see module header for why this differs from the invariant properties).
 prop_Fuzz_TypedCompileNeverCrashes :: Property
 prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_TypedCompileNeverCrashes" 2 $ do
+  compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
+  case compiled of
+    Left _ -> return $ property True
+    Right irEnv -> do
+      sample <- drawSample p irEnv
+      unless (isRuntimeFailure sample) $
+        void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
+      emitEveryBackend defaultCompilerConfig p irEnv
+
+-- | 'prop_Fuzz_TypedCompileNeverCrashes' over programs whose float constants
+-- are partly extreme-magnitude or non-finite ('genExtremeProgram'; task
+-- fuzz-extreme-magnitude-leaves). Compile, one sample, one probability query,
+-- every backend's emission; no value comparison, since these inputs fail the
+-- value-level invariants by IEEE design.
+prop_Fuzz_ExtremeMagnitudeNeverCrashes :: Property
+prop_Fuzz_ExtremeMagnitudeNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genExtremeProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_ExtremeMagnitudeNeverCrashes" 2 $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -2102,6 +2118,7 @@ aspirationalFuzzNames =
      \enumerated conditional meeting a density); since it reaches codegen \
      \(2026-10-08) also the batched emitter's missing infix form for OpIntDiv/OpMax \
      \(task batched-int-mult-inverse-no-intdiv)")
+  , ("prop_Fuzz_ExtremeMagnitudeNeverCrashes", "new (task fuzz-extreme-magnitude-leaves): starts here like its typed twin; see the task for what it found")
   , ("prop_Fuzz_ProbNeverGenerateBacked",
      "3/3 runs: gives up on its discard rate within the wall-clock budget, \
      \or is falsified")

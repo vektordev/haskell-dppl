@@ -18,6 +18,8 @@ module ArbitrarySPLL (
 , tyJoin
 , tyGeneralizes
 , genTypedProgram
+, genExtremeProgram
+, extremeFloats
 , genHelperProgram
 , genRecursiveProgram
 , RecShape(..)
@@ -393,6 +395,34 @@ genTypedProgram = withGeneratedADTs $ frequency
   , (1, genNeuralProgramIn)
   , (1, genRecursiveProgramIn)
   ]
+
+-- | 'genTypedProgram' with about half of its float constants replaced by an
+-- extreme-magnitude one (task fuzz-extreme-magnitude-leaves): 'extremeFloats',
+-- or a NaN built as @0.0 * 1e400@. For crash and termination properties only;
+-- on value-level invariants these fail by IEEE design, which is why the
+-- shared leaf generator ('genFloatConst') does not draw them. Self-recursive
+-- functions keep their constants: a NaN in the guard of a recursion makes
+-- @Uniform < NaN@ always false, so the program really never terminates
+-- (program semantics, not a compiler fault).
+genExtremeProgram :: Gen Program
+genExtremeProgram = genTypedProgram >>= \p -> do
+  fs <- mapM (\(n, e) -> if mentionsVar n e then return (n, e) else (,) n <$> go e) (functions p)
+  return p { functions = fs }
+  where
+    go e = do
+      let subs = getSubExprs e
+      subs' <- mapM go subs
+      let e' = if null subs then e else setSubExprs e subs'
+      case node e' of
+        Constant (VFloat _) -> frequency
+          [ (1, pure e'), (1, constF <$> elements extremeFloats)
+          , (1, pure (constF 0 #*# constF (1 / 0))) ]
+        _ -> return e'
+
+-- | The extreme-magnitude constants: finite high and low exponents, and
+-- the two infinities that @1e400@ and @-1e400@ parse to.
+extremeFloats :: [Double]
+extremeFloats = [1e300, -1e300, 1e-300, 1 / 0, -1 / 0]
 
 -- | The nullary shape: @main = \<expr\>@, with no neural declaration.
 genPlainProgramIn :: HasADTs => Gen Program
