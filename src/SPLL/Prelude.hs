@@ -95,7 +95,7 @@ module SPLL.Prelude
 
 import SPLL.ReservedNames (topKCutoffName, accProbInitName)
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo(..), ADTDecl, FnDecl)
+import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo(..), ADTDecl, FnDecl, spanPretty)
 import SPLL.Typing.PType (PType(..))
 import SPLL.ObservationMask
 import SPLL.MaskVariants
@@ -103,7 +103,7 @@ import SPLL.AutoNeural (validateWriteLogitsGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo, addModalityLaws)
-import SPLL.Typing.ModalityInfer (LawTable, Law(..), renderJustification)
+import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..), renderJustification, engineName)
 import qualified Data.Map.Strict as Map
 import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
@@ -537,6 +537,7 @@ typedStages conf rtyped = do
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
   printStageWith (lawColumn laws) conf "After Modality Inference (PType)" typed
+  printIfVerbose conf (engineReport typed laws)
 
   return (typed, fcData, laws)
 
@@ -789,6 +790,19 @@ printStageWith :: (Monad m) => (TypeInfo -> String) -> CompilerConfig -> String 
 printStageWith col CompilerConfig {showIntermediates=True} label prog =
   trace (unlines (stageHeader label ++ prettyPrintProgCustomTI (\ti -> show ti ++ col ti) prog ++ [""])) (return ())
 printStageWith _ _ _ _ = return ()
+
+-- | Under @-v@: every random binding a body reads, with the engines that apply
+-- to it in dispatch order -- the first is the one IRCompiler takes -- or none,
+-- in which case the binding is sample-only (task engine-applicability-as-data).
+engineReport :: Program -> LawTable -> String
+engineReport prog laws = unlines ("=== Engine applicability (the first listed is dispatched) ===" : rows)
+  where
+    rows = [ row f x lti cs | (f, b) <- functions prog, (x, lti) <- bindings b
+                            , Just (Law _ (JBinding cs)) <- [Map.lookup (chainName lti) laws] ]
+    bindings e@(Expr _ (Apply (Expr lti (Lambda x _)) _)) = (x, lti) : concatMap bindings (getSubExprs e)
+    bindings e = concatMap bindings (getSubExprs e)
+    row f x lti cs = f ++ ": binding of '" ++ x ++ "'" ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
+      ++ ": " ++ (if null cs then "no engine applies (sample-only)" else intercalate ", " (map engineName cs))
 
 -- | The justification of each node's law, for the modality stage's dump.
 lawColumn :: LawTable -> TypeInfo -> String

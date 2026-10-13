@@ -42,6 +42,11 @@ module SPLL.Typing.ModalityInfer
   , Justification(..)
   , AffineCert(..)
   , Recovery(..)
+  , EngineCert(..)
+  , engineName
+  , bindingCerts
+  , mkICtx
+  , ICtx
   , affineOf
   , LawTable
   , Env
@@ -65,15 +70,16 @@ import Data.Graph (SCC(..), stronglyConnComp)
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
   , Value, GenericValue(..), Tag(..), MultiValue(..) )
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isStaticZero)
-import SPLL.Analysis (enumerableDomain)
-import Data.Maybe (isJust)
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isStaticZero, freeVarsExpr)
+import SPLL.Analysis (enumerableDomain, enumerableApplication)
+import SPLL.AutoNeural (planReadOf)
+import Data.Maybe (isJust, catMaybes)
 import Data.List (intercalate, find)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.Modality
-import SPLL.Typing.ForwardChaining (FCData(..), isWitnessedLambda)
+import SPLL.Typing.ForwardChaining (FCData(..), isWitnessedLambda, WitnessCert(..), pointWitnessCert, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet)
 import PredefinedFunctions (isFieldConstructor)
 
 -- ---------------------------------------------------------------------------
@@ -382,6 +388,17 @@ data Justification
     -- is an affine combination of the independent standard-normal latents
     -- named. Consumed by the compiler's Gaussian collapse, which marginalises
     -- a binding certified this way ('IRCompiler.affineMarginalisable').
+  | JPlan [ChainName]
+    -- ^ A value read off a neural network's structured output through a
+    -- @let@: bound to a plan read ('SPLL.AutoNeural.planReadOf'), or computed
+    -- from such a binding. The chain names are the plan reads it projects
+    -- from. Consumed by 'compareGround': the plan-guided engine measures a
+    -- comparison whose operands both project from plan reads.
+  | JBinding [EngineCert]
+    -- ^ The applied lambda of a random binding the body reads: the
+    -- certificates of the engines that apply to it, in dispatch order
+    -- ('bindingCerts'). Empty when none does, and then the binding is
+    -- sample-only (the let rule of 'inferE').
   | JSharedLatent String [ChainName] [Law]
     -- ^ A field constructor, with its fields' laws, two of whose density
     -- factors integrate the same 'Marginal' affine latents, listed
@@ -440,6 +457,36 @@ isPointMass (IArr _ _) = False
 isPointMass (IWit _)   = False
 isPointMass m          = gCap (outerI m) == Exact
 
+-- | An engine's certificate for a random binding (task
+-- engine-applicability-as-data, law-carrying-modality M5): what the engine
+-- reads off the binding to compile it. One per probabilistic-application
+-- engine, in IRCompiler's dispatch order.
+data EngineCert
+  = CertEnumerable MultiValue
+    -- ^ Enumeration: the argument's finite domain
+    -- ('SPLL.Analysis.enumerableApplication').
+  | CertPlan String
+    -- ^ Plan-guided enumeration: the network whose structured output the
+    -- argument reads ('SPLL.AutoNeural.planReadOf').
+  | CertWitnessed WitnessCert
+    -- ^ Point inversion: the inverse and the root-seeded witness verdict
+    -- ('SPLL.Typing.ForwardChaining.pointWitnessCert').
+  | CertAffine AffineCert
+    -- ^ Affine marginalisation: the argument's affine Gaussian form, every use
+    -- of which flows into one affine consumer ('affineBindingCert').
+  | CertWorlds WorldsShape
+    -- ^ Set-valued witnesses: how the observation inverts onto the variable
+    -- ('SPLL.Typing.ForwardChaining.worldsShape').
+
+-- | The engine a certificate is for, as @-d@ and @-v@ print it.
+engineName :: EngineCert -> String
+engineName c = case c of
+  CertEnumerable _ -> "enumeration"
+  CertPlan n       -> "plan " ++ n
+  CertWitnessed w  -> "point inversion" ++ (if wcAtRoot w then " (witnessed)" else "")
+  CertAffine _     -> "affine marginalisation"
+  CertWorlds _     -> "set-valued witnesses"
+
 -- | One line per law, for the @-d@ dump and for tests.
 renderJustification :: Justification -> String
 renderJustification j = case j of
@@ -450,6 +497,9 @@ renderJustification j = case j of
   JStructured c ls -> c ++ args ls
   JAffine c        -> "affine" ++ latents c
   JSharedLatent c ks ls -> c ++ args ls ++ " sharing latent " ++ intercalate ", " ks
+  JPlan rs         -> "plan " ++ intercalate ", " rs
+  JBinding []      -> "binding: no engine (sample-only)"
+  JBinding cs      -> "binding: " ++ intercalate ", " (map engineName cs)
   JUnjustified     -> "unjustified"
   where args ls = "(" ++ intercalate ", " (map (renderJustification . lawJust) ls) ++ ")"
         renderValue (VFloat x) = show x
@@ -482,12 +532,17 @@ data ICtx = ICtx
   { icADTs :: [ADTDecl]
   , icFC   :: FCData
   , icObs  :: ChainName
-    -- | Does this declaration contain a 'ReadNN'? If so, a comparison in it may
-    -- be compiled by the plan-guided engine, whose applicability this pass
-    -- cannot see — so 'compareGround' keeps its historical verdict there rather
-    -- than guessing. See the note on 'compareGround'.
-  , icPlan :: Bool
+    -- | The program, as written: the engine predicates of a binding read its
+    -- declarations (a conditional callee, a call the set-witness walk enters)
+    -- and its neural declarations (a plan read).
+  , icProg :: Program
+    -- | The chain names of the program's plan reads ('planReadCNs').
+  , icPlanReads :: Set.Set ChainName
   }
+
+-- | The inference context of the declaration observed at @obsCN@.
+mkICtx :: [ADTDecl] -> FCData -> ChainName -> Program -> ICtx
+mkICtx adtsDecls fcData obsCN prog = ICtx adtsDecls fcData obsCN prog (planReadCNs prog)
 
 cnOf :: Expr -> ChainName
 cnOf = chainName . getTypeInfo
@@ -645,15 +700,19 @@ inferE ctx env expr = case expr of
          -- preserved) while its standalone law (and density, counted once at its
          -- own slot) is untouched. The capability gate (@gCap /= Exact@) skips
          -- the FC query for deterministic and function-valued bindings.
+         -- No engine for a random binding the body reads (task
+         -- engine-applicability-as-data): the variable is bound sample-only,
+         -- so the body, and the declaration, project 'Bottom' and no
+         -- inference variant is promised ('letBinding').
          Expr lti (Lambda x body) ->
-           let (bodyLaw, body', ba) = inferE ctx (bindParam ctx (chainName lti) x (cnOf arg) argLaw env) body
+           let (_, certs, (bodyLaw, body', ba)) = letBinding ctx env lti x body arg' argLaw
                bodyMod = lawMod bodyLaw
                -- The applied lambda node carries the body's pType (its result),
                -- matching @PInfer2@ and what @IRCompiler@ reads, not the outer
                -- closure 'Deterministic'.
                f' = Expr (setPType lti (projectI bodyMod)) (Lambda x body')
            in doneL bodyLaw (Expr (setPType ti (projectNode (rType ti) bodyMod)) (Apply f' arg'))
-                   (laccLambda lti ++ ba ++ aa)
+                   ((chainName lti, Law (IG gExact) (maybe JUnjustified JBinding certs)) : ba ++ aa)
          -- Any other head -- a named function, a function parameter, a
          -- partial application -- binds its parameter by the same rule: the
          -- witness question is asked of the lambda forward chaining resolves
@@ -670,14 +729,12 @@ inferE ctx env expr = case expr of
   where
     doneL l e acc = (l, e, (cnOf e, l) : acc)
     done' m = doneL (bareLaw m)
-    -- a directly-applied lambda node still records its own (det) outer ground
-    laccLambda lti = [(chainName lti, Law (IG gExact) JUnjustified)]
 
     compareNode ti fname a b =
       let (la, a', aacc) = inferE ctx env a
           (lb, b', bacc) = inferE ctx env b
           g = tagFin ti
-                (compareGround (icPlan ctx)
+                (compareGround (planDependent ctx env a && planDependent ctx env b)
                                (enumerableOperand a) (enumerableOperand b)
                                (independentOperands env a b)
                                (outerI (lawMod la)) (outerI (lawMod lb)))
@@ -788,17 +845,151 @@ letBoundLaw ctx headCN argLaw@(Law argMod j)
 -- extend through it, so the three cannot disagree on what a binder means.
 --
 -- A Gaussian argument binds at its affine certificate ('affineOf' at the
--- argument's chain name @argCN@), so every read of @x@ carries the same latent
--- keys. A witnessed binding is instead one 'Recovered' latent keyed @argCN@:
--- the observation determines @x@. Its density, which integrates the
--- argument's 'Marginal' latents, is recorded as its factor ('acFactors').
-bindParam :: ICtx -> ChainName -> String -> ChainName -> Law -> Env -> Env
-bindParam ctx headCN x argCN argLaw = Map.insert x (affineBound (letBoundLaw ctx headCN argLaw))
+-- argument's chain name), so every read of @x@ carries the same latent keys.
+-- A witnessed binding is instead one 'Recovered' latent keyed by the
+-- argument: the observation determines @x@. Its density, which integrates
+-- the argument's 'Marginal' latents, is recorded as its factor
+-- ('acFactors'). Any other argument that projects from a plan read binds at
+-- 'JPlan' ('planRoots').
+bindParam :: ICtx -> ChainName -> String -> Expr -> Law -> Env -> Env
+bindParam ctx headCN x arg argLaw env = Map.insert x (affineBound (letBoundLaw ctx headCN argLaw)) env
   where
+    argCN = cnOf arg
     affineBound l@(Law m _) = case affineOf argCN argLaw of
       Just c | not (Map.null (acLatents c)) -> Law m (JAffine (if isWitI m then recovered c else c))
-      _ -> l
+      _ | not (null roots) -> Law m (JPlan roots)
+        | otherwise -> l
     recovered c = AffineCert (Map.singleton argCN Recovered) (Map.insert argCN (marginalsOf c) (acFactors c))
+    roots = planRoots ctx env arg
+
+-- | The plan reads a value projects from: itself, if it is one
+-- ('SPLL.AutoNeural.planReadOf'), and those of every variable it reads that
+-- is bound at 'JPlan', or at an affine form one of whose latents is a plan
+-- read (a Float network's output). Empty for a value that reads no network's
+-- output through a binding.
+planRoots :: ICtx -> Env -> Expr -> [ChainName]
+planRoots ctx env e = Set.toList (Set.fromList ([ cnOf e | isJust (planReadOf (icProg ctx) e) ] ++ boundPlanRoots ctx env e))
+
+-- | The plan reads an expression projects from through the variables it
+-- reads ('planRoots' without the expression itself).
+boundPlanRoots :: ICtx -> Env -> Expr -> [ChainName]
+boundPlanRoots ctx env e = concatMap fromVar (Set.toList (freeVarsExpr e))
+  where
+    fromVar v = case Map.lookup v env of
+      Just (Law _ (JPlan rs))  -> rs
+      Just (Law _ (JAffine c)) -> filter (`Set.member` icPlanReads ctx) (Map.keys (acLatents c))
+      _                        -> []
+
+-- | Does a comparison operand project from a plan read through a binding
+-- ('boundPlanRoots')? A plan read in place, bound by nothing, does not count:
+-- the plan-guided engine inverts a binding.
+planDependent :: ICtx -> Env -> Expr -> Bool
+planDependent ctx env = not . null . boundPlanRoots ctx env
+
+-- | The chain names of a program's plan reads.
+planReadCNs :: Program -> Set.Set ChainName
+planReadCNs prog = Set.fromList [ cnOf e | (_, b) <- functions prog, e <- universe b
+                                         , isJust (planReadOf prog e) ]
+  where universe e = e : concatMap universe (getSubExprs e)
+
+-- | The @let@ rule: bind @x@ (the parameter of the literal lambda @lti@) to
+-- the argument, and infer the body under it. Answers the extended
+-- environment, the engine certificates where the binding is random and its
+-- value read ('bindingCerts'), and the body's inference.
+--
+-- A random binding the body reads that no engine handles is bound
+-- sample-only instead (design law-carrying-modality §F): the body is
+-- re-inferred under that, so it, and the declaration, project 'Bottom', and
+-- the compiler promises no inference variant it cannot compile. The
+-- predicates are the engines' own applicability, so the floor cannot
+-- foreclose an engine; where an engine's applicability is fused with its IR
+-- construction, the predicate is its necessary condition and the
+-- compiler's refusal stays the net.
+letBinding :: ICtx -> Env -> TypeInfo -> String -> Expr -> Expr -> Law -> (Env, Maybe [EngineCert], (Law, Expr, GAcc))
+letBinding ctx env lti x body arg argLaw
+  | needsEngine, null certs = (floored, Just certs, inferE ctx floored body)
+  | needsEngine = (env1, Just certs, inferred)
+  | otherwise = (env1, Nothing, inferred)
+  where
+    env1 = bindParam ctx (chainName lti) x arg argLaw env
+    inferred@(bodyLaw, body', _) = inferE ctx env1 body
+    needsEngine = gCap (outerI (lawMod argLaw)) /= Exact
+               && not (isArrow (rType (getTypeInfo arg)))
+               && x `Set.member` freeVarsExpr body
+               && not (determinedByWitnesses env arg)
+    lam' = Expr (setPType lti (projectI (lawMod bodyLaw))) (Lambda x body')
+    certs = bindingCerts ctx lam' arg argLaw
+    floored = Map.adjust (\(Law m _) -> Law (sampleOnlyI m) JUnjustified) x env1
+    isArrow (TArrow _ _) = True
+    isArrow _ = False
+
+-- | Is a value a function of witnessed variables alone: it draws nothing
+-- fresh itself, and every variable it reads is a point or witnessed? The
+-- compiler recovers a witnessed variable from the observation before it
+-- reaches a binding of such a value, which is then deterministic there and
+-- needs no engine of its own (@draw y = x in ...@ with @x@ witnessed).
+determinedByWitnesses :: Env -> Expr -> Bool
+determinedByWitnesses env arg = not (hasRandomLeaf arg) && all pinned (Set.toList (freeVarsExpr arg))
+  where pinned v = case Map.lookup v env of
+          Just (Law m _) -> inputIsPoint m
+          Nothing -> True
+
+-- | The certificates of the engines that apply to a random binding: the
+-- literal lambda @lam@ (its body annotated) applied to @arg@, of law
+-- @argLaw@. In IRCompiler's dispatch order: enumeration, plan-guided
+-- enumeration, point inversion, affine marginalisation, set-valued
+-- witnesses. Lazy, so asking whether any applies evaluates the predicates
+-- only up to the first that does.
+bindingCerts :: ICtx -> Expr -> Expr -> Law -> [EngineCert]
+bindingCerts ctx lam arg argLaw = catMaybes
+  [ CertEnumerable <$> enumerableApplication fc prog lam arg
+  , (\(n, _, _) -> CertPlan n) <$> planReadOf prog arg
+  , CertWitnessed <$> pointWitnessCert fc (icADTs ctx) (icObs ctx) lamCN
+  , CertAffine <$> affineBindingCert x arg argLaw body
+  , CertWorlds <$> worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) permissiveDet) occs body
+  ]
+  where
+    fc = icFC ctx
+    prog = icProg ctx
+    lamCN = cnOf lam
+    (x, body) = case lam of
+      Expr _ (Lambda v b) -> (v, b)
+      _ -> error "bindingCerts: the head of a let is a lambda"
+    occs = maybe [] id (lookup lamCN (lambdaVarOccurrences fc))
+
+-- | The affine collapse's certificate for binding @x@ to @arg@ over @body@:
+-- the argument's affine form ('affineOf'), when it has latents and every
+-- occurrence of @x@ flows into one affine consumer -- the value of a directly
+-- nested binding, or the let spine's terminal expression. That is
+-- @IRCompiler.affineMarginalisable@'s shape check, read syntactically: a part
+-- @x@ does not reach is admitted when it is Gaussian, deterministic or draws
+-- nothing fresh, and a call is admitted, since only the compile in scope can
+-- enter it.
+affineBindingCert :: String -> Expr -> Law -> Expr -> Maybe AffineCert
+affineBindingCert x arg argLaw body = case affineOf (cnOf arg) argLaw of
+  Just c | not (Map.null (acLatents c)), not (isArrow (rType (getTypeInfo body))), spineOK body -> Just c
+  _ -> Nothing
+  where
+    vFree = freeVarsExpr arg
+    readsX e = x `Set.member` freeVarsExpr e
+    spineOK (Expr _ (Apply lam@(Expr _ (Lambda y inner)) val))
+      | readsX val = not (readsX lam) && shaped val
+      | y == x || y `Set.member` vFree = False
+      | otherwise = spineOK inner
+    spineOK t = readsX t && shaped t
+    quiet e = pType (getTypeInfo e) `elem` [Deterministic, PNormal] || not (hasRandomLeaf e)
+    constant e = not (readsX e) && (pType (getTypeInfo e) == Deterministic || not (hasRandomLeaf e))
+    shaped e
+      | not (readsX e) = quiet e
+      | otherwise = case e of
+          Expr _ (Var n) -> n == x
+          Expr _ (Apply _ _) -> True
+          Expr _ (InjF (Named "plus") [a, b]) -> shaped a && shaped b
+          Expr _ (InjF (Named "mult") [a, b]) -> (constant a && shaped b) || (constant b && shaped a)
+          Expr _ (InjF (Named "neg") [a]) -> shaped a
+          _ -> False
+    isArrow (TArrow _ _) = True
+    isArrow _ = False
 
 -- | The law a free-standing lambda binds its parameter to: the representative
 -- of the parameter's type. Shared with 'envAt'.
@@ -815,27 +1006,13 @@ lambdaParamLaw = bareLaw . lambdaParamMod
 -- holding the head, as in 'inferE'. A head in no declaration (a synthesized
 -- node) is one forward chaining never saw, which 'letBoundLaw' does not ask
 -- either, so the binding is unwitnessed.
-bindingLawEnv :: ReinferCtx -> ChainName -> String -> ChainName -> Law -> Env -> Env
+bindingLawEnv :: ReinferCtx -> ChainName -> String -> Expr -> Law -> Env -> Env
 bindingLawEnv rc headCN = bindParam ctx headCN
   where
     ctx = case find (containsCN . snd) (rcDecls rc) of
-      Just (_, b) -> ICtx (rcADTs rc) (rcFC rc) (cnOf b) (hasReadNN b)
-      Nothing     -> ICtx (rcADTs rc) (rcFC rc) headCN False
+      Just (_, b) -> mkICtx (rcADTs rc) (rcFC rc) (cnOf b) (rcProg rc)
+      Nothing     -> mkICtx (rcADTs rc) (rcFC rc) headCN (rcProg rc)
     containsCN e = cnOf e == headCN || any containsCN (getSubExprs e)
-
--- | Does this declaration body contain a neural read anywhere?
---
--- The question 'compareGround' actually wants is "could the plan-guided engine
--- compile a comparison in this declaration?", and that engine exists only for
--- observations over a neural network's structured output. A declaration with no
--- 'ReadNN' in it can never reach the engine, so there the closed forms
--- 'compareGround' enumerates are exhaustive. This is the coarse, conservative
--- direction of that question: the engine's real applicability depends on which
--- @let@ is being inverted and what the plan slices look like, which this pass
--- cannot see.
-hasReadNN :: Expr -> Bool
-hasReadNN (Expr _ (ReadNN _ _)) = True
-hasReadNN (Expr _ f)            = any hasReadNN f
 
 -- | The environment an @if@'s arms are inferred under: every let-bound random
 -- variable the condition reads is rebound to its law /conditioned on the
@@ -864,8 +1041,12 @@ hasReadNN (Expr _ f)            = any hasReadNN f
 conditionEnv :: Env -> Expr -> Env
 conditionEnv env c = foldr refine env (Set.toList (freeVarsOf c))
   where refine v e = case Map.lookup v e of
-          Just l | gCap (outerI (lawMod l)) /= Exact -> Map.insert v (bareLaw (conditionI (lawMod l))) e
+          Just l | gCap (outerI (lawMod l)) /= Exact -> Map.insert v (provenance l (bareLaw (conditionI (lawMod l)))) e
           _                                          -> e
+        -- Which plan reads a value projects from survives conditioning: it is
+        -- where the value comes from, not its law.
+        provenance (Law _ (JPlan rs)) (Law m _) = Law m (JPlan rs)
+        provenance _ l = l
 
 -- | A law restricted to the event some condition on its value holds. The
 -- capability set survives (restriction preserves having a density / CDF /
@@ -917,8 +1098,8 @@ independentOperands env a b = not (any randomLocal (Set.toList shared))
           Nothing -> False
 
 -- | Comparison (@>@\/@<@): the Boolean result is a Bernoulli (finite support).
--- @plan@ says the enclosing declaration could reach the plan-guided engine
--- ('hasReadNN'); @enumA@\/@enumB@ say whether the left\/right operand is
+-- @plan@ says both operands project from plan reads through bindings
+-- ('planDependent'); @enumA@\/@enumB@ say whether the left\/right operand is
 -- enumerable ('enumerableOperand').
 --
 -- The capability rung is decided by whether a closed form for /this pair of
@@ -935,8 +1116,8 @@ independentOperands env a b = not (any randomLocal (Set.toList shared))
 -- still gets its @generate@ function, and a probability query is declined with a
 -- message naming the mode instead of taking the process down.
 --
--- The three closed forms admitted here each mirror one @toIRInference@ equation,
--- and this list must not outrun that one:
+-- The closed forms admitted here each mirror one engine of @IRCompiler@, and
+-- this list must not outrun those:
 --
 --   * __one side 'Exact'__ — the random side's own CDF evaluated at the fixed
 --     bound (@fixed_bound@\/@rhs_integral@\/@lhs_integral@).
@@ -954,19 +1135,19 @@ independentOperands env a b = not (any randomLocal (Set.toList shared))
 --     ('independentOperands') says no random local is read by both. A shared
 --     one (@draw t = .. in (Uniform + t) < t@) correlates them, and no
 --     equation measures that (task uniform-below-random-threshold-no-forward).
---
--- The @plan@ flag is the fourth, and the one this pass cannot decide: the
--- plan-guided engine measures a pairwise comparison of two continuous leaves of
--- a neural plan by that same difference Gaussian (@testCases\/planEnumContPair@),
--- but the leaves reach the comparison as @fst p@\/@snd p@ off a @let@-bound
--- neural read, and by then their Gaussian family is long gone from the flat
--- ground — a @(Float, Float)@ net is one family-free 'gIntegrate'. Rather than
--- guess at the engine's applicability, the narrowing simply does not apply to a
--- declaration containing a 'ReadNN': such a declaration keeps exactly the
--- verdict it had before this rule existed, so no neural program's typing moves.
--- The residue — a genuinely unsupported comparison inside a neural program still
--- reaching the IRCompiler catch-all — is the follow-up item
--- @comparison-closed-form-verdict-for-plan-leaves@.
+--   * __both sides projecting from plan reads__ — the plan-guided engine
+--     measures a pairwise comparison of two continuous leaves of a neural
+--     plan by that same difference Gaussian (@planEnumContPair@), but the
+--     leaves reach the comparison as @fst p@\/@snd p@ off a @let@-bound
+--     neural read, and by then their Gaussian family is gone from the flat
+--     ground. What the engine needs is the plan certificate of the binding
+--     each operand projects from (a 'JPlan' binder, or an affine form over a
+--     plan read: 'planDependent'), which is that engine's own predicate
+--     ('SPLL.AutoNeural.planReadOf'). Its per-node support is fused with its
+--     IR construction, so it is the necessary condition, and the compiler's
+--     refusal stays the net (task engine-applicability-as-data, closing
+--     @comparison-closed-form-verdict-for-plan-leaves@'s coarse
+--     declaration-wide flag).
 compareGround :: Bool -> Bool -> Bool -> Bool -> GroundMod -> GroundMod -> GroundMod
 compareGround plan enumA enumB indep a b
   | gCap a == Exact && gCap b == Exact = groundMod Exact        Finite FamNone
@@ -1147,9 +1328,10 @@ tryNormalClosure _      _                           = Nothing
 -- Over-approximating merges components, which only costs iterations; it never
 -- changes the fixpoint. (Pure non-terminating recursion would sit at the top —
 -- the totality axis, design §10, is the principled handle and is deferred.)
-summaries :: [ADTDecl] -> FCData -> [FnDecl] -> Env
-summaries adtsDecl fcData decls = foldl solve Map.empty components
+summaries :: FCData -> Program -> Env
+summaries fcData prog = foldl solve Map.empty components
   where
+    decls      = functions prog
     declNames  = Set.fromList (map fst decls)
     components = stronglyConnComp
                    [ ((n, b), n, callees b) | (n, b) <- decls ]
@@ -1171,7 +1353,7 @@ summaries adtsDecl fcData decls = foldl solve Map.empty components
 
     inferDecl env b = fst3 (inferE (declCtx b) env b)
     fst3 (x,_,_) = x
-    declCtx b = ICtx adtsDecl fcData (cnOf b) (hasReadNN b)
+    declCtx b = mkICtx (adts prog) fcData (cnOf b) prog
 
 -- ---------------------------------------------------------------------------
 -- Public entry points
@@ -1191,11 +1373,11 @@ inferProgram fcData prog = (prog', Map.fromList acc)
   where (prog', acc) = inferProgramAcc fcData prog
 
 inferProgramAcc :: FCData -> Program -> (Program, GAcc)
-inferProgramAcc fcData (Program decls nns adtDecls enc sigs) =
+inferProgramAcc fcData prog@(Program decls nns adtDecls enc sigs) =
   (Program decls' nns adtDecls enc sigs, concat accs)
   where
-    env = summaries adtDecls fcData decls
-    results = [ (n, inferE (ICtx adtDecls fcData (cnOf b) (hasReadNN b)) env b)
+    env = summaries fcData prog
+    results = [ (n, inferE (mkICtx adtDecls fcData (cnOf b) prog) env b)
               | (n, b) <- decls ]
     decls'  = [ (n, e) | (n, (_, e, _)) <- results ]
     accs    = [ a | (_, (_, _, a)) <- results ]
@@ -1216,11 +1398,12 @@ data ReinferCtx = ReinferCtx
   , rcFC        :: FCData
   , rcDecls     :: [FnDecl]
   , rcSummaries :: Env
+  , rcProg      :: Program
   }
 
 reinferCtx :: FCData -> Program -> ReinferCtx
-reinferCtx fcData (Program decls _ adtDecls _ _) =
-  ReinferCtx adtDecls fcData decls (summaries adtDecls fcData decls)
+reinferCtx fcData prog@(Program decls _ adtDecls _ _) =
+  ReinferCtx adtDecls fcData decls (summaries fcData prog) prog
 
 -- | Re-annotate @target@ as 'inferE' would, given that each of @pins@ names a
 -- variable whose value is known -- recovered from the observation by an
@@ -1254,7 +1437,7 @@ reinferGiven rc pins target = e'
       (b, env) : _ -> (declCtx b, env)
       [] -> (declCtx target, Map.union (annotatedFreeLaws target) (rcSummaries rc))
     (_, e', _) = inferE ctx (Map.union pinMap env0) target
-    declCtx b = ICtx (rcADTs rc) (rcFC rc) (cnOf b) (hasReadNN b)
+    declCtx b = mkICtx (rcADTs rc) (rcFC rc) (cnOf b) (rcProg rc)
 
 -- | The free variables of an expression at the law their current annotation
 -- projects: the fallback environment of 'reinferGiven' for a node it cannot
@@ -1276,11 +1459,11 @@ envAt :: ICtx -> Set.Set String -> Env -> ChainName -> Expr -> Maybe Env
 envAt ctx pins env cn e
   | cnOf e == cn = Just env
   | otherwise = case e of
-      Expr _ (Apply f@(Expr lti (Lambda x body)) arg) ->
+      Expr _ (Apply f@(Expr _ (Lambda x body)) arg) ->
         firstJust
           [ envAt ctx pins env cn arg
           , if cnOf f == cn then Just env else Nothing
-          , envAt ctx pins (pin x (bindParam ctx (chainName lti) x (cnOf arg) (argLaw arg) env)) cn body ]
+          , envAt ctx pins (pin x (letEnv arg)) cn body ]
       Expr ti (Lambda x body) ->
         envAt ctx pins (pin x (Map.insert x (bareLaw (lambdaParamMod ti)) env)) cn body
       Expr _ (IfThenElse c t f) ->
@@ -1289,5 +1472,10 @@ envAt ctx pins env cn e
       _ -> firstJust (map (envAt ctx pins env cn) (getSubExprs e))
   where
     pin x en = if x `Set.member` pins then Map.insert x (bareLaw (IG gExact)) en else en
-    argLaw arg = let (l, _, _) = inferE ctx env arg in l
+    letEnv arg = case e of
+      Expr _ (Apply (Expr lti (Lambda x body)) _) ->
+        let (l, arg', _) = inferE ctx env arg
+            (env', _, _) = letBinding ctx env lti x body arg' l
+        in env'
+      _ -> env
     firstJust = foldr (\m r -> maybe r Just m) Nothing

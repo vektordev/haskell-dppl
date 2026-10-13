@@ -78,8 +78,16 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
   [ testGroup "motivating programs (family composes through structured Mod)"
       [ testCase "MProd: tuple round-trip stays PNormal" $
           -- fst/snd recover the per-component family; the affine sum of two
-          -- Normals is Normal (design program 1).
+          -- Normals is Normal (design program 1). Projected out of tuples in
+          -- place: a @draw@-bound pair read through both fields has no
+          -- inference engine, so it is sample-only (the next case).
           assertEqual "" PNormal $
+            mainPType "main = fst (Normal + 1.0, 2.0) + snd (1.0, 2.0 * Normal)"
+      , testCase "MProd through a draw: no engine applies, so the pair is sample-only" $
+          -- Neither point-invertible (two occurrences), nor affine (a tuple
+          -- has no form), nor set-witnessable (a sum of two occurrences):
+          -- the let rule binds it sample-only (task engine-applicability-as-data).
+          assertEqual "" Bottom $
             mainPType "main = draw pair = (Normal + 1.0, 2.0 * Normal) \
                       \in fst pair + snd pair"
       , testCase "MArr/phi: family survives application (β-reduction)" $
@@ -153,12 +161,16 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           -- The control: same arms, a Dirac condition -- the family survives.
           assertEqual "" PNormal $
             mainPType "main = draw s = Normal in if 0.1 < 0.5 then s + 1.0 else s"
-      , testCase "a variable the condition does not read is untouched" $
+      , testCase "a variable the condition does not read is untouched" $ do
           -- @c@ is conditioned in the arms, @s@ is not: @s + 1.0@ stays a witnessed
           -- PNormal image on each arm; only the random-condition mixture drops it.
-          assertEqual "" Integrate $
-            mainPType "main = draw s = Normal in draw c = Uniform in \
-                      \if c < 0.5 then s + 1.0 else s"
+          -- @s@ is witnessed by the tuple's first field: with the mixture as the
+          -- only reader, no engine would apply to its binding, and the let rule
+          -- would bind it sample-only before conditioning is reached.
+          let src = "main = draw s = Normal in (s, draw c = Uniform in \
+                    \if c < 0.5 then s + 1.0 else s)"
+          assertEqual "the mixture" Integrate (pTypeAt "main" [0, 0, 1, 0, 0] src)
+          assertEqual "an arm" PNormal (pTypeAt "main" [0, 0, 1, 0, 0, 1] src)
       , testCase "three manually unrolled gated steps are Bottom" $
           assertEqual "" Bottom $
             mainPType "main = draw s1 = 3.0 + Normal in if s1 < 0.0 then 0.0 else \
@@ -736,11 +748,11 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           let src = "main = draw x = Uniform in (x, 1.0)"
               (p, fc, laws) = lawsOf src
               body = fromMaybe (error "no main") (lookup "main" (functions p))
-              (headCN, argCN) = case body of
-                Expr _ (Apply h a) -> (chainName (getTypeInfo h), chainName (getTypeInfo a))
+              (headCN, arg) = case body of
+                Expr _ (Apply h a) -> (chainName (getTypeInfo h), a)
                 _ -> error "main is not a draw"
-              argLaw = fromMaybe (error "no law for the argument") (Map.lookup argCN laws)
-              env = bindingLawEnv (reinferCtx fc p) headCN "x" argCN argLaw Map.empty
+              argLaw = fromMaybe (error "no law for the argument") (Map.lookup (chainName (getTypeInfo arg)) laws)
+              env = bindingLawEnv (reinferCtx fc p) headCN "x" arg argLaw Map.empty
           in case Map.lookup "x" env of
                Just (Law (IWit _) j) -> assertEqual "" "leaf Uniform" (renderJustification j)
                Just (Law _ j) -> assertFailure ("x bound unwitnessed, as " ++ renderJustification j)
@@ -761,9 +773,14 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
       , testCase "a scale by a constant keeps the form; a product of two latents has none" $ do
           assertEqual "" 1 (latentCount (justAt [] "main = Normal * 3.0"))
           assertEqual "" "unjustified" (justAt [] "main = Normal * Normal")
-      , testCase "fields sharing a marginal latent: the certificate says so, and the tuple is Bottom" $ do
+      , testCase "fields sharing a marginal latent: no engine applies to the binding, and the tuple is Bottom" $ do
+          -- The affine collapse needs one consumer, and there are two. Since
+          -- engine-applicability-as-data the let rule finds no engine and binds
+          -- x sample-only, which comes before the tuple's shared-latent
+          -- certificate ('JSharedLatent', which the multivariate density of
+          -- affine-gaussian-forms M2 is to consume) is reached.
           let src = "main = draw x = Normal in (x + Normal, x + Normal)"
-          assertBool "no shared-latent certificate" ("sharing latent" `isInfixOf` justAt [] src)
+          assertEqual "" "binding: no engine (sample-only)" (justAt [0] src)
           assertEqual "" Bottom (mainPType src)
       , testCase "two uses of one sum share both its latents" $
           assertEqual "" Bottom (mainPType "main = draw x = Normal in draw y = Normal in (x + y, x + y)")

@@ -38,14 +38,16 @@ import PredefinedFunctions
 import SPLL.Analysis (enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
-import Data.Either (isRight, partitionEithers)
+import Data.Either (partitionEithers)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
-import SPLL.AutoNeural
+import SPLL.AutoNeural hiding (planReadOf)
+import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
 import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf)
+import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
@@ -591,17 +593,19 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
           normalFun = presentVariant normalE,
           refusedVariants = refusedVariant "gen" genE ++ refusedVariant "prob" probE
                             ++ refusedVariant "integ" integE ++ refusedVariant "normal" normalE
-                            ++ comparisonRefusal "prob" noProb ++ comparisonRefusal "integ" noInteg,
+                            ++ intractableRefusal "prob" noProb ++ intractableRefusal "integ" noInteg,
           groupDoc="Function group " ++ name}
         -- A variant absent because its pType is intractable is otherwise absent
         -- without a reason. When the intractability starts at a comparison
         -- with no closed form for its operands, say so (task
         -- uniform-below-random-threshold-no-forward: @draw x = Uniform in
         -- (x < 0.5, Uniform < x)@ compiled with exit 0 and no word on why
-        -- the probability function was missing).
-        comparisonRefusal lbl suppressed
+        -- the probability function was missing), and likewise at a binding no
+        -- inference engine applies to (task engine-applicability-as-data).
+        intractableRefusal lbl suppressed
           | suppressed || admittedPT pt = []
-          | otherwise = [ (lbl, VariantRefusal why cn) | Just (why, cn) <- [comparisonWithoutClosedForm binding] ]
+          | otherwise = [ (lbl, VariantRefusal why cn)
+                        | Just (why, cn) <- [comparisonWithoutClosedForm binding <|> bindingWithoutEngine laws binding] ]
         -- Generate per-component normal functions for tuple outputs
         tupleNormalFuns = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
         -- One extra 'IRFunGroup' per 'extraSemirings' entry (task
@@ -814,6 +818,24 @@ comparisonWithoutClosedForm e@(Expr ti f) = case f of
           ++ " when one side is deterministic, both sides are Gaussian, both sides are"
           ++ " enumerable, or one side is enumerable and the two read no random variable"
           ++ " in common"
+
+-- | The first random binding in an expression that no inference engine
+-- applies to -- its applied lambda's certificate ('lawTable') lists none, so
+-- the modality engine bound it sample-only (task engine-applicability-as-data)
+-- -- with a diagnostic and its chain name.
+bindingWithoutEngine :: LawTable -> Expr -> Maybe (String, ChainName)
+bindingWithoutEngine laws e@(Expr _ f) = case f of
+  Apply (Expr lti (Lambda x _)) _
+    | Just (ModalityInfer.Law _ (ModalityInfer.JBinding [])) <- Map.lookup (chainName lti) laws ->
+        Just (why x lti, chainName lti)
+  _ -> listToMaybe (mapMaybe (bindingWithoutEngine laws) (getSubExprs e))
+  where
+    why x lti = "no inference engine applies to the binding of '" ++ x ++ "'"
+      ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
+      ++ ": its value is random and the body reads it, but it is not enumerable,"
+      ++ " not a neural plan read, not point-invertible from the observation, has no"
+      ++ " affine Gaussian form flowing into one consumer, and the observation has no"
+      ++ " set-valued inverse onto it. The binding is sample-only, and so is the function"
 
 -- | The operands of a comparison against a random enumerable bound, when the
 -- 'toIRInference' equation of that name applies: @Just (enumIsLeft, enumSide,
@@ -1838,10 +1860,9 @@ type LawEnv = ModalityInfer.Env
 -- certificate ('lawTable'); an argument the table does not hold (a node an
 -- engine synthesized) is taken at the law its annotation projects.
 withBindingLaw :: CompilerMetadata -> Binding -> String -> CompilerMetadata
-withBindingLaw meta b var = meta { lawEnv = bindingLawEnv (reinferContext meta) headCN var argCN argLaw (lawEnv meta) }
+withBindingLaw meta b var = meta { lawEnv = bindingLawEnv (reinferContext meta) headCN var (bindArg b) argLaw (lawEnv meta) }
   where
     headCN = chainName (getTypeInfo (bindHead b))
-    argCN  = chainName (getTypeInfo (bindArg b))
     argLaw = nodeLaw meta (bindArg b)
 
 -- | A node's certificate ('lawTable'), or for a node the table does not hold
@@ -8245,9 +8266,7 @@ planWorldMass sr raws w =
 -- declined.
 planWitnessApply :: CompilerMetadata -> Bool -> RType -> Binding -> IRExpr -> CompilerMonad (Either (Maybe String) PResult)
 planWitnessApply meta0 cumulative rt binding sample
-  | isJust (bindScope binding)
-  , not (isArrow rt)
-  , Just (nnName, plan, symArg) <- planReadOf meta0 (bindArg binding)
+  | Just (nnName, plan, symArg) <- planApplicable meta0 rt binding
   = do
       -- Bind the curried callee's leading parameters (none for a draw or a
       -- one-parameter callee) under fresh names, in the caller's scope.
@@ -8307,23 +8326,11 @@ planWitnessApply meta0 cumulative rt binding sample
               else return (Right (zipResult (\anyVal e -> IRIf (IRUnaryOp OpIsAny sample) anyVal e)
                                     (mass (srOne (semiringOf meta))) measured))
   | otherwise = return (Left Nothing)
-  where
-    isArrow (TArrow _ _) = True
-    isArrow _            = False
 
--- | The neural read an expression is, when the plan engine can traverse it:
--- the network's name, the 'PartitionPlan' of its output (from its @of@
--- annotation, else auto-derived from its type -- no annotation is required)
--- and the symbol argument.
+-- | The neural read an expression is, when the plan engine can traverse it
+-- ('SPLL.AutoNeural.planReadOf' in this compile's program).
 planReadOf :: CompilerMetadata -> Expr -> Maybe (String, PartitionPlan, Expr)
-planReadOf meta v
-  | Expr _ (ReadNN nnName symArg) <- v
-  , Just (_, declTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals (compilingProgram meta))
-  , Just targetTy <- neuralValueType declTy
-  , let resolved = resolvePartitionAnnotation (writeLogitsDecls (compilingProgram meta)) targetTy declTag
-  , isJust resolved || isRight (autoDeriveMultiValue (adtDecls meta) targetTy)
-  = Just (nnName, makePartitionPlan (adtDecls meta) targetTy resolved, symArg)
-  | otherwise = Nothing
+planReadOf meta = AutoNeural.planReadOf (compilingProgram meta)
 
 -- | The compiled inference function a call to top-level function @n@ must
 -- reference, given the semiring the CALLER is being compiled under.
@@ -8352,6 +8359,39 @@ calleeInferenceName meta cumulative n = case semiringFamily meta of
         ++ show (n ++ semiringGroupInfix fam ++ "_integ") ++ " to call. Compile this "
         ++ "program without requesting that semiring, or inline the call.")
     | otherwise -> return (n ++ semiringGroupInfix fam ++ "_prob")
+
+-- | One engine of a probabilistic application: its name, and, where it
+-- applies, its construction, which takes the diagnostic an earlier engine
+-- that declined left and either declines in turn ('Left', with its own) or
+-- answers.
+type BindingEngine = (String, Maybe (Maybe String -> CompilerMonad (Either (Maybe String) PResult)))
+
+-- | Try the engines in order, first applicable wins ('applyBinding'); a
+-- construction that declines hands on to the next applicable one. @none@
+-- answers when every engine is inapplicable or declined.
+dispatchEngines :: [BindingEngine] -> (Maybe String -> CompilerMonad PResult) -> CompilerMonad PResult
+dispatchEngines engines none = go Nothing engines
+  where
+    go diag [] = none diag
+    go diag ((_, Nothing) : rest) = go diag rest
+    go diag ((_, Just run) : rest) = run diag >>= either (\d -> go (d <|> diag) rest) return
+
+-- | The plan-guided engine's applicability to a binding: its argument is a
+-- plan read ('planReadOf', the predicate the modality engine reads too), its
+-- body is meaningful at this call site ('bindScope'), and it is not
+-- function-valued.
+planApplicable :: CompilerMetadata -> RType -> Binding -> Maybe (String, PartitionPlan, Expr)
+planApplicable meta rt binding
+  | isJust (bindScope binding), not (isTArrowType rt) = planReadOf meta (bindArg binding)
+  | otherwise = Nothing
+
+-- | The set-witness engine's applicability to a binding: the shape walk of
+-- 'SPLL.Typing.ForwardChaining.worldsShape' over its body, as the modality
+-- engine's let rule asks it.
+setWitnessApplicable :: CompilerMetadata -> Binding -> Maybe WorldsShape
+setWitnessApplicable meta binding =
+  worldsShape (WorldsCtx (fcData meta) (adtDecls meta) (functions (compilingProgram meta)) permissiveDet)
+              (bindOccs binding) (bindBody binding)
 
 -- | The probabilistic 'Apply' arm's engines, over one resolved application
 -- ('Binding'): plan-guided enumeration, point inversion with its body factor,
@@ -8406,339 +8446,353 @@ applyBinding meta cumulative rt binding sample = do
    let fieldWitnessUnfolded = underField && not cumulative && not inlineBody && isNothing namedCall
    let pointInversion = if fieldWitnessUnfolded then Nothing
                         else toInvExprMaybe clauses localAdts lChainName
-   planRes <- planWitnessApply meta cumulative rt binding sample
-   case planRes of
-    Right result -> return result
-    Left planDiag -> case pointInversion of
-     -- No occurrence of the bound variable is point-invertible from the
-     -- observation either. Fall back to set-valued witnesses: invert the
-     -- observation structurally into guarded constraint sets on the bound
-     -- variable (intervals from comparisons, case splits from ifs,
-     -- intersections across occurrences) and measure them against the bound
-     -- distribution (design set-valued-witnesses).
-     -- Before that, a binding whose certificate is an affine Gaussian form,
-     -- all of whose uses flow affinely into one density leaf, needs no
-     -- witness at all: it is integrated out analytically inside that leaf
-     -- (task affine-gaussian-closure-lost-across-let-bindings; dispatched on
-     -- the certificate since law-carrying-modality M4, not offered as the
-     -- set-witness engine's fallback).
-     Nothing -> case affineMarginalisable meta rt binding of
-       Just (x, lamBody) -> do
+   -- A binding whose certificate is an affine Gaussian form, all of whose
+   -- uses flow affinely into one density leaf, needs no witness at all: it is
+   -- integrated out analytically inside that leaf (task
+   -- affine-gaussian-closure-lost-across-let-bindings; dispatched on the
+   -- certificate since law-carrying-modality M4, not offered as the
+   -- set-witness engine's fallback).
+   let affineCollapse x lamBody = do
           form <- affineFormOf meta v
           let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) x) binding x)
                            { affineEnv = (x, form) : affineEnv meta }
           toIRInference bodyMeta cumulative lamBody sample
-       Nothing -> setWitnessApply meta cumulative rt binding planDiag sample
-     Just chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} -> do
-      -- A cumulative query transports a bound, rounded at integer quotients
-      -- (task cdf-through-discrete-inverse-wrong); a point query the point.
-      let (invExprP0, invExprGuard0)
-            | cumulative = (invCumValue chain, invCumGuard chain)
-            | otherwise  = (invValue chain, invGuard chain)
-      -- A CUMULATIVE query transports a bound through each step, and an '=='
-      -- or constructor-test step has none to transport. Observed True, the
-      -- bound @<= True@ holds for either outcome, so it constrains nothing --
-      -- yet the step recovered the compared point, and @right (v2 == 0)@ at
-      -- cdf(Right True) answered P(v2 = 0) rather than 1. Observed False, it
-      -- recovers the set "any value but this one" ('VAnyExcept'), neither a
-      -- bound nor a point: the interpreter compared it as a point, and no text
-      -- backend can render it, so 'anyExceptCodegenRefusal' refused the whole
-      -- module, the probability function's queries included (task
-      -- fuzz-unconsumed-vanyexcept-reaches-codegen, second seed). Either
-      -- polarity is wrong, so the cumulative variant is refused. A step handed
-      -- a wildcard the chain made up never shows the sentinel here: forward
-      -- chaining replaces it by the wildcard ('injectedWildcards').
-      --
-      -- A point query's '==' arm is refused at run time by forward chaining
-      -- ('SPLL.Typing.ForwardChaining.toPointValueExpr'); a constructor
-      -- test's keeps the sentinel, which the bound value's own inference
-      -- answers in some shapes (a single-constructor value observed False is
-      -- impossible, tupleCtorTestOfSharedDraw at @(False, ANY)@; task
-      -- point-inversion-vanyexcept-witness-crashes).
-      when (cumulative && hasAnyExceptExpr invExprP0) $
-        refuse lChainName ("cannot compute a cumulative distribution through binding '"
-          ++ (case l of Expr _ (Lambda n _) -> n; _ -> toInvCN)
-          ++ "': it is recovered through an == or constructor test, which transports no bound"
-          ++ " (task fuzz-unconsumed-vanyexcept-reaches-codegen)")
-      invExprP        <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
-      invExprCoV      <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
-      invExprGuard    <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
-      invExprReadsAny <- pruneDeadLetIns <$> materializeAnchors meta invExprReadsAny0
-      let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
-      let lInv = IRLambda (boundVar ++ tag) invExprP
-      -- Apply the sample to the inverse
-      let appliedSample = IRApply lInv sample
-      -- The inversion chain may pass through a deconstructing InjF whose inverse
-      -- (e.g. fromLeft/fromRight) is only applicable on one arm (isLeft/isRight):
-      -- 'guard' is False exactly when `sample` falls outside that domain, in which
-      -- case the whole result below must be forced to zero WITHOUT evaluating it
-      -- (it crashes on out-of-domain input -- observe-partials-umbrella N1b). Each
-      -- `IRIf guard ... 0` below relies on the interpreter's short-circuit
-      -- evaluation of the untaken branch, same as the existing appTestExpr/zeroCheck
-      -- idiom elsewhere in this module.
-      --
-      -- Whether the chain's own arithmetic reads a wildcard ('invReadsAny', see
-      -- 'readsAnyW' below). The domain guard is a step of that same chain --
-      -- @exp@'s applicability test reads the very slot @log@ would -- so it is
-      -- not asked of an unevaluable witness: there it raised a type error in
-      -- the interpreter, and the optimizer folded the comparison on the
-      -- sentinel into a False guard, a silent impossible answer
-      -- (fuzz-admission-oracle-bugs item 8). Every arm below answers a reading
-      -- wildcard before it evaluates the inverse.
-      let readsAnyW = IRApply (IRLambda (boundVar ++ tag) invExprReadsAny) sample
-      let guard = IRIf readsAnyW (IRConst (VBool True)) (IRApply (IRLambda (boundVar ++ tag) invExprGuard) sample)
-      let userVar = case l of Expr _ (Lambda n _) -> n; _ -> toInvCN
-      -- Query-dependent (the wildcard is in the query value), so a runtime
-      -- IRError rather than a static 'refuse'.
-      let anyRefusal = IRError ("cannot compute marginal: binding '" ++ userVar
-            ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
-            ++ " observed slots or further randomness; integrating it out is beyond"
-            ++ " this engine (design modality-witnessed-inference)")
-      -- Do probabilistic inference using the applied inverse; unpruned when the
-      -- cumulative CoV below may flip it through a complement ('covOperandMeta').
-      --
-      -- In its own writer scope: a binding the argument's inference floats (a
-      -- mixture's operands, an enumerated sum) reads the inverse, and floated
-      -- to the enclosing scope it is evaluated before -- and regardless of --
-      -- the domain guard: @draw r = (if Uniform < 0.5 then Stop else Stop) in
-      -- Link 8.4 r@ at @Stop@ ran @lnext Stop@ (found by the admission oracle).
-      -- So the block is bound under the guard, and under the condition every
-      -- arm below reads the result at all: never on an unevaluable witness, and
-      -- where a wildcard witness has its own answer, not on one either.
-      let sr = semiringOf meta
-      let wildcardHasOwnAnswer = case rt of
-            TArrow _ _ -> False
-            _ -> cumulative || inlineBody
-      let resReadable = if wildcardHasOwnAnswer
-            then IRIf readsAnyW (IRConst (VBool False)) (notIR (IRUnaryOp OpIsAny appliedSample))
-            else notIR readsAnyW
-      let operandAt c = do
-            (res0, resBinds) <- lift (runWriterT (toIRInference (covOperandMeta cumulative appliedCoV meta) c v appliedSample))
-            if null resBinds then return res0
-              else shareResult sr "inverted" [guard, resReadable] resBinds res0
-      res <- operandAt cumulative
-      -- Change of variables for the inverse the observation was pushed through;
-      -- a decreasing CDF flip adds the operand's mass at the bound back.
-      scaled <- pointInverseCoV meta cumulative appliedCoV res (operandAt False)
-      let guarded e zero = IRIf guard e zero
-      -- Guarded-to-zero: outside the inverse's domain the whole result is zero,
-      -- and must not be evaluated (short-circuit, see 'guard' above).
-      let guardedZero = guardP sr [guard]
-      -- The recovered variable (and any recovered by enclosing folds) is
-      -- Deterministic for the body's dispatch; re-typing happens after the
-      -- fetch because the fetch always returns original annotations.
-      let recovered = toInvCN : recoveredVars meta
-      let bodyExpr = reinferRecovered meta recovered (bindBody binding)
-      -- The body references the bound variable, so it must be in scope in the type
-      -- environment (mirrors how the Lambda arm descends into a lambda body).
-      let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN) { recoveredVars = recovered }
-      -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
-      -- appliedSample is VAny at runtime iff the slot FC recovers this binding
-      -- from was queried marginally. If the binding is a "sink" — a single
-      -- occurrence and no further randomness in the body — its density
-      -- integrates to 1 and the body factor alone is the correct marginal
-      -- (the ANY-valued occurrence lands in the very slot that is ANY, where
-      -- the deconstruction Save-guard absorbs it). Otherwise the marginal is a
-      -- genuine convolution (or the ANY value would flow into inverse
-      -- arithmetic / observed-slot comparisons), so refuse at runtime rather
-      -- than crash or return a silently wrong density.
-      --
-      -- The occurrence count is forward chaining's, syntactic, and does not
-      -- see through a @draw@: in @draw y = x in (y, y + 1.0)@ the one
-      -- occurrence of @x@ reaches two slots through @y@. Re-inference types
-      -- @y@ Deterministic there, so 'containsRandomSource' no longer
-      -- vetoes it, and the uses are counted through binders as well
-      -- ('usesThroughBinders').
-      let occurrences = bindOccs binding
-      let singleUse = not (bindLeadingArg binding) && length occurrences == 1
-            && usesThroughBinders toInvCN (bindBody binding) <= 1
-      let bindingIsSink = singleUse && not (containsRandomSource bodyExpr)
-      let anyW = IRIf readsAnyW (IRConst (VBool True)) (IRUnaryOp OpIsAny appliedSample)
-      let constResult e = mapResult (const e) (detP (srZero sr))
-      case rt of
-        -- A saturated call of a top-level function (`f v`, `step 2.0 v`) whose
-        -- parameter was just recovered: the body factor is the callee's own
-        -- probability function evaluated at the recovered witness, i.e. the
-        -- deterministic-argument call with the witness in v's place. Inlining the
-        -- body (the literal-lambda fold below) would mis-bind its tagged chain
-        -- names, which is why this used to fall into the single-witness branch
-        -- and drop the body entirely -- every other slot of `x : [x + Normal]`,
-        -- including the consistency indicator on the witnessing one (task
-        -- named-function-list-head-witness-not-recovered).
+   -- Point inversion: the witness recovered by the inverse chain, the
+   -- change of variables, and the body factor at the witness.
+   let pointInvert chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} = do
+        -- A cumulative query transports a bound, rounded at integer quotients
+        -- (task cdf-through-discrete-inverse-wrong); a point query the point.
+        let (invExprP0, invExprGuard0)
+              | cumulative = (invCumValue chain, invCumGuard chain)
+              | otherwise  = (invValue chain, invGuard chain)
+        -- A CUMULATIVE query transports a bound through each step, and an '=='
+        -- or constructor-test step has none to transport. Observed True, the
+        -- bound @<= True@ holds for either outcome, so it constrains nothing --
+        -- yet the step recovered the compared point, and @right (v2 == 0)@ at
+        -- cdf(Right True) answered P(v2 = 0) rather than 1. Observed False, it
+        -- recovers the set "any value but this one" ('VAnyExcept'), neither a
+        -- bound nor a point: the interpreter compared it as a point, and no text
+        -- backend can render it, so 'anyExceptCodegenRefusal' refused the whole
+        -- module, the probability function's queries included (task
+        -- fuzz-unconsumed-vanyexcept-reaches-codegen, second seed). Either
+        -- polarity is wrong, so the cumulative variant is refused. A step handed
+        -- a wildcard the chain made up never shows the sentinel here: forward
+        -- chaining replaces it by the wildcard ('injectedWildcards').
         --
-        -- A call returning a function (`mk v 1.0`, compiled at `mk v`) gets the
-        -- same factor inside the closure over the remaining parameters, which
-        -- the call then also passes on.
-        _ | Just (fName, fArgs) <- namedCall -> do
-              let namedRefusal = IRError ("cannot compute marginal: the argument of '" ++ fName
-                    ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
-                    ++ " observed slots or further randomness; integrating it out is beyond"
-                    ++ " this engine (design modality-witnessed-inference)")
-              argIRs <- mapM (toIRGenerate meta) fArgs
-              calleeName <- calleeInferenceName meta cumulative fName
-              let callee = inferenceCall meta cumulative (IRVar calleeName) sample
-              let call = foldl IRApply callee (argIRs ++ [appliedSample] ++ map IRVar lambdaVars)
-              callVar <- mkVariable "call"
-              let bodyReadable = if bindingIsSink then notIR readsAnyW else notIR anyW
-              let whenAny whenAnySink
-                    | bindingIsSink = IRIf readsAnyW namedRefusal whenAnySink
-                    | otherwise     = namedRefusal
-              let guardAny ok whenAnySink = IRIf anyW (whenAny whenAnySink) ok
-              let withBody bodyRes = guardedZero (zipResult guardAny (prodP sr scaled bodyRes) bodyRes)
-              case rt of
-                -- Inside the closure the call reads its parameters, so its
-                -- binding cannot float out: it is let-bound in place, under the
-                -- same two guards 'shareResult' would have put on it.
-                TArrow _ _ -> do
-                  let impossible = packResult (impossibleP sr)
-                  let guardedCall = IRIf guard (IRIf bodyReadable call impossible) impossible
-                  return (detP (guarded
-                    (wrapInLambdas (IRLetIn callVar guardedCall (packResult (withBody (unpackResult (IRVar callVar))))))
-                    (wrapInLambdas (packResult (detP (srZero sr))))))
-                _ -> do
-                  bodyRes <- shareResult sr "body_factor" [guard, bodyReadable]
-                               [(callVar, call)] (unpackResult (IRVar callVar))
-                  return (withBody bodyRes)
-        TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
-                                     (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr)))))))
-        -- Integrate mode, a binding read more than once, whatever its head
-        -- (a named callee's single witness answered these CDFs wrong too,
-        -- e.g. @f x = (x, x + 1.0)@ at @cdf((0.3, 1.0))@ 0.618 for 0.5): the
-        -- point inversion recovers it from ONE slot, but its other uses
-        -- correlate that slot with the rest of the body, and a joint CDF of
-        -- correlated slots is no product of per-slot factors -- @draw v =
-        -- Uniform in (v, v + 1.0)@ at @cdf((0.5, 1.2))@ is P(v <= min(0.5,
-        -- 0.2)) = 0.2, where the single witness answered 0.5 and the body
-        -- factor (v fixed at its witness, 1.5 <= 1.2 fails) answers 0. No
-        -- engine here measures that region, so the variant is refused rather
-        -- than answered wrong (task tuple-cdf-through-draw-ignores-other-slots).
-        -- A binding read ONCE reaches only the slot it is recovered from, so
-        -- the body's other slots are independent of it and the generic arm
-        -- below folds them in as a body factor, exactly as probability mode
-        -- does: @draw v = Uniform in (v, 2.0)@ at @(0.5, 1.0)@ is 0.5 * [2.0
-        -- <= 1.0] = 0, where the single witness alone answered 0.5.
-        _ | cumulative && not singleUse ->
-              refuse lChainName ("cannot compute a cumulative distribution through binding '" ++ userVar
-                ++ "': it is read more than once, so the slots it reaches are correlated and"
-                ++ " their joint CDF is not a product of per-slot factors"
-                ++ " (task tuple-cdf-through-draw-ignores-other-slots)")
-        _ | not inlineBody ->
-              -- The single witness, where the body cannot be folded in inline
-              -- ('bindInline'): a top-level callee's body (folded by the
-              -- 'namedCall' arm above where it must be), or one that reads a
-              -- variable this scope does not bind. A wildcard witness has no
-              -- answer here (in integrate mode it used to crash in 'irCDF'), and
-              -- an unevaluable one none anywhere. A tuple-valued CDF through
-              -- such a callee still measures only the witnessed slot.
-              let anyHere = if cumulative then anyW else readsAnyW in
-              return (mapResult wrapInLambdas (guardedZero (mapResult (IRIf anyHere anyRefusal) scaled)))
-        _ -> do
-          -- The inversion above only recovers and infers the variable bound by THIS
-          -- lambda. Any additional independent latents bound deeper in the body (e.g. a
-          -- second `let` whose value is repacked alongside this one in a tuple) are not
-          -- captured by the bound-value inference. Infer the body too and fold it in as an
-          -- independent factor: probabilities multiply, dimensions add, branch counts add.
-          -- For a body that is deterministic given the recovered variable, the exact
-          -- inverse makes the body factor an always-true (dim-0) indicator, so the product
-          -- collapses to the original result; only genuinely new latents add density/dim.
-          -- Asking whether the recovered witness IS a wildcard evaluates the
-          -- inverse, and an inverse whose own arithmetic READS one has no value
-          -- to evaluate to: it dies in the interpreter's `Minus` / `Fst` with a
-          -- raw type error, and in the typed backends on the string "ANY" (task
-          -- fc-inverse-refuses-on-any-input). 'invReadsAny' is the chain's own
-          -- static answer to which of its steps read the observation, as a
-          -- runtime disjunction over their inputs, so testing it FIRST is what
-          -- makes the question below safe to ask at all.
+        -- A point query's '==' arm is refused at run time by forward chaining
+        -- ('SPLL.Typing.ForwardChaining.toPointValueExpr'); a constructor
+        -- test's keeps the sentinel, which the bound value's own inference
+        -- answers in some shapes (a single-constructor value observed False is
+        -- impossible, tupleCtorTestOfSharedDraw at @(False, ANY)@; task
+        -- point-inversion-vanyexcept-witness-crashes).
+        when (cumulative && hasAnyExceptExpr invExprP0) $
+          refuse lChainName ("cannot compute a cumulative distribution through binding '"
+            ++ (case l of Expr _ (Lambda n _) -> n; _ -> toInvCN)
+            ++ "': it is recovered through an == or constructor test, which transports no bound"
+            ++ " (task fuzz-unconsumed-vanyexcept-reaches-codegen)")
+        invExprP        <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
+        invExprCoV      <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
+        invExprGuard    <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
+        invExprReadsAny <- pruneDeadLetIns <$> materializeAnchors meta invExprReadsAny0
+        let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
+        let lInv = IRLambda (boundVar ++ tag) invExprP
+        -- Apply the sample to the inverse
+        let appliedSample = IRApply lInv sample
+        -- The inversion chain may pass through a deconstructing InjF whose inverse
+        -- (e.g. fromLeft/fromRight) is only applicable on one arm (isLeft/isRight):
+        -- 'guard' is False exactly when `sample` falls outside that domain, in which
+        -- case the whole result below must be forced to zero WITHOUT evaluating it
+        -- (it crashes on out-of-domain input -- observe-partials-umbrella N1b). Each
+        -- `IRIf guard ... 0` below relies on the interpreter's short-circuit
+        -- evaluation of the untaken branch, same as the existing appTestExpr/zeroCheck
+        -- idiom elsewhere in this module.
+        --
+        -- Whether the chain's own arithmetic reads a wildcard ('invReadsAny', see
+        -- 'readsAnyW' below). The domain guard is a step of that same chain --
+        -- @exp@'s applicability test reads the very slot @log@ would -- so it is
+        -- not asked of an unevaluable witness: there it raised a type error in
+        -- the interpreter, and the optimizer folded the comparison on the
+        -- sentinel into a False guard, a silent impossible answer
+        -- (fuzz-admission-oracle-bugs item 8). Every arm below answers a reading
+        -- wildcard before it evaluates the inverse.
+        let readsAnyW = IRApply (IRLambda (boundVar ++ tag) invExprReadsAny) sample
+        let guard = IRIf readsAnyW (IRConst (VBool True)) (IRApply (IRLambda (boundVar ++ tag) invExprGuard) sample)
+        let userVar = case l of Expr _ (Lambda n _) -> n; _ -> toInvCN
+        -- Query-dependent (the wildcard is in the query value), so a runtime
+        -- IRError rather than a static 'refuse'.
+        let anyRefusal = IRError ("cannot compute marginal: binding '" ++ userVar
+              ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
+              ++ " observed slots or further randomness; integrating it out is beyond"
+              ++ " this engine (design modality-witnessed-inference)")
+        -- Do probabilistic inference using the applied inverse; unpruned when the
+        -- cumulative CoV below may flip it through a complement ('covOperandMeta').
+        --
+        -- In its own writer scope: a binding the argument's inference floats (a
+        -- mixture's operands, an enumerated sum) reads the inverse, and floated
+        -- to the enclosing scope it is evaluated before -- and regardless of --
+        -- the domain guard: @draw r = (if Uniform < 0.5 then Stop else Stop) in
+        -- Link 8.4 r@ at @Stop@ ran @lnext Stop@ (found by the admission oracle).
+        -- So the block is bound under the guard, and under the condition every
+        -- arm below reads the result at all: never on an unevaluable witness, and
+        -- where a wildcard witness has its own answer, not on one either.
+        let sr = semiringOf meta
+        let wildcardHasOwnAnswer = case rt of
+              TArrow _ _ -> False
+              _ -> cumulative || inlineBody
+        let resReadable = if wildcardHasOwnAnswer
+              then IRIf readsAnyW (IRConst (VBool False)) (notIR (IRUnaryOp OpIsAny appliedSample))
+              else notIR readsAnyW
+        let operandAt c = do
+              (res0, resBinds) <- lift (runWriterT (toIRInference (covOperandMeta cumulative appliedCoV meta) c v appliedSample))
+              if null resBinds then return res0
+                else shareResult sr "inverted" [guard, resReadable] resBinds res0
+        res <- operandAt cumulative
+        -- Change of variables for the inverse the observation was pushed through;
+        -- a decreasing CDF flip adds the operand's mass at the bound back.
+        scaled <- pointInverseCoV meta cumulative appliedCoV res (operandAt False)
+        let guarded e zero = IRIf guard e zero
+        -- Guarded-to-zero: outside the inverse's domain the whole result is zero,
+        -- and must not be evaluated (short-circuit, see 'guard' above).
+        let guardedZero = guardP sr [guard]
+        -- The recovered variable (and any recovered by enclosing folds) is
+        -- Deterministic for the body's dispatch; re-typing happens after the
+        -- fetch because the fetch always returns original annotations.
+        let recovered = toInvCN : recoveredVars meta
+        let bodyExpr = reinferRecovered meta recovered (bindBody binding)
+        -- The body references the bound variable, so it must be in scope in the type
+        -- environment (mirrors how the Lambda arm descends into a lambda body).
+        let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN) { recoveredVars = recovered }
+        -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
+        -- appliedSample is VAny at runtime iff the slot FC recovers this binding
+        -- from was queried marginally. If the binding is a "sink" — a single
+        -- occurrence and no further randomness in the body — its density
+        -- integrates to 1 and the body factor alone is the correct marginal
+        -- (the ANY-valued occurrence lands in the very slot that is ANY, where
+        -- the deconstruction Save-guard absorbs it). Otherwise the marginal is a
+        -- genuine convolution (or the ANY value would flow into inverse
+        -- arithmetic / observed-slot comparisons), so refuse at runtime rather
+        -- than crash or return a silently wrong density.
+        --
+        -- The occurrence count is forward chaining's, syntactic, and does not
+        -- see through a @draw@: in @draw y = x in (y, y + 1.0)@ the one
+        -- occurrence of @x@ reaches two slots through @y@. Re-inference types
+        -- @y@ Deterministic there, so 'containsRandomSource' no longer
+        -- vetoes it, and the uses are counted through binders as well
+        -- ('usesThroughBinders').
+        let occurrences = bindOccs binding
+        let singleUse = not (bindLeadingArg binding) && length occurrences == 1
+              && usesThroughBinders toInvCN (bindBody binding) <= 1
+        let bindingIsSink = singleUse && not (containsRandomSource bodyExpr)
+        let anyW = IRIf readsAnyW (IRConst (VBool True)) (IRUnaryOp OpIsAny appliedSample)
+        let constResult e = mapResult (const e) (detP (srZero sr))
+        case rt of
+          -- A saturated call of a top-level function (`f v`, `step 2.0 v`) whose
+          -- parameter was just recovered: the body factor is the callee's own
+          -- probability function evaluated at the recovered witness, i.e. the
+          -- deterministic-argument call with the witness in v's place. Inlining the
+          -- body (the literal-lambda fold below) would mis-bind its tagged chain
+          -- names, which is why this used to fall into the single-witness branch
+          -- and drop the body entirely -- every other slot of `x : [x + Normal]`,
+          -- including the consistency indicator on the witnessing one (task
+          -- named-function-list-head-witness-not-recovered).
           --
-          -- It is folded into 'anyW' rather than wrapped around the result,
-          -- which would be a fifth IRIf level per field: every field already
-          -- reads 'anyW', so putting it here adds no reader and no nesting,
-          -- where 'mapResult' around the whole result grew the emitted chain
-          -- programs up to 6x (the duplication 'shareResult' documents).
-          -- Compile the body factor in its own writer scope: any bindings the
-          -- recursion floats (e.g. the shared `l_*_call` triple of an inner Apply)
-          -- must stay under the recovered-variable binding -- evaluation is
-          -- strict, so a floated binding that mentions the bound variable would
-          -- otherwise be evaluated before the recovered value is in scope.
-          (bodyRes0, bodyBinds) <- lift (runWriterT (toIRInference bodyMeta cumulative bodyExpr sample))
-          -- The recovered value of the bound variable heads that block, so free
-          -- occurrences in the body factor resolve (and redundant comparisons
-          -- collapse to true), and the whole block is bound ONCE ('shareResult'),
-          -- with the fields below projected off it.
-          --
-          -- It used to be kept inline and unpacked field by field, i.e. one copy
-          -- of the block per field that reads it, and the block of a nested
-          -- witnessed let holds the enclosing copies of every inner one: the
-          -- -O0 IR of a K-step observed chain grew ~6x per step, and the optimizer
-          -- spent exponential time folding it back (task
-          -- chained-gaussian-trajectory-compile-exponential). Inline was a
-          -- workaround for 'stripBranchCount' mis-shifting projections off a
-          -- hoisted local result, which it no longer does.
-          --
-          -- Being bound, the block is evaluated wherever its binding lands, not
-          -- where a field reads it, so it carries its own guards: the inverse's
-          -- domain guard (outside it the inverse crashes), and the condition
-          -- under which the body is read at all below -- a sink's body absorbs a
-          -- wildcard-valued witness but not an unevaluable one, and any other
-          -- body is read only when the witness is not a wildcard.
-          --
-          -- Only a body that itself holds a probabilistic let is bound. The
-          -- duplication compounds only through such nesting, and a leaf body
-          -- factor is typically an indicator whose dim and flag fold to
-          -- constants inline but not through a tuple ('shareResult' records
-          -- the -O2 cost of routing constants through one), so the innermost
-          -- level keeps the inline form -- and single-let programs their
-          -- emitted code.
-          let bodyReadable = if bindingIsSink then notIR readsAnyW else notIR anyW
-          let bodyBlock = (toInvCN, appliedSample) : bodyBinds
-          bodyRes <- if holdsProbabilisticLet bodyExpr
-            then shareResult sr "body_factor" [guard, bodyReadable] bodyBlock bodyRes0
-            else return (unpackResult (IRLetIn toInvCN appliedSample
-                                         (generateLetInBlock bodyMeta (bodyRes0, bodyBinds))))
-          -- Independent factors: probabilities multiply, dims add, branch counts add.
-          let combined = prodP sr scaled bodyRes
-          -- A sink's body factor absorbs a wildcard-VALUED witness, which is
-          -- why it may answer with the body alone. It cannot absorb an
-          -- unevaluable one: there is no witness to bind, and letting the body
-          -- proceed with a wildcard in its place is exactly the silent p = 1.0
-          -- this refusal exists to prevent. So a sink refuses here too.
-          -- A wildcard witness -- the recovered value is ANY, or a step of the
-          -- chain read one (unevaluable) -- means the binding's one occurrence
-          -- sits under an ANY slot of the observation, which constrains
-          -- nothing there: the marginal is the body's own inference with the
-          -- binding left random, its occurrence never evaluated (the slot's
-          -- 'anySafe' answers first). That holds for any single-use binding --
-          -- fresh randomness elsewhere in the body is independent of it -- not
-          -- only a sink (fuzz-admission-oracle-bugs item 8: @snd (draw h =
-          -- Uniform in (exp h, True))@ answered p(True) = 0; @draw z = x + 1.0
-          -- in (z, Uniform)@ at @(ANY, 0.5)@ refused). A sink keeps its cheaper
-          -- answer for a wildcard-valued witness, and a body that cannot be
-          -- compiled this way keeps the refusal.
-          unevaluable <- if not singleUse then return (constResult anyRefusal) else do
-            let openBody = bindBody binding
-            let openMeta = withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN
-            r <- lift ((Just <$> runWriterT (toIRInference openMeta cumulative openBody sample))
-                         `catchError` (\_ -> return Nothing))
-            -- Bound ONCE ('shareResult'), like the body factor above: unpacked
-            -- inline, every field of the result carried its own copy of the
-            -- open body, which holds the next binding's fold and so its own
-            -- four copies -- ~8x per binding on independent single-use lets
-            -- (task witness-fold-open-body-copied-per-field). Its guards are
-            -- exactly the conditions 'whenAny' reads it under ('guardedZero'
-            -- adds 'guard' outside): a wildcard witness, and for a sink an
-            -- unevaluable one. As for the body factor, only a body that itself
-            -- holds a probabilistic let is bound: the copies compound only
-            -- through such nesting, and a leaf block's constant dim and flag
-            -- fold away inline but not through the shared tuple.
-            case r of
-              Just (openRes, binds)
-                | holdsProbabilisticLet openBody ->
-                    shareResult sr "open_body" [guard, if bindingIsSink then readsAnyW else anyW] binds openRes
-                | otherwise -> return (unpackResult (generateLetInBlock openMeta (openRes, binds)))
-              Nothing -> return (constResult anyRefusal)
-          let whenAny whenAnySink whenUneval
-                | bindingIsSink = IRIf readsAnyW whenUneval whenAnySink
-                | singleUse     = whenUneval
-                | otherwise     = anyRefusal
-          let guardAny ok whenAnySink whenUneval = IRIf anyW (whenAny whenAnySink whenUneval) ok
-          return (mapResult wrapInLambdas (guardedZero (zip3Result guardAny combined bodyRes unevaluable)))
+          -- A call returning a function (`mk v 1.0`, compiled at `mk v`) gets the
+          -- same factor inside the closure over the remaining parameters, which
+          -- the call then also passes on.
+          _ | Just (fName, fArgs) <- namedCall -> do
+                let namedRefusal = IRError ("cannot compute marginal: the argument of '" ++ fName
+                      ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
+                      ++ " observed slots or further randomness; integrating it out is beyond"
+                      ++ " this engine (design modality-witnessed-inference)")
+                argIRs <- mapM (toIRGenerate meta) fArgs
+                calleeName <- calleeInferenceName meta cumulative fName
+                let callee = inferenceCall meta cumulative (IRVar calleeName) sample
+                let call = foldl IRApply callee (argIRs ++ [appliedSample] ++ map IRVar lambdaVars)
+                callVar <- mkVariable "call"
+                let bodyReadable = if bindingIsSink then notIR readsAnyW else notIR anyW
+                let whenAny whenAnySink
+                      | bindingIsSink = IRIf readsAnyW namedRefusal whenAnySink
+                      | otherwise     = namedRefusal
+                let guardAny ok whenAnySink = IRIf anyW (whenAny whenAnySink) ok
+                let withBody bodyRes = guardedZero (zipResult guardAny (prodP sr scaled bodyRes) bodyRes)
+                case rt of
+                  -- Inside the closure the call reads its parameters, so its
+                  -- binding cannot float out: it is let-bound in place, under the
+                  -- same two guards 'shareResult' would have put on it.
+                  TArrow _ _ -> do
+                    let impossible = packResult (impossibleP sr)
+                    let guardedCall = IRIf guard (IRIf bodyReadable call impossible) impossible
+                    return (detP (guarded
+                      (wrapInLambdas (IRLetIn callVar guardedCall (packResult (withBody (unpackResult (IRVar callVar))))))
+                      (wrapInLambdas (packResult (detP (srZero sr))))))
+                  _ -> do
+                    bodyRes <- shareResult sr "body_factor" [guard, bodyReadable]
+                                 [(callVar, call)] (unpackResult (IRVar callVar))
+                    return (withBody bodyRes)
+          TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
+                                       (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr)))))))
+          -- Integrate mode, a binding read more than once, whatever its head
+          -- (a named callee's single witness answered these CDFs wrong too,
+          -- e.g. @f x = (x, x + 1.0)@ at @cdf((0.3, 1.0))@ 0.618 for 0.5): the
+          -- point inversion recovers it from ONE slot, but its other uses
+          -- correlate that slot with the rest of the body, and a joint CDF of
+          -- correlated slots is no product of per-slot factors -- @draw v =
+          -- Uniform in (v, v + 1.0)@ at @cdf((0.5, 1.2))@ is P(v <= min(0.5,
+          -- 0.2)) = 0.2, where the single witness answered 0.5 and the body
+          -- factor (v fixed at its witness, 1.5 <= 1.2 fails) answers 0. No
+          -- engine here measures that region, so the variant is refused rather
+          -- than answered wrong (task tuple-cdf-through-draw-ignores-other-slots).
+          -- A binding read ONCE reaches only the slot it is recovered from, so
+          -- the body's other slots are independent of it and the generic arm
+          -- below folds them in as a body factor, exactly as probability mode
+          -- does: @draw v = Uniform in (v, 2.0)@ at @(0.5, 1.0)@ is 0.5 * [2.0
+          -- <= 1.0] = 0, where the single witness alone answered 0.5.
+          _ | cumulative && not singleUse ->
+                refuse lChainName ("cannot compute a cumulative distribution through binding '" ++ userVar
+                  ++ "': it is read more than once, so the slots it reaches are correlated and"
+                  ++ " their joint CDF is not a product of per-slot factors"
+                  ++ " (task tuple-cdf-through-draw-ignores-other-slots)")
+          _ | not inlineBody ->
+                -- The single witness, where the body cannot be folded in inline
+                -- ('bindInline'): a top-level callee's body (folded by the
+                -- 'namedCall' arm above where it must be), or one that reads a
+                -- variable this scope does not bind. A wildcard witness has no
+                -- answer here (in integrate mode it used to crash in 'irCDF'), and
+                -- an unevaluable one none anywhere. A tuple-valued CDF through
+                -- such a callee still measures only the witnessed slot.
+                let anyHere = if cumulative then anyW else readsAnyW in
+                return (mapResult wrapInLambdas (guardedZero (mapResult (IRIf anyHere anyRefusal) scaled)))
+          _ -> do
+            -- The inversion above only recovers and infers the variable bound by THIS
+            -- lambda. Any additional independent latents bound deeper in the body (e.g. a
+            -- second `let` whose value is repacked alongside this one in a tuple) are not
+            -- captured by the bound-value inference. Infer the body too and fold it in as an
+            -- independent factor: probabilities multiply, dimensions add, branch counts add.
+            -- For a body that is deterministic given the recovered variable, the exact
+            -- inverse makes the body factor an always-true (dim-0) indicator, so the product
+            -- collapses to the original result; only genuinely new latents add density/dim.
+            -- Asking whether the recovered witness IS a wildcard evaluates the
+            -- inverse, and an inverse whose own arithmetic READS one has no value
+            -- to evaluate to: it dies in the interpreter's `Minus` / `Fst` with a
+            -- raw type error, and in the typed backends on the string "ANY" (task
+            -- fc-inverse-refuses-on-any-input). 'invReadsAny' is the chain's own
+            -- static answer to which of its steps read the observation, as a
+            -- runtime disjunction over their inputs, so testing it FIRST is what
+            -- makes the question below safe to ask at all.
+            --
+            -- It is folded into 'anyW' rather than wrapped around the result,
+            -- which would be a fifth IRIf level per field: every field already
+            -- reads 'anyW', so putting it here adds no reader and no nesting,
+            -- where 'mapResult' around the whole result grew the emitted chain
+            -- programs up to 6x (the duplication 'shareResult' documents).
+            -- Compile the body factor in its own writer scope: any bindings the
+            -- recursion floats (e.g. the shared `l_*_call` triple of an inner Apply)
+            -- must stay under the recovered-variable binding -- evaluation is
+            -- strict, so a floated binding that mentions the bound variable would
+            -- otherwise be evaluated before the recovered value is in scope.
+            (bodyRes0, bodyBinds) <- lift (runWriterT (toIRInference bodyMeta cumulative bodyExpr sample))
+            -- The recovered value of the bound variable heads that block, so free
+            -- occurrences in the body factor resolve (and redundant comparisons
+            -- collapse to true), and the whole block is bound ONCE ('shareResult'),
+            -- with the fields below projected off it.
+            --
+            -- It used to be kept inline and unpacked field by field, i.e. one copy
+            -- of the block per field that reads it, and the block of a nested
+            -- witnessed let holds the enclosing copies of every inner one: the
+            -- -O0 IR of a K-step observed chain grew ~6x per step, and the optimizer
+            -- spent exponential time folding it back (task
+            -- chained-gaussian-trajectory-compile-exponential). Inline was a
+            -- workaround for 'stripBranchCount' mis-shifting projections off a
+            -- hoisted local result, which it no longer does.
+            --
+            -- Being bound, the block is evaluated wherever its binding lands, not
+            -- where a field reads it, so it carries its own guards: the inverse's
+            -- domain guard (outside it the inverse crashes), and the condition
+            -- under which the body is read at all below -- a sink's body absorbs a
+            -- wildcard-valued witness but not an unevaluable one, and any other
+            -- body is read only when the witness is not a wildcard.
+            --
+            -- Only a body that itself holds a probabilistic let is bound. The
+            -- duplication compounds only through such nesting, and a leaf body
+            -- factor is typically an indicator whose dim and flag fold to
+            -- constants inline but not through a tuple ('shareResult' records
+            -- the -O2 cost of routing constants through one), so the innermost
+            -- level keeps the inline form -- and single-let programs their
+            -- emitted code.
+            let bodyReadable = if bindingIsSink then notIR readsAnyW else notIR anyW
+            let bodyBlock = (toInvCN, appliedSample) : bodyBinds
+            bodyRes <- if holdsProbabilisticLet bodyExpr
+              then shareResult sr "body_factor" [guard, bodyReadable] bodyBlock bodyRes0
+              else return (unpackResult (IRLetIn toInvCN appliedSample
+                                           (generateLetInBlock bodyMeta (bodyRes0, bodyBinds))))
+            -- Independent factors: probabilities multiply, dims add, branch counts add.
+            let combined = prodP sr scaled bodyRes
+            -- A sink's body factor absorbs a wildcard-VALUED witness, which is
+            -- why it may answer with the body alone. It cannot absorb an
+            -- unevaluable one: there is no witness to bind, and letting the body
+            -- proceed with a wildcard in its place is exactly the silent p = 1.0
+            -- this refusal exists to prevent. So a sink refuses here too.
+            -- A wildcard witness -- the recovered value is ANY, or a step of the
+            -- chain read one (unevaluable) -- means the binding's one occurrence
+            -- sits under an ANY slot of the observation, which constrains
+            -- nothing there: the marginal is the body's own inference with the
+            -- binding left random, its occurrence never evaluated (the slot's
+            -- 'anySafe' answers first). That holds for any single-use binding --
+            -- fresh randomness elsewhere in the body is independent of it -- not
+            -- only a sink (fuzz-admission-oracle-bugs item 8: @snd (draw h =
+            -- Uniform in (exp h, True))@ answered p(True) = 0; @draw z = x + 1.0
+            -- in (z, Uniform)@ at @(ANY, 0.5)@ refused). A sink keeps its cheaper
+            -- answer for a wildcard-valued witness, and a body that cannot be
+            -- compiled this way keeps the refusal.
+            unevaluable <- if not singleUse then return (constResult anyRefusal) else do
+              let openBody = bindBody binding
+              let openMeta = withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN
+              r <- lift ((Just <$> runWriterT (toIRInference openMeta cumulative openBody sample))
+                           `catchError` (\_ -> return Nothing))
+              -- Bound ONCE ('shareResult'), like the body factor above: unpacked
+              -- inline, every field of the result carried its own copy of the
+              -- open body, which holds the next binding's fold and so its own
+              -- four copies -- ~8x per binding on independent single-use lets
+              -- (task witness-fold-open-body-copied-per-field). Its guards are
+              -- exactly the conditions 'whenAny' reads it under ('guardedZero'
+              -- adds 'guard' outside): a wildcard witness, and for a sink an
+              -- unevaluable one. As for the body factor, only a body that itself
+              -- holds a probabilistic let is bound: the copies compound only
+              -- through such nesting, and a leaf block's constant dim and flag
+              -- fold away inline but not through the shared tuple.
+              case r of
+                Just (openRes, binds)
+                  | holdsProbabilisticLet openBody ->
+                      shareResult sr "open_body" [guard, if bindingIsSink then readsAnyW else anyW] binds openRes
+                  | otherwise -> return (unpackResult (generateLetInBlock openMeta (openRes, binds)))
+                Nothing -> return (constResult anyRefusal)
+            let whenAny whenAnySink whenUneval
+                  | bindingIsSink = IRIf readsAnyW whenUneval whenAnySink
+                  | singleUse     = whenUneval
+                  | otherwise     = anyRefusal
+            let guardAny ok whenAnySink whenUneval = IRIf anyW (whenAny whenAnySink whenUneval) ok
+            return (mapResult wrapInLambdas (guardedZero (zip3Result guardAny combined bodyRes unevaluable)))
+   -- The engines of a probabilistic application, as data, in dispatch order
+   -- (task engine-applicability-as-data): each entry's applicability is the
+   -- predicate the modality engine's let rule reads too, and its
+   -- construction. First applicable wins. A construction that declines
+   -- ('Left') passes its diagnostic on to the next applicable engine; one
+   -- that refuses refuses the variant. Enumeration comes before all of them,
+   -- at the Apply arm's first equation ('isEnumerableApplication'), ahead of
+   -- the dead-binding and leading-argument handling a 'Binding' needs.
+   -- Where none applies, the set-witness engine is asked anyway, for its
+   -- diagnostic: its predicate is its necessary condition only.
+   let engines =
+         [ ("plan-guided enumeration", planApplicable meta rt binding <&> \_ _ ->
+              planWitnessApply meta cumulative rt binding sample)
+         , ("point inversion", pointInversion <&> \chain _ -> Right <$> pointInvert chain)
+         , ("affine marginalisation", affineMarginalisable meta rt binding <&> \(x, lamBody) _ ->
+              Right <$> affineCollapse x lamBody)
+         , ("set-valued witnesses", setWitnessApplicable meta binding <&> \_ diag ->
+              Right <$> setWitnessApply meta cumulative rt binding diag sample)
+         ]
+   -- Set-valued witnesses invert the observation structurally into guarded
+   -- constraint sets on the bound variable (intervals from comparisons, case
+   -- splits from ifs, intersections across occurrences) and measure them
+   -- against the bound distribution (design set-valued-witnesses).
+   dispatchEngines engines (\diag -> setWitnessApply meta cumulative rt binding diag sample)

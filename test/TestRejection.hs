@@ -43,7 +43,7 @@ import Data.List (isInfixOf, nub)
 import Data.Either (isLeft)
 import Text.Megaparsec (errorBundlePretty)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
+import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, Assertion)
 
 rejectionTests :: TestTree
 rejectionTests = testGroup "Rejection"
@@ -961,9 +961,13 @@ fstProjectedBottomSrc = "main = fst (Uniform * Uniform, Uniform)"
 
 -- 'f' is refused by the set-witness engine (sqrt is outside the monotone
 -- transport table); 'main' is perfectly tractable apart from calling it.
+-- The binding is a call of 'g', not a @draw@: a @draw@ no engine applies to
+-- is typed Bottom (task engine-applicability-as-data), so 'f' would not be
+-- admitted at all, while a call's binding is still admitted and refused.
 refusedHelperSrc :: String
 refusedHelperSrc = unlines
-  [ "f u = draw x = Normal in if sqrt x > u then 1.0 else 0.0"
+  [ "g u x = if sqrt x > u then 1.0 else 0.0"
+  , "f u = g u Normal"
   , "main = if Uniform < 0.5 then f 0.5 else 3.0"
   ]
 
@@ -1381,15 +1385,27 @@ sharedSourceConditionSrc :: String
 sharedSourceConditionSrc =
   "main = draw z = Uniform in draw x = z + 1.0 in if z < 0.5 then x else x + 10.0"
 
-setWitnessDiagnostic :: String
-setWitnessDiagnostic = "set-valued witness construction failed for the binding of 'x'"
+-- | The answer for a @draw@ of @x@ no inference engine applies to: the
+-- modality engine binds it sample-only, so the function is Bottom and its
+-- probability variant absent, with that reason recorded (task
+-- engine-applicability-as-data). A thrown exception would be a crash, and a
+-- number a silent measure of what no engine measures.
+assertNoEngine :: String -> Either SomeException (Either CompilerError IRValue) -> Assertion
+assertNoEngine what res = case res of
+  Right (Left e) -> assertBool
+    ("expected the no-engine refusal for " ++ what ++ ", got: " ++ e)
+    ("no inference engine applies to the binding of 'x'" `isInfixOf` e)
+  Left ex -> assertFailure (what ++ " crashed instead of recording a refusal: " ++ show ex)
+  Right (Right v) -> assertFailure (what ++ " was accepted and answered " ++ show v)
 
 setWitnessNestedLetTests :: TestTree
 setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
   [ testCase "x occurring in both the inner binding and its body is still refused" $
+      -- No engine applies, so the binding is sample-only and the function
+      -- Bottom (task engine-applicability-as-data), with the reason recorded.
       withParsed nestedLetSharedOccurrenceSrc $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
-        assertSetWitnessRefusal "a shared occurrence across the inner let" res
+        assertNoEngine "a shared occurrence across the inner let" res
   , testCase "an inner binding drawing fresh randomness is marginalised, not refused" $
       withParsed nestedLetFreshRandomnessSrc $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
@@ -1420,18 +1436,6 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
             assertBool ("expected Phi(1) = 0.8413, got " ++ show p) (abs (p - 0.8413447460685429) < 1e-4)
           Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
   ]
-  where
-    -- The refusal is recorded on the absent probability variant and read back
-    -- through the query's 'Left' (task static-refusals-become-absent-variants);
-    -- a thrown exception would be a crash.
-    assertSetWitnessRefusal what res = case res of
-      Right (Left e) -> assertBool
-        ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ e)
-        (setWitnessDiagnostic `isInfixOf` e
-          && "neither point-invertible" `isInfixOf` e)
-      Left ex -> assertFailure
-        (what ++ " crashed instead of recording a refusal: " ++ show ex)
-      Right (Right _) -> assertFailure (what ++ " was accepted")
 
 -- ----------------------------------------------------------------------------
 -- A shared Gaussian latent: design pipeline-coherence's F2 row, still open
@@ -1527,8 +1531,10 @@ setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
 
 -- Task set-witness-interval-partial-inverse: interval transport through a
 -- monotone InjF chain covers exactly 'ForwardChaining.stepMonotonicity's
--- table. Anything else must be REFUSED with the set-witness diagnostic --
--- never a silent number. These pin the refusal for the InjFs outside the
+-- table. Anything else must be REFUSED -- never a silent number. Since task
+-- engine-applicability-as-data the set-witness predicate sees that too, so no
+-- engine applies and the binding is sample-only: the function is Bottom, with
+-- the no-engine reason recorded. These pin the refusal for the InjFs outside the
 -- table (sqrt/recip/sq: partial domain or non-monotone on the line) and for
 -- mult by a deterministic operand that is not a literal, whose sign -- and
 -- so the transported endpoints' order -- is not statically known.
@@ -1542,15 +1548,7 @@ setWitnessTransportTests = testGroup "SetWitnessTransport"
   ]
   where
     refused what src = testCase (what ++ " is refused, not silently measured") $
-      withParsed src $ \prog -> do
-        res <- forcedProb prog (VFloat 1.0)
-        case res of
-          Right (Left e) -> assertBool
-            ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ e)
-            (setWitnessDiagnostic `isInfixOf` e)
-          Left ex -> assertFailure
-            (what ++ " crashed instead of recording a refusal: " ++ show ex)
-          Right (Right v) -> assertFailure (what ++ " was accepted and answered " ++ show v)
+      withParsed src $ \prog -> forcedProb prog (VFloat 1.0) >>= assertNoEngine what
 
 -- ----------------------------------------------------------------------------
 -- Task continuous-recursive-gate-witness-failure: a continuous let-bound value

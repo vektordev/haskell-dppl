@@ -18,6 +18,7 @@ module SPLL.AutoNeural(
 , neuralReadLogitsSuffix
 , deadSlotFill
 , stripDeadSlotFills
+, planReadOf
 ) where
 
 import SPLL.Lang.Types
@@ -31,6 +32,7 @@ import Data.List (find, elemIndex, intercalate, isPrefixOf)
 import Utils
 import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe, maybeToList)
 import Control.Applicative ((<|>))
+import Data.Either (isRight)
 
 -- basic strucutre:
 --  get the partition plan.
@@ -883,3 +885,21 @@ planUsesProb (TuplePlan a b)  = planUsesProb a || planUsesProb b
 planUsesProb (Discretes _ _)  = True
 planUsesProb (EitherPlan _ _) = True
 planUsesProb (ADTPlan _ _)    = True
+
+-- | The plan engine's applicability to a binding's argument (design
+-- plan-guided-lazy-enumeration; law-carrying-modality M5): a neural read whose
+-- declaration yields a 'PartitionPlan' -- from its @of@ annotation, else
+-- auto-derived from its type, so no annotation is required. Answers the
+-- network's name, the plan, and the symbol argument. Read alike by the
+-- modality engine (the plan certificate of a binding) and by IRCompiler's
+-- dispatch. The plan traversal's per-node support is fused with its IR
+-- construction, so this is the engine's necessary condition only.
+planReadOf :: Program -> Expr -> Maybe (String, PartitionPlan, Expr)
+planReadOf prog v
+  | Expr _ (ReadNN nnName symArg) <- v
+  , Just (_, declTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals prog)
+  , Just targetTy <- neuralValueType declTy
+  , let resolved = resolvePartitionAnnotation (writeLogitsDecls prog) targetTy declTag
+  , isJust resolved || isRight (autoDeriveMultiValue (adts prog) targetTy)
+  = Just (nnName, makePartitionPlan (adts prog) targetTy resolved, symArg)
+  | otherwise = Nothing
