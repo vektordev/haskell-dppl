@@ -66,7 +66,8 @@ current list for whichever binary you run):
   oracle`, which are in the default suite
 - `test/BackendAgreement.hs` / `BackendCoverage.hs` — the batched backend
   drivers behind `prop_Fuzz_BackendsAgree`, and the corpus-minus-fuzz construct
-  exception list (see `fuzz-testing.md`, "Backend agreement")
+  exception lists, for that property and for the IR fuzz generator (see
+  `fuzz-testing.md`, "Backend agreement" and "IR-level backend agreement")
 - `test/IRFuzz.hs` — the IR fuzz generator behind `prop_Fuzz_IRBackendsAgree`
   (Slow), with its filed refusal and disagreement families; its `IR fuzz
   generator` group is in the default suite (see `fuzz-testing.md`, "IR-level

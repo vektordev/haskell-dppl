@@ -2037,7 +2037,8 @@ prop_Fuzz_IRBackendsAgree = withMaxSuccess (fuzzCases irFuzzBatches) $
           explore <- lookupEnv "NEST_IRFUZZ_EXPLORE"
           case explore of
             Just path -> appendFile path (concatMap (\d -> "=====\n" ++ renderIRDisagreement d) newD
-                                          ++ concat [ "=====REFUSAL " ++ r ++ "\n" ++ renderIRCase c | (c, qs) <- prepared, (_, InterpRefusal r) <- qs ])
+                                          ++ concat [ "=====REFUSAL " ++ r ++ "\n" ++ renderIRCase c | (c, qs) <- prepared, (_, InterpRefusal r) <- qs
+                                                    , not (isJust (knownRefusal (refusalKey r))) ])
             Nothing -> return ()
           return
             $ tabulate "julia arm" [maybe "skipped (no julia)" (const "ran") julia]

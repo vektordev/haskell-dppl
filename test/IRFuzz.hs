@@ -1,8 +1,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | The IR fuzz generator (docs-repo design @ir-fuzz-generator@), milestone
--- M1: deterministic-value IR on the scalar Python and Julia backends, with
--- the interpreter as the oracle.
+-- | The IR fuzz generator (docs-repo design @ir-fuzz-generator@), milestones
+-- M1 (deterministic-value IR) and M2 ('PResult' bodies in every semiring, see
+-- "PResult bodies" below) on the scalar Python and Julia backends, with the
+-- interpreter as the oracle.
 --
 -- 'prop_Fuzz_BackendsAgree' reaches the backends only through what the SPLL
 -- compiler emits from programs its generator can draw. This module draws
@@ -33,6 +34,7 @@
 module IRFuzz
   ( IRCase(..)
   , BodyKind(..)
+  , SemiringChoice(..)
   , genIRCase
   , shrinkIRCase
   , irCaseEnv
@@ -52,6 +54,7 @@ module IRFuzz
   , runIRCasesPython
   , runIRCasesJulia
   , checkedIRConstructs
+  , irGeneratorConstructs
   , noProduction
   , valueAgrees
   , irFuzzGeneratorTests
@@ -64,6 +67,7 @@ import Data.Char (isSpace)
 import Data.List (intercalate, isPrefixOf, isInfixOf, nub, sort)
 import Data.Maybe (mapMaybe, isJust)
 import qualified Data.IntMap.Strict as IM
+import qualified Data.Map.Strict as M
 import System.Directory (getCurrentDirectory, findExecutable)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -80,6 +84,9 @@ import Data.Text (pack, unpack, replace)
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.IRTypeCheck (IRType(..), checkIREnv, showIRType, showIRTypeError)
+import SPLL.Semiring
+import SPLL.IRCompiler (stripBranchCount)
+import Control.Monad.Writer.Lazy (runWriterT)
 import SPLL.Typing.RType (RType(..), TVarR(..))
 import IRInterpreter (generateDet)
 import qualified SPLL.CodeGenPyTorch as Py
@@ -92,12 +99,19 @@ import End2EndTesting (juliaTestFlags)
 -- Cases
 
 -- | Which deterministic body of @main@ the expression is: its normal-parameter
--- function or its writeLogits function. Both are plain value functions of
--- the group's parameters; they differ in the method name each backend emits.
-data BodyKind = NormalBody | WriteLogitsBody deriving (Show, Eq)
+-- function, its writeLogits function, or (a 'PResult'-shaped body, M2) its
+-- probability or integrate function. All are plain functions of the group's
+-- parameters; they differ in the method name each backend emits.
+data BodyKind = NormalBody | WriteLogitsBody | ProbBody | IntegBody deriving (Show, Eq)
+
+-- | The semiring a 'PResult' body was built in ('presultSemiring').
+data SemiringChoice = SRLinear | SRLog | SRMaxLinear | SRMaxLog deriving (Show, Eq, Enum, Bounded)
 
 data IRCase = IRCase
   { icKind   :: BodyKind
+  , icShape  :: Maybe (SemiringChoice, Bool)
+    -- ^ a 'PResult' body: its semiring, and whether its branch count was
+    -- stripped (as the compiler does unless @countBranches@)
   , icParams :: [(String, IRType)]
   , icResult :: IRType
   , icConsts :: [(String, IRValue)]   -- ^ the env's top-level constants
@@ -114,14 +128,23 @@ irCaseEnv c = IREnv [group] [] (icConsts c)
   where
     decl = Just (irCaseFunction c, "")
     group = IRFunGroup
-      { groupName = "main", genFun = Nothing, probFun = Nothing, integFun = Nothing
+      { groupName = "main", genFun = Nothing
       , writeLogitsFun = if icKind c == WriteLogitsBody then decl else Nothing
       , normalFun = if icKind c == NormalBody then decl else Nothing
+      , probFun = if icKind c == ProbBody then decl else Nothing
+      , integFun = if icKind c == IntegBody then decl else Nothing
       , groupDoc = "", refusedVariants = [], sampleDomain = Nothing, maskVariantOf = Nothing }
 
 -- | The name the checker reports the body's type under.
 bodyName :: IRCase -> String
-bodyName c = "main" ++ (if icKind c == NormalBody then "_normal" else "_writeLogits")
+bodyName c = "main" ++ bodySuffix (icKind c)
+
+bodySuffix :: BodyKind -> String
+bodySuffix k = case k of
+  NormalBody -> "_normal"
+  WriteLogitsBody -> "_writeLogits"
+  ProbBody -> "_prob"
+  IntegBody -> "_integ"
 
 -- | The checker's type for the body, printed; 'Left' with its message when it
 -- rejects the case.
@@ -156,7 +179,8 @@ instanceOf general specific sub = case (general, specific) of
 
 renderIRCase :: IRCase -> String
 renderIRCase c = unlines $
-  [ "IR CASE (" ++ show (icKind c) ++ "): main :: " ++ showIRType (foldr (ITArrow . snd) (icResult c) (icParams c)) ]
+  [ "IR CASE (" ++ show (icKind c) ++ maybe "" (\(sr, stripped) -> ", " ++ show sr ++ (if stripped then ", branch count stripped" else "")) (icShape c)
+    ++ "): main :: " ++ showIRType (foldr (ITArrow . snd) (icResult c) (icParams c)) ]
   ++ [ "  const " ++ n ++ " = " ++ show v | (n, v) <- icConsts c ]
   ++ [ "  params " ++ unwords (map fst (icParams c))
      , "  body " ++ show (icBody c) ]
@@ -430,10 +454,14 @@ genDomain t = case t of
 caseSize :: Int
 caseSize = 14
 
--- | A case: zero to three parameters, up to two top-level constants, a body
--- and four argument vectors.
+-- | A case: a value body (M1) or a 'PResult' body (M2), in equal parts.
 genIRCase :: Gen IRCase
-genIRCase = do
+genIRCase = oneof [genValueCase, genPResultCase]
+
+-- | A value-body case: zero to three parameters, up to two top-level
+-- constants, a body and four argument vectors.
+genValueCase :: Gen IRCase
+genValueCase = do
   kind <- frequency [(3, return NormalBody), (1, return WriteLogitsBody)]
   np <- choose (0, 3)
   ptys <- vectorOf np (genType 2)
@@ -447,7 +475,262 @@ genIRCase = do
       sc = params ++ zip (map fst consts) ctys
   body <- evalStateT (genExpr sc rt size) 0
   args <- replicateM 4 (mapM genValue ptys)
-  return (IRCase kind params rt consts body args)
+  return (IRCase kind Nothing params rt consts body args)
+
+-- ---------------------------------------------------------------------------
+-- PResult bodies (M2)
+--
+-- A probability or integrate body returns a 'PResult', packed. It is drawn as
+-- a /plan/, a tree whose nodes name 'SPLL.Semiring''s combinators, and the
+-- plan is then built by those very combinators ('buildPlan') in a semiring
+-- the case draws: linear and log-space sum-product, and the two max-product
+-- instances. So the body is what the compiler would emit for the same
+-- combinator tree, in that semiring, without a program that compiles to it
+-- and without compiling through the log-space or max-product config. The
+-- dims and the impossibility flag come out of the combinators too: a mixture
+-- of a mass and a density, an indicator, a guard, an ANY-guarded leaf.
+--
+-- Half the bodies have their branch count stripped as the compiler does
+-- unless @countBranches@ ('stripBranchCount'), so both result layouts are
+-- drawn. The leaves' operands are M1's value expressions.
+
+-- | A 'PResult' built from the combinator of the same name.
+data PPlan
+  = PDensity Distribution IRExpr                -- ^ 'density' of 'distDensity' at a sample
+  | PScaledNormal IRExpr [IRExpr]               -- ^ 'density' of 'scaledNormalDensity'
+  | PCdf Distribution IRExpr                    -- ^ 'mass' of 'distCumulative'
+  | PMass IRExpr                                -- ^ 'mass' of a linear value ('fromLinearSR')
+  | PDet IRExpr                                 -- ^ 'detP' of a linear value
+  | PIndicator IRExpr                           -- ^ 'indicatorP'
+  | PImpossible                                 -- ^ 'impossibleP'
+  | PMeasureDiff Distribution IRExpr IRExpr     -- ^ 'measureDiffSR' of two CDFs, at @lo@ and @lo + |w|@
+  | PSumAll [IRExpr]                            -- ^ 'mass' of 'sumAllSR' over linear values
+  | PImpossibleWhen IRExpr PPlan
+  | PProd PPlan PPlan
+  | PGuard [IRExpr] PPlan
+  | PScaleCoV Bool IRExpr PPlan
+  | PScaleCoVAtom IRExpr PPlan PPlan
+  | PComplement PPlan                           -- ^ 'srComplement' of the probability
+  | PComplementWhen IRExpr PPlan
+  | PAnySafe IRExpr PPlan
+  | PAnySafeShared IRExpr PPlan                 -- ^ over the sub-result's own let block
+  | PMix PPlan PPlan
+  | PMixSub PPlan PPlan                         -- ^ not drawn under max-product ('srMinus' is undefined there)
+  | PIf IRExpr PPlan PPlan                      -- ^ 'zipResult' of an 'IRIf'
+  | PLet String IRExpr PPlan                    -- ^ a let-binding the sub-plan may read
+  | PShare [IRExpr] PPlan                       -- ^ 'shareResult' under guards
+  | PEnumSum Bool String MultiValue PPlan       -- ^ 'enumSumP', with or without branch counts
+  | PEnumMix Bool IRExpr String MultiValue PPlan -- ^ 'enumMixP', with its density dim
+  deriving (Show)
+
+semiringFor :: SemiringChoice -> Semiring
+semiringFor c = case c of
+  SRLinear -> linearSemiring
+  SRLog -> logSemiring
+  SRMaxLinear -> maxLinearSemiring
+  SRMaxLog -> maxLogSemiring
+
+isMaxProduct :: SemiringChoice -> Bool
+isMaxProduct c = c == SRMaxLinear || c == SRMaxLog
+
+-- | The plan's nodes by constructor name, for the coverage check.
+planNodes :: PPlan -> [String]
+planNodes pl = takeWhile (/= ' ') (show pl) : concatMap planNodes (subPlans pl)
+  where
+    subPlans x = case x of
+      PImpossibleWhen _ a -> [a]
+      PProd a b -> [a, b]
+      PGuard _ a -> [a]
+      PScaleCoV _ _ a -> [a]
+      PScaleCoVAtom _ a b -> [a, b]
+      PComplement a -> [a]
+      PComplementWhen _ a -> [a]
+      PAnySafe _ a -> [a]
+      PAnySafeShared _ a -> [a]
+      PMix a b -> [a, b]
+      PMixSub a b -> [a, b]
+      PIf _ a b -> [a, b]
+      PLet _ _ a -> [a]
+      PShare _ a -> [a]
+      PEnumSum _ _ _ a -> [a]
+      PEnumMix _ _ _ _ a -> [a]
+      _ -> []
+
+-- | Every 'PPlan' constructor; 'PMixSub' is not drawn under max-product.
+planLabels :: SemiringChoice -> [String]
+planLabels c =
+  [ "PDensity", "PScaledNormal", "PCdf", "PMass", "PDet", "PIndicator", "PImpossible", "PMeasureDiff"
+  , "PSumAll", "PImpossibleWhen", "PProd", "PGuard", "PScaleCoV", "PScaleCoVAtom", "PComplement"
+  , "PComplementWhen", "PAnySafe", "PAnySafeShared", "PMix", "PIf", "PLet", "PShare", "PEnumSum", "PEnumMix" ]
+  ++ [ "PMixSub" | not (isMaxProduct c) ]
+
+-- | The packed result the plan builds, its floated let-bindings around it.
+buildPlan :: SemiringChoice -> PPlan -> IRExpr
+buildPlan c plan = case runCompilerMonad (go plan) of
+  Right (r, binds) -> generateLetInExpr binds (packResult r)
+  Left refusal -> error ("IRFuzz.buildPlan: a combinator refused: " ++ show refusal)
+  where
+    sr = semiringFor c
+    nested p = lift (runWriterT (go p))
+    packedOf p = do
+      (r, binds) <- nested p
+      return (generateLetInExpr binds (packResult r))
+    go :: PPlan -> CompilerMonad PResult
+    go pl = case pl of
+      PDensity d x -> return (density (distDensity sr d x) x)
+      PScaledNormal z fs -> return (density (scaledNormalDensity sr z fs) z)
+      PCdf d x -> return (mass (distCumulative sr d x))
+      PMass e -> return (mass (fromLinearSR sr e))
+      PDet e -> return (detP (fromLinearSR sr e))
+      PIndicator cond -> return (indicatorP sr cond)
+      PImpossible -> return (impossibleP sr)
+      PMeasureDiff d lo w -> do
+        vlo <- mkVariable "cdf_lo"
+        vhi <- mkVariable "cdf_hi"
+        setVariables [ (vlo, distCumulative sr d lo)
+                     , (vhi, distCumulative sr d (IROp OpPlus lo (IRUnaryOp OpAbs w))) ]
+        return (mass (measureDiffSR sr (IRVar vhi) (IRVar vlo)))
+      PSumAll es -> return (mass (sumAllSR sr (map (fromLinearSR sr) es)))
+      PImpossibleWhen cond a -> impossibleWhen cond <$> go a
+      PProd a b -> prodP sr <$> go a <*> go b
+      PGuard conds a -> guardP sr conds <$> go a
+      PScaleCoV cum deriv a -> scaleCoV sr cum deriv <$> go a
+      PScaleCoVAtom deriv atom a -> scaleCoVAtom sr deriv <$> go atom <*> go a
+      PComplement a -> onProb (srComplement sr) <$> go a
+      PComplementWhen cond a -> do
+        r <- go a
+        x <- complementWhen sr cond (unP (rProb r))
+        return (mkPResult (sealP x) (rDim r) (rBranches r) (rImposs r))
+      PAnySafe x a -> anySafe sr x id <$> go a
+      PAnySafeShared x a -> do
+        (r, binds) <- nested a
+        anySafeShared sr x binds r
+      PMix a b -> mix (mixP sr) a b
+      PMixSub a b -> mix (mixSubP sr) a b
+      PIf cond a b -> zipResult (IRIf cond) <$> go a <*> go b
+      PLet v e a -> setVariables [(v, e)] >> go a
+      PShare guards a -> do
+        (r, binds) <- nested a
+        shareResult sr "share" guards binds r
+      PEnumSum bc v dom a -> packedOf a >>= enumSumP sr bc id v dom
+      PEnumMix bc dd v dom a -> packedOf a >>= enumMixP sr bc id dd v dom
+    -- The caller's branch count, as an 'IfThenElse' passes it: both arms'.
+    mix f a b = do
+      ra <- go a
+      rb <- go b
+      f (IROp OpPlus (rBranches ra) (rBranches rb)) ra rb
+
+-- | The size of a leaf's operand expressions.
+operandSize :: Int
+operandSize = 3
+
+genPlan :: SemiringChoice -> Scope -> Int -> G PPlan
+genPlan c sc n
+  | n <= 0 = leafPlan
+  | otherwise = frequency' $
+      [ (2, leafPlan)
+      , (1, PImpossibleWhen <$> bool <*> sub)
+      , (3, PProd <$> half <*> half)
+      , (1, do k <- liftG (choose (1, 2)); PGuard <$> replicateM k bool <*> sub)
+      , (1, PScaleCoV <$> liftG arbitrary <*> float <*> sub)
+      , (1, PScaleCoVAtom <$> float <*> half <*> half)
+      , (1, PComplement <$> sub)
+      , (1, PComplementWhen <$> bool <*> sub)
+      , (1, PAnySafe <$> anySample <*> sub)
+      , (1, PAnySafeShared <$> anySample <*> sub)
+      , (3, PMix <$> half <*> half)
+      , (2, PIf <$> bool <*> half <*> half)
+      , (1, do s <- liftG (genType 1)
+               v <- fresh "pl"
+               e <- genExpr sc s operandSize
+               PLet v e <$> genPlan c ((v, s) : sc) (n - 1))
+      , (1, do k <- liftG (choose (0, 2)); PShare <$> replicateM k bool <*> sub)
+      , (2, enumerated (\v dom body -> do bc <- liftG arbitrary; return (PEnumSum bc v dom body)))
+      , (1, enumerated (\v dom body -> do bc <- liftG arbitrary
+                                          dd <- liftG (elements [IRConst (VFloat 1), IRConst (VFloat 0)])
+                                          dd' <- frequency' [(1, return dd), (1, (\x -> IRIf (IRUnaryOp OpIsAny x) (IRConst (VFloat 0)) (IRConst (VFloat 1))) <$> float)]
+                                          return (PEnumMix bc dd' v dom body)))
+      ]
+      ++ [ (1, PMixSub <$> half <*> half) | not (isMaxProduct c) ]
+  where
+    sub = genPlan c sc (n - 1)
+    half = genPlan c sc (n `div` 2)
+    float = genExpr sc ITFloat operandSize
+    bool = genExpr sc ITBool operandSize
+    frequency' xs = join' (liftG (frequency [ (w, return m) | (w, m) <- xs ]))
+    join' m = m >>= id
+    -- The sample an ANY guard tests: mostly a marginal hole, else a value.
+    anySample = frequency' [ (2, return (IRConst VAny))
+                           , (2, do s <- liftG (genType 1); genExpr sc s 1) ]
+    -- An enumerated sum's body sees the enumerated variable, over a small
+    -- finite domain (no Float slot: a continuous domain has no values).
+    enumerated k = do
+      s <- liftG (suchThat (genType 1) (\ty -> isJust (domainShape ty) && finiteTy ty))
+      dom <- liftG (genDomain s)
+      v <- fresh "ev"
+      body <- genPlan c ((v, s) : sc) (n `div` 2)
+      k v dom body
+    finiteTy ty = case ty of
+      ITFloat -> False
+      ITTuple a b -> finiteTy a && finiteTy b
+      ITEither a b -> finiteTy a && finiteTy b
+      _ -> True
+    leafPlan = frequency' $
+      [ (3, PDensity <$> liftG (elements [IRNormal, IRUniform]) <*> float)
+      , (1, do k <- liftG (choose (1, 2)); PScaledNormal <$> float <*> replicateM k float)
+      , (2, PCdf <$> liftG (elements [IRNormal, IRUniform]) <*> float)
+      , (2, PMass <$> probability)
+      , (1, PDet <$> probability)
+      , (2, PIndicator <$> bool)
+      , (1, return PImpossible)
+      , (1, PMeasureDiff <$> liftG (elements [IRNormal, IRUniform]) <*> float <*> float)
+      , (1, do k <- liftG (choose (2, 3)); PSumAll <$> replicateM k probability)
+      ]
+    -- A linear probability: mostly a constant in [0, 1], else any float.
+    probability = frequency'
+      [ (3, IRConst . VFloat <$> liftG (frequency [(3, choose (0, 1)), (1, elements [0, 1, 0.5, 1e-300])]))
+      , (1, float) ]
+
+-- | The 'PResult' layout: @(prob, (dim, (branches, impossible)))@, or without
+-- the branch count once stripped.
+presultType :: Bool -> IRType
+presultType stripped
+  | stripped = ITTuple ITFloat (ITTuple ITFloat ITBool)
+  | otherwise = ITTuple ITFloat (ITTuple ITFloat (ITTuple ITFloat ITBool))
+
+-- | A 'PResult'-body case: a probability or integrate body over zero to two
+-- parameters (the first a float, as a sample is), up to two constants.
+genPResultCase :: Gen IRCase
+genPResultCase = do
+  kind <- elements [ProbBody, IntegBody]
+  c <- frequency [(4, return SRLinear), (4, return SRLog), (1, return SRMaxLinear), (1, return SRMaxLog)]
+  stripped <- arbitrary
+  np <- choose (0, 2)
+  ptys <- (ITFloat :) <$> vectorOf np (genType 1)
+  nc <- frequency [(3, return 0), (1, choose (1, 2))]
+  ctys <- vectorOf nc (genType 1)
+  cvals <- mapM genValue ctys
+  size <- choose (1, 7)
+  let params = zip [ "a" ++ show i | i <- [0 :: Int ..] ] ptys
+      consts = zip [ "k" ++ show i | i <- [0 :: Int ..] ] cvals
+      sc = params ++ zip (map fst consts) ctys
+  plan <- evalStateT (genPlan c sc size) 0
+  args <- replicateM 4 (mapM genValue ptys)
+  let unstripped = IRCase kind (Just (c, stripped)) params (presultType False) consts (buildPlan c plan) args
+  return $ if stripped then stripCase unstripped else unstripped
+
+-- | The case with its body's branch count stripped, by the compiler's own
+-- pass.
+stripCase :: IRCase -> IRCase
+stripCase c = case stripBranchCount (irCaseEnv c) of
+  IREnv [g] _ _ | Just (f, _) <- (if icKind c == ProbBody then probFun g else integFun g) ->
+    c { icBody = dropLambdas (length (icParams c)) f, icResult = presultType True }
+  _ -> error "IRFuzz.stripCase: stripBranchCount changed the group's shape"
+  where
+    dropLambdas :: Int -> IRExpr -> IRExpr
+    dropLambdas 0 e = e
+    dropLambdas k (IRLambda _ e) = dropLambdas (k - 1) e
+    dropLambdas _ e = error ("IRFuzz.stripCase: expected a lambda, got " ++ show e)
 
 -- ---------------------------------------------------------------------------
 -- Shrinking: structural on the IR, filtered by the checker
@@ -542,7 +825,7 @@ knownRefusal r = case [ t | (r', t, _) <- knownRefusals, r' == r ] of
 
 -- | A one-query case, for a pin.
 repro :: [(String, IRType)] -> IRType -> IRExpr -> [IRValue] -> IRCase
-repro params rt body args = IRCase NormalBody params rt [] body [args]
+repro params rt body args = IRCase NormalBody Nothing params rt [] body [args]
 
 -- ---------------------------------------------------------------------------
 -- Comparing a backend's answer
@@ -632,8 +915,20 @@ knownDisagreements =
       (AsIf (const (irMap shortCircuit)))
       (repro [] ITBool (IROp OpOr (IRConst (VBool True)) (IRDestruct AcHead (IRConst (VList EmptyList)))) [])
   , KnownFamily "opmax-nan-and-signed-zero-differ-across-engines" ["python", "julia"]
-      (AsIf (\b -> irMap (backendMax b)))
+      (AsIf (\b -> backendMaxReduce b . irMap (backendMax b)))
       (repro [("a0", ITFloat)] ITFloat (IROp OpMax (IRConst (VFloat 0)) (IRVar "a0")) [VFloat (-0.0)])
+  , KnownFamily "opmax-nan-and-signed-zero-differ-across-engines" ["python", "julia"]
+      (AsIf (\b -> backendMaxReduce b . irMap (backendMax b)))
+      (repro [("a0", ITFloat)] ITFloat
+         (IRBuiltin (BReduce ROpMax 0) [IRBuiltin (BTensor [EFixed 3]) [IRConst (VFloat 1), IRVar "a0", IRConst (VFloat 5)]]) [VFloat (0 / 0)])
+  , KnownFamily "logsumexp-reduction-nan-and-infinity-differ-across-engines" ["python", "julia"]
+      (AsIf (\b -> irMap (backendLogSumExp b)))
+      (repro [("a0", ITFloat)] ITFloat
+         (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat (-1 / 0))]]) [VFloat (1 / 0)])
+  , KnownFamily "logsumexp-reduction-nan-and-infinity-differ-across-engines" ["python"]
+      (AsIf (\b -> irMap (backendLogSumExp b)))
+      (repro [("a0", ITFloat)] ITFloat
+         (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRConst (VFloat (-1 / 0)), IRVar "a0"]]) [VFloat (0 / 0)])
   , KnownFamily "opsign-nan-negative-zero-and-int-results-differ-across-engines" ["python", "julia"]
       (AsIf (\b -> irMap (backendSign b)))
       (repro [("a0", ITFloat), ("a1", ITFloat)] (ITTuple ITBool ITFloat)
@@ -717,19 +1012,59 @@ shortCircuit e = case e of
 -- anywhere wins, and -0 is below +0). The interpreter's is Haskell's 'max',
 -- @if x <= y then y else x@ (so a NaN wins only in front, and of two equal
 -- zeros the second is kept).
+--
+-- The same ticket covers the max /reduction/ ('BReduce' 'ROpMax', the
+-- max-product semiring's enumerated sum), 'backendMaxReduce'.
 backendMax :: String -> IRExpr -> IRExpr
 backendMax backend e = case e of
-  IROp OpMax a b -> IRLetIn "mx_a" a (IRLetIn "mx_b" b (pick (IRVar "mx_a") (IRVar "mx_b")))
+  IROp OpMax a b -> IRLetIn "mx_a" a (IRLetIn "mx_b" b (maxPick backend (IRVar "mx_a") (IRVar "mx_b")))
   _ -> e
+
+-- | One step of each backend's @max@, on two cheap (let-bound) operands.
+maxPick :: String -> IRExpr -> IRExpr -> IRExpr
+maxPick backend x y
+  | backend == "python" = IRIf (gtE y x) y x
+  | otherwise =
+      IRIf (isNaNE x) x $ IRIf (isNaNE y) y $ IRIf (gtE x y) x $ IRIf (gtE y x) y $
+        -- Equal: only a pair of zeros of different sign can still differ.
+        IRIf (IRConformsTo TFloat x)
+             (IRIf (gtE (IROp OpDiv (IRConst (VFloat 1)) x) (IRConst (VFloat 0))) x y)
+             x
+
+-- | The max reduction as each backend evaluates it, wherever the reduced
+-- tensor's length is statically known (a 'BTensor' literal, a 'BMap' over
+-- one, or a variable let-bound to either), as a fold of 'maxPick' over its
+-- elements. Python's @max@ of an iterable starts from the first element and
+-- keeps it unless a later one is greater (so a NaN wins only in front);
+-- Julia's @maximum(xs; init=-Inf)@ folds its IEEE @max@ from -inf (a NaN
+-- anywhere wins). The interpreter folds Haskell's 'max' from the right, from
+-- -inf, so a NaN wins only in front, and then only over what follows it:
+-- @[1, NaN, 5]@ reduces to 1.
+backendMaxReduce :: String -> IRExpr -> IRExpr
+backendMaxReduce backend = go M.empty
   where
-    pick x y
-      | backend == "python" = IRIf (gtE y x) y x
-      | otherwise =
-          IRIf (isNaNE x) x $ IRIf (isNaNE y) y $ IRIf (gtE x y) x $ IRIf (gtE y x) y $
-            -- Equal: only a pair of zeros of different sign can still differ.
-            IRIf (IRConformsTo TFloat x)
-                 (IRIf (gtE (IROp OpDiv (IRConst (VFloat 1)) x) (IRConst (VFloat 0))) x y)
-                 x
+    go env e = case e of
+      IRLetIn v x b -> let x' = go env x in IRLetIn v x' (go (bind v (staticLength env x') env) b)
+      IRLambda v b -> IRLambda v (go (M.delete v env) b)
+      IRBuiltin (BReduce ROpMax 0) [t] ->
+        let t' = go env t
+        in maybe (IRBuiltin (BReduce ROpMax 0) [t']) (fold t') (staticLength env t')
+      _ -> irDescend (go env) e
+    bind v = maybe (M.delete v) (M.insert v)
+    staticLength env x = case x of
+      IRBuiltin (BTensor [EFixed n]) _ -> Just n
+      IRBuiltin BMap [_, t] -> staticLength env t
+      IRVar v -> M.lookup v env
+      IRLetIn v a b -> staticLength (bind v (staticLength env a) env) b
+      _ -> Nothing
+    el i = IRBuiltin (BIndex 0) [IRVar "rmx_t", IRConst (VInt i)]
+    acc = IRVar "rmx_acc"
+    step i rest = IRLetIn "rmx_x" (el i) (IRLetIn "rmx_acc" (maxPick backend acc (IRVar "rmx_x")) rest)
+    fold t n = IRLetIn "rmx_t" t $
+      if backend == "python"
+        then if n == 0 then IRError "max() arg is an empty sequence"
+             else IRLetIn "rmx_acc" (el 0) (foldr step acc [1 .. n - 1])
+        else IRLetIn "rmx_acc" (IRConst (VFloat (-1 / 0))) (foldr step acc [0 .. n - 1])
 
 -- | @sign@ as each backend evaluates it. Python's runtime @sign@ answers the
 -- ints -1, 0 and 1 (1 at a NaN); Julia's keeps a zero's sign and a NaN. The
@@ -792,6 +1127,32 @@ leE a b = IROp OpOr (ltE a b) (IROp OpEq a b)
 
 isNaNE :: IRExpr -> IRExpr
 isNaNE x = IRUnaryOp OpNot (IROp OpEq x x)
+
+-- | Whether some element of a rank-1 tensor satisfies the test.
+countWhere :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
+countWhere test t = gtE (IRBuiltin (BReduce ROpAdd 0)
+                           [IRBuiltin BMap [IRLambda "cw_x" (IRIf (test (IRVar "cw_x")) (IRConst (VFloat 1)) (IRConst (VFloat 0))), t]])
+                        (IRConst (VFloat 0))
+
+-- | Log-sum-exp as each text backend reduces it: around its @max@ of the
+-- terms, so a +inf term makes @exp(inf - inf)@ and the sum NaN (where the
+-- interpreter, folding pairwise, answers +inf when no other term is finite).
+-- Python's @max@ also skips a NaN that is not in front, so terms that are
+-- all -inf or NaN, the first not NaN, give -inf (the interpreter, and
+-- Julia, answer NaN).
+backendLogSumExp :: String -> IRExpr -> IRExpr
+backendLogSumExp backend e = case e of
+  IRBuiltin (BReduce ROpLogSumExp 0) [t] ->
+    IRLetIn "lse_t" t $ IRLetIn "lse_r" (IRBuiltin (BReduce ROpLogSumExp 0) [IRVar "lse_t"]) $
+      (if backend == "python" then IRIf pythonMaxIsNegInf negInf else id) $
+        IRIf (countWhere (\x -> IROp OpEq x posInf) (IRVar "lse_t")) (IRConst (VFloat (0 / 0))) (IRVar "lse_r")
+  _ -> e
+  where
+    posInf = IRConst (VFloat (1 / 0))
+    negInf = IRConst (VFloat (-1 / 0))
+    pythonMaxIsNegInf =
+      IROp OpAnd (IRUnaryOp OpNot (isNaNE (IRBuiltin (BIndex 0) [IRVar "lse_t", IRConst (VInt 0)])))
+                 (IRUnaryOp OpNot (countWhere (\x -> IROp OpAnd (IROp OpEq x x) (IRUnaryOp OpNot (IROp OpEq x negInf))) (IRVar "lse_t")))
 
 -- | The family a disagreement belongs to, if any: each family alone, then
 -- every alternative semantics of its backend at once (a case can hit two).
@@ -886,6 +1247,8 @@ emitPython _ c = fmap (fmap stubTorch) (forcedSource (return (Py.generateFunctio
 methodOf :: BodyKind -> String
 methodOf NormalBody = "normal_params"
 methodOf WriteLogitsBody = "writeLogits"
+methodOf ProbBody = "forward"
+methodOf IntegBody = "integrate"
 
 pythonIRDriver :: FilePath -> [(Int, FilePath, IRCase)] -> String
 pythonIRDriver projectDir entries = unlines $
@@ -943,7 +1306,7 @@ juliaIRDriver projectDir entries = unlines $
                     , "  println(\"E " ++ show i ++ " " ++ show j ++ " \", _msg(e)); flush(stdout)"
                     , "end" ]
                   | (j, args) <- zip [0 :: Int ..] (icArgs c) ]
-    fn c = "main" ++ (if icKind c == NormalBody then "_normal" else "_writeLogits")
+    fn c = "main" ++ bodySuffix (icKind c)
 
 -- | Each case carries the interpreter's outcome per argument vector.
 runIRCasesPython :: [(IRCase, [([IRValue], InterpOutcome)])] -> IO ([String], [IRDisagreement])
@@ -964,12 +1327,17 @@ runIRCasesJulia julia cases = runCases "julia" emit ".jl" juliaIRDriver
 checkedIRConstructs :: IRCase -> [String]
 checkedIRConstructs = sort . nub . irConstructs . irCaseFunction
 
--- | Constructs of 'irConstructs'' inventory with no production in M1, and
+-- | Every construct the generator's fixed-seed sample reaches: what
+-- 'BackendCoverage' measures the corpus census under every config against.
+irGeneratorConstructs :: [String]
+irGeneratorConstructs = sort (nub (concatMap checkedIRConstructs fixedSample))
+
+-- | Constructs of 'irConstructs'' inventory with no production yet, and
 -- why. Later milestones own most of them.
 noProduction :: [(String, String)]
 noProduction =
   [ ("IRExpr:IRSample", "random draws: generate bodies are M4")
-  , ("IRExpr:IRBuiltin", "builtins and tensors are M3")
+  , ("Builtin:BIndex, BListIndex, BMapList, BZip", "builtins and tensors are M3; M2's PResult bodies reach only the enumerated sum's BTensor, BMap and BReduce")
   , ("ConTag:ADT", "ADT values are built by implicit constructor functions; function groups are M3")
   , ("Symbol constants", "neither text backend can render a VSymbol constant (pyVal/juliaVal have no case); symbols reach the backends only as network inputs")
   ]
@@ -996,12 +1364,19 @@ accessorLabels = map (\a -> "Accessor:" ++ takeWhile (/= ' ') (show (accessorWit
           AcFst -> a; AcSnd -> a; AcHead -> a; AcTail -> a; AcFromLeft -> a; AcFromRight -> a
           AcIsLeft -> a; AcIsRight -> a; AcTheta _ -> a; AcSubtree _ -> a
 
--- | The 'IRExpr' constructors M1 has a production for: all but 'IRSample'
--- and 'IRBuiltin' ('noProduction').
+-- | The 'IRExpr' constructors with a production: all but 'IRSample'
+-- ('noProduction'). 'IRBuiltin' only through M2's enumerated sums.
 exprLabels :: [String]
 exprLabels = map ("IRExpr:" ++)
   [ "IRIf", "IRSelect", "IROp", "IRUnaryOp", "IRConst", "IRConstruct", "IRDestruct", "IRDensity"
-  , "IRCumulative", "IRLetIn", "IRVar", "IRLambda", "IRApply", "IRIsPossible", "IRError", "IRConformsTo" ]
+  , "IRCumulative", "IRLetIn", "IRVar", "IRLambda", "IRApply", "IRIsPossible", "IRError", "IRConformsTo"
+  , "IRBuiltin" ]
+
+-- | A fixed-seed sample of plans per semiring, as the plan coverage check
+-- reads it.
+fixedPlans :: SemiringChoice -> [PPlan]
+fixedPlans c = unGen (vectorOf 300 drawPlan) (mkQCGen (20261013 + fromEnum c)) 30
+  where drawPlan = choose (1, 7) >>= \size -> evalStateT (genPlan c [("a0", ITFloat)] size) 0
 
 -- | A fixed-seed sample of cases, as the coverage check reads it.
 fixedSample :: [IRCase]
@@ -1047,6 +1422,18 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
                                 [] (map idWhy ds)
         | kf <- knownDisagreements, b <- backends ]
       return (maybe "no julia on the PATH: the Julia arm was skipped" (const "") julia)
+  , testCase "a fixed-seed sample of plans reaches every PResult combinator, in every semiring" $
+      assertEqual "unreached (semiring, combinator)" []
+        [ (c, l) | c <- [minBound .. maxBound], let reached = nub (concatMap planNodes (fixedPlans c))
+                 , l <- planLabels c, l `notElem` reached ]
+  , testCase "a fixed-seed sample reaches both PResult bodies, both layouts, and every semiring's reductions" $ do
+      let shapes = nub [ (icKind c, sh) | c <- fixedSample, Just sh <- [icShape c] ]
+          reached = nub (concatMap checkedIRConstructs fixedSample)
+      assertEqual "unreached (body, (semiring, stripped))" []
+        [ k | k <- [ (b, (c, st)) | b <- [ProbBody, IntegBody], c <- [minBound .. maxBound], st <- [False, True] ]
+            , k `notElem` shapes ]
+      assertEqual "unreached" [] (filter (`notElem` reached)
+        [ "Builtin:BReduce ROpAdd", "Builtin:BReduce ROpLogSumExp", "Builtin:BReduce ROpMax", "Builtin:BMap", "Builtin:BTensor" ])
   , testCase "a fixed-seed sample reaches both densities and cumulatives in both spaces" $ do
       let reached = nub (concatMap checkedIRConstructs fixedSample)
           wanted = [ k ++ ":" ++ d ++ " " ++ ls | k <- ["Density", "Cumulative"], d <- ["IRNormal", "IRUniform"], ls <- ["Linear", "Log"] ]
