@@ -61,6 +61,7 @@ import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 import End2EndTesting (findTorchPython, noTorch)
 import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
+                         runPythonBatchWith, runJuliaBatchWith, Disagreement(..),
                          prepareBatchedCase, runBatchedPythonBatch)
 
 
@@ -3662,6 +3663,57 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
       check runPythonBatch
       julia <- findJulia
       maybe (return ()) (check . runJuliaBatch) julia
+  , testCase "generate samples round-trip through every scalar backend and land in the interpreter's support, and an off-support or mistyped sample disagrees" $ do
+      -- Task backend-agreement-generate-support. Each row's samples are
+      -- decoded as its return type and judged by the interpreter's
+      -- probability function. The ADT rows name constructors the backends
+      -- mangle (Any, Nil); the shared-draw row is the sharing class the
+      -- check exists for: a re-evaluated let would give (True, False).
+      let rows = [ ("main = Normal * 2.0 + 1.0", TFloat)
+                 , ("main = if Uniform < 0.3 then 1 else 2", TInt)
+                 , ("main = draw x = Uniform < 0.5 in (x, x)", Tuple TBool TBool)
+                 , ("main = if Uniform < 0.4 then left Uniform else right (Uniform < 0.5)", TEither TFloat TBool)
+                 , ("main = if Uniform < 0.5 then [1, 2] else [3]", ListOf TInt)
+                 , ("data Box = Any | Possible | Nil\nmain = if Uniform < 0.3 then Any else (if Uniform < 0.5 then Possible else Nil)", TADT "Box")
+                 , ("data Mix = Zero | Two ma::Int, mb::Bool\nmain = if Uniform < 0.5 then Zero else Two 1 (Uniform < 0.5)", TADT "Mix") ]
+          gens rt = [ (QGen k rt [], Generates) | k <- [1 .. 4] ]
+      acs <- forM rows $ \(src, rt) -> do
+        prog <- parseOrFail src
+        env <- either (\e -> assertFailure (src ++ ": " ++ show e)) return (compile defaultCompilerConfig prog)
+        return (AgreementCase prog env [] [] (gens rt))
+      shared <- parseOrFail "main = draw x = Uniform < 0.5 in (x, x)"
+      sharedEnv <- either (\e -> assertFailure (show e)) return (compile defaultCompilerConfig shared)
+      case interpreterAnswer shared sharedEnv [] (QProb (VTuple (VBool True) (VBool False))) of
+        Just (Answered _ _ True) -> return ()
+        other -> assertFailure ("the interpreter must call (True, False) impossible for a shared draw, got " ++ show other)
+      -- An env whose generate is another program's: Uniform + 5 sampled,
+      -- Uniform's probability function judging.
+      unitProg <- parseOrFail "main = Uniform"
+      unitEnv <- either (\e -> assertFailure (show e)) return (compile defaultCompilerConfig unitProg)
+      shiftedEnv <- parseOrFail "main = Uniform + 5.0" >>= either (\e -> assertFailure (show e)) return . compile defaultCompilerConfig
+      let IREnv ugs ud uc = unitEnv
+          IREnv sgs _ _ = shiftedEnv
+          shiftedGen = genFun (head [ g | g <- sgs, groupName g == "main" ])
+          offEnv = IREnv [ if groupName g == "main" then g { genFun = shiftedGen } else g | g <- ugs ] ud uc
+          offCase = AgreementCase unitProg offEnv [] [] (gens TFloat)
+          mistyped = AgreementCase unitProg unitEnv [] [] (gens TInt)
+          check run = do
+            (ds, outcomes) <- run acs
+            assertBool (concatMap renderDisagreement ds) (null ds)
+            assertEqual "every sample decodes and lies in the support" (replicate (4 * length rows) "in support") outcomes
+            (dsOff, _) <- run [offCase]
+            assertBool ("Uniform + 5 sampled, Uniform judging: 4 off-support samples, got " ++ concatMap renderDisagreement dsOff)
+              (length dsOff == 4 && all (offSupportAnswer . dBackendA) dsOff)
+            (dsTy, _) <- run [mistyped]
+            assertBool ("a Float decoded as an Int: 4 undecodable samples, got " ++ concatMap renderDisagreement dsTy)
+              (length dsTy == 4 && all (undecodable . dBackendA) dsTy)
+          offSupportAnswer (BadSample why) = "off the interpreter's support" `isPrefixOf` why
+          offSupportAnswer _ = False
+          undecodable (BadSample why) = "undecodable sample" `isPrefixOf` why
+          undecodable _ = False
+      check runPythonBatchWith
+      julia <- findJulia
+      maybe (return ()) (check . runJuliaBatchWith) julia
   , testCase "the batched arm round-trips structure-of-arrays and bucketed batches, and a wrong answer disagrees" $ do
       -- Task backend-agreement-batched-arm. The prob points include ANY, so
       -- they go through the bucketing wrapper; the integrate points are one

@@ -29,6 +29,16 @@
 -- with 'probAgrees'. They take the function's own arguments rather than a
 -- query point, so a query of either kind carries its arguments.
 --
+-- Generate bodies (task @backend-agreement-generate-support@) are checked
+-- value-free: a 'QGen' query calls @main@'s generate function once per
+-- backend, under a fixed seed, and the sample comes back as a token stream
+-- ('decodeSample', typed by @main@'s return type). The backend must not raise
+-- where the interpreter's generate does not, and the interpreter's
+-- probability function must not call the sample impossible
+-- ('supportCheck'). That covers the generate-only lowerings an inference body
+-- never reaches: a let-bound draw read twice must stay one draw, and a spilled
+-- deep generate line must still run.
+--
 -- Also here: 'irConstructs', the construct inventory of emitted IR that the
 -- coverage table and the corpus-minus-fuzz exception list are built from.
 module BackendAgreement
@@ -37,6 +47,10 @@ module BackendAgreement
   , bodyKind
   , Answer(..)
   , AgreementCase(..)
+  , decodeSample
+  , supportCheck
+  , runPythonBatchWith
+  , runJuliaBatchWith
   , Disagreement(..)
   , renderDisagreement
   , interpreterAnswer
@@ -67,9 +81,9 @@ module BackendAgreement
   , allBodies
   ) where
 
-import Control.Exception (SomeException, try, evaluate)
+import Control.Exception (SomeException, SomeAsyncException(..), try, evaluate, fromException, throwIO)
 import Data.Char (toLower, isSpace)
-import Data.List (intercalate, nub, sort, isPrefixOf)
+import Data.List (intercalate, nub, sort, isPrefixOf, find)
 import Data.Maybe (fromMaybe)
 import System.Directory (getCurrentDirectory, findExecutable)
 import System.Exit (ExitCode(..))
@@ -86,6 +100,7 @@ import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC, compile)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.ReservedNames (componentNormalName)
 import IRInterpreter (generateDet)
+import SPLL.Typing.RType (RType(..))
 import Control.Monad.Random (evalRand)
 import System.Random (mkStdGen)
 import qualified SPLL.CodeGenPyTorch as Py
@@ -103,8 +118,15 @@ import End2EndTesting (qualifyConstructors, juliaTestFlags, SampleBatch(..), bat
 -- (@QNormal@) or writeLogits function (@QWriteLogits@), named by the group,
 -- with the arguments the text backends take (a neural @main@'s mock envelope
 -- already resolved, as 'acBackendArgs' is).
+--
+-- @QGen seed rt interpArgs@ calls @main@'s generate function with the case's
+-- backend arguments, the backend's RNG seeded with @seed@; @rt@ is @main@'s
+-- return type (what the sample is decoded as) and @interpArgs@ are the
+-- arguments the interpreter's probability function takes for @main@, to
+-- judge the sample with.
 data Query = QProb IRValue | QInteg IRValue
            | QNormal String [IRValue] | QWriteLogits String [IRValue]
+           | QGen Int RType [IRValue]
   deriving (Show, Eq)
 
 -- | The argument list a backend calls the query's function with, given the
@@ -114,6 +136,7 @@ callArgs args (QProb v) = v : args
 callArgs args (QInteg v) = v : args
 callArgs _ (QNormal _ as) = as
 callArgs _ (QWriteLogits _ as) = as
+callArgs args (QGen {}) = args
 
 -- | The query point of an inference query. A body query has none; its first
 -- argument stands in (only used for labelling).
@@ -130,6 +153,7 @@ bodyKind (QProb _) = "prob"
 bodyKind (QInteg _) = "integ"
 bodyKind (QNormal _ _) = "normal"
 bodyKind (QWriteLogits _ _) = "writeLogits"
+bodyKind (QGen {}) = "generate"
 
 -- | What one engine said at one point. 'Raised' is any failure to produce a
 -- number: an exception in the backend, a module that did not load, codegen
@@ -139,9 +163,17 @@ bodyKind (QWriteLogits _ _) = "writeLogits"
 -- A 'Nothing' slot is not compared: a writeLogits slot of a dead arm holds iid
 -- noise (task @writelogits-dead-arm-nan@), recognised by the interpreter
 -- answering it differently under two seeds.
+--
+-- A 'QGen' query's interpreter answer is 'Generates' (its own generate ran
+-- without raising); a backend answers it 'Sampled' (the sample's tokens, see
+-- 'decodeSample'), and a sample 'supportCheck' rejects is reported as
+-- 'BadSample' with the reason.
 data Answer = Answered Double Double Bool   -- ^ probability, dim, impossible
             | AnsweredVec [Maybe Double]
             | Raised String
+            | Generates
+            | Sampled [String]
+            | BadSample String
   deriving (Show, Eq)
 
 -- | One compiled program and the points the interpreter answered at, with its
@@ -188,6 +220,7 @@ interpreterAnswer p env args q = case run of
       QInteg v -> Just (runIntegC p env args v)
       QNormal _ _ -> Nothing
       QWriteLogits _ _ -> Nothing
+      QGen {} -> Nothing
 
 -- | Probabilities agree when both are NaN, both are the same infinity, or
 -- they are within 'probTolerance', relative above 1 (a density can be large,
@@ -281,11 +314,14 @@ oneLine = take 400 . map (\c -> if c == '\n' then ' ' else c)
 -- | The Python driver. @programs@ holds, per program, the path of its emitted
 -- module (already prefixed with its identity mocks), the backend arguments
 -- and the queries. Output lines: @R i j prob dim imposs@, @E i j message@,
--- @L i message@ (the module did not load).
+-- @L i message@ (the module did not load), @V i j x ...@ (a body query's
+-- vector), @S i j token ...@ (a generate query's sample, as 'decodeSample'
+-- reads it).
 pythonDriver :: FilePath -> [(FilePath, [IRValue], [Query])] -> String
 pythonDriver projectDir programs = unlines $
-  [ "import sys, signal"
+  [ "import sys, signal, random as _random"
   , "sys.path.insert(0, " ++ show projectDir ++ ")"
+  , "import pythonLib as _pl"
   , "sys.setrecursionlimit(20000)"
   , "class _Timeout(Exception): pass"
   , "def _alarm(signum, frame): raise _Timeout('query exceeded its time limit')"
@@ -297,6 +333,28 @@ pythonDriver projectDir programs = unlines $
   , "def _vals(r):"
   , "    if hasattr(r, 't1') and hasattr(r, 't2'): return [r.t1, r.t2]"
   , "    return list(r)"
+  -- A sample as prefix tokens ('decodeSample'). An ADT value is an instance
+  -- of a class the module defined (so its name is bound to it in the
+  -- module's namespace); its field values are in '_fields', in order.
+  , "def _ser(v, ns):"
+  , "    out = []"
+  , "    def go(v):"
+  , "        if isinstance(v, bool): out.append('b1' if v else 'b0')"
+  , "        elif isinstance(v, int): out.append('i' + repr(v))"
+  , "        elif isinstance(v, float): out.append('f' + repr(v))"
+  , "        elif v is None: out.append('u')"
+  , "        elif isinstance(v, _pl.T): out.append('t'); go(v.t1); go(v.t2)"
+  , "        elif isinstance(v, _pl.Left): out.append('l'); go(v.val)"
+  , "        elif isinstance(v, _pl.Right): out.append('r'); go(v.val)"
+  , "        elif isinstance(v, _pl.ConsInferenceList): out.append('c'); go(v.value); go(v.next)"
+  , "        elif isinstance(v, _pl.EmptyInferenceList): out.append('n')"
+  , "        elif ns.get(type(v).__name__) is type(v):"
+  , "            fs = getattr(v, '_fields', [])"
+  , "            out.append('a' + type(v).__name__); out.append(str(len(fs)))"
+  , "            for f in fs: go(f)"
+  , "        else: out.append('?' + type(v).__name__)"
+  , "    go(v)"
+  , "    return ' '.join(out)"
   ] ++ concat (zipWith program [0 :: Int ..] programs)
   where
     program i (path, args, qs) =
@@ -313,9 +371,10 @@ pythonDriver projectDir programs = unlines $
     query i args j q =
       [ "    try:"
       , "        signal.setitimer(signal.ITIMER_REAL, 10.0)"
+      ] ++ seedLine q ++
       -- Evaluated inside the program's namespace: a query point names the
       -- program's own ADT constructor classes.
-      , "        _r = eval(" ++ show (target q ++ "." ++ method q ++ "(" ++ intercalate ", " (map Py.pyVal (callArgs args q)) ++ ")") ++ ", _ns)"
+      [ "        _r = eval(" ++ show (target q ++ "." ++ method q ++ "(" ++ intercalate ", " (map Py.pyVal (callArgs args q)) ++ ")") ++ ", _ns)"
       , "        signal.setitimer(signal.ITIMER_REAL, 0)"
       , "        _out(" ++ output i j q ++ ")"
       , "    except BaseException as _e:"
@@ -326,12 +385,18 @@ pythonDriver projectDir programs = unlines $
     method (QInteg _) = "integrate"
     method (QNormal _ _) = "normal_params"
     method (QWriteLogits _ _) = "writeLogits"
+    method (QGen {}) = "generate"
+    -- The runtime samples through the @random@ module's global generator
+    -- (@from random import random, gauss@).
+    seedLine (QGen seed _ _) = ["        _random.seed(" ++ show seed ++ ")"]
+    seedLine _ = []
     target (QNormal g _) = g
     target (QWriteLogits g _) = g
     target _ = "main"
     output i j q = case q of
       QProb _ -> rLine
       QInteg _ -> rLine
+      QGen {} -> "'S " ++ show i ++ " " ++ show j ++ " ' + _ser(_r, _ns)"
       _ -> "'V " ++ show i ++ " " ++ show j ++ " ' + ' '.join(repr(float(x)) for x in _vals(_r))"
       where rLine = "'R " ++ show i ++ " " ++ show j ++ " ' + repr(float(_r[0])) + ' ' + repr(float(_r[1][0])) + ' ' + str(bool(_r[1][1]))"
 
@@ -343,8 +408,27 @@ juliaDriver :: FilePath -> [(FilePath, [IRValue], [Query])] -> String
 juliaDriver projectDir programs = unlines $
   [ "include(" ++ show (projectDir </> "juliaLib.jl") ++ ")"
   , "using .JuliaSPPLLib"
+  , "using Random"
   , "_msg(e) = first(replace(sprint(showerror, e), '\\n' => ' '), 400)"
   , "_vals(r) = r isa JuliaSPPLLib.T ? [r.t1, r.t2] : collect(r)"
+  -- 'pythonDriver''s @_ser@: an ADT value is a struct of a program module.
+  , "function _ser(v, out)"
+  , "  if v isa Bool; push!(out, v ? \"b1\" : \"b0\")"
+  , "  elseif v isa Integer; push!(out, \"i\" * string(v))"
+  , "  elseif v isa AbstractFloat; push!(out, \"f\" * repr(Float64(v)))"
+  , "  elseif v === nothing; push!(out, \"u\")"
+  , "  elseif v isa JuliaSPPLLib.T; push!(out, \"t\"); _ser(v.t1, out); _ser(v.t2, out)"
+  , "  elseif v isa JuliaSPPLLib.Left; push!(out, \"l\"); _ser(v.val, out)"
+  , "  elseif v isa JuliaSPPLLib.Right; push!(out, \"r\"); _ser(v.val, out)"
+  , "  elseif v isa JuliaSPPLLib.ConsInferenceList; push!(out, \"c\"); _ser(v.value, out); _ser(v.next, out)"
+  , "  elseif v isa JuliaSPPLLib.EmptyInferenceList; push!(out, \"n\")"
+  , "  elseif isstructtype(typeof(v)) && startswith(string(nameof(parentmodule(typeof(v)))), \"Prog\")"
+  , "    push!(out, \"a\" * string(nameof(typeof(v)))); push!(out, string(nfields(v)))"
+  , "    for k in 1:nfields(v); _ser(getfield(v, k), out); end"
+  , "  else; push!(out, \"?\" * replace(string(typeof(v)), ' ' => '_'))"
+  , "  end"
+  , "  return out"
+  , "end"
   ] ++ concat (zipWith program [0 :: Int ..] programs)
   where
     program i (path, args, qs) =
@@ -355,8 +439,8 @@ juliaDriver projectDir programs = unlines $
          , "catch e"
          , "  println(\"L " ++ show i ++ " \", _msg(e)); flush(stdout)"
          , "end"
-         ] ++ concat [ [ "try"
-                       , "  r = Base.invokelatest(" ++ intercalate ", " ((modName ++ "." ++ fn q) : map jv (callArgs args q)) ++ ")"
+         ] ++ concat [ [ "try" ] ++ seedLine q ++
+                       [ "  r = Base.invokelatest(" ++ intercalate ", " ((modName ++ "." ++ fn q) : map jv (callArgs args q)) ++ ")"
                        , "  " ++ output i j q ++ "; flush(stdout)"
                        , "catch e"
                        , "  println(\"E " ++ show i ++ " " ++ show j ++ " \", _msg(e)); flush(stdout)"
@@ -367,9 +451,13 @@ juliaDriver projectDir programs = unlines $
     fn (QInteg _) = "main_integ"
     fn (QNormal g _) = g ++ "_normal"
     fn (QWriteLogits g _) = g ++ "_writeLogits"
+    fn (QGen {}) = "main_gen"
+    seedLine (QGen seed _ _) = ["  Random.seed!(" ++ show seed ++ ")"]
+    seedLine _ = []
     output i j q = case q of
       QProb _ -> rLine
       QInteg _ -> rLine
+      QGen {} -> "println(\"S " ++ show i ++ " " ++ show j ++ " \", join(_ser(r, String[]), \" \"))"
       _ -> "println(\"V " ++ show i ++ " " ++ show j ++ " \", join([repr(Float64(x)) for x in _vals(r)], \" \"))"
       where rLine = "println(\"R " ++ show i ++ " " ++ show j ++ " \", repr(Float64(r[1])), \" \", repr(Float64(r[2][1])), \" \", Bool(r[2][2]))"
 
@@ -386,6 +474,9 @@ parseAnswerLine l = case words l of
     i' <- readMaybe i; j' <- readMaybe j
     vs <- mapM readNum xs
     return (i', Just j', AnsweredVec (map Just vs))
+  ("S" : i : j : toks) -> do
+    i' <- readMaybe i; j' <- readMaybe j
+    return (i', Just j', Sampled toks)
   ("E" : i : j : _) -> do
     i' <- readMaybe i; j' <- readMaybe j
     return (i', Just j', Raised (dropFields 3 l))
@@ -424,14 +515,17 @@ readNum s0 = case map toLower s0 of
 -- | Run one batch through a backend: emit every program's source, run the
 -- driver once, and pair every interpreter answer with the backend's.
 -- A query with no output line (the process died or timed out before it) is
--- 'Raised' with the process's own stderr tail.
+-- 'Raised' with the process's own stderr tail. A generate query is judged by
+-- 'supportCheck' instead of compared; the second result lists every generate
+-- query's outcome, for tabulation.
 runBatch :: String
+         -> (String -> String)                            -- ^ the backend's name mangling (an ADT constructor's class name)
          -> (AgreementCase -> IO (Either String String))   -- ^ emitted module text
          -> String                                        -- ^ module file extension
          -> (FilePath -> [(FilePath, [IRValue], [Query])] -> String)
          -> (FilePath -> IO (ExitCode, String, String))    -- ^ run the driver file
-         -> [AgreementCase] -> IO [Disagreement]
-runBatch backend emit ext driver runDriver cases =
+         -> [AgreementCase] -> IO ([Disagreement], [String])
+runBatch backend mangle emit ext driver runDriver cases =
   withSystemTempDirectory ("nest-" ++ backend) $ \dir -> do
     projectDir <- getCurrentDirectory
     sources <- mapM emit cases
@@ -456,11 +550,110 @@ runBatch backend emit ext driver runDriver cases =
         fromRun = [ Disagreement backend (acProgram c) q ia ba
                   | (i, c) <- zip [0 ..] emitted
                   , (j, (q, ia)) <- zip [0 ..] (acQueries c)
+                  , not (isGen q)
                   , let ba = answerFor i j
                   , not (answersAgree ia ba) ]
-        fromGen = [ Disagreement backend (acProgram c) q ia (Raised ("codegen threw: " ++ e))
-                  | (c, e) <- failedGen, (q, ia) <- acQueries c ]
-    return (fromGen ++ fromRun)
+        fromCodegen = [ Disagreement backend (acProgram c) q ia (Raised ("codegen threw: " ++ e))
+                      | (c, e) <- failedGen, (q, ia) <- acQueries c ]
+    judged <- sequence [ judgeSample c q ia (answerFor i j)
+                       | (i, c) <- zip [0 ..] emitted
+                       , (j, (q, ia)) <- zip [0 ..] (acQueries c)
+                       , isGen q ]
+    return ( fromCodegen ++ fromRun ++ [ d | (Just d, _) <- judged ]
+           , [ "codegen threw" | (c, _) <- failedGen, (q, _) <- acQueries c, isGen q ] ++ map snd judged )
+  where
+    isGen (QGen {}) = True
+    isGen _ = False
+    judgeSample c q ia ba = case (q, ba) of
+      (QGen _ rt iargs, Sampled toks) -> do
+        verdict <- supportCheck mangle c rt iargs toks
+        return $ case verdict of
+          Left why -> (Just (Disagreement backend (acProgram c) q ia (BadSample why)), takeWhile (/= ':') why)
+          Right outcome -> (Nothing, outcome)
+      _ -> return (Just (Disagreement backend (acProgram c) q ia ba), "backend raised")
+
+-- | Decode a backend's sample (the drivers' @_ser@ tokens) as a value of the
+-- given type, or 'Nothing' where the tokens do not spell one: a @?@ token (a
+-- runtime value with no 'IRValue' form), a scalar of the wrong kind (a float
+-- where an @Int@ is due), an ADT constructor the type does not have, or
+-- tokens left over. @mangle@ is the backend's name mangling, which an ADT
+-- value's class name carries; the decoded 'VADT' takes the declaration's name.
+-- A type with no sample form here (a symbol, a tensor, an arrow) decodes
+-- nothing, so the caller does not ask for one.
+decodeSample :: (String -> String) -> [ADTDecl] -> RType -> [String] -> Maybe IRValue
+decodeSample mangle decls rt0 toks0 = case go rt0 toks0 of
+  Just (v, []) -> Just v
+  _ -> Nothing
+  where
+    go _ [] = Nothing
+    go rt (t : ts) = case (rt, t) of
+      (TFloat, 'f' : x) -> (\d -> (VFloat d, ts)) <$> readNum x
+      (TInt, 'i' : x) -> (\n -> (VInt n, ts)) <$> readMaybe x
+      (TBool, "b1") -> Just (VBool True, ts)
+      (TBool, "b0") -> Just (VBool False, ts)
+      (TUnit, "u") -> Just (VUnit, ts)
+      (Tuple a b, "t") -> do
+        (x, r1) <- go a ts
+        (y, r2) <- go b r1
+        return (VTuple x y, r2)
+      (TEither a _, "l") -> do
+        (x, r) <- go a ts
+        return (VEither (Left x), r)
+      (TEither _ b, "r") -> do
+        (y, r) <- go b ts
+        return (VEither (Right y), r)
+      (ListOf _, "n") -> Just (VList EmptyList, ts)
+      (ListOf a, "c") -> do
+        (x, r1) <- go a ts
+        (rest, r2) <- go rt r1
+        case rest of
+          VList xs -> return (VList (ListCont x xs), r2)
+          _ -> Nothing
+      (TADT n, 'a' : cls) -> do
+        decl <- find ((== n) . dataName) decls
+        (ctor, fields) <- find ((== cls) . mangle . fst) (constructors decl)
+        (k, r0) <- case ts of
+          (kt : r) -> (\k -> (k, r)) <$> (readMaybe kt :: Maybe Int)
+          [] -> Nothing
+        if k /= length fields then Nothing else do
+          (vs, r) <- fieldsFrom (map snd fields) r0
+          return (VADT ctor vs, r)
+      _ -> Nothing
+    fieldsFrom [] r = Just ([], r)
+    fieldsFrom (ft : fts) r = do
+      (v, r1) <- go ft r
+      (vs, r2) <- fieldsFrom fts r1
+      return (v : vs, r2)
+
+-- | Wall clock for the interpreter's probability function at one backend
+-- sample.
+sampleCheckMicros :: Int
+sampleCheckMicros = 2 * 1000 * 1000
+
+-- | Judge one backend sample of @main@ ('QGen'): 'Left' with the reason when
+-- the tokens do not decode ('decodeSample') or the interpreter's probability
+-- function calls the decoded value impossible (the backend sampled off the
+-- support); otherwise 'Right' an outcome label. The interpreter not
+-- answering at the sample (a refusal, a 'Left', a timeout) is not a
+-- disagreement: support is only checked where the interpreter can judge it.
+supportCheck :: (String -> String) -> AgreementCase -> RType -> [IRValue] -> [String] -> IO (Either String String)
+supportCheck mangle c rt iargs toks = case decodeSample mangle decls rt toks of
+  Nothing -> return (Left ("undecodable sample: " ++ unwords toks ++ " as " ++ show rt))
+  Just v -> do
+    r <- try (timeout sampleCheckMicros (evaluate (forced (interpreterAnswer (acProgram c) env iargs (QProb v)))))
+    case r of
+      -- An enclosing timeout's cancellation is not the interpreter's answer.
+      Left (e :: SomeException) | Just (SomeAsyncException _) <- fromException e -> throwIO e
+      _ -> return ()
+    return $ case r of
+      Left _ -> Right "interpreter raised at the sample"
+      Right Nothing -> Right "interpreter timed out at the sample"
+      Right (Just Nothing) -> Right "interpreter does not answer at the sample"
+      Right (Just (Just (Answered _ _ True))) -> Left ("off the interpreter's support: " ++ show v)
+      Right (Just (Just _)) -> Right "in support"
+  where
+    env@(IREnv _ decls _) = acEnv c
+    forced a = length (show a) `seq` a
 
 -- | A whole-process bound on top of the Python driver's per-query alarm:
 -- a hang in a module's top level, or in Julia (which has no per-query bound),
@@ -477,7 +670,11 @@ runBounded exe args = do
 -- @Module@ stubbed out (the scalar backend never uses torch), plus an identity
 -- mock per declared network.
 runPythonBatch :: [AgreementCase] -> IO [Disagreement]
-runPythonBatch = runBatch "python" emit ".py" pythonDriver (\f -> runBounded "python3" [f])
+runPythonBatch = fmap fst . runPythonBatchWith
+
+-- | 'runPythonBatch', with every generate query's outcome ('runBatch').
+runPythonBatchWith :: [AgreementCase] -> IO ([Disagreement], [String])
+runPythonBatchWith = runBatch "python" Py.pyMangle emit ".py" pythonDriver (\f -> runBounded "python3" [f])
   where
     emit c = fmap (fmap (\src -> mocks c ++ stubTorch src))
                   (forcedSource (return (Py.generateFunctions True (acEnv c))))
@@ -490,7 +687,11 @@ findJulia :: IO (Maybe FilePath)
 findJulia = findExecutable "julia"
 
 runJuliaBatch :: FilePath -> [AgreementCase] -> IO [Disagreement]
-runJuliaBatch julia cases = runBatch "julia" emit ".jl" juliaDriver (\f -> runBounded julia (juliaTestFlags ++ [f])) cases
+runJuliaBatch julia = fmap fst . runJuliaBatchWith julia
+
+-- | 'runJuliaBatch', with every generate query's outcome ('runBatch').
+runJuliaBatchWith :: FilePath -> [AgreementCase] -> IO ([Disagreement], [String])
+runJuliaBatchWith julia cases = runBatch "julia" Jl.juliaMangle emit ".jl" juliaDriver (\f -> runBounded julia (juliaTestFlags ++ [f])) cases
   where
     indexed = zip [0 :: Int ..] cases
     emit c = do

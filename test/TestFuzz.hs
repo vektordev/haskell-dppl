@@ -69,7 +69,7 @@ import Control.Monad.Random (evalRand)
 import System.Random (mkStdGen)
 import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer,
                          anyHoles, offSupport, bodyKind,
-                         runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
+                         runPythonBatchWith, runJuliaBatchWith, findJulia, renderDisagreement,
                          comparedBodies, irConstructs, maskedConstruct,
                          BatchedCase(..), BatchedGroup(..), prepareBatchedCase,
                          runBatchedPythonBatch, batchedComparedBodies,
@@ -1690,23 +1690,28 @@ prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout a
     Just env -> do
       let args = fuzzArgs p
           backendArgs = resolveNeuralParams p args
+      -- 'agreementGenReference' draws; the first three are the query points'
+      -- samples (a longer run of one generator shares its prefix).
       drawn <- if hasProbFun env
-                 then trySync (evaluate (forceShow (evalRand (replicateM 3 (runGenC p env args)) (mkStdGen seed))))
+                 then trySync (evaluate (forceShow (evalRand (replicateM agreementGenReference (runGenC p env args)) (mkStdGen seed))))
                  else return (Right [])
-      let samples = [ s | Right ss <- [drawn], s <- ss, queryable s ]
+      let samples = [ s | Right ss <- [drawn], s <- take 3 ss, queryable s ]
           points = take maxAgreementPoints (nub (samples ++ concatMap anyHoles samples ++ concatMap offSupport samples))
           queries = if not (hasProbFun env) then [] else
                     map QProb points
                     ++ (if hasIntegFun env then [ QInteg v | v <- points, not (hasWildcard v) ] else [])
           bodies = bodyQueries p env seed args backendArgs
-      if null queries && null bodies then return (Left "no body to compare") else do
+      gens <- genQueries p env seed args (case drawn of
+                                            Right ss | all queryable ss -> Just ss
+                                            _ -> Nothing)
+      if null queries && null bodies && null gens then return (Left "no body to compare") else do
         answered <- fmap concat $ mapM (\q -> do
                       r <- trySync (evaluate (forceShow (interpreterAnswer p env args q)))
                       return [ (q, a) | Right (Just a) <- [r] ]) queries
         answeredBodies <- fmap concat $ mapM (\(q, iargs) -> do
                       r <- trySync (evaluate (forceShow (interpreterBodyAnswer p env iargs q)))
                       return [ (q, a) | Right (Just a) <- [r] ]) bodies
-        let allAnswered = answered ++ answeredBodies
+        let allAnswered = answered ++ answeredBodies ++ [ (q, Generates) | q <- gens ]
         return $ if null allAnswered then Left "interpreter answered no point" else Right AgreementCase
           { acProgram = p, acEnv = env
           , acBackendArgs = backendArgs
@@ -1743,6 +1748,64 @@ prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout a
 
 maxAgreementPoints :: Int
 maxAgreementPoints = 12
+
+-- | How many times the interpreter runs @main@'s generate for a program
+-- (the first three also give the query points), and how many generate
+-- queries ('QGen') each backend answers.
+agreementGenReference, agreementGenQueries :: Int
+agreementGenReference = 10
+agreementGenQueries = 3
+
+-- | The generate queries of a compiled program (task
+-- backend-agreement-generate-support): 'agreementGenQueries' seeded calls of
+-- @main@'s generate function, each sample to be judged by the interpreter's
+-- probability function ('BackendAgreement.supportCheck'). Only asked where
+-- that judgement means something, which the interpreter's own run shows:
+--
+-- * every one of its 'agreementGenReference' samples is a renderable value
+--   (none raised or failed), so a backend raising is a disagreement and not
+--   a rare failing path the reference happened to miss;
+-- * its probability function answers at every one of them and calls none
+--   impossible -- otherwise it cannot judge a backend's sample either;
+-- * @main@'s return type has a decodable sample form
+--   ('BackendAgreement.decodeSample').
+--
+-- @reference@ is the interpreter's run, 'Nothing' where it raised or a
+-- sample is not a renderable value.
+genQueries :: Program -> IREnv -> Int -> [IRValue] -> Maybe [IRValue] -> IO [Query]
+genQueries p env seed args reference = case (reference, mainSampleType p) of
+  (Just ss@(_ : _), Just rt)
+    | hasProbFun env, isJust (genFun (lookupIREnv "main" env)), decodable rt -> do
+        own <- mapM (\s -> trySync (evaluate (forceShow (interpreterAnswer p env args (QProb s))))) ss
+        return $ if all possible own
+          -- Julia's seed! takes no negative seed.
+          then [ QGen ((seed `mod` 1000003) * (agreementGenQueries + 1) + k) rt args | k <- [1 .. agreementGenQueries] ]
+          else []
+  _ -> return []
+  where
+    possible (Right (Just (Answered _ _ False))) = True
+    possible _ = False
+    decodable rt = case rt of
+      TFloat -> True
+      TInt -> True
+      TBool -> True
+      TUnit -> True
+      Tuple a b -> decodable a && decodable b
+      TEither a b -> decodable a && decodable b
+      ListOf a -> decodable a
+      TADT _ -> True
+      _ -> False
+
+-- | @main@'s return type: its 'rType' past the arrows of its parameters (a
+-- neural @main@ takes its network input).
+mainSampleType :: Program -> Maybe RType
+mainSampleType p = do
+  typed <- either (const Nothing) (Just . fst) (addTypeInfo (annotateProg (annotateEnumsProg p)))
+  binding <- lookup "main" (functions typed)
+  return (result (rType (getTypeInfo binding)))
+  where
+    result (TArrow _ b) = result b
+    result t = t
 
 -- | The normal-parameter ('QNormal') and writeLogits ('QWriteLogits') queries
 -- of a compiled program, each with the arguments the interpreter takes for it
@@ -1880,13 +1943,13 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
       prepared <- mapM prepareAgreementCase batch
       let cases = rights prepared
       if null cases then return discardVacuous else do
-        pyD <- runPythonBatch cases
+        (pyD, pyGen) <- runPythonBatchWith cases
         julia <- findJulia
-        jlD <- case julia of
-          Just j -> runJuliaBatch j cases
+        (jlD, jlGen) <- case julia of
+          Just j -> runJuliaBatchWith j cases
           Nothing -> do
             noteOnce "prop_Fuzz_BackendsAgree: no julia on the PATH; the Julia arm is skipped (interpreter vs Python only)."
-            return []
+            return ([], [])
         -- The batched arm (task backend-agreement-batched-arm): the cases
         -- batched mode takes, all in one torch process. No torch is a
         -- failure unless NEST_SKIP_TORCH=1 skips it, as for every other
@@ -1917,6 +1980,8 @@ prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
           $ tabulate "drawn program" [ either id (const "compared") r | r <- prepared ]
           $ tabulate "query kind" [ kind q | c <- cases, (q, _) <- acQueries c ]
           $ tabulate "body kind" [ bodyKind q | c <- cases, (q, _) <- acQueries c ]
+          $ tabulate "generate sample (python)" pyGen
+          $ tabulate "generate sample (julia)" jlGen
           $ tabulate "IR construct in a compared body" (concatMap (filter (not . maskedConstruct) . sort . nub . concatMap irConstructs . comparedBodies) cases)
           $ counterexample (show (length ds) ++ " disagreement(s) over " ++ show (length cases)
                             ++ " programs / " ++ show nQueries ++ " interpreter-answered queries ("
