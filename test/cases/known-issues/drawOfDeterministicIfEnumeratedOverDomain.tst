@@ -1,0 +1,12 @@
+-- `draw s = <if over enumerated latents>` is enumerated as one more latent
+-- over s's whole value domain (`for s in [0..9]` around the x/y/z loops,
+-- checked against the forward value), although s is a deterministic function
+-- of x and y. The `define s = ...` spelling emits no s loop: 5.7 KB here
+-- against 7.3 KB, 10^3 against 10^4 cells per query. In the
+-- operator-sequence program of experiments_nest
+-- mnist-operator-sequence-induction (N=3, intermediate domain 109 values) the
+-- same thing costs 32.6 s per query against 0.03 s for `define`, with
+-- identical values. The runtime cost is not measurable by this harness, so
+-- the pin is the module size, which drops to the define spelling's once the
+-- loop is gone. Docs task deterministic-draw-enumerated-over-its-domain.
+expect-failure: code-size above 6 KB
