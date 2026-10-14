@@ -8,8 +8,8 @@
 -- Plan per read: [Nil, Obj, Red, Green, mu, sigma] = [0.2, 0.8, 0.5, 0.5, 0, 1]
 -- so q = P(Obj) * P(Green) = 0.4 per slot:
 --   p(0) = 0.36, p(1) = 2 q (1 - q) = 0.48, p(2) = 0.16.
+-- No `batched` token: Slow.BatchedPython topk-is-per-element fails (batched topK at k=0.6 gives 0.0 against the interpreter); docs task batched-topk-per-element-failures-on-redeclared-programs.
 slow
-batched
 p(0, (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]), (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]))=(0.36, 0.0)
 p(1, (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]), (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]))=(0.48, 0.0)
 p(2, (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]), (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]))=(0.16, 0.0)

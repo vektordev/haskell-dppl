@@ -7,7 +7,7 @@
 -- P(c = Red) = 0.3. Per read q = P(Obj) * P(color = c):
 --   c = Red:   q1 = 0.4, q2 = 0.45      c = Green: q1 = 0.4, q2 = 0.15
 -- p(k) = 0.3 * P(k | Red) + 0.7 * P(k | Green)
-batched
+-- No `batched` token: Slow.BatchedPython topk-is-per-element fails (batched topK at k=0.6 gives 0.0 against the interpreter); docs task batched-topk-per-element-failures-on-redeclared-programs.
 p(0, (2, [0.3, 0.7]), (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]), (2, [0.4, 0.6, 0.75, 0.25, 1.0, 2.0]))=(0.456, 0.0)
 p(1, (2, [0.3, 0.7]), (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]), (2, [0.4, 0.6, 0.75, 0.25, 1.0, 2.0]))=(0.448, 0.0)
 p(2, (2, [0.3, 0.7]), (2, [0.2, 0.8, 0.5, 0.5, 0.0, 1.0]), (2, [0.4, 0.6, 0.75, 0.25, 1.0, 2.0]))=(0.096, 0.0)

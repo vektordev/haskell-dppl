@@ -1,5 +1,5 @@
+-- No `batched` token: Slow.BatchedPython topk-is-per-element fails (bucketing produced N buckets, expected 1); docs task batched-topk-per-element-failures-on-redeclared-programs.
 slow
-batched
 p(Face True True True, (2, [0.7, 0.3, 0.2, 0.8, 0.4, 0.6]))=(0.15810000000000002, 0.0)
 p(Face True False ANY, (2, [0.7, 0.3, 0.2, 0.8, 0.4, 0.6]))=(0.22500000000000003, 0.0)
 p(Face False True False, (2, [0.7, 0.3, 0.2, 0.8, 0.4, 0.6]))=(0.09570000000000004, 0.0)
