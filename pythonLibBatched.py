@@ -708,14 +708,19 @@ def _scatter(parts, idxs, total):
   if hasattr(head, '_fields'):
     return type(head)(*[_scatter([p._fields[i] for p in parts], idxs, total)
                         for i in range(len(head._fields))])
-  out = None
-  for p, idx in zip(parts, idxs):
-    t = astensor(p)
+  # A leaf keeps its kind: a folded python int (the result's dim) becomes an
+  # int64 tensor and a python bool (the impossibility flag) a bool one, not a
+  # float via astensor -- the dim is an integer on every backend (task
+  # presult-dim-as-int). Buckets of different dtypes promote to a common one.
+  ts = [_anchor(p) for p in parts]
+  dt = ts[0].dtype
+  for t in ts[1:]:
+    dt = torch.promote_types(dt, t.dtype)
+  out = torch.empty(total, dtype=dt)
+  for t, idx in zip(ts, idxs):
     if t.dim() == 0:
       t = t.expand(len(idx))
-    if out is None:
-      out = torch.empty(total, dtype=t.dtype)
-    out[torch.tensor(idx)] = t.to(out.dtype)
+    out[torch.tensor(idx)] = t.to(dt)
   return out
 
 def bucketed(fn, samples, *args):
@@ -800,7 +805,9 @@ def gather_dense(dense, idx):
     return type(dense)(gather_dense(dense.val, idx))
   if hasattr(dense, '_fields'):
     return type(dense)(*[gather_dense(f, idx) for f in dense._fields])
-  t = astensor(dense)
+  # _anchor, not astensor: a folded int dim or bool flag keeps its kind (task
+  # presult-dim-as-int).
+  t = _anchor(dense)
   if t.dim() == 0:
     return t.expand(len(idx))
   return t[idx]

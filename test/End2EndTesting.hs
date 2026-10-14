@@ -2209,6 +2209,35 @@ resultDimIsIntTests = testGroup "result dim is an Int (presult-dim-as-int)"
       case mpy of
         Nothing -> noTorchProperty "result dim is an Int: BatchedPython"
         Just py -> runDims "batched" (Just py) "py" batchedScript
+    -- The batched runtime's reassembly of per-bucket and dense results
+    -- ('bucketed', 'dense_query', 'gather_dense') used to cast a folded python
+    -- int dim to a float tensor, so a sample-list query answered dim 0.0
+    -- (prop_Fuzz_BackendsAgree, --quickcheck-replay=312753).
+  , testProperty "BatchedPython, bucketed and dense reassembly" $ once $ ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorchProperty "result dim is an Int: BatchedPython reassembly"
+        Just py -> do
+          cwd <- getCurrentDirectory
+          case compiledDim "main = if Uniform < 0.3 then 1 else 0" >>= generateFunctionsBatched True . snd of
+            Left err -> return (counterexample err False)
+            Right srcLines -> do
+              let calls = [ "bucketed(main.forward, [1, 0, 1])", "bucketed(main.forward, [1, 'ANY'])"
+                          , "main.forward_at([1, 0], dense=True)", "main.forward_at([1, 5], dense=True)"
+                          , "main.forward_at([1, 0], dense=False)" ]
+                  script = unlines $
+                    [ "import sys, torch", "sys.path.insert(0, " ++ show cwd ++ ")"
+                    , "_ns = {}", "exec(" ++ show (unlines srcLines) ++ ", _ns)"
+                    , "from pythonLibBatched import bucketed", "_ns['bucketed'] = bucketed" ] ++
+                    [ "_r = eval(" ++ show c ++ ", _ns)\nprint(" ++ show c ++ " + '\\t' + str(_r[1][0].dtype) + '\\t' + str(_r[1][1].dtype))" | c <- calls ]
+              (code, out, err) <- withSystemTempFile "result_dim_reassembly.py" $ \tmpPath tmpHandle -> do
+                hPutStr tmpHandle script
+                hClose tmpHandle
+                readProcessWithExitCode py [tmpPath] ""
+              return $ case code of
+                ExitSuccess -> counterexample "(call, dim dtype, flag dtype)"
+                                 (lines out === [ c ++ "\ttorch.int64\ttorch.bool" | c <- calls ])
+                ExitFailure _ -> counterexample ("reassembly script failed:\n" ++ out ++ err) False
   , testProperty "Julia" $ once $ ioProperty $ runDims "julia" Nothing "jl" juliaScript
   , testProperty "Normalization takes the exact branch on a discrete program, and only there" $ once $ ioProperty $ do
       let branchOf name = do
