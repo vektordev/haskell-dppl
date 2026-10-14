@@ -3,8 +3,8 @@
 -- also rewrote the accessor reference and the program applied the sample to
 -- itself (task adt-field-name-collides-with-fdecl-var). Same values as the
 -- p/q twin.
+-- No `batched` token: Slow.BatchedPython topk-is-per-element fails (bucketing count and torch.where(Tensor, T, T) TypeError); docs task batched-topk-per-element-failures-on-redeclared-programs.
 slow
-batched
 p(Dot 0.5)=(0.3, 1.0, False)
 p(Pair 0.5 0.25)=(0.7, 2.0, False)
 p(Dot 0.9)=(0.3, 1.0, False)

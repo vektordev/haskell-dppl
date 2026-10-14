@@ -1,4 +1,4 @@
-batched
+-- No `batched` token: Slow.BatchedPython topk-is-per-element fails (bucketing count and field-accessor "Got: Blank" error); docs task batched-topk-per-element-failures-on-redeclared-programs.
 p(Face True True, (2, [0.6, 0.4, 0.7, 0.3, 0.2, 0.8]))=(0.14076000000000005, 0.0)
 p(Face True False, (2, [0.6, 0.4, 0.7, 0.3, 0.2, 0.8]))=(0.2732400000000001, 0.0)
 p(Face False ANY, (2, [0.6, 0.4, 0.7, 0.3, 0.2, 0.8]))=(0.18600000000000003, 0.0)
