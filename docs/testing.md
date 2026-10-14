@@ -54,8 +54,8 @@ current list for whichever binary you run):
 - `test/End2EndTesting.hs` — `.ppl`/`.tst` integration against interpreter,
   Julia and Python, plus the batched groups (see `batched-mode-pytorch-tensorizer.md`)
 - `test/Rewrites.hs` / `test/TestRewrites.hs` — the rewrite-invariance net
-  (groups `RewriteInvariance`, `RewriteInvarianceCorpus`, `RewriteSequences`
-  and `OfToggleCompilesIdentically`; see "Rewrite invariance" below)
+  (groups `RewriteInvariance`, `RewriteInvarianceCorpus`, `RewriteSequences`,
+  `RewriteIntegration` and `OfToggleCompilesIdentically`; see "Rewrite invariance" below)
 - `test/TestKnownIssues.hs` — drives `test/cases/known-issues/`: pinned
   repros of open compiler bugs, each declaring which failure shape
   it demonstrates (see "Known-issues corpus" below)
@@ -503,6 +503,28 @@ listed in `knownOperandOrderDependent` with their tracking task, and an entry
 that stops diverging fails. At landing, 393 sites over 247 programs agreed at
 both thresholds; only the constructed pin `topk-pruning/topKOperandOrder`
 diverges (see `semiring-presult-internals.md`, "topK Branch Pruning").
+
+### Integration: config pairs on rewritten variants, and the metrics
+
+`Slow.RewriteIntegration` (the umbrella pass of design
+`transformation-differential-testing`) takes every variant of the corpus
+sweep whose default compile agrees with the original, and checks four more
+things on it:
+
+- under `-O0`, `topK 0` and branch counting it still answers its rows as its
+  default compile does. A refusal under a config is hard too;
+- its forward sampler matches its densities (`samplingCheck`), so agreeing
+  variants are in the sampling-vs-PDF pool as well;
+- the `PType` of `main` equals the original's, by strict equality;
+- its branch count at each row against the original's. This one is only
+  logged: a branch count measures the path a compile takes, and a rewrite
+  changes the path. At landing 92 of 1405 crossed variants differed.
+
+A variant known to diverge under a config is listed in
+`knownConfigDivergences` with its tracking task. An entry that stops
+diverging fails. There is no `known-issues/` pin for these, because a
+`broken` pin runs at the default `-O2` only. Cost is about 220 s wall on 4
+cores, most of it `gaussianTrajectory4`'s 235 variants.
 
 ## Slow and Aspirational tests
 

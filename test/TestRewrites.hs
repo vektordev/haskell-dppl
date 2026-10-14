@@ -24,7 +24,7 @@
 -- program's own @.tst@ query points. A fourth, @OfToggleCompilesIdentically@,
 -- toggles neural declarations' @of@ clauses ('ofToggles'; M3 of
 -- transformation-differential-testing) and compares the compiles themselves.
-module TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, ofToggleCorpusTests) where
+module TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rewriteIntegrationTests, ofToggleCorpusTests) where
 
 import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -43,8 +43,9 @@ import Test.QuickCheck (Property, Result(..), Discard(..), stdArgs, quickCheckWi
 import Test.QuickCheck.Random (mkQCGen)
 
 import SPLL.Lang.Types
-import SPLL.Lang.Lang (freeVarsExpr)
-import SPLL.IntermediateRepresentation (IREnv, IRValue, defaultCompilerConfig, pattern VProbDim)
+import SPLL.Typing.PType (PType(..))
+import SPLL.Lang.Lang (freeVarsExpr, getTypeInfo)
+import SPLL.IntermediateRepresentation (IREnv, IRValue, CompilerConfig(..), defaultCompilerConfig, pattern VProbDim, pattern VProbDimBC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, compileStages, runProbC, runGenC, StageSnapshot(..), StageValue(..))
 import TestCaseParser (TestCase(..), Backend(..))
@@ -227,8 +228,12 @@ runQueries p qs = compileTimed p >>= \c -> runCompiled p c qs
 -- crash or a timeout. The environment itself stays lazy, as the queries
 -- force it: forcing all of it could crash on a part no query reads.
 compileTimed :: Program -> IO (Either String IREnv)
-compileTimed p = do
-  r <- timedTry (20 * 1000000) (evaluate (compile defaultCompilerConfig p))
+compileTimed = compileTimedWith defaultCompilerConfig
+
+-- | 'compileTimed' under another config.
+compileTimedWith :: CompilerConfig -> Program -> IO (Either String IREnv)
+compileTimedWith conf p = do
+  r <- timedTry (20 * 1000000) (evaluate (compile conf p))
   return $ case r of
     Nothing -> Left "timeout (20s)"
     Just (Left ex) -> Left ("crash: " ++ firstLine (show (ex :: SomeException)))
@@ -526,7 +531,14 @@ sitesOf fam src = map variantSite (variants fam (parseSrc "unit" src))
 
 unitTests :: TestTree
 unitTests = testGroup "Units"
-  [ testCase "draw and literal application parse to the same AST" $
+  [ -- The integration sweep's PType metric reads main's root PType off the
+    -- modality snapshot; a Nothing on both sides would compare equal and
+    -- check nothing.
+    testCase "mainPTypeOf reads main's root PType" $ do
+      mainPTypeOf (parseSrc "a" "main = 1.0") @?= Just Deterministic
+      assertBool "a random main is not Deterministic"
+        (maybe False (/= Deterministic) (mainPTypeOf (parseSrc "b" "main = Normal + 1.0")))
+  , testCase "draw and literal application parse to the same AST" $
       assertBool "draw x = e in b and (\\x -> b) e should be one AST"
         (parseSrc "a" "main = draw x = Normal in x + 1.0" ~= parseSrc "b" "main = (\\x -> x + 1.0) Normal")
   -- Linearity: exactly one free occurrence, not under a function body.
@@ -903,6 +915,156 @@ verdictLine v = case v of
   SampledOk -> "refused -> compiles, sampling agrees"
   Agree -> "agree"
   BothRefuse -> "both refuse"
+
+-- ---------------------------------------------------------------------------
+-- Integration: config pairs crossed with rewritten variants, and the
+-- assertion metrics (umbrella pass of transformation-differential-testing)
+-- ---------------------------------------------------------------------------
+
+-- | The config axes of milestone M1 (task
+-- transformation-differential-testing-m1-config-differencing), each the
+-- non-default side of its pair. On an unchanged program the corpus sweeps
+-- check them; here they run on every rewritten variant. The branch-count
+-- compile also supplies the variant's branch counts.
+integrationConfigs :: [(String, CompilerConfig)]
+integrationConfigs =
+  [ ("-O0", defaultCompilerConfig { optimizerLevel = 0 })
+  , ("topK 0", defaultCompilerConfig { topKThreshold = Just 0 })
+  , (branchCountLabel, branchCountConfig) ]
+
+branchCountLabel :: String
+branchCountLabel = "branch counts"
+
+branchCountConfig :: CompilerConfig
+branchCountConfig = defaultCompilerConfig { countBranches = True }
+
+-- | A variant whose default compile agrees with the original but whose
+-- compile under one 'integrationConfigs' entry does not (a refusal, a crash,
+-- or other numbers). Matched on (program, family, a substring of the site
+-- label, the config's label); logged, and an entry nothing matches any more
+-- fails its program's test. Each tracking document carries the minimal
+-- program.
+data KnownConfig = KnownConfig { kcProg :: String, kcFam :: Family, kcSite :: String, kcConfig :: String, kcDoc :: String }
+  deriving (Eq)
+
+knownConfigDivergences :: [KnownConfig]
+knownConfigDivergences =
+  -- Drawing the tuple mixture leaves the -O0 compile reading the draw's name
+  -- where nothing binds it ("Variable rwv0 not declared"); -O2 folds the
+  -- reference away.
+  [ KnownConfig "helperDiscardsComparedMixture" DrawIntro "draw-intro (if False" "-O0" "drawn-tuple-mixture-field-read-dangles-at-o0"
+  -- The mask's VAny reaches the identity's inverse (minus / divide) at -O0
+  -- only, the -O0 face of the family M3 filed.
+  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "plus-zero (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition"
+  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "one-times (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition"
+  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "double-negate (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition" ]
+
+knownConfigDivergence :: String -> Family -> String -> String -> Maybe KnownConfig
+knownConfigDivergence prog fam site cfg =
+  case [ k | k <- knownConfigDivergences, kcProg k == prog, kcFam k == fam, kcConfig k == cfg, kcSite k `isInfixOf` site ] of
+    (k : _) -> Just k
+    [] -> Nothing
+
+-- | One test per pool program: the integration check of the umbrella pass of
+-- transformation-differential-testing. For every variant (of every family,
+-- at every site) whose default compile agrees with the original's:
+--
+-- * hard: each 'integrationConfigs' compile of the variant answers its rows
+--   as the variant's default compile does. A refusal there is hard too: a
+--   config is not supposed to change capability. 'knownConfigDivergences'
+--   are logged.
+-- * hard: the variant's forward sampler matches its own densities
+--   ('samplingCheck'), so every transformed variant enters the
+--   sampling-vs-PDF pool, not only the refused -> compiles ones.
+-- * hard: the 'PType' of @main@ is the original's, by strict equality (the
+--   design's "Assertion metrics").
+-- * logged: the branch count at each row against the original's. Branch
+--   counts measure the path a compile takes, and rewrites change that path
+--   (see the design's dated note), so they are not an invariant.
+rewriteIntegrationTests :: Corpus -> IO TestTree
+rewriteIntegrationTests corpus = corpusSweep corpus SweepSpec
+  { sweepName = "Slow.RewriteIntegration", sweepTier = Slow, sweepSlow = SkipSlow
+  , sweepSelect = rewritePool
+  , sweepNote = "agreeing rewritten variants keep agreeing under -O0, topK 0 and branch counting, sample as they measure, and keep main's PType" } $ \e ->
+    testCaseInfo (ceName e) $ do
+      let n = ceName e; p = ceProgram e; qs = corpusQueries e
+      (orig, vs) <- compileSweep p
+      origOut <- runCompiled p orig qs
+      origBC <- compileTimedWith branchCountConfig p >>= \c -> branchCounts p c qs
+      let origPT = mainPTypeOf p
+      checked <- concurrently [ integrate n origOut origBC origPT qs v c | (v, c) <- vs ]
+      let hard = concat [ h | (h, _, _, _) <- checked ]
+          logs = concat [ l | (_, l, _, _) <- checked ]
+          matched = concat [ k | (_, _, k, _) <- checked ]
+          crossed = length [ () | (_, _, _, True) <- checked ]
+          stale = [ k | k <- knownConfigDivergences, kcProg k == n, k `notElem` matched ]
+      if not (null hard) then assertFailure (unlines hard) >> return ""
+      else if not (null stale)
+      then assertFailure (unlines [ "known config divergence no longer observed -- fixed? remove its entry: "
+                                    ++ familyName (kcFam k) ++ " at \"" ++ kcSite k ++ "\" under " ++ kcConfig k
+                                    ++ " [" ++ kcDoc k ++ "]" | k <- stale ]) >> return ""
+      else return $ show (length vs) ++ " variants, " ++ show crossed ++ " agreeing ones crossed"
+             ++ concatMap ("\n    " ++) logs
+
+-- | Cross one variant: (hard failures, log lines, the known config
+-- divergences it matched, whether it was crossed at all).
+integrate :: String -> Outcome -> Maybe [Double] -> Maybe PType -> [Query] -> Variant -> Either String IREnv
+          -> IO ([String], [String], [KnownConfig], Bool)
+integrate prog origOut origBC origPT qs v c = do
+  out <- runCompiled rp c qs
+  case (origOut, out, c) of
+    (Answered as, Answered bs, Right env) | and (zipWith agrees as bs), isNothing (knownDivergence prog fam site) -> do
+      cfgs <- forM integrationConfigs $ \(lbl, conf) -> do
+        c' <- compileTimedWith conf rp
+        o <- runCompiled rp c' qs
+        bc <- if lbl == branchCountLabel then branchCounts rp c' qs else return Nothing
+        let problem = case o of
+              Answered cs | and (zipWith agrees bs cs) -> Nothing
+                          | otherwise -> Just (tag ++ " under " ++ lbl ++ ": " ++ show bs ++ " vs " ++ show cs)
+              Refused why -> Just (tag ++ " refuses under " ++ lbl ++ ": " ++ why)
+        return (lbl, problem, bc)
+      sampled <- samplingCheck rp env (zip qs bs)
+      let vBC = case [ bc | (lbl, _, bc) <- cfgs, lbl == branchCountLabel ] of
+            (bc : _) -> bc
+            [] -> Nothing
+          vPT = mainPTypeOf rp
+          known = [ (k, m) | (lbl, Just m, _) <- cfgs, Just k <- [knownConfigDivergence prog fam site lbl] ]
+          newCfg = [ m | (lbl, Just m, _) <- cfgs, isNothing (knownConfigDivergence prog fam site lbl) ]
+          samplingFail = case sampled of
+            SampleMismatch m -> [tag ++ ": SAMPLING MISMATCH " ++ m]
+            _ -> []
+          ptFail = [ tag ++ ": PType of main " ++ show origPT ++ " -> " ++ show vPT | origPT /= vPT ]
+          bcLog = [ tag ++ ": branch counts " ++ show origBC ++ " -> " ++ show vBC | origBC /= vBC ]
+          knownLog = [ "known: " ++ m ++ " [" ++ kcDoc k ++ "]" | (k, m) <- known ]
+      return (newCfg ++ samplingFail ++ ptFail, knownLog ++ bcLog, map fst known, True)
+    _ -> return ([], [], [], False)
+  where
+    fam = variantFamily v
+    site = variantSite v
+    rp = variantProgram v
+    tag = familyName fam ++ " at " ++ site
+
+-- | The branch count at each row, on a 'branchCountConfig' compile, if it
+-- answers them all.
+branchCounts :: Program -> Either String IREnv -> [Query] -> IO (Maybe [Double])
+branchCounts _ (Left _) _ = return Nothing
+branchCounts p (Right env) qs = do
+  r <- timedTry (20 * 1000000) (evaluate (forceBCs (mapM (\(s, params) -> either (const Nothing) bcOf (runProbC p env params s)) qs)))
+  return $ case r of
+    Just (Right x) -> x
+    _ -> Nothing
+  where
+    bcOf (VProbDimBC _ _ bc) = Just bc
+    bcOf _ = Nothing
+    forceBCs m = maybe () (\xs -> sum xs `seq` ()) m `seq` m
+
+-- | The 'PType' at the root of @main@ after the modality stage, if the front
+-- end gets that far. Takes the first such snapshot, so the IR stages are not
+-- forced.
+mainPTypeOf :: Program -> Maybe PType
+mainPTypeOf p = case [ q | StageSnapshot _ (StageTyped q _) <- fst (compileStages defaultCompilerConfig p) ] of
+  [] -> Nothing
+  (q : _) -> pType . getTypeInfo <$> lookup "main" (functions q)
 
 -- | Bump when the rewrite oracle's logic changes.
 rewriteCheckVersion :: String

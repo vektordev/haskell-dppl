@@ -33,7 +33,7 @@ import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, branchCountBackendTests, topKRuntimeCutoffTests)
 import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
 import ScalingCheck (scalingCheckTests)
-import TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, ofToggleCorpusTests)
+import TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rewriteIntegrationTests, ofToggleCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestSamplingPrimitives (samplingPrimitiveTests)
 import TestCLI (cliTests)
@@ -561,6 +561,9 @@ main = do
   -- Rewrite sequences, shrunk and stage-diffed on failure (task
   -- transformation-differential-testing-m4-isolation-automation).
   rewriteSequences <- rewriteSequenceTests corpus
+  -- The M1 config pairs crossed with the rewritten variants, and the PType /
+  -- branch-count metrics (umbrella pass of transformation-differential-testing).
+  rewriteIntegration <- rewriteIntegrationTests corpus
   -- of-clause toggling compiles identically (task
   -- transformation-differential-testing-m3-catalog-expansion): compile-only.
   ofToggleCorpus <- ofToggleCorpusTests corpus
@@ -569,7 +572,7 @@ main = do
   generateCensus <- generateCensusTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
-        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, rewriteSequences, ofToggleCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
+        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, rewriteSequences, rewriteIntegration, ofToggleCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it
