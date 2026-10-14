@@ -6094,7 +6094,7 @@ worldFactorFree meta sub target
   | not (null (planFactorExternals (typeEnv meta) (recoveredVars meta) sub)) = return Nothing
   | hasInterval target && not (isScalar (rType (getTypeInfo sub))) = return Nothing
   | otherwise = do
-      block <- lift (runWriterT (measureSet meta sub target)) <&> generateLetInBlock meta
+      block <- lift (runWriterT (measureSet meta sub (wildcardTolerant target))) <&> generateLetInBlock meta
       fv <- mkVariable "xfree_factor"
       return (Just [WWorld [] WFull [WFactor [(fv, block)] (unpackResult (IRVar fv))]])
   where
@@ -6102,6 +6102,19 @@ worldFactorFree meta sub target
     hasInterval (WChoice _ a b) = hasInterval a || hasInterval b
     hasInterval (WExcept s _) = hasInterval s
     hasInterval _ = False
+    -- A point target is a projection of the query sample, so it can be the
+    -- marginal wildcard at runtime (the @ANY@ of @p((-2.0, ANY))@ reaching the
+    -- x-free @exp Uniform@ of @(h1, exp Uniform)@). The subtree is measured by
+    -- 'toIRInference', whose inverse steps apply arithmetic to their sample
+    -- and are not wildcard-safe below the top level ('toIRInferenceSave'
+    -- guards only there), so a wildcard point would reach @log ANY@. A
+    -- wildcard constrains nothing: the factor is the subtree's marginal, a
+    -- certain world ('WFull'). The runtime choice keeps the density side under
+    -- its own 'IRIf' ('measureSet''s 'WChoice' scopes each side), which is
+    -- also what keeps batched mode, whose world guards are eager selects,
+    -- from evaluating it on an @ANY@ bucket.
+    wildcardTolerant (WPoint p c) = WChoice (IRUnaryOp OpIsAny p) WFull (WPoint p c)
+    wildcardTolerant s = s
     isScalar TFloat = True
     isScalar TInt = True
     isScalar _ = False
