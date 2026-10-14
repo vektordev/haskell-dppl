@@ -1,0 +1,17 @@
+-- Two per-slot edits chained through a draw-bound intermediate scene:
+-- `draw s1 = Scene (flip (o1 s0)) ... in Scene (flip (o1 s1)) ...` over a
+-- 10-slot product read. Compiles generate only; at 8 slots it compiles all
+-- four variants and writeLogits. With the four-field CLEVR object it already
+-- fails at 3 slots, which fits s1 being enumerated jointly over its value
+-- domain (3^10 here, 97^3 there) and the materialization budget refusing it:
+-- `--materializationBudget 1000000` turns the CLEVR case into an out-of-memory
+-- under 2 GB instead. Composing per slot instead (`flip (flip (o1 s0))`)
+-- compiles `forward` at 10 slots. A reservoir-sampling edit ("recolour one
+-- uniformly random cube", draw-bound running count and pick per slot) fails
+-- the same way. Related: deterministic-draw-enumerated-over-its-domain
+-- (drawOfDeterministicIfEnumeratedOverDomain), the deterministic-draw case.
+-- Found by experiments_nest symbolic-latent-scene-editing. Docs task
+-- draw-bound-scene-intermediate-loses-probability.
+-- Idealized: p(Scene (Obj Red) Nil ...) = the read's own probability of
+-- that scene, since flip . flip = id.
+expect-failure: no-code

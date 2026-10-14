@@ -1,0 +1,15 @@
+-- A scene edit over one draw of a product neural read: slot 1's object is
+-- recoloured and moved (px - 1.0), slot 2's is recoloured with its px passed
+-- through. Compiles, but main has only `generate`; `-v` records no reason.
+-- Each half alone compiles `forward` (shift slot 1 only, or recolour both
+-- slots with px passed through unchanged), and so does the same body with
+-- `readScene sym` spelled at every use instead of draw-bound -- but that
+-- spelling is a different program (each use an independent draw). The
+-- per-slot law is a Gaussian shifted by a constant given the Obj arm, so
+-- nothing about the distribution is hard.
+-- Idealized, at slot logits [Nil, Obj, Red, Green, mu, sigma] x 2:
+-- p(Scene (Obj Red x1) (Obj Red x2)) = P(Obj_1) P(Obj_2)
+--   * N(x1 + 1; mu1, s1) * N(x2; mu2, s2).
+-- Found by experiments_nest symbolic-latent-scene-editing (edit probes).
+-- Docs task scene-rebuild-with-float-leaf-loses-probability.
+expect-failure: no-code
