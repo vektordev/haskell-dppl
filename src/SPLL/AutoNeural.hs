@@ -19,6 +19,7 @@ module SPLL.AutoNeural(
 , deadSlotFill
 , stripDeadSlotFills
 , planReadOf
+, continuousSlots
 ) where
 
 import SPLL.Lang.Types
@@ -574,9 +575,10 @@ makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan
 
   Continuous ->
     -- Call normalFnName(outerArgs...) → a (mu, sigma) tuple, then emit [mu, sigma].
-    -- 'norm' is necessarily Nothing here: a continuous leaf inside an arm would need an
-    -- arm-conditional (mu, sigma) that the IRCompiler does not generate, and
-    -- 'requiredNormalFns' names it so 'makeTopLevelWriteLogitsFun'/'validateWriteLogitsGaussian'
+    -- 'norm' is not applied: inside an Either/ADT arm normalFnName is already the payload's
+    -- (mu, sigma) *given* the arm (IRCompiler generates it only where that is one Normal;
+    -- task writelogits-continuous-leaf-under-sum-type), and where it is absent
+    -- 'requiredNormalFns' makes 'makeTopLevelWriteLogitsFun'/'validateWriteLogitsGaussian'
     -- refuse the whole writeLogits build before reaching this point.
     let normalResult = foldl IRApply (IRVar normalFnName) outerArgs
     in irList [IRDestruct AcFst normalResult, IRDestruct AcSnd normalResult]
@@ -800,17 +802,18 @@ validateWriteLogitsGaussian adtDecls registry neuralDecls env = mapM_ checkDecl 
     writeLogitsGaussianError name =
       "writeLogits: neural declaration '" ++ name ++ "' has a continuous output slot that cannot "
       ++ "be written. Either it is not Gaussian (a mixture produced by `if`, a product of "
-      ++ "random variables), or it is a continuous arm inside an Either/ADT — the latter is "
-      ++ "not yet supported (its arm-conditional (mu, sigma) is not generated), so it is "
-      ++ "refused rather than silently zero-stubbed."
+      ++ "random variables), or it is a continuous payload inside an Either/ADT that is not "
+      ++ "one Gaussian given its constructor (a mixture, a payload gated by its own value, or "
+      ++ "one produced where the compiler cannot see it), so it is refused rather than "
+      ++ "silently zero-stubbed."
 
 -- | Normal-parameter function names that `writeLogits` references for the Continuous slots of a
 -- plan.  Mirrors the name threading in `makeWriteLogitsPlan` (top-level `main_normal`,
 -- tuple components suffixed `_fst`/`_snd`).
 --
 -- Either/ADT arms recurse too: a continuous leaf inside an arm names an arm-conditional
--- normal function (`_left`/`_right`, `_<ctor>_<field>`) that the IRCompiler does not yet
--- generate.  By surfacing that leaf as a required-but-absent normal function,
+-- normal function (`_left`/`_right`, `_<ctor>_<field>`), which the IRCompiler generates only
+-- where the payload is one Gaussian given its constructor.  Where it is absent,
 -- `makeTopLevelWriteLogitsFun`'s `normalsOk` check refuses to build such a writeLogits function
 -- (and `validateWriteLogitsGaussian` refuses to run it) rather than silently emitting a zero for
 -- the arm's `(mu, sigma)`.  A fully-discrete arm contributes no requirement, so a discrete
@@ -830,6 +833,22 @@ requiredNormalFns nf (ADTPlan _ ctors) =
   concat [ requiredNormalFns (nf ++ "_" ++ cName ++ "_" ++ show j) fp
          | (cName, fps) <- ctors, (j, fp) <- zip [0 :: Int ..] fps ]
 requiredNormalFns _  (Discretes _ _)   = []
+
+-- | Every Continuous slot of a plan: its position suffix in the 'requiredNormalFns' name
+-- scheme (@""@ for a bare Continuous plan) and the offset of its mu (sigma follows).  The
+-- offsets are 'makeProbRec''s.  This is how a network read's own Gaussian fields get their
+-- component normal functions (task writelogits-continuous-leaf-under-sum-type).
+continuousSlots :: PartitionPlan -> [(String, Int)]
+continuousSlots = go "" 0
+  where
+    go p ix Continuous      = [(p, ix)]
+    go _ _  (Discretes _ _) = []
+    go p ix (TuplePlan a b)  = go (p ++ "_fst") ix a ++ go (p ++ "_snd") (ix + getSize a) b
+    go p ix (EitherPlan a b) = go (p ++ "_left") (ix + 1) a ++ go (p ++ "_right") (ix + 1 + getSize a) b
+    go p ix (ADTPlan _ ctors) =
+      concat [ go (p ++ "_" ++ cName ++ "_" ++ show j) fIx fp
+             | ((cName, fps), cIx) <- zip ctors (scanl (+) (ix + adtFlagSlots ctors) (map (sum . map getSize . snd) ctors))
+             , (j, fp, fIx) <- zip3 [0 :: Int ..] fps (scanl (+) cIx (map getSize fps)) ]
 
 -- | Normal-parameter function names actually present in the compiled environment.  Mirrors
 -- the registration in `reduceIREnv`: `_component_<name>` groups register under `<name>`,

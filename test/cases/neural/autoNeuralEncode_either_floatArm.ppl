@@ -1,0 +1,7 @@
+-- Read-logits passthrough of an Either with a Float arm (task
+-- writelogits-continuous-leaf-under-sum-type). Layout
+-- [P(Left), mu|Left, sigma|Left, P(True|Right), P(False|Right)]; the Left payload's
+-- (mu, sigma) is the network's own, through main_normal_left. Picked up by
+-- WriteLogitsRoundtrip's LogitIdentity.
+neural readEither :: (Symbol -> Either Float Bool)
+main sym = readEither sym

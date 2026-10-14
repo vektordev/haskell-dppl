@@ -1,0 +1,8 @@
+-- Read-logits passthrough of nested single-constructor ADTs over Floats (task
+-- writelogits-continuous-leaf-under-sum-type). Layout [mu|x, sigma|x, mu|y, sigma|y]:
+-- no flag slots, each field's (mu, sigma) read from the network's own slots through
+-- main_normal_Wrapper_0_Position_0/_1. Picked up by WriteLogitsRoundtrip's LogitIdentity.
+data Position = Position x::Float, y::Float
+data Wrapper = Wrapper pos::Position
+neural extract :: (Symbol -> Wrapper)
+main symbol = extract symbol

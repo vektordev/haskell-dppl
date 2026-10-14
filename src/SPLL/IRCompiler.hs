@@ -735,11 +735,16 @@ generateLetInBlock _ codeGen =
 -- the same arity as the original binding; parameter types are added to the type
 -- environment so that inner Var references resolve correctly.
 compileNormalExpr :: CompilerMetadata -> Expr -> Either VariantRefusal IRExpr
-compileNormalExpr meta (Expr _ (Lambda name subExpr)) =
+compileNormalExpr = compileNormalWith toIRNormal
+
+-- | 'compileNormalExpr' with the (mu, sigma) extraction of the stripped body given.
+compileNormalWith :: (CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr))
+                  -> CompilerMetadata -> Expr -> Either VariantRefusal IRExpr
+compileNormalWith extract meta (Expr _ (Lambda name subExpr)) =
   let newMeta = meta { typeEnv = (name, (rType (getTypeInfo subExpr), False)) : typeEnv meta }
-  in IRLambda name <$> compileNormalExpr newMeta subExpr
-compileNormalExpr meta expr = do
-  ((mu, sigma), binds) <- runCompilerMonad (toIRNormal meta expr)
+  in IRLambda name <$> compileNormalWith extract newMeta subExpr
+compileNormalWith extract meta expr = do
+  ((mu, sigma), binds) <- runCompilerMonad (extract meta expr)
   return (generateLetInExpr binds (IRConstruct TgTuple [mu, sigma]))
 
 -- | True when the expression (with lambdas stripped) has its own toIRInference
@@ -753,41 +758,78 @@ isNormalExtractable (Expr _ (InjF (Named "Cons")  _))   = False
 isNormalExtractable (Expr _ (InjF (Named "TCons") _))   = False
 isNormalExtractable _                            = True
 
--- | Generate per-component normal functions for tuple expressions.
--- For a tuple (fst, snd) where both parts are PNormal/PLogNormal, generates:
---   {name}_normal_fst :: extracting normal params from fst
---   {name}_normal_snd :: extracting normal params from snd
--- Lambda wrappers are stripped to reach the TCons, then re-applied to each component.
+-- | Per-component normal functions for the Continuous positions of a structured
+-- output: tuple components, Either payloads and ADT fields, at any nesting depth.
+-- A position is named by the same path scheme 'SPLL.AutoNeural.requiredNormalFns'
+-- uses (@_fst@/@_snd@, @_left@/@_right@, @_<Ctor>_<field>@), so @main = Pos Normal
+-- Normal@ yields @main_normal_Pos_0@ and @main_normal_Pos_1@.
+--
+-- A position below a constructor holds the payload's law *given* that constructor
+-- (task writelogits-continuous-leaf-under-sum-type). That is the leaf's own law only
+-- when the leaf is the one expression that can produce the position: the walk goes
+-- through the outer parameter lambdas, tuple and constructor applications and @if@
+-- arms, and stops at anything else. A position is generated only when exactly one
+-- stopped-at expression lies on or above it -- two are a mixture (refused until
+-- encode-07's @collapse@), and an opaque one above it (a call, a variable, a @let@)
+-- may produce it unseen. Since the walk never enters a @let@, the leaf shares no
+-- random variable with the conditions that select it, so the arm's conditioning
+-- does not change its law (a gated variable's truncated law is the case this rules
+-- out). The leaf must still be one Normal by its own modality
+-- ('generateComponentNormalFunction'). A dead arm needs nothing here: writeLogits
+-- guards it ('SPLL.AutoNeural.deadSlotFill').
 -- Functions are registered via the _component_ prefix mechanism in reduceIREnv.
 generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [IRFunGroup]
-generateTupleComponentNormalFunctions meta baseName expr = go expr id
+generateTupleComponentNormalFunctions meta baseName expr =
+  catMaybes
+    [ generateComponentNormalFunction meta (baseName ++ "_normal" ++ concat path) (wrap leaf) (getTypeInfo leaf)
+    | (path, leaf) <- occurrences, not (null path), soleProducer path, isNothing (planReadOf meta leaf) ]
+  -- A network read's fields are Gaussian by the read-logits plan itself (each field
+  -- conditional on its constructor), so every Continuous slot of its plan is one.
+  ++ [ componentNormalGroup fullName
+         (compileNormalWith (\m e -> readNNSlotNormal m k e) meta (wrap leaf))
+     | (path, leaf) <- occurrences, soleProducer path
+     , Just (_, plan, _) <- [planReadOf meta leaf]
+     , (suffix, k) <- continuousSlots plan
+     , not (null path && null suffix)
+     , let fullName = baseName ++ "_normal" ++ concat path ++ suffix ]
   where
-    go (Expr ti (Lambda name lambdaBody)) wrap = go lambdaBody (\e -> wrap (Expr ti (Lambda name e)))
-    go (Expr _ (InjF (Named "TCons") [fstExpr, sndExpr])) wrap =
-      catMaybes
-        [ generateComponentNormalFunction meta (baseName ++ "_normal_fst") (wrap fstExpr) (getTypeInfo fstExpr)
-        , generateComponentNormalFunction meta (baseName ++ "_normal_snd") (wrap sndExpr) (getTypeInfo sndExpr)
-        ]
-    go _ _ = []
+    (wrap, outBody) = stripOuter expr id
+    stripOuter (Expr ti (Lambda name lambdaBody)) w = stripOuter lambdaBody (\e -> w (Expr ti (Lambda name e)))
+    stripOuter e w = (w, e)
+    ctorNames = [ c | decl <- adtDecls meta, (c, _) <- constructors decl ]
+    occurrences = walk [] outBody
+    walk path e@(Expr _ f) = case f of
+      InjF (Named "TCons") [a, b] -> walk (path ++ ["_fst"]) a ++ walk (path ++ ["_snd"]) b
+      InjF (Named "left") [a]     -> walk (path ++ ["_left"]) a
+      InjF (Named "right") [a]    -> walk (path ++ ["_right"]) a
+      InjF (Named c) args | c `elem` ctorNames ->
+        concat [ walk (path ++ ["_" ++ c ++ "_" ++ show j]) a | (j, a) <- zip [0 :: Int ..] args ]
+      IfThenElse _ a b -> walk path a ++ walk path b
+      _ -> [(path, e)]
+    soleProducer path = length [ () | (q, _) <- occurrences, q `isPrefixOf` path ] == 1
 
 -- | Generate a single per-component normal function if the expression is extractable and PNormal/PLogNormal.
 -- Stored in normalFun field and registered via _component_ prefix in reduceIREnv (bare name, no suffix).
 generateComponentNormalFunction :: CompilerMetadata -> String -> Expr -> TypeInfo -> Maybe IRFunGroup
 generateComponentNormalFunction meta fullName expr ti
   | (pType ti == PNormal || pType ti == PLogNormal) && isNormalExtractable expr =
-      let compiled = compileNormalExpr meta expr
-      in Just $ IRFunGroup (componentNormalGroupPrefix ++ fullName)
-           Nothing
-           Nothing
-           Nothing
-           Nothing
-           (either (const Nothing) (\c -> Just (c, "Per-component normal extraction for tuple element: " ++ fullName)) compiled)
-           ""
-           [ ("normal", r) | Left r <- [compiled] ]
-           -- No prob function, so no query domain to enumerate (M3).
-           Nothing
-           Nothing
+      Just (componentNormalGroup fullName (compileNormalExpr meta expr))
   | otherwise = Nothing
+
+-- | The group holding one output component's normal function.
+componentNormalGroup :: String -> Either VariantRefusal IRExpr -> IRFunGroup
+componentNormalGroup fullName compiled =
+  IRFunGroup (componentNormalGroupPrefix ++ fullName)
+    Nothing
+    Nothing
+    Nothing
+    Nothing
+    (either (const Nothing) (\c -> Just (c, "Per-component normal extraction for output component: " ++ fullName)) compiled)
+    ""
+    [ ("normal", r) | Left r <- [compiled] ]
+    -- No prob function, so no query domain to enumerate (M3).
+    Nothing
+    Nothing
 
 -- Return type (name, rType, hasInferenceFunctions)
 getGlobalTypeEnv :: Program -> TypeEnv
@@ -2237,6 +2279,15 @@ irHypot a b = do
     containsSqrt x = any containsSqrt (getIRSubExprs x)
 
 -- | Recursively extract (mu, sigma) as IRExprs from a PNormal-typed expression.
+-- | (mu, sigma) of the Continuous slot at logit offset @k@ of a network read.
+readNNSlotNormal :: CompilerMetadata -> Int -> Expr -> CompilerMonad (IRExpr, IRExpr)
+readNNSlotNormal meta k (Expr _ (ReadNN name arg)) = do
+  sym <- toIRGenerate meta arg
+  var <- mkVariable "nn_out"
+  setVariables [(var, IRApply (IRVar name) sym)]
+  return (IRBuiltin BListIndex [IRVar var, IRConst (VInt k)], IRBuiltin BListIndex [IRVar var, IRConst (VInt (k + 1))])
+readNNSlotNormal _ _ e = error ("readNNSlotNormal: not a network read: " ++ show e)
+
 toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 -- An expression reading an analytically marginalised binding is collapsed from
 -- its affine form. Tried first: the scalar equations below combine their
@@ -2291,11 +2342,7 @@ toIRNormalParams meta (Expr ti (InjF f@(Named n) [Expr _ (Var name)]))
       toIRNormalParams meta (Expr ti (InjF f [expr]))
 toIRNormalParams meta (Expr _ (Var name))
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRNormalParams meta expr
-toIRNormalParams meta (Expr _ (ReadNN name arg)) = do
-  sym <- toIRGenerate meta arg
-  var <- mkVariable "nn_out"
-  setVariables [(var, IRApply (IRVar name) sym)]
-  return (IRBuiltin BListIndex [IRVar var, IRConst (VInt 0)], IRBuiltin BListIndex [IRVar var, IRConst (VInt 1)])
+toIRNormalParams meta e@(Expr _ (ReadNN _ _)) = readNNSlotNormal meta 0 e
 toIRNormalParams meta e | Just act <- normalParamsViaCall meta PNormal e = act
 toIRNormalParams _ e = refuse (chainName (getTypeInfo e)) $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
 

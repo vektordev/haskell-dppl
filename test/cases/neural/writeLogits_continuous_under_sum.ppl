@@ -1,0 +1,14 @@
+-- A Continuous leaf under an Either or ADT constructor (task
+-- writelogits-continuous-leaf-under-sum-type): each such slot is the payload's
+-- (mu, sigma) given its constructor, from a component normal function
+-- (main_normal_Pos_0, side_normal_left, ...). Exact vectors are pinned in
+-- TestWriteLogitsProperties' continuousUnderSum group; here the endpoints feed
+-- WriteLogitsRoundtrip's DensityAgreement. opt's Present arm is dead at True.
+-- main: [mu|x, sigma|x, mu|y, sigma|y]
+-- side: [P(Left), mu|Left, sigma|Left, P(True|Right), P(False|Right)]
+-- opt:  [P(Absent), P(Present), mu|Present, sigma|Present]
+data Pos = Pos x::Float, y::Float
+data Opt = Absent | Present w::Float
+main = Pos (Normal * 2.0) (Normal + 1.0)
+side = if Uniform < 0.25 then left (Normal * 3.0) else right True
+opt b = if b then Absent else Present (Normal + 1.0)

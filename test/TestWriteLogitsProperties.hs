@@ -20,6 +20,8 @@
 --   § 3.4  Noised void fill on constructor change: dead-arm slots are finite, on-manifold
 --          noise; live slots exact; tiny-probability arms stay live    (deadArm group)
 --   § 3.7  Cross-slot correlations silently marginalised (no test — not observable)
+--   Continuous leaf under an Either/ADT constructor: exact conditional (mu, sigma), dead arm,
+--          mixture/truncation refused                   (continuousUnderSum group)
 
 module TestWriteLogitsProperties
   ( writeLogitsTests
@@ -852,7 +854,65 @@ writeLogitsTests = testGroup "WriteLogits"
   , writeLogitsInvariant_generateCoversAllSlots
   , writeLogitsInvariant_probIndicesInBounds
   , deadArmTests
+  , continuousUnderSumTests
   ]
+
+------------------------------------------------------------------------
+-- A Continuous leaf under an Either/ADT constructor (task
+-- writelogits-continuous-leaf-under-sum-type). Its slots hold the payload's (mu, sigma)
+-- *given* the constructor, from a component normal function the IRCompiler generates when
+-- one expression -- a single Normal by its own modality -- is the only producer of that
+-- position. A mixture and a truncated (gated) payload are not Normal given the arm, and
+-- stay refused (no writeLogits) until encode-07's collapse.
+
+continuousUnderSumTests :: TestTree
+continuousUnderSumTests = testGroup "continuousUnderSum"
+  [ testCase "loneCtorRecord" $
+      closedWriteLogits (unlines [ "data Pos = Pos x::Float, y::Float"
+                                 , "main = Pos (Normal * 2.0) (Normal + 1.0)" ])
+        >>= checkVector "Pos" [0.0, 2.0, 1.0, 1.0]
+  , testCase "eitherLeftArm" $
+      closedWriteLogits "main = if Uniform < 0.25 then left (Normal * 3.0) else right True"
+        >>= checkVector "Either" [0.25, 0.0, 3.0, 1.0, 0.0]
+  , testCase "twoCtorField" $
+      closedWriteLogits (unlines [ "data Opt = Absent | Present w::Float"
+                                 , "main = if Uniform < 0.4 then Absent else Present (Normal - 2.0)" ])
+        >>= checkVector "Opt" [0.4, 0.6, -2.0, 1.0]
+  , testCase "fieldBesideDiscreteField" $
+      closedWriteLogits (unlines [ "data Obj = Obj shape::Bool, x::Float"
+                                 , "main = Obj (Uniform < 0.3) (Normal * 2.0 + 1.0)" ])
+        >>= checkVector "Obj" [0.3, 0.7, 1.0, 2.0]
+  , testCase "nestedTuple" $
+      closedWriteLogits "main = ((Normal, Normal * 2.0), Uniform < 0.5)"
+        >>= checkVector "nested tuple" [0.0, 1.0, 0.0, 2.0, 0.5, 0.5]
+  , testCase "deterministicParamSelectsArm" $ do
+      prog <- parseOrFail "main b = if b then left (Normal + 1.0) else right False"
+      slots <- writeLogitsSlots prog [VBool True]
+      checkVector "live Left" [1.0, 1.0, 1.0] (take 3 slots)
+      -- At b = True the Right arm is dead: on-manifold noise, a softmax pair.
+      assertBool ("dead Right arm is a softmax pair, got " ++ show (drop 3 slots))
+                 (length slots == 5 && all (>= 0) (drop 3 slots) && abs (sum (drop 3 slots) - 1) < 1e-9)
+  , testCase "deadContinuousArmIsNoise" $ do
+      prog <- parseOrFail (unlines [ "data Opt = Absent | Present w::Float"
+                                   , "main b = if b then Absent else Present (Normal + 1.0)" ])
+      dead <- writeLogitsSlots prog [VBool True]
+      checkVector "dead Present: flags" [1.0, 0.0] (take 2 dead)
+      assertBool ("dead Present: sigma > 0 and finite, got " ++ show dead)
+                 (length dead == 4 && dead !! 3 > 0 && all (not . isNaN) dead && all (not . isInfinite) dead)
+      writeLogitsSlots prog [VBool False] >>= checkVector "live Present" [0.0, 1.0, 1.0, 1.0]
+  , refused "mixturePayload" "main = if Uniform < 0.5 then left Normal else left (Normal + 3.0)"
+  , refused "nestedMixturePayload"
+      "main = if Uniform < 0.5 then left (if Uniform < 0.5 then Normal else Normal + 3.0) else right True"
+  , refused "truncatedPayload" "main = draw x = Normal in if x > 0.0 then left x else right 0"
+  , refused "constantPayload" "main = if Uniform < 0.5 then left 1.0 else right True"
+  ]
+  where
+    refused label src = testCase ("refuses." ++ label) $ do
+      prog <- parseOrFail src
+      case runWriteLogits defaultCompilerConfig prog mainTarget [] of
+        Left err -> assertBool ("expected the missing-writeLogits refusal, got: " ++ err)
+                               ("has no writeLogits function" `isInfixOf` err)
+        Right v  -> assertFailure ("expected no writeLogits for a non-Gaussian payload, got " ++ show v)
 
 ------------------------------------------------------------------------
 -- Corpus roundtrip invariants: writeLogits and the read-logits readers must be two
