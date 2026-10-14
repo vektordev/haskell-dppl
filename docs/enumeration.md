@@ -279,7 +279,11 @@ measures it, and declines the table unless the copy is small
 (`maxTabulatedLeafNodes`) and the total fits the budget — a `ReadNN`
 digit read is 10 IR nodes, while an arbitrary enumerable if-tree can be
 thousands, where copying per value cost 14x the IR and turned a 0.17s
-compile into 16s.
+compile into 16s. The per-copy size counts literal data (constants,
+constructors, literal tensors) as one node (`irLogicNodeCount`): it is the
+same in every copy and CSE binds it once, so an enumerated neural ADT
+domain's tensor does not make its leaf look large. The total counts every
+node.
 
 ## The dense-enumeration budget gate
 

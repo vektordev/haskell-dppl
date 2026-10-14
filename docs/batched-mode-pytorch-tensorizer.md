@@ -59,14 +59,14 @@ a structural `if` — `isNil o` guarding `color o` — is emitted as Python's
 lazy `t if c else f` rather than a `torch.where`, so the sibling
 constructor's field accessor is never evaluated. Task
 `batched-backend-refuses-neural-adt-constants`; corpus
-`test/cases/neural/neuralAdtReadCount`, `neuralEnumReadCount`. Cost caveat:
-branch-free evaluation cannot skip the residuals a nested `++` count chain's
-`is_member` guard rules out, so an n-slot chain does `n!`-ish work per call
-where the scalar backend prunes per row (6 slots: ~49s per call, whatever
-`B`) -- correct, but not yet practical past ~4 slots. Tier-0 materialization
-would make it a convolution but declines the table, the leaf cell
-(`match (readAttrs s)`, a 97-value sum) exceeding `maxTabulatedLeafNodes`;
-docs-repo task `batched-count-chain-enumeration-factorial`.
+`test/cases/neural/neuralAdtReadCount`, `neuralEnumReadCount`. Branch-free
+evaluation cannot skip the residuals a nested `++` count chain's `is_member`
+guard rules out, so an untabulated n-slot chain does `n!`-ish work per call
+where the scalar backend prunes per row. Tier-0 materialization turns it into
+a convolution: the leaf cell (`match (readAttrs s)`, a 97-value sum) is
+judged with its domain-tensor literal counted as one node, so 10 slots at
+`B = 256` take ~0.8s per call, linear in slots (docs-repo task
+`batched-count-chain-enumeration-factorial`).
 
 A prob/integ path may call only forward/integrate methods: a batched
 `generate` is a different artifact (trailing batch size, per-element draws).

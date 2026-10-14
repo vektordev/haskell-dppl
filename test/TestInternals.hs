@@ -4045,8 +4045,46 @@ materializationTests = testGroup "Tier 0 marginal materialization"
           cells <- compilesWithCells (defaultCompilerConfig { materializationCardinality = 300 }) prog
           assertBool "a raw total over the budget must not be tabulated" (not cells)
       ]
+  , testGroup "literal data counts as one node (task batched-count-chain-enumeration-factorial)"
+      -- A count chain over neural ADT reads, @match (readAttrs s1) ++ ...@: each
+      -- leaf enumerates the 97-value Attrs domain, whose tensor literal is ~98
+      -- of the leaf's ~138 folded nodes. Counted node for node that is over
+      -- 'maxTabulatedLeafNodes', the table is declined, and under --batched
+      -- (which cannot prune residuals lazily) an n-slot chain cost n! per call.
+      [ testCase "a 3-slot neural ADT count chain is tabulated, scalar and batched" $ do
+          prog <- parseOrFail (attrsCountSrc 3)
+          forM_ [defaultCompilerConfig, defaultCompilerConfig { batched = True }] $ \conf -> do
+            cells <- compilesWithCells conf prog
+            assertBool "the chain's nested operand must be materialized" cells
+      , testCase "materialized == re-descended at every count" $ do
+          prog <- parseOrFail (attrsCountSrc 3)
+          let attrs ps = VTuple (VInt 2) (constructVList (map VFloat ps))
+              -- [Nil, Obj | Cube, Sphere, Cylinder | Small, Large | 8 colours | Rubber, Metal]
+              slot nil green = attrs ([nil, 1 - nil, 0.2, 0.3, 0.5, 0.6, 0.4]
+                                      ++ [0.1, 0.1, green, 0.1, 0.1, 0.1, 0.1, 0.4 - green] ++ [0.7, 0.3])
+              params = [slot 0.2 0.25, slot 0.5 0.1, slot 0.9 0.3]
+          forM_ [0 .. 3] $ \q -> do
+            matP <- probUnder defaultCompilerConfig   prog params (VInt q)
+            refP <- probUnder noMaterializationConfig prog params (VInt q)
+            assertBool ("p(" ++ show q ++ ") must not move: " ++ show refP ++ " re-descended vs "
+                          ++ show matP ++ " tabulated")
+              (abs (matP - refP) <= 1e-12)
+      ]
   ]
   where
+    attrsCountSrc :: Int -> String
+    attrsCountSrc n = unlines
+      [ "data Shape = Cube | Sphere | Cylinder"
+      , "data Size = Small | Large"
+      , "data Color = Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple"
+      , "data Material = Rubber | Metal"
+      , "data Attrs = Nil | Obj shape::Shape, size::Size, color::Color, material::Material"
+      , "neural readAttrs :: (Symbol -> Attrs) of {Nil | Obj {Cube | Sphere | Cylinder} {Small | Large} "
+          ++ "{Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple} {Rubber | Metal}}"
+      , "match o = if isNil o then 0 else (if isGreen (color o) then 1 else 0)"
+      , "main " ++ unwords [ "s" ++ show i | i <- [1 .. n] ] ++ " = "
+          ++ intercalate " ++ " [ "(match (readAttrs s" ++ show i ++ "))" | i <- [1 .. n] ]
+      ]
     sharedLeaf = "(if Uniform < 0.1 then (not b) else b)"
     boolChainSrc op n leaf =
       "main = draw b = Uniform < 0.5 in (b, " ++ intercalate (" " ++ op ++ " ") (replicate n leaf) ++ ")"

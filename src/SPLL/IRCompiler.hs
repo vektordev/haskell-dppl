@@ -1466,15 +1466,16 @@ convolveTables meta dom buckets = do
 -- "how much unrolling is affordable" question the guard asks of domains and
 -- grids), and the individual copy must be small enough to be worth copying at
 -- all ('maxTabulatedLeafNodes') -- judged on the copy's size once its constant
--- key has been folded in, when its raw size is over (see the fallback below).
+-- key has been folded in, when its raw size is over (see the fallback below),
+-- and in both cases with literal data counted as one node ('irLogicNodeCount').
 pointQueryTable :: CompilerMetadata -> Expr -> [Value] -> CompilerMonad (Maybe MarginalTable)
 pointQueryTable _ _ [] = return Nothing
 pointQueryTable meta e dom@(v0 : vs) = do
   probe@(probeRes, probeBinds) <- lift $ runWriterT $ inferAt v0
-  let probeSize = compiledSize probe
+  let probeSize = compiledSize irNodeCount probe
       bound = materializationCardinality (compilerConfig meta)
       withinTotal = withinMaterializationBudget bound (length dom * probeSize)
-  if withinTotal && probeSize <= maxTabulatedLeafNodes
+  if withinTotal && compiledSize irLogicNodeCount probe <= maxTabulatedLeafNodes
     then do
       setVariables probeBinds
       cell0 <- bindCell (unP (rProb probeRes))
@@ -1510,8 +1511,8 @@ pointQueryTable meta e dom@(v0 : vs) = do
           else return Nothing
   where
     inferAt v = toIRInference meta False e (IRConst (valueToIR v))
-    compiledSize (res, binds) = irNodeCount (unP (rProb res)) + sum (map (irNodeCount . snd) binds)
-    foldedSize (res, binds) = irNodeCount (postProcess (compilerConfig meta) (buildLetIns binds (unP (rProb res))))
+    compiledSize count (res, binds) = count (unP (rProb res)) + sum (map (count . snd) binds)
+    foldedSize (res, binds) = irLogicNodeCount (postProcess (compilerConfig meta) (buildLetIns binds (unP (rProb res))))
     bindCell p = do
       cellName <- mkVariable "mat_leaf"
       setVariables [(cellName, p)]
@@ -1520,6 +1521,28 @@ pointQueryTable meta e dom@(v0 : vs) = do
 -- | Node count of an IR expression, for the unrolling-size budget above.
 irNodeCount :: IRExpr -> Int
 irNodeCount e = 1 + sum (map irNodeCount (getIRSubExprs e))
+
+-- | 'irNodeCount' with every literal-data subtree counted as one node: the
+-- per-copy size 'pointQueryTable' gates a leaf on. A literal (constants,
+-- constructors and tensors built only of literals) is the same in every
+-- per-value copy of a leaf, so the optimizer's CSE binds it once for the whole
+-- table; its node count measures the size of an enumeration DOMAIN, not of the
+-- leaf's logic. The case that needed this (task
+-- batched-count-chain-enumeration-factorial): a neural ADT read under a
+-- predicate, @match (readAttrs s)@, enumerates the 97 values of its @Attrs@
+-- domain, and that tensor literal was 98 of the leaf's 138 folded nodes -- over
+-- 'maxTabulatedLeafNodes' with a 40-node body, so the table was declined and
+-- an n-slot count chain went factorial under @--batched@. Does not bear on the
+-- cardinality budget, which still counts every node.
+irLogicNodeCount :: IRExpr -> Int
+irLogicNodeCount e
+  | isLiteralData e = 1
+  | otherwise       = 1 + sum (map irLogicNodeCount (getIRSubExprs e))
+  where
+    isLiteralData (IRConst _)                    = True
+    isLiteralData (IRConstruct _ es)             = all isLiteralData es
+    isLiteralData (IRBuiltin (BTensor _) es)     = all isLiteralData es
+    isLiteralData _                              = False
 
 -- | How large a leaf's compiled inference may be and still be worth copying
 -- once per domain value. Not a second cardinality budget -- a statement about
