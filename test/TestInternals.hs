@@ -2275,6 +2275,27 @@ test_wideProductSceneBatchedCompilesFast = testCase "wideProductSceneBatchedComp
       assertBool "an emitted DOMAIN constant lists the Scene domain"
         (not (any (\l -> "DOMAIN = [" `isInfixOf` l && "Scene(" `isInfixOf` l) (concatMap lines ls)))
 
+-- | The corpus copy of the ten-slot scene, wideProductSceneCount, declares no
+-- @batched@. Every @batched@-declaring program feeds Slow.BatchedPython's topK
+-- differentials ('End2EndTesting.topKEntries'), which query it on the
+-- interpreter compiled at a topK cutoff, and that query is exponential in the
+-- slot count (p(0) at k=0.3: 0.8 s at 5 slots, 4.7 s at 6, 34 s at 7, 0.1 s
+-- topK-off at any width). At ten slots the list both differentials share never
+-- finished, so the whole Slow group hung. The running batched kernel is
+-- itself past 20 minutes (task batched-count-chain-enumeration-factorial).
+-- The token came in with the mass declaration of task
+-- declare-batched-on-eligible-corpus-programs, against the @.tst@'s own note.
+test_wideProductSceneCountNotBatched :: TestTree
+test_wideProductSceneCountNotBatched = testCase "wideProductSceneCountNotBatched" $ do
+  tst <- corpusTstPath "wideProductSceneCount"
+  t <- readFile tst >>= either assertFailure' return . parseTstFileFromString tst
+  assertBool ("wideProductSceneCount declares batched: its topK interpreter query is exponential in \
+              \the slot count, which hangs Slow.BatchedPython's topK differentials (docs-repo task \
+              \batched-topk-differentials-scale-with-declared-programs)")
+             (Batched `notElem` tstBackends t)
+  where
+    assertFailure' e = assertFailure e >> error "unreachable"
+
 test_wideTupleCompilesFast :: TestTree
 test_wideTupleCompilesFast = testCase "wideTupleCompilesFast" $ do
   let n = 8 :: Int
@@ -5623,6 +5644,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_wideTupleCompilesFast
   , test_wideProductSceneAccessorCompilesFast
   , test_wideProductSceneBatchedCompilesFast
+  , test_wideProductSceneCountNotBatched
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
   , test_planEnumAccumulatorFoldPolynomial
