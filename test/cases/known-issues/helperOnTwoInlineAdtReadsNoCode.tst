@@ -1,0 +1,13 @@
+-- The ADT-shaped sibling of helperOnTwoInlineNeuralReadsNoCode: a helper
+-- applied straight to two independent ADT-valued neural reads, comparing a
+-- field of each. Compiles, but main has only `generate`; probability and
+-- integrate are silently absent with no recorded reason. The draw-bound
+-- spelling `draw p = readP sp in draw h = readH sh in same p h` compiles
+-- `forward` and answers the right value. Kept separate from the Int pin
+-- because the mechanism here goes through field accessors and enum
+-- equality, not arithmetic, so a fix to one need not cover the other.
+-- Found by experiments_nest shared-symbolic-interlingua (its entailment task
+-- program `entails (readP sp) (readH sh)`); docs task
+-- helper-on-two-inline-neural-reads-no-probability.
+-- Idealized: P(main = True) = sum_c pP(color = c) * pH(color = c).
+expect-failure: no-code

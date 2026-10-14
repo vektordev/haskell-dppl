@@ -1,0 +1,6 @@
+data Color = Red | Green
+data Thing = Thing color::Color, shade::Color
+neural readP :: (Symbol -> Thing)
+neural readH :: (Symbol -> Thing)
+same a b = color a == color b
+main sp sh = same (readP sp) (readH sh)
