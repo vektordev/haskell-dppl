@@ -191,7 +191,14 @@ knownSequenceDivergences =
   -- Probe row 10, `0.0 * Normal`, with the Normal drawn into a binding and
   -- the product wrapped in `0 - (0 - .)`: knownDivergences' diracLawLost on
   -- drawBoundRandomTimesLiteralZero, which the sweep skips as slow.
-  , KnownSeq "probe10" [DrawIntro, InjFIdentity] "dirac-law-point-lost-under-plus-or-helper" ]
+  , KnownSeq "probe10" [DrawIntro, InjFIdentity] "dirac-law-point-lost-under-plus-or-helper"
+  -- `draw x = Normal in if x == 0.0 then 0 else 2`, inlined to
+  -- `if Normal == 0.0 ...` and then if-flipped to `if not (Normal == 0.0)`:
+  -- the negation drops the equality's density convention (p(0) = 0, not the
+  -- density), as knownDivergences' nullSetNegation on the let-free spelling.
+  -- Pinned by known-issues/negatedContinuousEqualityDropsDensity. Reached once
+  -- d3dd60a's corpus addition moved what seeds 20261015/20261016 draw.
+  , KnownSeq "observeContinuousEqualsLetBound" [LinearInline, IfFlip] "null-set-conventions-not-preserved-under-negation" ]
 
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =
