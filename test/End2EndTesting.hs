@@ -2625,8 +2625,8 @@ batchLiteral vs
       Just ("torch.tensor([" ++ intercalate ", " (map numLit vs) ++ "])")
   | otherwise = Nothing
   where
-    numLit (VFloat f) = show f
-    numLit (VInt i)   = show (fromIntegral i :: Double)
+    numLit (VFloat f) = pyDouble f
+    numLit (VInt i)   = pyDouble (fromIntegral i)
     numLit _          = "0.0"
 
 -- | Locate a Python interpreter that can import torch: @NEST_TORCH_PYTHON@, then
