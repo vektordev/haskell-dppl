@@ -1,0 +1,2 @@
+cnt n = if n == 0 then 0 else if Uniform < 0.5 then 1 + cnt (n - 1) else cnt (n - 1)
+main = cnt 2 > cnt 1

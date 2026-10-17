@@ -1,0 +1,2 @@
+neural digit :: (Symbol -> Int) of [0, 1, 2, 3]
+main a = digit a

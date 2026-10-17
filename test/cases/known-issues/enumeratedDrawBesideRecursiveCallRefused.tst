@@ -1,0 +1,12 @@
+-- An enumerated Bool draw beside a recursive call that does not read it.
+-- Refused by requireDeterministicUnderEnum: "draws fresh randomness by
+-- calling coins_gen, which is on a recursive call cycle ... no decreasing
+-- argument". Without the density field ((if e then 1 else 2, coins))
+-- it answers 0.03 at (1, [True]). Behind the refusal sits the
+-- enumerated-sum-over-density-body limit (the density field alone,
+-- (e, if e then Normal else Normal + 1.0), fails at query time), although e
+-- is observed in the first slot. Found by the publication-exploration
+-- density probes (a molecule grammar). Verified at b16b4d9 on dev. Docs
+-- task decreasing-recursion-refused-as-generate-fallback.
+-- Idealized: p((True, (0.0, [True]))) = 0.3 phi(0) (0.5 0.4 0.5) = 0.0119683.
+expect-failure: refused "which is on a recursive call cycle"

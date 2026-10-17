@@ -1,0 +1,2 @@
+neural readD :: (Symbol -> Int) of [0, 1, 2, 3]
+main a b = draw x = readD a in draw y = readD b in (x, x ++ y)

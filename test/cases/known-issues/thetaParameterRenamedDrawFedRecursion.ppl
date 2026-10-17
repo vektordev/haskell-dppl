@@ -1,0 +1,3 @@
+g u = Normal + (theta u @ 0)
+gen prev th = if Uniform < 0.5 then [] else draw e = g th in e : gen e th
+main th = gen 0.0 th

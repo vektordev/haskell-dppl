@@ -1,0 +1,2 @@
+ex n = if n == 0 then False else (Uniform < 0.3) || ex (n - 1)
+main = ex 3

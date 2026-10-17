@@ -1,0 +1,1 @@
+main = draw x = Normal * 3.0 in (x > 0.0, x)

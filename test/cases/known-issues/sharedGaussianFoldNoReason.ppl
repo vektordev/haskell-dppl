@@ -1,0 +1,2 @@
+exL xc ys = if isNull ys then False else if Uniform < fst (head ys) then (if xc < Normal * snd (snd (head ys)) + fst (snd (head ys)) then True else exL xc (tail ys)) else exL xc (tail ys)
+main d ys = draw xc = Normal * snd (snd d) + fst (snd d) in exL xc ys

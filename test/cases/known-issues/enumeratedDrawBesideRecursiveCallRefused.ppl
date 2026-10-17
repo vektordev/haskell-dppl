@@ -1,0 +1,2 @@
+coins = if Uniform < 0.5 then [] else (Uniform < 0.4) : coins
+main = draw e = Uniform < 0.3 in (e, (if e then Normal else Normal + 1.0, coins))

@@ -1,0 +1,1 @@
+main = draw a = Normal in draw b = Normal in (a + 3.0*b, 3.0*b)

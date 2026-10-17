@@ -1,0 +1,4 @@
+neural cls :: (Symbol -> Int) of [0, 1, 2, 3]
+readAll os = if isNull os then [] else draw k = cls (head os) in k : readAll (tail os)
+ex c ks = if isNull ks then False else if head ks == c then True else ex c (tail ks)
+main os = draw ks = readAll os in ex 1 ks
