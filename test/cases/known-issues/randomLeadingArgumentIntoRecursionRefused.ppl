@@ -1,0 +1,4 @@
+trans fog = if fog then Uniform < 0.9 else Uniform < 0.2
+step n fog = if n == 0 then False else cont (trans fog) n
+cont fog n = if fog then True else step (n - 1) fog
+main = step 2 False
