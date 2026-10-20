@@ -371,6 +371,29 @@ are as large as the dense module (`planOverBudgetTuplePair`, 8.2MB; follow-up
 Corpus: `planEnumRecCountOfLazy*`, `planOverBudget*`; structural test
 `Internals.nestedEnumerationHonoursBudget`.
 
+**Field factoring of a constructed value** (task
+`scene-float-passthrough-edit-exponential`). A constructed value observed at a
+point (`Scene (f (o1 sc)) .. (f (oN sc))`, a tuple, a cons, an `Either`
+injection) inverts field by field, and its worlds are the cross-intersection
+of the fields' worlds. When the value DP cannot merge a field's worlds, for
+example because they carry a point density on a Float leaf, that is c^N: 643 KB
+at N = 5 for a per-slot recolour, and the 10-slot CLEVR scene ran out of 2 GB.
+`planFieldProduct` collapses each multi-world field to one world when at least
+two fields have several worlds. Constraints its worlds share stay live
+(`planCommonDiscreteCons`). The rest is measured once: as a `WMass` when every
+world is dim 0 and uncoupled, so an enclosing value DP can still merge it, and
+otherwise as a whole `measurePlanWorlds` `PResult` carried as a `WFactor`. By
+distributivity, which the dimension-aware `mixP`/`prodP` pair also satisfies,
+the measure is unchanged. The collapsed leaves go into `pwBaked`, like a value
+group's. `planWitnessApply` therefore tries three attempts in order:
+factoring and grouping, then grouping alone (only if something factored), then
+neither. A body whose fields read the same slot
+(`planSceneFloatPassthroughSharedSlot`) clashes and emits byte-identically
+what it did before. The per-slot recolour is now linear (~4.6 KB per slot),
+and the 10-slot CLEVR scene compiles in 2.5 s (145 KB). Corpus:
+`planSceneFloatPassthrough*`. Growth test:
+`Internals.planSceneFloatPassthroughPolynomial`.
+
 ## Agreement fusion: two categoricals multiply in O(V)
 
 Combining two categorical variables by **agreement** — `let a = camNN i in
