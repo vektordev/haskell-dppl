@@ -187,6 +187,27 @@ one (follow-up `repeated-neural-read-not-shared`). Pinned by
 `Internals.productReadSplitConditions` (each condition) and the
 `neural/drawProductRead*` / `drawMultiConstructorReadStaysJoint` corpus pairs.
 
+**A drawn constructor application is split the same way** (task
+`draw-bound-scene-intermediate-loses-probability`). An edit chain through a
+draw-bound intermediate, `draw s1 = Scene (edit (o1 s0)) .. (edit (oN s0)) in
+Scene (edit (o1 s1)) ..`, enumerated `s1` over its joint domain (`3^10` for a
+two-colour object, `97^3` for a CLEVR one), was refused past the budget and
+compiled generate only. A constructor application `C a1 .. an`, of any ADT, is
+a product given what its arguments read: the constructor is fixed, and each
+`a_i` is evaluated once either way. So when the body reads it only through
+that constructor's field accessors, `splitProductDraw` binds `draw s1_oi = a_i`
+per field read (no argument binding, no repeated read), and both chains sink
+per slot: `3*3` terms a slot, the ten-slot CLEVR chain compiling in 2.5 s.
+Not split: a body using the value whole, an accessor of another constructor,
+and literal arguments (`mayBeRandom`; nothing is drawn). Binding nodes built by
+the pass now carry their body's tags, so a binding sunk into an argument does
+not make that argument look non-enumerable to the split or sink that follows.
+Pinned by `neural/drawBoundSceneIntermediate` and the constructor cases of
+`Internals.productReadSplitConditions`. The reservoir-sampled pick from the
+same experiment is a Markov chain over a draw-bound count and pick, not a
+product, and stays refused (`known-issues/reservoirPickOverProductReadRefused`,
+docs task `reservoir-pick-over-product-read-refused`).
+
 The per-slot chain is then tabulated by Tier 0 materialization *inside* the
 loop over `c`, which needed its decomposability gate to be retaken given the
 enclosing enumerated bindings (`sharesLatentGiven` over

@@ -4774,8 +4774,35 @@ test_productReadSplitConditions = testGroup "productReadSplitConditions"
                    , "main imgs = draw t = see (head imgs) in Face (tells (x0 t)) (tells (x1 t))" ])
       readCount sunk @?= 2
       length [ () | Expr _ (InjF (Named "head") _) <- allNodes sunk ] @?= 1
+    -- A constructor application is a product too (task
+    -- draw-bound-scene-intermediate-loses-probability): the edit-chain shape
+    -- draw s = Face (tells (x0 t)) .. in Face (tells (x0 s)) ..
+  , testCase "constructor application read by field: split" $
+      bindersIn (ctorChain "Face (tells (x0 s)) (tells (x1 s))") @?= ["s_x0", "s_x1"]
+  , testCase "constructor application used whole: not split" $
+      bindersIn (ctorChain "(isFace s, Face (tells (x0 s)) (tells (x1 s)))") @?= ["s"]
+  , testCase "constructor application of literals: not split" $
+      bindersIn (face ["x0", "x1"] ++ unlines
+        [ "tells truth = if truth then Uniform < 0.9 else Uniform < 0.2"
+        , "main u = draw s = Face True False in Face (tells (x0 s)) (tells (x1 s))" ]) @?= ["s"]
+  , testCase "constructor of a multi-constructor type: split" $
+      -- the constructor is fixed, so its fields do not couple through it
+      bindersIn ("data Face = Face x0::Bool, x1::Bool | Blank\n" ++ ctorBody "Face (tells (x0 s)) (tells (x1 s))")
+        @?= ["s_x0", "s_x1"]
+  , testCase "accessor of another constructor: not split" $
+      bindersIn ("data Face = Face x0::Bool, x1::Bool | Half y0::Bool\n" ++ ctorBody "Face (tells (y0 s)) (tells (x1 s))")
+        @?= ["s"]
   ]
   where
+    ctorChain b = face ["x0", "x1"] ++ ctorBody b
+    ctorBody b = unlines
+      [ "neural see :: (Symbol -> Face)"
+      , "tells truth = if truth then Uniform < 0.9 else Uniform < 0.2"
+      , "main img = draw t = see img in draw s = Face (tells (x0 t)) (tells (x1 t)) in " ++ b ]
+    -- the draw-bound names left in main once sunk, other than the read's
+    -- fields and the argument (which every case shares)
+    bindersIn src = sort [ n | Expr _ (Lambda n _) <- universeE (snd (head [ f | f@("main", _) <- functions (sinkSrc src) ]))
+                             , n `notElem` ["img", "u", "t", "t_x0", "t_x1"] ]
     face fs = "data Face = Face " ++ intercalate ", " [ f ++ "::Bool" | f <- fs ] ++ "\n"
     body b = unlines
       [ "neural see :: (Symbol -> Face)"
