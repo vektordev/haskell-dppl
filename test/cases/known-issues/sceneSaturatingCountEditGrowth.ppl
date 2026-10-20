@@ -1,0 +1,9 @@
+data Mat = Rubber | Metal
+data Size = Small | Large
+data Object = Nil | Obj mat::Mat, size::Size
+data Scene = Scene {{for i in 1..N sep ", "}}o{{i}}::Object{{end}}
+neural readScene :: (Symbol -> Scene)
+isMetalObj o = if isObj o then isMetal (mat o) else False
+bump c o = if isMetalObj o then (if c > 1 then 2 else c + 1) else c
+soften o = if isObj o then (if isMetal (mat o) then Obj Rubber (size o) else o) else o
+main sym = draw sc = readScene sym in if ({{for i in 1..N}}bump ({{end}}0{{for i in 1..N}}) (o{{i}} sc){{end}}) > 1 then Scene{{for i in 1..N}} (soften (o{{i}} sc)){{end}} else sc
