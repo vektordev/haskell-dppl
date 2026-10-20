@@ -514,8 +514,10 @@ toPointValueExpr = toValueExprWith refuseEqSet
     refuseEqSet _ = id
 
 toValueExprWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
-toValueExprWith pointStep clauses paramClauses adtsDecls startCN = do
-  relevantSortedClauses <- toValuePath clauses paramClauses startCN
+-- Partially applied up to the ADTs, it solves the clause set once and is
+-- shared by every start it is then asked about ('toValuePath').
+toValueExprWith pointStep clauses paramClauses adtsDecls = let pathTo = toValuePath clauses paramClauses in \startCN -> do
+  relevantSortedClauses <- pathTo startCN
   -- Calculate the symbolic derivative
   let deriv = derivativeOfPath adtsDecls relevantSortedClauses
   let cumStep = cumulativeStep adtsDecls relevantSortedClauses
@@ -887,21 +889,25 @@ clauseApplicability _ _ = IRConst (VBool True)
 -- The clause-path core of 'toValueExpr': the topologically sorted, fulfilled
 -- clauses up to (and including) the one concluding @startCN@, or Nothing when
 -- forward chaining never derives it.
+--
+-- Partially applied to the clause set and the parameters, it solves and sorts
+-- once: a caller asking about several occurrences under one seed maps the
+-- partial application over them, rather than re-solving the whole clause set
+-- per occurrence.
 toValuePath :: [[HornClause]] -> [HornClause] -> ChainName -> Maybe [HornClause]
-toValuePath clauses paramClauses startCN =
+toValuePath clauses paramClauses = \startCN ->
   case findConcludingHornClause solvedClauses startCN of
-    Just concludingClause -> do
-      -- Throw away superfluous clauses. Do this by sorting them by requirement
-      -- and throwing away clauses after the clause that inferes the bound variable
-      -- Also guarantees that the later generated letIns are in the correct order
-      -- This may still contain some superflous clauses, but they can easily be detected by an optimizer
-      let sortedClauses = topSortDAG solvedClauses
-      Just (cutList sortedClauses concludingClause)
+    -- Throw away superfluous clauses. Do this by sorting them by requirement
+    -- and throwing away clauses after the clause that inferes the bound variable
+    -- Also guarantees that the later generated letIns are in the correct order
+    -- This may still contain some superflous clauses, but they can easily be detected by an optimizer
+    Just concludingClause -> Just (cutList sortedClauses concludingClause)
     Nothing -> Nothing
   where
     augmentedClauseSet = map (:[]) paramClauses ++ clauses
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
+    sortedClauses = topSortDAG solvedClauses
 
 -- | Whether the inverse chain seed→occurrence is monotone increasing or
 -- decreasing, statically.
