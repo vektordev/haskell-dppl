@@ -6542,12 +6542,22 @@ data PlanState = PlanState
     -- | The semiring the worlds are measured in ('semiringOf' the compile):
     -- the value grouping measures collapsed groups mid-traversal.
   , psSemiring :: Semiring
+    -- | Whether a constructed value's fields may each be collapsed to one
+    -- measured world before they are intersected ('planFieldProduct'), so an
+    -- N-field construction costs a sum of the fields' world counts rather
+    -- than their product. Like 'psMerge' it bakes leaves ('pwBaked'), and a
+    -- clash reruns the traversal with it off (then with 'psMerge' off too).
+    -- Off whenever 'psMerge' is.
+  , psFactor   :: Bool
+    -- | Set once 'planFieldProduct' has collapsed some field: a clashing run
+    -- that never factored gains nothing from a rerun with factoring off.
+  , psFactored :: Bool
   }
 
 -- | The state a traversal starts from: one read, bound at @nnRaw@, whose plan
 -- occupies the first @size@ offsets.
-emptyPlanState :: Semiring -> String -> Int -> Bool -> PlanState
-emptyPlanState sr nnRaw size merge = PlanState Map.empty Map.empty [] [(0, nnRaw)] size merge [] sr
+emptyPlanState :: Semiring -> String -> Int -> Bool -> Bool -> PlanState
+emptyPlanState sr nnRaw size merge factor = PlanState Map.empty Map.empty [] [(0, nnRaw)] size merge [] sr (merge && factor) False
 
 -- | The raw logit vectors a traversal reads, as (first flat offset, variable)
 -- per neural read, ascending. Plan leaves are keyed by a flat offset
@@ -7267,9 +7277,9 @@ planInvertNode meta env planBody target = case planBody of
           Left why -> return (Left why)
           Right subTargets -> do
             fieldsE <- zipWithM (\a s -> planInvert meta env a (PTPoint s)) args subTargets
-            return $ do
-              wss <- sequence fieldsE
-              return (map (planAddGuard (planIsCtor nm y)) (foldl liveIntersects [pw1 []] wss))
+            case sequence fieldsE of
+              Left why -> return (Left why)
+              Right wss -> Right . map (planAddGuard (planIsCtor nm y)) <$> planFieldProduct wss
   _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName planBody))
   where
     occs = planEnvOccs env
@@ -7284,10 +7294,11 @@ planInvertNode meta env planBody target = case planBody of
       PTUpTo _ -> return (Left ("cumulative target on the constructed " ++ what ++ " value"))
       PTPoint y -> do
         fieldsE <- mapM (\(e, sub) -> fmap (planAnySplit (sub y)) <$> planInvert meta env e (PTPoint (sub y))) comps
-        return $ do
-          wss <- sequence fieldsE
-          let ws = foldl liveIntersects [pw1 []] wss
-          return (maybe ws (\g -> map (planAddGuard (g y)) ws) guardY)
+        case sequence fieldsE of
+          Left why -> return (Left why)
+          Right wss -> do
+            ws <- planFieldProduct wss
+            return (Right (maybe ws (\g -> map (planAddGuard (g y)) ws) guardY))
     planDep = subtreeHasOcc occs
     isDetSide  x = not (subtreeHasOcc occs x) && pType (getTypeInfo x) == Deterministic
     ctorTestName nm
@@ -7831,8 +7842,8 @@ planGroupValues pairs = do
     -- residual (the internal randomness that varies across the group, disjoint
     -- from anything constrained outside) is baked into the summed mass factor.
     mergeGroup sr raws (v, ws) = do
-      let common = commonDiscreteCons ws
-          residual w = w { pwCons = filter (\c -> not (any (conEq c) common)) (pwCons w) }
+      let common = planCommonDiscreteCons ws
+          residual w = w { pwCons = filter (\c -> not (any (planConEq c) common)) (pwCons w) }
       let groupMass = sumAllSR sr (map (planWorldMass sr raws . residual) ws)
       mv <- lift (mkVariable "cnt_mass")
       lift (setVariables [(mv, groupMass)])
@@ -7841,12 +7852,74 @@ planGroupValues pairs = do
       -- of them is caught as a double count ('pwBaked')
       let baked = nub (concatMap (\w -> map plcBase (pwCons (residual w)) ++ pwBaked w) ws)
       return (IRConst v, PlanWorld [] common [] [WMass (IRVar mv)] baked (any pwClash ws))
-    -- discrete leaf constraints present (identically) in every world's cons
-    commonDiscreteCons (w:ws') =
-      [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (conEq c) (pwCons w')) ws' ]
-    commonDiscreteCons [] = []
-    conEq (PLeafCon b1 s1) (PLeafCon b2 s2) = b1 == b2 && s1 == s2
-    conEq _ _ = False
+
+-- | Discrete leaf constraints present (identically) in every world's cons:
+-- what a collapsed group keeps live ('planGroupValues', 'planFieldProduct').
+planCommonDiscreteCons :: [PlanWorld] -> [PLeafCon]
+planCommonDiscreteCons (w:ws') =
+  [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (planConEq c) (pwCons w')) ws' ]
+planCommonDiscreteCons [] = []
+
+planConEq :: PLeafCon -> PLeafCon -> Bool
+planConEq (PLeafCon b1 s1) (PLeafCon b2 s2) = b1 == b2 && s1 == s2
+planConEq _ _ = False
+
+-- | The worlds of a constructed value, from its fields' worlds: their
+-- cross-intersection. Each field's worlds partition that field's ways of
+-- meeting its sub-observation, so the cross product is a partition of the
+-- whole -- but its size is the PRODUCT of the fields' world counts, which for
+-- a per-slot edit over an N-slot scene (@Scene (f (o1 sc)) .. (f (oN sc))@,
+-- task scene-float-passthrough-edit-exponential) is c^N.
+--
+-- When two or more fields have several worlds, each such field is instead
+-- collapsed to ONE world before intersecting: a field's mass is the sum of
+-- its worlds' masses, and since the sum over the cross product of products is
+-- the product of the per-field sums (distributivity, which the dimension-
+-- aware 'mixP' / 'prodP' pair also satisfies), the measure is unchanged.
+-- What a field's worlds share identically ('planCommonDiscreteCons', e.g. the
+-- scene's own constructor flag) stays live; the residual is measured once
+-- and carried as a factor -- a 'WMass' when every world is dim 0 and
+-- uncoupled (so an enclosing value DP can still merge it), else a whole
+-- measured 'PResult' ('measurePlanWorlds', which handles point densities and
+-- couplings). That is sound exactly when nothing else constrains the residual
+-- leaves: they are recorded in 'pwBaked', and meeting one again is a clash on
+-- which 'planWitnessApply' reruns with 'psFactor' off -- the cross product
+-- as before. A field holding an over-coupled world is never collapsed, so
+-- 'pwOverCoupled' still sees it at the end.
+planFieldProduct :: [[PlanWorld]] -> PlanM [PlanWorld]
+planFieldProduct wss = do
+  factor <- gets psFactor
+  let wss' = map (filter (not . pwUnsat)) wss
+      multi = length (filter ((> 1) . length) wss')
+  if not factor || multi < 2
+    then return (foldl liveIntersects [pw1 []] wss)
+    else do
+      collapsed <- mapM collapseField wss'
+      return (foldl liveIntersects [pw1 []] collapsed)
+  where
+    collapseField :: [PlanWorld] -> PlanM [PlanWorld]
+    collapseField ws
+      | length ws <= 1 || any (isJust . pwOverCoupled) ws = return ws
+      | otherwise = do
+          sr <- gets psSemiring
+          raws <- gets psRaws
+          modify (\st -> st { psFactored = True })
+          let common = planCommonDiscreteCons ws
+              residual w = w { pwCons = filter (\c -> not (any (planConEq c) common)) (pwCons w) }
+              rs = map residual ws
+              baked = nub (concatMap pwLeaves rs)
+              clash = any pwClash ws
+          if all mergeable rs
+            then do
+              mv <- lift (mkVariable "field_mass")
+              lift (setVariables [(mv, sumAllSR sr (map (planWorldMass sr raws) rs))])
+              return [PlanWorld [] common [] [WMass (IRVar mv)] baked clash]
+            else do
+              r <- lift (measurePlanWorlds sr raws rs)
+              return [PlanWorld [] common [] [WFactor [] r] baked clash]
+    mergeable w = null (pwPairs w) && null (pwSubFactors w) && not (any isPt (pwCons w))
+    isPt PLeafPt{} = True
+    isPt _         = False
 
 -- | Enumerate the possible values of a plan-dependent expression as
 -- (value, world) pairs -- the milestone-2 mechanism behind counting folds.
@@ -8397,15 +8470,25 @@ planWitnessApply meta0 cumulative rt binding sample
       -- clashes emits exactly what the ungrouped traversal alone would.
       -- The traversal may open further neural reads ('planOpenBinding'); the
       -- final state says where each one's logits live.
-      let runPlan merge = do
-            (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState (semiringOf meta) nnRaw (getSize plan) merge)
-            return (filter (not . pwUnsat) <$> ws, psRaws st)
-      supply0 <- get
-      (grouped, clashed) <- pass $ do
-        r <- runPlan True
-        let c = either (const False) (any pwClash) (fst r)
-        return ((r, c), if c then const [] else id)
-      (worldsE, raws) <- if clashed then put supply0 >> runPlan False else return grouped
+      -- Field factoring ('planFieldProduct', 'psFactor') bakes leaves the same
+      -- way, so it is tried first and dropped on a clash -- before grouping
+      -- is: the second attempt is exactly the traversal that ran before field
+      -- factoring existed. An attempt that never factored is not repeated.
+      let runPlan merge factor = do
+            (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState (semiringOf meta) nnRaw (getSize plan) merge factor)
+            return ((filter (not . pwUnsat) <$> ws, psRaws st), psFactored st)
+          attempt merge factor = do
+            supply <- get
+            pass $ do
+              (r, factored) <- runPlan merge factor
+              let c = either (const False) (any pwClash) (fst r)
+              return ((r, c, factored, supply), if c then const [] else id)
+      (factoredR, clashed1, didFactor, supply0) <- attempt True True
+      (groupedR, clashed2, supply1) <-
+        if clashed1 && didFactor
+          then put supply0 >> attempt True False >>= \(r, c, _, sp) -> return (r, c, sp)
+          else return (factoredR, clashed1, supply0)
+      (worldsE, raws) <- if clashed2 then put supply1 >> (fst <$> runPlan False False) else return groupedR
       case worldsE of
         Left why -> return (Left (Just why))
         Right worlds -> do

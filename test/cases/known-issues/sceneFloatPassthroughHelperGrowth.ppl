@@ -1,6 +1,0 @@
-data Color = Red | Green
-data Object = Nil | Obj color::Color, px::Float
-data Scene = Scene {{for i in 1..N sep ", "}}o{{i}}::Object{{end}}
-neural readScene :: (Symbol -> Scene)
-recolor o = if isObj o then (if isRed (color o) then Obj Green (px o) else o) else o
-main sym = draw sc = readScene sym in Scene{{for i in 1..N}} (recolor (o{{i}} sc)){{end}}

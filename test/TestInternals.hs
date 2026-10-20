@@ -2382,6 +2382,35 @@ test_planFlatSumOverProductPolynomial = testCase "planFlatSumOverProductPolynomi
               ++ show s4 ++ " s7=" ++ show s7 ++ " ratio=" ++ show (fromIntegral s7 / fromIntegral s4 :: Double))
     (s7 < 3 * s4)
 
+-- | A per-slot edit rebuilding an N-slot product scene whose objects carry a
+-- Float leaf (task scene-float-passthrough-edit-exponential). Every field of
+-- the rebuilt Scene has several worlds, some with a point density, which the
+-- value DP cannot merge, so the constructor's cross product of field worlds
+-- was c^N: 73 KB of Python at N = 3, 643 KB at N = 5, N = 6 over 60 s.
+-- 'planFieldProduct' measures each field once (~1.3x from 3 to 5). The pair
+-- (3, 5) fails in seconds (~9x) if that regresses.
+test_planSceneFloatPassthroughPolynomial :: TestTree
+test_planSceneFloatPassthroughPolynomial = testCase "planSceneFloatPassthroughPolynomial" $ do
+  let prog n = unlines
+        [ "data Color = Red | Green"
+        , "data Object = Nil | Obj color::Color, px::Float"
+        , "data Scene = Scene " ++ intercalate ", " [ "o" ++ show i ++ "::Object" | i <- [1 .. n :: Int] ]
+        , "neural readScene :: (Symbol -> Scene)"
+        , "recolor o = if isObj o then (if isRed (color o) then Obj Green (px o) else o) else o"
+        , "main sym = draw sc = readScene sym in Scene" ++ concat [ " (recolor (o" ++ show i ++ " sc))" | i <- [1 .. n] ]
+        ]
+  let sizeAt :: Int -> IO Int
+      sizeAt n = case tryParseProgram "scenepassthrough" (prog n) of
+        Left e  -> assertFailure ("parse error at N = " ++ show n ++ ": " ++ show e)
+        Right p -> case compile noMaterializationConfig p of
+          Left e   -> assertFailure ("compile error at N = " ++ show n ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s3 <- sizeAt 3
+  s5 <- sizeAt 5
+  assertBool ("N=5 scene rebuild IR is growing at the cross-product (c^N) rate: s3="
+              ++ show s3 ++ " s5=" ++ show s5 ++ " ratio=" ++ show (fromIntegral s5 / fromIntegral s3 :: Double))
+    (s5 < 2 * s3)
+
 -- | The same value-grouped DP acceptance, on the BOOL path ('planGroupBool').
 -- A recursive Bool predicate reaches its recursive call through one disjoint
 -- world per @Object@ constructor (here: @obj@ is @NoObj@, or it is @Obj@ with a
@@ -5712,6 +5741,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_wideProductSceneCountNotBatched
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
+  , test_planSceneFloatPassthroughPolynomial
   , test_planEnumAccumulatorFoldPolynomial
   , test_planEnumSubtractionAccumulatorFoldPolynomial
   , test_planFoldDisjunctionPolynomial
