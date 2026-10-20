@@ -8491,6 +8491,43 @@ setWitnessApplicable meta binding =
   worldsShape (WorldsCtx (fcData meta) (adtDecls meta) (functions (compilingProgram meta)) permissiveDet)
               (bindOccs binding) (bindBody binding)
 
+-- | Bind the conditions a point inverse split on ('toInvExprMaybeWith') to
+-- their values at this binding: each condition is compiled where the body is
+-- made meaningful here ('enterBindingScope'), so a condition reading a
+-- leading parameter of the callee (@t < 0.5@ in @step t x@) reads that
+-- parameter's argument. 'Nothing' (the engine declines) where the body cannot
+-- be entered here, a condition is not in the body this binding compiles, or
+-- it reads a parameter of a function-valued body, which is not bound where
+-- the inverse is applied.
+bindIfConditions :: CompilerMetadata -> Binding -> InvChain -> CompilerMonad (Maybe InvChain)
+bindIfConditions meta binding chain = case used of
+  [] -> return (Just chain)
+  _ -> do
+    -- In its own writer scope: the leading parameters' bindings are folded
+    -- into each condition, so a declining binding leaves nothing behind.
+    (entered, scopeBinds) <- lift (runWriterT (enterBindingScope meta binding))
+    case entered of
+      Nothing -> return Nothing
+      Just (scopeMeta, scopedBody) -> do
+        let conds = [ (v, findCond cn scopedBody) | (v, cn) <- used ]
+        if any (maybe True readsOuter . snd) conds
+          then return Nothing
+          else do
+            binds <- forM conds $ \(v, c) -> do
+              (cIR, cBinds) <- lift (runWriterT (toIRGenerate scopeMeta (fromJust c)))
+              return (v, generateLetInExpr (scopeBinds ++ cBinds) cIR)
+            let wrap e = foldr (\(v, cIR) acc -> if freeInIR v acc then IRLetIn v cIR acc else acc) e binds
+            return (Just chain { invValue = wrap (invValue chain), invCoV = wrap (invCoV chain)
+                               , invGuard = wrap (invGuard chain), invReadsAny = wrap (invReadsAny chain)
+                               , invCumValue = wrap (invCumValue chain), invCumGuard = wrap (invCumGuard chain) })
+  where
+    fields = [invValue chain, invCoV chain, invGuard chain, invReadsAny chain, invCumValue chain, invCumGuard chain]
+    used = [ vc | vc@(v, _) <- ifConditionVars (fcData meta) (bindTag binding), any (freeInIR v) fields ]
+    findCond cn e
+      | chainName (getTypeInfo e) == cn = Just e
+      | otherwise = listToMaybe (mapMaybe (findCond cn) (getSubExprs e))
+    readsOuter c = any (`Set.member` freeVarsExpr c) (bindOuterVars binding)
+
 -- | The probabilistic 'Apply' arm's engines, over one resolved application
 -- ('Binding'): plan-guided enumeration, point inversion with its body factor,
 -- set-valued witnesses and affine marginalisation, in that order.
@@ -8542,8 +8579,14 @@ applyBinding meta cumulative rt binding sample = do
    -- lambda in place: a CDF of a structured value is not a product of
    -- per-field factors anyway.
    let fieldWitnessUnfolded = underField && not cumulative && not inlineBody && isNothing namedCall
+   -- An if-then-else on the way is split when its condition is deterministic
+   -- here ('toInvExprMaybeWith'; the condition is bound in 'bindIfConditions').
+   -- Not for a cumulative query: the point path refuses a variable read more
+   -- than once (its occurrences in both arms count), where the set-witness
+   -- engine splits the same if and answers it.
+   let condKnown cn = not cumulative && pType (getTypeInfo (reinferRecovered meta (recoveredVars meta) (exprWithCN meta cn))) == Deterministic
    let pointInversion = if fieldWitnessUnfolded then Nothing
-                        else toInvExprMaybe clauses localAdts lChainName
+                        else toInvExprMaybeWith condKnown clauses localAdts lChainName
    -- A binding whose certificate is an affine Gaussian form, all of whose
    -- uses flow affinely into one density leaf, needs no witness at all: it is
    -- integrated out analytically inside that leaf (task
@@ -8883,7 +8926,11 @@ applyBinding meta cumulative rt binding sample = do
    let engines =
          [ ("plan-guided enumeration", planApplicable meta rt binding <&> \_ _ ->
               planWitnessApply meta cumulative rt binding sample)
-         , ("point inversion", pointInversion <&> \chain _ -> Right <$> pointInvert chain)
+         , ("point inversion", pointInversion <&> \chain diag -> do
+              bound <- bindIfConditions meta binding chain
+              case bound of
+                Just chain' -> Right <$> pointInvert chain'
+                Nothing -> return (Left diag))
          , ("affine marginalisation", affineMarginalisable meta rt binding <&> \(x, lamBody) _ ->
               Right <$> affineCollapse x lamBody)
          , ("set-valued witnesses", setWitnessApplicable meta binding <&> \_ diag ->

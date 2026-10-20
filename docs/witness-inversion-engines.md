@@ -483,6 +483,43 @@ callee, or an application of a function parameter, has no point inverse in the
 tagged copy. Those shapes reach the set-witness engine, which enters them
 through the binding instead.
 
+## Point inversion through a deterministic `if`
+
+Forward chaining has no clauses for an `if`, so a variable whose every
+occurrence sits in the arms of one had no point inverse:
+`draw x = Normal in if 2.0 < 0.5 then [x] else x : [x]`, and the recursive
+`step t x = if t < 0.5 then [x] else x : step (t - 1.0) (...)` (task
+`witness-through-deterministic-if-over-list-arms`). When the direct inverse
+finds nothing and the seed is an `if` whose condition draws no fresh
+randomness and holds no occurrence of the variable,
+`ForwardChaining.toInvExprMaybeWith` inverts each arm on its own, seeded at the
+arm, and selects the two chains field by field with an `IRIf` on the
+condition. Nested ifs split recursively. An arm where the variable is dead
+leaves the whole split without an inverse.
+
+The condition enters the chain as a free variable (`ifConditionVars`: its
+chain name plus the invocation tag). `IRCompiler.bindIfConditions` binds it to
+the condition compiled where the body means what it means in the callee
+(`enterBindingScope`), so `t < 0.5` reads the call's argument for `t`. The
+engine declines when the body can't be entered, when the condition is not in
+the body this binding compiles (a leading-argument binding), or when the
+condition reads a parameter of a function-valued body. The caller's predicate
+admits a condition only when it is `Deterministic` after re-inferring the
+recovered variables. A cumulative query never splits, because the point path
+refuses a variable read more than once, and the set-witness engine splits the
+same `if` for it. The modality verdict (`isWitnessedLambda`) accepts the same
+split when the observation reaches the lambda's body.
+
+The per-invocation copy (`getDependentGroups`) steps into the arms of an
+`if` whose condition has no random leaf (`ifChildren`), and only into those
+arms. Before this, a callee whose body is an `if` had an empty copy. Copying
+every `if`'s arms and condition made the copies of a recursive body whole,
+which cost 5x on `known-issues/markovBranchRandomRateCompileGrowth`.
+
+An `ANY` in the witnessing slot of an if-rooted program stays a runtime
+refusal: observation masks stop at an `if` root (`observation-masks.md`).
+Corpus `conditionals/witnessThroughDetIf*`, `distributions/ouChainRecursive`.
+
 ## Forward chaining never re-derives a chain name it already has
 
 `ForwardChaining.solveHCSet` fulfils, per clause group, the first clause whose
