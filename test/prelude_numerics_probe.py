@@ -229,6 +229,30 @@ def batched_dtype():
     r.t1.sum().backward()
     if w.grad is None or float(w.grad) != 3.0:
       fail("pythonLibBatched.split_retry lost the gradient: " + repr(w.grad))
+  if hasattr(B, "gen_branch"):
+    # The generate split (task batched-value-dependent-recursion): each arm
+    # runs once, on its half, with its free values sliced and its batch size
+    # the half's; a shared value passes through; an empty half never runs.
+    seen = []
+    def then_arm(n, v, w):
+      seen.append(("t", n))
+      return v * w
+    def else_arm(n, v, w):
+      seen.append(("f", n))
+      return torch.zeros(n, dtype=torch.float64) - w
+    w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+    v = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+    r = B.gen_branch(torch.tensor([True, False, True]), 3, then_arm, else_arm, v, w)
+    if r.tolist() != [2.0, -2.0, 6.0] or sorted(seen) != [("f", 1), ("t", 2)]:
+      fail("pythonLibBatched.gen_branch gave " + repr((r, seen)))
+    r.sum().backward()
+    if w.grad is None or float(w.grad) != 3.0:
+      fail("pythonLibBatched.gen_branch lost the gradient: " + repr(w.grad))
+    seen.clear()
+    B.gen_branch(torch.tensor([False, False]), 2, then_arm, else_arm, v[:2], 1.0)
+    B.gen_branch(True, 2, then_arm, else_arm, v[:2], 1.0)
+    if sorted(seen) != [("f", 2), ("t", 2)]:
+      fail("pythonLibBatched.gen_branch ran an empty half: " + repr(seen))
   if hasattr(B, "table_select"):
     # The flat form of a constant select chain answers in the kind of its
     # values exactly as the chain's where_anchored would.

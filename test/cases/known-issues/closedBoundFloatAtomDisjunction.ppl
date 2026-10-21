@@ -1,0 +1,8 @@
+main = draw v = (if Uniform < 0.5 then 1.0 else Normal) in if (v < 1.0) || (v == 1.0) then left () else right v
+-- closedBoundFloatAtom through a disjunction: `||` observed True is the first
+-- operand's True worlds plus the second's inside the first's False worlds.
+-- Both polarities of `v < 1.0` are closed at 1.0, so the atom of mass 0.5 at
+-- 1.0 is in [-inf, 1] and again in [1, inf] meet {1}: p(Left ()) answers
+-- 1.4207 for an event of probability 0.5 + 0.5 Phi(1) = 0.9207. Verified on
+-- dev at the fix of null-set-conventions-not-preserved-under-negation,
+-- interpreter. Docs task set-witness-null-set-boundary-conventions.

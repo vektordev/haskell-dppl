@@ -117,6 +117,22 @@ through the same subtraction in the `IfThenElse` rule. Corpus
 `test/cases/set-witness/setWitnessContinuousEquals*` (task
 `sampling-matches-pdf-continuous-equality-density`).
 
+**Null-set conventions under negation.** Every interval of a continuous
+variable is closed at its bounds, so a boundary query answers the density.
+For a Float variable, `invertToWorlds` closes an interval with one of its
+own bounds removed back to the interval (`closeNullExcept`, a runtime
+`WChoice` on "the removed point is a bound"; measured once, from the
+excepted side): `not ((v < 1.0) || (v == 1.0))` is `v > 1.0` and answers
+the same density at 1. A point removed from an interval's inside or from
+the whole line stays removed, which keeps `x == 0.0` meeting its own
+complement empty. On the letfree side, the `IfThenElse` rule derives the
+False weight as the complement of the True weight, which cannot carry a
+density, so a negated condition `if not c then a else b` is compiled as `if
+c then b else a`. Task `null-set-conventions-not-preserved-under-negation`;
+the remaining boundary inconsistencies (both polarities closed, Float atoms,
+a removed point hiding a query point) are task
+`set-witness-null-set-boundary-conventions`.
+
 A nested `let` between the source and the constraint — `let x = Normal in
 let y = x + 1.0 in if y > 0.0 then 1.0 else 0.0`, which the parser desugars
 to `Apply (Lambda y b) e` — is inverted *through* the inner binding in two

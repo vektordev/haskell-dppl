@@ -1,4 +1,5 @@
 slow
+batched
 p(Nil)=(0.5, 0.0, False)
 p(Link 0.5 Nil)=(0.25, 1.0, False)
 p(Link 0.5 (Link 0.25 Nil))=(0.125, 2.0, False)

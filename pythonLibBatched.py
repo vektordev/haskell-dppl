@@ -884,6 +884,38 @@ def split_retry(kernel, *args):
              for idx in halves]
     return _scatter(parts, [idx.tolist() for idx in halves], total)
 
+# --- per-element recursion in generate (task batched-value-dependent-recursion)
+# A recursive generator whose recursion is guarded by a per-element value
+# (`if Uniform < 1/x then x else dice (x - 1)`) cannot run as an eager
+# torch.where: the recursive arm would run for every element, forever. The
+# compiler emits the guard's two arms as closures `arm(n, *free)` instead, and
+# this runs each on the half of the batch that takes it: the condition is
+# drawn once (a generate body is never re-run, unlike split_retry's kernel),
+# every per-element free value is sliced to the half, and `n` is the half's
+# size so the arm's own draws are drawn for that half. An empty half is never
+# run, which is what stops the recursion. A condition that agrees across the
+# batch runs one arm on the whole of it.
+
+def gen_branch(c, n, then_arm, else_arm, *free):
+  if not torch.is_tensor(c) or c.dim() == 0:
+    return then_arm(n, *free) if bool(c) else else_arm(n, *free)
+  m = c.to(torch.bool)
+  if bool(m.all()):
+    return then_arm(n, *free)
+  if not bool(m.any()):
+    return else_arm(n, *free)
+  total = m.shape[0]
+  halves = [torch.nonzero(m).flatten(), torch.nonzero(~m).flatten()]
+  parts = [arm(len(idx), *[_slice_batch(v, idx, total) for v in free])
+           for arm, idx in zip((then_arm, else_arm), halves)]
+  # The compiler stubs a recursion that builds a structure; this backstops it,
+  # since _scatter would silently keep the first half's shape.
+  structured = [p for p in parts if not (torch.is_tensor(p) or isinstance(p, (bool, int, float, T)))]
+  if structured and type(parts[0]) is not type(parts[1]):
+    raise NotImplementedError("batched generate: the two halves of a split drew different structures ("
+                              + type(parts[0]).__name__ + ", " + type(parts[1]).__name__ + ")")
+  return _scatter(parts, [idx.tolist() for idx in halves], total)
+
 # --- dense enumeration mode (Component 2, M3) --------------------------------
 # When the *query* domain is finite -- the program returns one of V statically
 # known values -- batching query points is the wrong axis: evaluate the kernel
