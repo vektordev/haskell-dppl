@@ -16,6 +16,18 @@ calls the kernel once per bucket). `OpLog`/`OpDiv` route through
 select; a refused `IRError` arm emits as a NaN `poison()` constant the
 select masks away.
 
+`IRSelectPass` retags by syntax, so it also retags a conditional whose guard
+is a shape probe the fragment admits: `sample == []`, a constructor-test
+predicate, or a CSE name bound to one (`let cse_0 = sample == [] in let
+cse_1 = select (not cse_0) True False in ... select cse_1 (... head sample
+...) 0.0`, the witness guard of a draw-bound list element). The backend
+first demotes every select whose condition is `structural` back to an `IRIf`
+(`demoteStructuralSelects`), so it is emitted as a Python `if` and the arm it
+rules out never runs; emitted eagerly, that arm read the head of the empty
+tail (task `batched-draw-bound-list-element-reads-empty-tail`, corpus
+`data-structures/drawBoundListElementGuardsEmptyTail`). The impact census
+labels a program that demotes (`usesSelectDemotion`, `docs/testing.md`).
+
 `torch.where` selects tensors, not Python tuples, so a tuple-valued select
 is split into one select per component (`distributeSelects`). The split
 copies the condition, and an arm's `let`-spine, into every component. That

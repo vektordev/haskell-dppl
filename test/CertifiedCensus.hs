@@ -40,13 +40,14 @@ module CertifiedCensus
   , batchedUncertifiedConstructs
   , structureSplitLabel
   , lineSpillLabel
+  , selectDemotionLabel
   ) where
 
 import Data.Char (isDigit, isSpace)
 import Data.List (isPrefixOf, nub, sort, (\\))
 
 import SPLL.IntermediateRepresentation
-import SPLL.CodeGenPyTorchBatched (usesStructureSplit, generateFunctionsBatched)
+import SPLL.CodeGenPyTorchBatched (usesStructureSplit, usesSelectDemotion, generateFunctionsBatched)
 import SPLL.Lang.Types (GenericValue(..), GenericList(..))
 
 -- | Every IR construct a body uses, as a label naming its kind:
@@ -240,6 +241,14 @@ batchedCertifiedConstructs =
 -- constructs alone, so the label is never in 'batchedCertifiedConstructs',
 -- and a program that splits always has its batched-vs-expected check.
 --
+-- Likewise 'selectDemotionLabel' when the batched backend turns a select back
+-- into a structural @if@ ('SPLL.CodeGenPyTorchBatched.usesSelectDemotion'):
+-- the census still counts an 'IRSelect' there, which the fuzz arms certify as
+-- an eager @torch.where@, but the module emits a Python @if@ they never
+-- compared -- and a select over a shape probe that was emitted eagerly is how
+-- a list program read the head of its empty tail (task
+-- batched-draw-bound-list-element-reads-empty-tail).
+--
 -- Likewise 'lineSpillLabel' when the emitted module spilled a line too deep for
 -- CPython into statements (@_sN = ...@, 'SPLL.PythonNesting'). Whether a line
 -- is that deep depends on the program's scale (a 250-value domain, 24 nested
@@ -250,6 +259,7 @@ batchedProgramCensus :: Either e IREnv -> [String]
 batchedProgramCensus = either (const []) census
   where census env = sort (nub (irEnvConstructs inferenceBodies env
                                 ++ [ structureSplitLabel | usesStructureSplit env ]
+                                ++ [ selectDemotionLabel | usesSelectDemotion env ]
                                 ++ [ lineSpillLabel | spillsALine env ]))
         spillsALine env = either (const False) (any isSpillLine . concatMap lines)
                                  (generateFunctionsBatched True env)
@@ -261,6 +271,11 @@ batchedProgramCensus = either (const []) census
 -- batched-value-dependent-structure-select).
 structureSplitLabel :: String
 structureSplitLabel = "Batched:structure split"
+
+-- | The batched census label of a select the batched backend demotes back to
+-- a structural @if@ (task batched-draw-bound-list-element-reads-empty-tail).
+selectDemotionLabel :: String
+selectDemotionLabel = "Batched:structural select"
 
 -- | The batched census label of a line spilled for CPython's bracket limit.
 lineSpillLabel :: String
