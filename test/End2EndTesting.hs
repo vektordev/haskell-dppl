@@ -1912,8 +1912,7 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
                                 , integFun = Nothing, writeLogitsFun = Nothing
                                 , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing, maskVariantOf = Nothing }] [] []
     source n = sourceOf (envOf n)
-    sourceOf env = unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
-                               (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))))
+    sourceOf = torchFreePythonModule
     spillLines = filter (isPrefixOf "_s" . dropWhile (== ' ')) . lines
     deepCase = runsTo (source 300)
     letArmCase = runsTo (sourceOf (envWith (letSumOf 300)))
@@ -1990,6 +1989,112 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
     shallowComprehensionCase =
       let src = comprehensionSource 5
       in counterexample src (" for x in " `isInfixOf` src && null (spillLines src))
+
+-- | The scalar Python module for an 'IREnv', with torch's @Module@ replaced by
+-- a stub so that a plain @python3@ can import it.
+torchFreePythonModule :: IREnv -> String
+torchFreePythonModule env =
+  unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
+                  (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))))
+
+-- | Run a module followed by check lines under @python3@, with the repository
+-- root (where @pythonLib.py@ lives) on the path.
+runPythonChecks :: String -> String -> [String] -> IO (ExitCode, String, String)
+runPythonChecks name src checks = do
+  cwd <- getCurrentDirectory
+  withSystemTempFile name $ \tmpPath tmpHandle -> do
+    hPutStr tmpHandle $ unlines (["import sys", "sys.path.insert(0, " ++ show cwd ++ ")", src] ++ checks)
+    hClose tmpHandle
+    readProcessWithExitCode "python3" [tmpPath] ""
+
+-- ===========================================================================
+-- Deeply indented blocks are hoisted
+-- (task python-nested-conditionals-exceed-indentation-limit)
+-- ===========================================================================
+--
+-- CPython refuses a line indented 100 levels deep, and statement emission
+-- indents once per conditional nested in an arm, so ~97 nested ifs made a
+-- module that could not be imported. A method that deep is now regenerated
+-- with its deep arms hoisted into flat, closure-converted local functions.
+--
+-- The fixture chain is hand-built IR: level k binds @c_k = v * 1@ and branches
+-- on @c_k > 0@ into level k-1, else 0. The innermost arm reads both the
+-- innermost and the outermost let, so it needs variables bound on either side
+-- of every hoist, and carries a laziness canary (a division by zero behind a
+-- guard that never holds). Over v > 0 the chain is 2v.
+deepIndentationHoistTests :: TestTree
+deepIndentationHoistTests = testGroup "deep indentation hoist (python-nested-conditionals-exceed-indentation-limit)"
+  [ testProperty "a returned 150-deep if chain imports and evaluates" (once (chainCase "return" (chainEnv returned 150)))
+  , testProperty "a let-bound 150-deep if chain imports and evaluates" (once (chainCase "let" (chainEnv letBound 150)))
+  , testProperty "a comprehension over a 150-deep if chain imports and evaluates" (once comprehensionCase)
+  , testProperty "a 60-deep if chain is emitted without hoisting" (once shallowCase)
+  , testProperty "100 nested ifs compile through the pipeline and match the idealized value" (once pipelineCase)
+  ]
+  where
+    lit = IRConst . VFloat
+    x = IRVar "x"
+    cName k = "c_" ++ show k
+    chain :: String -> Int -> IRExpr
+    chain v n = go n
+      where
+        go k = IRLetIn (cName k) (IROp OpMult (IRVar v) (lit 1.0))
+                 (IRIf (IROp OpGreaterThan (IRVar (cName k)) (lit 0.0)) (inner k) (lit 0.0))
+        inner 1 = IRIf (IROp OpGreaterThan (IRVar (cName (1 :: Int))) (lit 1.0e9))
+                       (IROp OpDiv (lit 1.0) (lit 0.0))
+                       (IROp OpPlus (IRVar (cName (1 :: Int))) (IRVar (cName n)))
+        inner k = go (k - 1)
+    returned = chain "x"
+    -- 'generateLetInStatement' rather than 'generateStatementBlock': the arms
+    -- assign @r@ instead of returning.
+    letBound n = IRLetIn "r" (chain "x" n) (IROp OpPlus (IRVar "r") (lit 1.0))
+    chainEnv body n = IREnv [IRFunGroup { groupName = "main", refusedVariants = [], genFun = Nothing
+                                        , probFun = Just (IRLambda "x" (body n), "")
+                                        , integFun = Nothing, writeLogitsFun = Nothing
+                                        , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing, maskVariantOf = Nothing }] [] []
+    hoists = length . filter (isPrefixOf "def _h" . dropWhile (== ' ')) . lines
+    expectRuns name src checks = ioProperty $ do
+      (code, out, err) <- runPythonChecks name src checks
+      return $ counterexample ("the emitted module failed:\n" ++ out ++ err) (code == ExitSuccess)
+          -- A hoist per ~32 levels; one per level would be hoisting every arm.
+          .&&. counterexample ("expected between 1 and 6 hoisted functions, got " ++ show (hoists src))
+                 (hoists src >= 1 && hoists src <= 6)
+    check q want = [ "got = main.forward(" ++ show q ++ ")"
+                   , "if got != " ++ show want ++ ": raise ValueError('forward(%r) = %r, expected %r' % ("
+                       ++ show q ++ ", got, " ++ show want ++ "))" ]
+    chainCase kind env =
+      let offset = if kind == "let" then 1.0 else 0.0 :: Double
+      in expectRuns "deep_indent_chain.py" (torchFreePythonModule env)
+           (check (3.0 :: Double) (6.0 + offset) ++ check (-1.0 :: Double) offset)
+    -- Statement-level loops come from the bracket spill: the comprehension's
+    -- body renders 150 brackets deep, so it becomes a loop, whose body is then
+    -- too deeply indented and is hoisted. Over y in [1, 2] plus x: 2 + 4 + x.
+    comprehensionCase =
+      let body = IROp OpPlus
+                   (IRBuiltin (BReduce ROpAdd 0)
+                      [IRBuiltin BMap [ IRLambda "y" (chain "y" 150)
+                                      , IRBuiltin (BTensor [EFixed 2]) [lit 1.0, lit 2.0] ]])
+                   x
+          src = torchFreePythonModule (chainEnv (const body) (0 :: Int))
+      in expectRuns "deep_indent_loop.py" src (check (0.5 :: Double) (6.5 :: Double))
+    shallowCase = let src = torchFreePythonModule (chainEnv returned 60)
+                  in counterexample src (hoists src == 0)
+    -- The former known-issues pin ifChain100PythonIndentDepth: the generator
+    -- (a return-form chain) and the probability method both nest 100 deep.
+    pipelineCase = ioProperty $ do
+      let levels = 100 :: Int
+          progSrc = "main = " ++ iterate (\e -> "(if Uniform < 0.99 then " ++ e ++ " else False)") "True" !! levels
+          pTrue = 0.99 ^ levels :: Double
+      case either (Left . show) Right (tryParseProgram "" progSrc) >>= compile defaultCompilerConfig of
+        Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
+        Right env -> do
+          (code, out, err) <- runPythonChecks "deep_indent_pipeline.py" (torchFreePythonModule env)
+            [ "for q, want in [(True, " ++ show pTrue ++ "), (False, " ++ show (1 - pTrue) ++ ")]:"
+            , "    got = main.forward(q)[0]"
+            , "    if abs(got - want) > " ++ show probTolerance ++ ":"
+            , "        raise ValueError('forward(%r) = %r, expected %r' % (q, got, want))"
+            , "assert main.generate() in (True, False)"
+            ]
+          return $ counterexample ("the emitted module failed:\n" ++ out ++ err) (code == ExitSuccess)
 
 -- ===========================================================================
 -- Batched code is linear in nested tuple-valued selects
