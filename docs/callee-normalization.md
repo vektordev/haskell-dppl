@@ -87,6 +87,22 @@ Whatever the pass does not reach is refused by IRCompiler's point-inversion
 `Apply` arm ("does not resolve to a lambda the compiler can see"), an absent
 variant rather than the `error` it used to be.
 
+A function value outside callee position that no rewrite reaches is refused
+the same way when an InjF with no probabilistic operand computes it --
+`head ((\v3 -> [\v4 -> Uniform]) 1.0)` as an `if` arm passed as an argument,
+or `left (\r1 -> ..)` as a helper's result. Those leaves were compiled by
+generating the value and comparing it with the sample: an integrate variant
+reached `compareValueExpr`'s arrow invariant, and a probability variant
+handed an equality indicator to a consumer expecting a probability closure
+(the lifted mixture, the arrow-typed argument arm). Any result type with a
+function anywhere inside it (`containsArrow`) now refuses there, an absent
+variant naming the InjF. A function in a tuple or `Either` component that
+reaches `compareValueExpr` some other way (a deterministic call's result) is
+an `IRError` at run time unless the query slot is a wildcard, which bounds
+nothing as for a scalar -- the `TADT`/`TSymbol` convention
+(`higher-order/functionInTupleCdfWildcardSlot`; task
+`function-value-compared-in-probability-mode`).
+
 The one selection it deliberately leaves alone is a **bare name** in callee
 position (other than the projected one above), precisely because that is the
 one FC already resolves. An earlier

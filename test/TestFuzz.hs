@@ -81,7 +81,7 @@ import End2EndTesting (resolveNeuralParams, networkNames, findTorchPython, noTor
 import Data.List (sort, nub, intersect, find, isInfixOf, isPrefixOf, partition)
 import PrettyPrint (pPrintProg)
 import SPLL.Parser (tryParseProgram)
-import SPLL.Typing.PType (PType(Bottom))
+import SPLL.Typing.PType (PType(Bottom, Integrate))
 import AdmissionOracle (Outcome(..), admissionCheck, admissionCheckAt, AdmissionReport(..), Check(..), Mode(..), admitted, violations, overPromises, outcomeBucket, renderViolation)
 import Data.Number.Erf (erf)
 import IRFuzz (IRCase(..), InterpOutcome(..), genIRCase, shrinkIRCase, irCaseWellTyped, renderIRCase,
@@ -830,12 +830,10 @@ knownAdmissionCrashes =
   -- form checks, the generate-backed enumeration guard, the Normal/LogNormal
   -- parameter extractors) are gone from this list: they are absent variants
   -- with a recorded reason now, which the oracle buckets as refusals.
-  -- Found once fuzz-admission-oracle-bugs' item 3 exception was lifted (it had
-  -- been hiding this under the same message), and filed rather than fixed in
-  -- that task.
-  [ ("Comparison not implemented for type: TArrow", "function-value-compared-in-probability-mode")
-  ]
-  -- bare-equality-of-two-neural-reads-crashes ("More than one probabilistic
+  []
+  -- function-value-compared-in-probability-mode ("Comparison not implemented
+  -- for type: TArrow") left when a function value selected by an InjF became
+  -- a refusal. bare-equality-of-two-neural-reads-crashes ("More than one probabilistic
   -- argument") and single-prob-param-injf-with-no-probabilistic-operand left
   -- with the AnyExcept arm's one-probabilistic-operand guard.
   -- The nine families of fuzz-admission-oracle-bugs and fuzz-let-witness-bugs
@@ -866,6 +864,10 @@ knownOverPromises =
   , ("does not resolve to a lambda the compiler can see", "fuzz-admission-over-promises")
   , ("reached a generate-backed fallback", "fuzz-admission-over-promises")
   , ("the argument has pType Bottom (no measurable distribution)", "fuzz-admission-over-promises")
+    -- Family 8: a function value computed by an InjF (task
+    -- function-value-compared-in-probability-mode turned its crash into this
+    -- refusal; the lattice still admits the enclosing function).
+  , ("yields a value containing a function", "fuzz-admission-over-promises")
   ]
 
 
@@ -3672,18 +3674,45 @@ admissionOracleTests = testGroup "Admission oracle"
       assertNoViolation rep
       assertEqual "helper outcomes" [(ModeGenerate, "value"), (ModeProbability, "value"), (ModeIntegrate, "value")]
         (outcomesOf "shift" rep)
-  , testCase "an admitted function the IR compiler crashes on is a violation naming it" $ do
-      -- Docs task function-value-compared-in-probability-mode: admitted, and
-      -- the IR compiler dies on an internal invariant (a CDF comparison built
-      -- for an arrow type) rather than refusing. Earlier versions of this case
-      -- used fuzz-admission-oracle-bugs item 7's curried lambda and then the
-      -- bare equality of two neural reads, both of which compile now.
+  , testCase "a crash of an admitted function is a violation naming it, and is never filed by default" $ do
+      -- The oracle's crash bucket, checked on a constructed report: no known
+      -- program crashes the IR compiler any more. Earlier versions of this
+      -- case ran fuzz-admission-oracle-bugs item 7's curried lambda, then the
+      -- bare equality of two neural reads, then the function value of
+      -- function-value-compared-in-probability-mode (below), each until it
+      -- compiled; the next crash family found should take this place again.
+      let crash = Check "main" Integrate ModeIntegrate (Crash "boom")
+          rep = Checked [("main", Integrate)] [Check "main" Integrate ModeGenerate Value, crash]
+      assertEqual "violations" [crash] (violations rep)
+      assertEqual "unfiled" ([], [crash]) (partitionKnownAdmission (violations rep))
+  , testCase "a function value selected by an InjF is refused, not compared (function-value-compared-in-probability-mode)" $ do
+      -- An if arm projecting a lambda out of a redex's result, passed as an
+      -- argument: the integrate variant compared a function value against
+      -- the sample and died on compareValueExpr's arrow invariant. Now an
+      -- absent variant with a recorded reason, and generate survives.
       rep <- oracleOn "main = \\v0 -> v0 0 (if False then (if Uniform < 0.894 then \\v1 -> Uniform else \\v2 -> 0.0) else head ((\\v3 -> [\\v4 -> Uniform]) 1.0))"
-      case [ v | v@(Check "main" _ _ (Crash _)) <- violations rep ] of
-        (Check _ pt _ (Crash msg) : _) -> do
-          assertBool ("admitted: " ++ show pt) (admitted pt)
-          assertBool msg ("Comparison not implemented for type: TArrow" `isInfixOf` msg)
-        _ -> assertFailure ("expected a crash on main, got " ++ show (violations rep))
+      assertNoViolation rep
+      assertEqual "generate" [(ModeGenerate, "value")] [ o | o@(m, _) <- outcomesOf "main" rep, m == ModeGenerate ]
+      assertBool ("an inference variant refused: " ++ show (outcomesOf "main" rep))
+        (any ((`elem` ["refusal", "promised-absent"]) . snd) (outcomesOf "main" rep))
+      -- Admitted (Integrate), so the refusal is a filed lattice over-promise.
+      assertEqual "unfiled over-promises" [] (map renderViolation (snd (partitionKnownOverPromises (overPromises rep))))
+  , testCase "a helper returning a function inside an Either is refused, not compared" $ do
+      -- The second repro of function-value-compared-in-probability-mode: the
+      -- cdf of @left <closure>@ reached compareValueExpr's arrow invariant.
+      -- The oracle skips @loop@ (no canonical value for its parameter), so
+      -- the compiled group is inspected directly.
+      let src = "loop r0 = left (\\r1 -> r1 0.0 (\\r2 -> snd (-1, \\r3 -> if Uniform < 0.5 then 1 else 2)) (fst (right 1, False)))\nmain = left 0"
+      rep <- oracleOn src
+      assertNoViolation rep
+      p <- either (\e -> assertFailure (show e) >> error "unreachable") return (tryParseProgram "<admission>" src)
+      IREnv groups _ _ <- either (\e -> assertFailure e >> error "unreachable") return (compile defaultCompilerConfig p)
+      case [ g | g <- groups, groupName g == "loop" ] of
+        [g] -> do
+          assertBool "loop generates" (isJust (genFun g))
+          assertEqual "refused variants" ["integ", "prob"] (sort (map fst (refusedVariants g)))
+          assertBool (show (refusedVariants g)) (all (("containing a function" `isInfixOf`) . show . snd) (refusedVariants g))
+        gs -> assertFailure ("expected one loop group, got " ++ show (map groupName gs))
   , testCase "an admitted function the IR compiler refuses is an over-promise, and generate survives" $ do
       -- A call binding a Normal to a parameter read through sqrt, outside the
       -- monotone transport table: admitted, and the set-valued witness engine
