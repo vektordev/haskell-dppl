@@ -1,0 +1,1 @@
+main = draw w = Uniform < 0.5 in (w, w)

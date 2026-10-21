@@ -134,6 +134,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `IROptimizer` — constant folding, CSE and let-in optimization.
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.
 - `AutoNeural` — generated readLogits/writeLogits functions and partition plans for neural declarations.
+- `CompileWarnings` — compile-time warnings (non-blocking diagnostics), computed by `Prelude.programWarnings`/`compiledWarnings`.
 - `ReservedNames` — the single registry of compiler-claimed and target-language names.
 - `Prelude` — `compile`, smart constructors and the `run*` query entry points.
 - `StageDiff` — compiles two equivalent programs side by side and names the first stage that diverges (`docs/testing.md`, "Rewrite invariance").
@@ -149,7 +150,7 @@ stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
 
 | doc | covers |
 |---|---|
-| `pipeline-and-types.md` | stage order, `Expr`/`TypeInfo`/`Value`/`MultiValue`/`CompilerConfig`, the `PType` order, the `-d` dump |
+| `pipeline-and-types.md` | stage order, `Expr`/`TypeInfo`/`Value`/`MultiValue`/`CompilerConfig`, the `PType` order, compile-time warnings, the `-d` dump |
 | `language-frontend.md` | `draw` vs `define`, `observe`, type signatures, reserved names and mangling, type-error provenance, monomorphization |
 | `modality-and-admission.md` | the Modality layer, conditioning inside `if` arms, re-inferring recovered variables, refusals as absent variants, the admission contract |
 | `witness-inversion-engines.md` | plan-guided enumeration, set-valued witnesses, affine Gaussian marginalisation, the one application rule (`Binding`), forward-chaining acyclicity |

@@ -22,6 +22,9 @@ import SPLL.Typing.RType (RType(..))
 import TestCaseParser (corpusPplPath)
 import CorpusSweep
 import SPLL.MaskVariants (variantGroupName)
+import SPLL.CompileWarnings (planLeafSlot)
+import SPLL.AutoNeural (PartitionPlan(..))
+import Data.Foldable (toList)
 import qualified SPLL.CodeGenPyTorch
 
 import Control.Exception (try, evaluate, SomeException, ErrorCall(..), fromException)
@@ -488,7 +491,7 @@ variantUnitTests =
         Left err -> assertFailure err
         Right (IREnv groups _ _) ->
           assertEqual "variant groups" [] [ groupName g | g <- groups, isJust (maskVariantOf g) ]
-      case marginalBudgetWarnings tight prog of
+      case map renderCompileWarning (programWarnings tight prog) of
         [w] -> do
           assertBool ("names the function: " ++ w) ("'main'" `isInfixOf` w)
           assertBool ("names the flag: " ++ w) ("--marginalSlots" `isInfixOf` w)
@@ -668,6 +671,93 @@ allConcreteArm (IRIf (IRIf (IRUnaryOp OpIsAny (IRVar _)) (IRConst (VBool False))
 allConcreteArm other = other
 
 -- ---------------------------------------------------------------------------
+-- The correlated-writeLogits warning (task warn-correlated-slots)
+-- ---------------------------------------------------------------------------
+
+-- | The compile-dependent warnings of a program, after compiling it.
+compiledWarningsOf :: String -> IO [CompileWarning]
+compiledWarningsOf src = do
+  prog <- parseOrFail src
+  case compile defaultCompilerConfig prog of
+    Left err  -> assertFailure err
+    Right env -> return (compiledWarnings defaultCompilerConfig prog env)
+
+correlatedWarningTests :: TestTree
+correlatedWarningTests = testGroup "correlated writeLogits slots warning"
+  [ testCase "one Bool latent in both fields: names both slots and the latent" $ do
+      ws <- compiledWarningsOf g4
+      assertEqual "warnings" [CorrelatedWriteLogitsSlots "main" [CorrelatedClass ["fst", "snd"] ["w"]]] ws
+      let txt = concatMap renderCompileWarning ws
+      forM_ ["'main'", "fst, snd", "'w'", "product of those slots' marginals"] $ \frag ->
+        assertBool ("rendered warning mentions " ++ frag ++ ": " ++ txt) (frag `isInfixOf` txt)
+
+  , testCase "the warning does not change writeLogits: still the product of marginals" $ do
+      prog <- parseOrFail g4
+      case runWriteLogits defaultCompilerConfig prog "main" [] of
+        Right (VList l) -> assertEqual "logits" [0.5, 0.5, 0.5, 0.5] [ x | VFloat x <- toList l ]
+        other -> assertFailure ("writeLogits: " ++ show other)
+
+  , testCase "a transformed second use shares the latent too" $ do
+      ws <- compiledWarningsOf "main = draw w = Uniform < 0.5 in (w, not w)"
+      assertEqual "warnings" [CorrelatedWriteLogitsSlots "main" [CorrelatedClass ["fst", "snd"] ["w"]]] ws
+
+  , testCase "an alias is the same draw, named where it is drawn" $ do
+      ws <- compiledWarningsOf "main = draw x = Uniform < 0.5 in draw y = x in (x, y)"
+      assertEqual "warnings" [CorrelatedWriteLogitsSlots "main" [CorrelatedClass ["fst", "snd"] ["x"]]] ws
+
+  , testCase "a destructured draw is named by the user's binders, not the generated one" $ do
+      ws <- compiledWarningsOf
+        "main = draw (a, b) = (if Uniform < 0.5 then (True, True) else (False, False)) in (a, b)"
+      assertEqual "warnings" [CorrelatedWriteLogitsSlots "main" [CorrelatedClass ["fst", "snd"] ["a", "b"]]] ws
+
+  , testCase "a class spans nesting levels and several latents" $ do
+      ws <- compiledWarningsOf
+        "main = draw w = Uniform < 0.5 in draw v = Uniform < 0.3 in (w, (v, w && v))"
+      assertEqual "warnings"
+        [CorrelatedWriteLogitsSlots "main" [CorrelatedClass ["fst", "snd.fst", "snd.snd"] ["v", "w"]]] ws
+
+  , testCase "ADT fields are named by their accessors" $ do
+      ws <- compiledWarningsOf "data P = Mk a :: Bool, b :: Bool\nmain = draw w = Uniform < 0.5 in Mk w (not w)"
+      assertEqual "warnings" [CorrelatedWriteLogitsSlots "main" [CorrelatedClass ["a", "b"] ["w"]]] ws
+
+  , testCase "two syntactic draws are two independent latents: no warning" $ do
+      ws <- compiledWarningsOf "main = (Uniform < 0.5, Uniform < 0.5)"
+      assertEqual "warnings" [] ws
+
+  , testCase "a drawing function referenced twice draws twice: no warning" $ do
+      ws <- compiledWarningsOf "f = Uniform < 0.5\nmain = (f, f)"
+      assertEqual "warnings" [] ws
+
+  , testCase "a shared continuous latent gets no writeLogits, so no warning" $ do
+      -- If this program ever gets a writeLogits, the warning must start firing
+      -- for it: the first assertion is the tripwire for revisiting this test.
+      let src = "main = draw x = Normal in (x, x + 1.0)"
+      prog <- parseOrFail src
+      case compile defaultCompilerConfig prog of
+        Left err -> assertFailure err
+        Right (IREnv groups _ _) ->
+          assertEqual "main's writeLogits" (Just False)
+            (isJust . writeLogitsFun <$> find ((== "main") . groupName) groups)
+      ws <- compiledWarningsOf src
+      assertEqual "warnings" [] ws
+
+  , testCase "the warning reads the compile, not the program alone" $ do
+      prog <- parseOrFail g4
+      assertEqual "programWarnings" [] (programWarnings defaultCompilerConfig prog)
+
+  , testCase "plan-leaf coarsening stops at a jointly encoded leaf" $ do
+      let l0 = Accessor "TCons" 0
+          l1 = Accessor "TCons" 1
+      assertEqual "tuple of leaves" [l1] (planLeafSlot (TuplePlan Continuous Continuous) [l1, l0])
+      assertEqual "nested tuples" [l1, l0]
+        (planLeafSlot (TuplePlan Continuous (TuplePlan Continuous Continuous)) [l1, l0])
+      assertEqual "a leaf swallows the rest" [] (planLeafSlot Continuous [l0, l1])
+      assertEqual "an accessor with no plan child" [] (planLeafSlot (TuplePlan Continuous Continuous) [Accessor "Cons" 0])
+  ]
+  where
+    g4 = "main = draw w = Uniform < 0.5 in (w, w)"
+
+-- ---------------------------------------------------------------------------
 
 observationMaskTests :: TestTree
 observationMaskTests = testGroup "ObservationMask"
@@ -677,4 +767,5 @@ observationMaskTests = testGroup "ObservationMask"
     , maskTableTests
     , pruneTests
     , variantTests
+    , correlatedWarningTests
     ]

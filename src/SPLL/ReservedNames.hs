@@ -71,6 +71,7 @@ module SPLL.ReservedNames
   , destructBinderPrefix
   , observeBinderPrefix
   , etaBinderPrefix
+  , isFrontendBinder
   , reservedIdentifierReason
   , internalNameReason
   , groupNameCollisions
@@ -192,6 +193,13 @@ destructBinderPrefix, observeBinderPrefix, etaBinderPrefix :: String
 destructBinderPrefix = "p_d"
 observeBinderPrefix  = "p_ob"
 etaBinderPrefix      = "p_eta"
+
+-- | Is this a binder the frontend generated ('parserBinderPrefixes'), rather
+-- than a name the user wrote? Diagnostics that name a variable skip these.
+isFrontendBinder :: String -> Bool
+isFrontendBinder name = case numberedReason parserBinderPrefixes name of
+  Just _  -> True
+  Nothing -> False
 
 -- | Unlike every other entry these legitimately occur in an AST -- the
 -- frontend put them there -- so only the surface check ('reservedIdentifierReason')

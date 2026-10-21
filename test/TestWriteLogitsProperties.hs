@@ -37,7 +37,7 @@ import Data.Foldable (toList)
 import Data.List (find, isInfixOf, nub, sort)
 import Data.Maybe (isJust)
 
-import SPLL.Prelude (runWriteLogits, compile, runWriteLogitsC, runWriteLogitsRandC, runProbNamedC, runGenNamedC)
+import SPLL.Prelude (runWriteLogits, compile, runWriteLogitsC, runWriteLogitsRandC, runProbNamedC, runGenNamedC, compiledWarnings, CompileWarning(..), warningFunction)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (constructVList)
@@ -991,9 +991,10 @@ readPassthroughTests = testGroup "readPassthrough"
 --    (toIRNormalParams vs makeProbRec), so this direction catches *formula*
 --    bugs -- e.g. a mis-(de)normalized mu/sigma in the Gaussian reader.
 --    Valid only where the output distribution is plan-representable
---    (independent tuple slots -- true of the current writeLogits corpus; a
---    dependent-slot program would need excluding here, since writeLogits
---    deliberately marginalises cross-slot correlations, design § 3.7).
+--    (independent tuple slots). writeLogits deliberately marginalises
+--    cross-slot correlations (design § 3.7), so an endpoint the
+--    correlated-slots compile warning fires for is excluded
+--    ('discardsCorrelation').
 
 -- `main sym = nn sym` (after normalization: a ReadNN directly on the lambda
 -- parameter). Only for these does main's output distribution equal the
@@ -1015,6 +1016,15 @@ writeLogitsGenerated p target = case compile defaultCompilerConfig p of
   Right (IREnv groups _ _) -> maybe False (isJust . writeLogitsFun) (find ((== target) . groupName) groups)
   Left _                   -> False
 
+-- Whether the compile warns that the endpoint's writeLogits encodes correlated slots
+-- independently (task warn-correlated-slots). Its vector is then the product of the
+-- slots' marginals by design, which DensityAgreement would report as a formula bug.
+discardsCorrelation :: Program -> String -> Bool
+discardsCorrelation p target = case compile defaultCompilerConfig p of
+  Right env -> or [ warningFunction w == target
+                  | w@CorrelatedWriteLogitsSlots{} <- compiledWarnings defaultCompilerConfig p env ]
+  Left _    -> False
+
 -- | Both sweeps draw on every interpreter-routed, non-slow corpus program,
 -- with its unshaped test cases.
 writeLogitsRoundtripTests :: Corpus -> IO TestTree
@@ -1035,6 +1045,7 @@ writeLogitsRoundtripTests corpus = do
         , let p = ceProgram e
         , (target, args) <- invocations e
         , writeLogitsGenerated p target
+        , not (discardsCorrelation p target)
         ]
   return $ testGroup "WriteLogitsRoundtrip" [identity, density]
   where
