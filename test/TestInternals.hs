@@ -24,7 +24,7 @@ import SPLL.Typing.ForwardChaining (WorldsShape(..))
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
-import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, InputSlot(..), inputSlots, inputWidth, inputLayoutString)
+import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlot(..), inputSlots, inputWidth, inputLayoutString)
 import MockNN (flattenMockInput, mockInputFor, shapedMockLogits)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
@@ -947,6 +947,7 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   , test_makePartitionPlanWildcardMatchesNothing
   , test_makePartitionPlanMixedExplicitAuto
   , test_neuralAdtContinuousFieldDim
+  , test_neuralAdtBranchCountUnscaled
   ]
 
 -- The read-logits reader of a multi-constructor neural ADT selects a
@@ -972,6 +973,26 @@ test_neuralAdtContinuousFieldDim = testCase "a neural ADT's continuous field has
   case runProbC prog env [logits] (VADT "Nil" []) of
     Right (VProbDim p d) -> assertEqual "Nil: a mass" (0.4, 0) (p, d)
     other -> assertFailure ("Nil: " ++ show other)
+
+-- The branch count, like the dim, is selected by the constructor test and
+-- never scaled by the constructor's flag probability (task
+-- autoneural-adt-branch-count-scaled-by-constructor-flag).  No leaf of a
+-- neural read carries a branch itself, so the count is always 0 and the scaling
+-- (flag * 0) was unobservable by value; the test pins the reader's shape
+-- instead: the branch-count component must not read a logit slot.
+test_neuralAdtBranchCountUnscaled :: TestTree
+test_neuralAdtBranchCountUnscaled = testCase "a neural ADT's branch count is not scaled by a constructor flag" $ do
+  prog <- either (\e -> assertFailure ("parse: " ++ show e) >> error "unreachable") return $ tryParseProgram "<inline>" $ unlines
+    [ "data Color = Red | Green"
+    , "data Attrs = Nil | Obj color::Color, px::Float"
+    , "neural readAttrs :: (Symbol -> Attrs) of {Nil | Obj {Red | Green} Real}"
+    , "main s = readAttrs s" ]
+  let plan = makePartitionPlan (adts prog) (TADT "Attrs") Nothing
+  case makeProb (adts prog) defaultCompilerConfig plan of
+    IRLambda _ (IRLambda _ (IRLetIn _ _ (IRLetIn _ _
+      (IRConstruct TgTuple [_, IRConstruct TgTuple [_, IRConstruct TgTuple [bc, _]]])))) ->
+        assertBool ("branch count reads a logit slot: " ++ show bc) (not ("BListIndex" `isInfixOf` show bc))
+    other -> assertFailure ("unexpected reader shape: " ++ show other)
 
 -- A .tst dim is an Int (task presult-dim-as-int): written @0@ or, as the
 -- older corpus does, @0.0@; a non-integral or negative dim is a typo the
