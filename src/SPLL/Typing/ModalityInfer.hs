@@ -70,18 +70,19 @@ import Data.Graph (SCC(..), stronglyConnComp)
 
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
-  , Value, GenericValue(..), Tag(..), MultiValue(..) )
+  , Value, GenericValue(..), GenericList(..), Tag(..), MultiValue(..) )
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isZeroValue, freeVarsExpr)
 import SPLL.Analysis (enumerableDomain, enumerableApplication)
 import SPLL.AutoNeural (planReadOf, planProjectedReadOf)
 import Data.Maybe (isJust, catMaybes, listToMaybe)
+import Control.Monad (guard)
 import Data.List (intercalate, find)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.Modality
 import SPLL.Typing.ForwardChaining (FCData(..), isWitnessedLambda, WitnessCert(..), pointWitnessCert, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet)
-import PredefinedFunctions (isFieldConstructor)
+import PredefinedFunctions (isFieldConstructor, propagateValuesLazily)
 
 -- ---------------------------------------------------------------------------
 -- Internal closure-carrying modality
@@ -376,7 +377,10 @@ data Justification
   = JDirac (Maybe Value)
     -- ^ A point mass: the node's capability is 'Exact'. Carries the value
     -- where it is statically known -- a constant, a node whose enumeration
-    -- domain is a single value, a product with a literal zero factor.
+    -- domain is a single value, a product with a literal zero factor, an
+    -- 'InjF' of points of known value ('foldedValue'), a tuple field of known
+    -- value ('projectedLaw'), a call whose callee returns a known point
+    -- ('JReturns').
   | JLeaf String [Law]
     -- ^ A primitive distribution and the laws of its parameters: @Normal@ and
     -- @Uniform@ (no parameters), or a neural read whose input is a point
@@ -407,6 +411,16 @@ data Justification
     -- Gaussian, which no engine implements (affine-gaussian-forms M2), so the
     -- node is sample-only: this is the certificate saying so, and the lattice
     -- floors on it ('sampleOnlyI').
+  | JReturns Int Justification
+    -- ^ A function whose result, after @n@ more arguments (@n >= 1@), has
+    -- the justification, whatever the arguments: its body's justification
+    -- under the representative of its parameter, with every part that could
+    -- depend on the argument dropped ('argumentFree'). @h z = 0.0 * z@
+    -- returns @JDirac (Just 0.0)@. Consumed by the
+    -- application rule, which gives the call that justification
+    -- ('applyLaw'), and through it by the compiler's Dirac-law clause
+    -- ('IRCompiler.lawPoint') at the call (task
+    -- dirac-law-point-lost-under-plus-or-helper).
   | JUnjustified
 
 -- | The certificate of an affine Gaussian form: the latents the value is an
@@ -501,6 +515,7 @@ renderJustification j = case j of
   JPlan rs         -> "plan " ++ intercalate ", " rs
   JBinding []      -> "binding: no engine (sample-only)"
   JBinding cs      -> "binding: " ++ intercalate ", " (map engineName cs)
+  JReturns n r     -> "returns " ++ renderJustification r ++ " after " ++ show n ++ " argument" ++ (if n == 1 then "" else "s")
   JUnjustified     -> "unjustified"
   where args ls = "(" ++ intercalate ", " (map (renderJustification . lawJust) ls) ++ ")"
         renderValue (VFloat x) = show x
@@ -617,6 +632,9 @@ inferE ctx env expr = case expr of
         l | Just z <- zeroFactor                  = Law (IG gExact) (JDirac (Just z))
           | isFieldConstructor (icADTs ctx) fname = structuredLaw fname laws m0
           | Just c <- affine                      = Law m0 (JAffine c)
+          | Just pl <- projectedLaw fname laws m0 = pl
+          | isPointMass m0, Just v <- foldedValue (icADTs ctx) fname laws
+                                                  = Law m0 (JDirac (Just v))
           | otherwise                             = pointOr m0 (Expr ti (InjF name es'))
         -- mult(0, y) = 0 for every y, whatever y's own law: a point mass, not
         -- (as 'injFMod' would say) whatever family y belongs to (task
@@ -649,6 +667,13 @@ inferE ctx env expr = case expr of
         arr   = IArr gExact (\m -> let (bl,_,_) = inferE ctx (Map.insert x (bareLaw m) env) body in lawMod bl)
         (bodyRepLaw, body', ba) = inferE ctx (Map.insert x (bareLaw (lambdaParamMod ti)) env) body
         bodyRepMod = lawMod bodyRepLaw
+        -- What the body's law says whatever the argument ('argumentFree'):
+        -- a body that is a known point under the parameter's representative
+        -- takes that value for every argument.
+        lamJust = case lawJust bodyRepLaw of
+          JReturns n r -> JReturns (n + 1) r
+          r | Just r' <- argumentFree r -> JReturns 1 r'
+            | otherwise -> JUnjustified
     -- The internal modality is the closure 'arr' (so application β-reduces), but
     -- the flat annotation @IRCompiler@ reads is the /body's/ pType, not the outer
     -- closure 'Deterministic' — IRCompiler selects prob/integrate codegen from the
@@ -664,7 +689,7 @@ inferE ctx env expr = case expr of
     -- @continuous-recursive-gate-witness-failure@; the one-parameter twin was
     -- declined cleanly). 'projectNode' recurses down the arrow spine to the
     -- final result, the same way a 'Var' referencing the function is annotated.
-    in done' arr (Expr (setPType ti (projectNode bodyTy bodyRepMod)) (Lambda x body')) ba
+    in doneL (Law arr lamJust) (Expr (setPType ti (projectNode bodyTy bodyRepMod)) (Lambda x body')) ba
 
   Expr ti (Apply f arg) ->
     let (argLaw, arg', aa) = inferE ctx env arg
@@ -702,7 +727,7 @@ inferE ctx env expr = case expr of
            let (fLaw, f', fa) = inferE ctx env f
                m = applyI (lawMod fLaw) (lawMod (letBoundLaw ctx (cnOf f) argLaw))
                e' = Expr (setPType ti (projectNode (rType ti) m)) (Apply f' arg')
-           in doneL (pointOr m e') e' (fa ++ aa)
+           in doneL (applyLaw fLaw m e') e' (fa ++ aa)
 
   where
     doneL l e acc = (l, e, (cnOf e, l) : acc)
@@ -802,6 +827,82 @@ staticValue (Expr _ (Constant v)) = Just v
 staticValue (Expr ti _) = case [ mv | DiscreteValues mv <- tags ti ] of
   (MultiDiscretes [v] : _) -> Just v
   _ -> Nothing
+
+-- | The law of a call of a head of law @fLaw@ whose result has modality @m@:
+-- a callee whose result's justification does not depend on its arguments
+-- ('JReturns') gives the call that justification, or, still awaiting
+-- arguments, passes the fact on. Any other call is 'pointOr'.
+applyLaw :: Law -> IMod -> Expr -> Law
+applyLaw fLaw m e = case lawJust fLaw of
+  JReturns 1 r@(JDirac _) | isPointMass m -> Law m r
+  JReturns 1 r@(JStructured _ _) -> Law m r
+  JReturns n r | n > 1, IArr _ _ <- m -> Law m (JReturns (n - 1) r)
+  _ -> pointOr m e
+
+-- | The part of a function body's justification, inferred under its
+-- parameter's representative, that holds for every argument, where it says
+-- anything a call can use ('applyLaw'): a point of known value, or a field
+-- constructor. A known value never reads a variable bound at a bare law, so
+-- it is the same for every argument. A field's other facts are dropped
+-- ('JUnjustified'), which only forgoes them: an affine form or a plan read
+-- names nodes of the callee's body, which every call would then share, and
+-- the rest are inert at a field. So @h z = (0.0 * z, Normal + 0.0)@ returns a
+-- pair whose @fst@ is the point 0.0 and whose @snd@ is unjustified.
+argumentFree :: Justification -> Maybe Justification
+argumentFree j = case j of
+  JDirac (Just _)  -> Just j
+  JStructured c ls -> Just (JStructured c (map field ls))
+  _                -> Nothing
+  where
+    field (Law m fj) = Law m (case fj of
+      JDirac (Just _)  -> fj
+      JStructured c ls -> JStructured c (map field ls)
+      _                -> JUnjustified)
+
+-- | The law of a tuple accessor whose operand's law is a pair constructor
+-- ('JStructured'), at modality @m0@: a projected field of known value is
+-- that point, whatever the other field is (@fst (0.0 * z, Normal)@ is the
+-- point 0.0), and a projected pair keeps its fields' laws. Any other field
+-- is left to the generic rules ('Nothing').
+projectedLaw :: String -> [Law] -> IMod -> Maybe Law
+projectedLaw fname laws m0 = field >>= \l -> case l of
+  _ | Just v <- lawValue l -> Just (Law (IG gExact) (JDirac (Just v)))
+  Law _ j@(JStructured _ _) -> Just (Law m0 j)
+  _ -> Nothing
+  where
+    field = case (fname, laws) of
+      ("fst", [Law _ (JStructured "TCons" [a, _])]) -> Just a
+      ("snd", [Law _ (JStructured "TCons" [_, b])]) -> Just b
+      _ -> Nothing
+
+-- | The value of an 'InjF' every operand of which is a point of known value
+-- (@(0.0 * z) + 0.0@ is the point 0.0): its forward function evaluated on
+-- those values, as 'SPLL.Analysis' lists a value set. 'Nothing' when an
+-- operand's value is unknown or not first-order data, or the forward function
+-- does not give exactly one value.
+foldedValue :: [ADTDecl] -> String -> [Law] -> Maybe Value
+foldedValue adtsDecl fname laws = do
+  vs <- mapM lawValue laws
+  guard (not (null vs) && all firstOrder vs)
+  case propagateValuesLazily adtsDecl fname (map pure vs) of
+    [Right v] -> Just v
+    _ -> Nothing
+  where
+    firstOrder v = case v of
+      VBool _    -> True
+      VInt _     -> True
+      VSymbol _  -> True
+      VFloat _   -> True
+      VUnit      -> True
+      VTuple a b -> firstOrder a && firstOrder b
+      VEither ab -> either firstOrder firstOrder ab
+      VADT _ fs  -> all firstOrder fs
+      VList l    -> listFirstOrder l
+      _          -> False
+    listFirstOrder l = case l of
+      EmptyList     -> True
+      ListCont x xs -> firstOrder x && listFirstOrder xs
+      AnyList       -> False
 
 -- | The value a law certifies its node to take, when it is a point mass whose
 -- value is known statically ('JDirac').

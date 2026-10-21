@@ -1,0 +1,2 @@
+h z = 1.0 * z
+main = draw z = Normal in h z

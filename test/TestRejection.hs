@@ -1200,14 +1200,19 @@ vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal"
 -- name -- at every optimisation level alike. Before, the interpreter took a
 -- Normal density at ANY (both levels); with the wildcard only passed on, -O2
 -- answered while -O0 evaluated @h + 1.0@ at ANY in the body and died.
+--
+-- The first field is a random 'Uniform': with the literal @0@ it was until
+-- task dirac-law-point-lost-under-plus-or-helper, which made @fst@ of a pair
+-- whose first field is a known point that point, so no inversion runs (the
+-- last case below).
 injectedWildcardArithmeticSrc :: String
-injectedWildcardArithmeticSrc = "main = draw h = Normal in fst (0, h + 1.0)\n"
+injectedWildcardArithmeticSrc = "main = draw h = Normal in fst (Uniform, h + 1.0)\n"
 
 injectedWildcardArithmeticTests :: TestTree
-injectedWildcardArithmeticTests = testGroup "InjectedWildcardArithmetic"
+injectedWildcardArithmeticTests = testGroup "InjectedWildcardArithmetic" $
   [ testCase ("refused by name, not a type error, at -O" ++ show lvl) $
       withParsed injectedWildcardArithmeticSrc $ \prog -> do
-        let res = runProb defaultCompilerConfig{optimizerLevel = lvl} prog [] (VInt 0)
+        let res = runProb defaultCompilerConfig{optimizerLevel = lvl} prog [] (VFloat 0.5)
         outcome <- try (evaluate (length (show res)))
         case outcome of
           Right _ -> assertFailure ("expected a runtime refusal, got " ++ show res)
@@ -1216,7 +1221,13 @@ injectedWildcardArithmeticTests = testGroup "InjectedWildcardArithmetic"
               ("is unobserved" `isInfixOf` show ex)
             assertBool ("a type error leaked through: " ++ show ex)
               (not ("Type error" `isInfixOf` show ex))
-  | lvl <- [0, 2] ]
+  | lvl <- [0, 2] ] ++
+  [ testCase ("a known point in the projected field is that point, at -O" ++ show lvl) $
+      withParsed "main = draw h = Normal in fst (0, h + 1.0)\n" $ \prog ->
+        case runProb defaultCompilerConfig{optimizerLevel = lvl} prog [] (VInt 0) of
+          Right (VTuple (VFloat p) (VTuple (VInt 0) (VBool False))) | abs (p - 1.0) < 1e-9 -> return ()
+          other -> assertFailure ("expected (1.0, dim 0), got " ++ show other)
+  | lvl <- [0, 2 :: Int] ]
 
 -- ----------------------------------------------------------------------------
 -- Comparisons with no closed form (task
