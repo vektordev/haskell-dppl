@@ -954,6 +954,19 @@ continuousUnderSumTests = testGroup "continuousUnderSum"
       "main = if Uniform < 0.5 then left (if Uniform < 0.5 then Normal else Normal + 3.0) else right True"
   , refused "truncatedPayload" "main = draw x = Normal in if x > 0.0 then left x else right 0"
   , refused "constantPayload" "main = if Uniform < 0.5 then left 1.0 else right True"
+  -- A log-normal's normal function holds the underlying Normal's (mu, sigma); writing it into a
+  -- Gaussian slot would mislabel it (task writelogits-labels-lognormal-as-gaussian).
+  , refused "logNormal" "main = exp Normal"
+  , refused "logNormalInAdt"
+      (unlines [ "data Sh = Circ r::Float | Sq s::Float"
+               , "main = if Uniform < 0.3 then Circ (exp Normal) else Sq (Normal * 2.0)" ])
+  , refused "logNormalTupleComponent" "main = (Normal, exp Normal)"
+  , testCase "gaussianBesideLogNormalFunctionStillWrites" $
+      -- The other side of the boundary: a Gaussian function in a program that also has a
+      -- log-normal one keeps its writeLogits.
+      closedWriteLogits (unlines [ "ln = exp Normal"
+                                 , "main = Normal * 2.0" ])
+        >>= checkVector "main" [0.0, 2.0]
   ]
   where
     refused label src = testCase ("refuses." ++ label) $ do
