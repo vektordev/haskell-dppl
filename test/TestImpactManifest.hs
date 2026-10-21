@@ -18,7 +18,7 @@ import SPLL.Prelude (compile)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv)
 import ImpactManifest
 import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
-                        batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs, lineSpillLabel,
+                        batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs, lineSpillLabel, oneHotGatherLabel,
                         selectDemotionLabel, pureCalleeLabel)
 import End2EndTesting (interpreterKey, pythonKey, juliaKey, loadCorpusPair, networkMocks)
 import TestCaseParser (corpusPplPath, isProbTestCase, isCumulTestCase)
@@ -74,11 +74,17 @@ batchedCensusRouting = do
   assertEqual "a plain batched program is certified" [] (batchedUncertifiedConstructs plain)
   theta <- census <$> load "theta"
   assertEqual "a theta-tree read is not certified" ["Accessor:AcTheta"] (batchedUncertifiedConstructs theta)
-  -- A 250-value neural agreement: its mask variant's point read is spilled
-  -- for CPython's bracket limit, which the fuzz arms never reach.
-  wide <- census <$> load "batchedMaskVariantNeuralReadChain"
+  -- A 250-value neural agreement over a non-contiguous domain: its mask
+  -- variant's point read is spilled for CPython's bracket limit, which the
+  -- fuzz arms never reach.
+  wide <- census <$> load "batchedMaskVariantNeuralReadTableChain"
   assertEqual "a module with a spilled line is not certified" [lineSpillLabel] (batchedUncertifiedConstructs wide)
   assertBool "a module without one carries no spill label" (lineSpillLabel `notElem` plain)
+  -- The same over a contiguous domain: the read is one guarded nn_gather
+  -- (SPLL.IRGatherPass), no spill, and the rewrite keeps the check.
+  gathered <- census <$> load "batchedMaskVariantNeuralReadChain"
+  assertEqual "a module with a one-hot gather is not certified" [oneHotGatherLabel] (batchedUncertifiedConstructs gathered)
+  assertBool "a module without one carries no gather label" (oneHotGatherLabel `notElem` plain)
   -- A draw-bound list element: its witness guard is a select over the shape
   -- probe `sample == []`, which the batched backend emits as a Python if.
   demoted <- census <$> load "drawBoundListElementGuardsEmptyTail"

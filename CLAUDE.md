@@ -100,7 +100,8 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
   → RInfer (+ Monomorphize on failure) → Analysis (DiscreteValues) → DrawSinking
   → ForwardChaining → ModalityInfer
   → IRCompiler (generate / probability / integrate) → PerValue (install)
-  → IRSelectPass (batched only) → IROptimizer → CodeGen{PyTorch,PyTorchBatched,Julia}
+  → IRSelectPass (batched only) → IROptimizer → IRGatherPass (batched only)
+  → CodeGen{PyTorch,PyTorchBatched,Julia}
 ```
 
 `SPLL.Prelude.compile` is the authority on stage order.
@@ -131,6 +132,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `IntermediateRepresentation` — `IRExpr` and `IRFunGroup`.
 - `IRTypeCheck` — the IR's type contract: `IRType` and an inference checker over an `IREnv`.
 - `IRSelectPass` — `IRIf` → `IRSelect` for batched mode.
+- `IRGatherPass` — batched only: a one-hot sum reading a logit tensor over a contiguous key range → one guarded `nn_gather`.
 - `IROptimizer` — constant folding, CSE and let-in optimization.
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.
 - `PythonNesting` — CPython's per-line bracket and indentation limits, and the deep-line spill both Python backends share.
