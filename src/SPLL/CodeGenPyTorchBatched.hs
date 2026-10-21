@@ -32,9 +32,11 @@
 -- structure-of-arrays data, and makes list recursion terminate at a
 -- bucket-uniform depth. The other half of the dichotomy -- a *value*-dependent
 -- branch that chooses between structures -- is served by a second strategy,
--- a per-structure split of the batch at the select ('splitStructureSelects');
--- the guard still refuses the shapes the split does not reach, and
--- value-dependent recursion ('recOffenders').
+-- a per-structure split of the batch at the select ('splitStructureSelects').
+-- The same split serves value-dependent recursion: a branch guarding a
+-- recursive call is split, so each element recurses as deep as on the scalar
+-- backend ('splitGenRecursion' is generate's version). The guard still
+-- refuses the shapes the split does not reach ('recOffenders').
 module SPLL.CodeGenPyTorchBatched
   ( generateFunctionsBatched
   , batchedGuard
@@ -57,7 +59,7 @@ import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
-import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble, groupClassName)
+import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble, groupClassName, irFreeVars)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
@@ -146,7 +148,8 @@ emitBatched genBoil env0 = do
       -- uncollapsed backend's. At most k+1 attempts for k enums, and the
       -- fallback is never worse than the uncollapsed backend.
       let attempt enums = do
-            let env' = (adtEnvWith enums adts) { sGenNames = map fst genArities }
+            let env' = (adtEnvWith enums adts) { sGenNames = map fst genArities
+                                               , sMethodSCCs = methodSCCs lut funcs }
             () <- checkCallGraph env' funcs
             classes <- mapM (generateClass (groupClassName env) env' lut genArities genRaw) funcs
             return (enums, classes)
@@ -319,10 +322,11 @@ renderConst (n, v) = case batchedVal v of
 -- forward/integrate, see 'renderGen').
 generateClass :: (String -> String) -> SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either Refusal [String]
 generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc _ dom variantOf) = do
-  let method m d | Just ls <- retiredMethod variantOf m d = Right ls
-                 | otherwise = generateMethod env lut m name d
-  p <- maybe (Right []) (method "forward") prob
-  i <- maybe (Right []) (method "integrate") integ
+  let method m suffix d
+        | Just ls <- retiredMethod variantOf m d = Right ls
+        | otherwise = generateMethod (enterMethod (name ++ suffix) env) lut m name d
+  p <- maybe (Right []) (method "forward" "_prob") prob
+  i <- maybe (Right []) (method "integrate" "_integ") integ
   g <- maybe (Right []) (renderGen env lut genArities genMethods name) gen
   let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ clsName name ++ "(Module):"
@@ -528,42 +532,54 @@ batchNVar = "_batchN"
 -- Two shapes are excluded, each with its own diagnostic:
 --
 --   1. Recursive generate (a cycle in the generate-only call graph,
---      'hasGenCycle'): both-arm-eager select semantics would recurse forever
---      at *runtime* (unlike prob/integ, this is not merely a compile-time
---      concern -- Python would stack-overflow actually calling it).
+--      'hasGenCycle') whose recursion sits under a value-dependent branch
+--      'splitGenRecursion' could not split: both-arm-eager select semantics
+--      would recurse forever at *runtime*. A split one recurses per element
+--      as deep as the scalar generate does (task
+--      batched-value-dependent-recursion); a recursion that builds a list is
+--      stubbed instead ('heterogeneousGenStub').
 --   2. Any other construct outside the tensor fragment ('batchedGuard', same
 --      as forward/integrate): lists, ADTs, Either dispatch (including a
 --      neural read-logits network's own 'EitherPlan'/'ADTPlan' output shape -- see the
 --      header comment above), etc.
 renderGen :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either Refusal [String]
-renderGen env lut genArities genRaw groupNameStr (expr0, doc)
-  | hasGenCycle genRaw (groupNameStr ++ "_gen") =
-      if producesList (lookup (groupNameStr ++ "_gen") genRaw)
-        then Right (heterogeneousGenStub groupNameStr)
-        else Left $ unblamed $ "batched mode: " ++ groupNameStr ++ "'s generate function recurses (directly "
-          ++ "or through a call chain); data-dependent recursion is outside the tensor fragment "
-          ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
+renderGen env0 lut genArities genRaw groupNameStr (expr0, doc)
+  | recursive, producesStructure env (lookup rawName genRaw) = Right (heterogeneousGenStub groupNameStr)
   | otherwise =
       let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
           (args, body) = unwrapLambdas (prepGenBody env expr)
-      in case batchedGuardBlamed env groupNameStr "generate" body of
-           -- Drawing a *structurally heterogeneous* sample -- a value-dependent
-           -- branch between two shapes -- is the same Component 4 situation as
-           -- the recursive list case above: the shapes are the output, so there
-           -- is nothing to bucket on. Stub it rather than refusing the whole
-           -- program, whose inference over such samples buckets fine. A refusal
-           -- blamed on a collapsed enum is passed up instead: with that ADT
-           -- keyed back into the signature the body may emit for real, which
-           -- beats a stub.
-           Left r | null (refusalBlame r), structureBranch env body -> Right (heterogeneousGenStub groupNameStr)
-                  | otherwise -> Left r
-           Right () ->
-             let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
-                 docLines = map ("# " ++) (lines doc)
-             in Right (docLines ++ [l1] ++ indentOnce (batchedBlock (Just (groupNameStr ++ ".generate")) env body))
+      in case pickOffender (recOffenders scc env Nothing body) of
+           Just (_, why) -> Left $ unblamed $ "batched mode: " ++ groupNameStr ++ "'s generate "
+             ++ why ++ ". A recursive generate is admitted when every value-dependent "
+             ++ "branch guarding its recursion can be split (each half of the batch "
+             ++ "runs only the arm it takes; see 'splitGenRecursion')."
+           Nothing -> case batchedGuardBlamed env groupNameStr "generate" body of
+             -- Drawing a *structurally heterogeneous* sample -- a value-dependent
+             -- branch between two shapes -- is the same Component 4 situation as
+             -- the recursive list case above: the shapes are the output, so there
+             -- is nothing to bucket on. Stub it rather than refusing the whole
+             -- program, whose inference over such samples buckets fine. A refusal
+             -- blamed on a collapsed enum is passed up instead: with that ADT
+             -- keyed back into the signature the body may emit for real, which
+             -- beats a stub.
+             Left r | null (refusalBlame r), structureBranch env body -> Right (heterogeneousGenStub groupNameStr)
+                    | otherwise -> Left r
+             Right () ->
+               let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
+                   docLines = map ("# " ++) (lines doc)
+               in Right (docLines ++ [l1] ++ indentOnce (batchedBlock (Just (groupNameStr ++ ".generate")) env body))
+  where
+    rawName   = groupNameStr ++ "_gen"
+    recursive = hasGenCycle genRaw rawName
+    -- The generate methods this one's recursion runs through, by raw and by
+    -- emitted (@group.generate@) name: the calls 'splitGenRecursion' splits
+    -- the batch above, and 'recOffenders' judges.
+    scc = sccIn lut genRaw rawName
+    env = env0 { sRecCallees = scc }
 
 -- | A generate that draws a /structurally heterogeneous/ sample -- a recursion
--- that builds a list, or a value-dependent branch between two shapes -- is the
+-- that builds a structure (a list, an Either arm or an ADT constructor), or a
+-- value-dependent branch between two shapes -- is the
 -- one case where the batch's shapes are the *output* rather than an input to
 -- partition on, so there is no bucket to run it in. That is design
 -- heterogeneous-batch-inference's Component 4 (per-element dynamic iteration),
@@ -574,7 +590,7 @@ renderGen env lut genArities genRaw groupNameStr (expr0, doc)
 -- it, admitting list-valued *inference* (M1) would buy nothing, because every
 -- list-valued corpus program also has a generate function, and a whole-program
 -- refusal on it would keep the program out of batched mode entirely. It is
--- scoped by construction to a recursion that constructs a list, so
+-- scoped by construction to a recursion that constructs a structure, so
 -- @twiceApplication@ (the accepted cost of the hard rule) is unaffected.
 heterogeneousGenStub :: String -> [String]
 heterogeneousGenStub groupNameStr =
@@ -600,14 +616,22 @@ structureBranch env e = here e || any (structureBranch env) (getIRSubExprs e)
                              && (listValued env t || listValued env f)
         here _                = False
 
--- | Does this generate body construct a list?
-producesList :: Maybe IRExpr -> Bool
-producesList Nothing  = False
-producesList (Just e) = go e
+-- | Does this generate body construct a structure -- a list, an @Either@ arm
+-- or an ADT constructor? A recursion that does draws a sample whose shape is
+-- decided per element, which neither bucketing nor 'splitGenRecursion' can
+-- return as one batch ('heterogeneousGenStub').
+producesStructure :: SEnv -> Maybe IRExpr -> Bool
+producesStructure _   Nothing  = False
+producesStructure env (Just e) = go e
   where go x = case x of
-          IRConstruct TgCons _ -> True
-          IRConst (VList _)    -> True
-          _                    -> any go (getIRSubExprs x)
+          IRConstruct TgCons _  -> True
+          IRConstruct TgLeft _  -> True
+          IRConstruct TgRight _ -> True
+          IRConst (VList _)     -> True
+          IRConst (VEither _)   -> True
+          IRConst (VADT _ _)    -> True
+          IRVar n | n `elem` sCtors env -> True
+          _                     -> any go (getIRSubExprs x)
 
 -- | Is there a cycle reachable from @root@ in the call graph restricted to
 -- generate methods (@_gen@-suffixed names only, mirroring 'checkCallGraph's
@@ -680,7 +704,9 @@ attachBatchCall _ e = e
 --
 -- A prob/integ body additionally gets its value-dependent structure selects
 -- split ('splitStructureSelects'), between steps 2 and 3; a generate body
--- ('prepGenBody') does not, since its conditions draw randomness.
+-- ('prepGenBody') does not, since its conditions draw randomness. It gets
+-- 'splitGenRecursion' there instead, which branches a recursive generator's
+-- batch once per guarding condition without re-running anything.
 prepBatchedBody :: SEnv -> IRExpr -> IRExpr
 prepBatchedBody = prepBody True
 
@@ -689,11 +715,13 @@ prepGenBody :: SEnv -> IRExpr -> IRExpr
 prepGenBody = prepBody False
 
 prepBody :: Bool -> SEnv -> IRExpr -> IRExpr
-prepBody split env (IRLambda n b) = IRLambda n (prepBody split env b)
-prepBody split env e =
-  hoistStructural env (distributeSelects env (splitIf (foldConst (demoteStructuralSelects env (stripRootGuard e)))))
-  where splitIf | split     = splitStructureSelects env
-                | otherwise = id
+prepBody split env = go []
+  where
+    go ps (IRLambda n b) = IRLambda n (go (n : ps) b)
+    go ps e =
+      hoistStructural env (distributeSelects env (splitIf ps (foldConst (demoteStructuralSelects env (stripRootGuard e)))))
+    splitIf ps | split     = splitStructureSelects env
+               | otherwise = splitGenRecursion env ps
 
 -- | Turn back into an 'IRIf' every 'IRSelect' whose condition is 'structural'.
 --
@@ -786,10 +814,11 @@ usesSelectDemotion = anyInferenceBody (\senv body -> demoteStructuralSelects sen
 -- batched backend names it?
 anyInferenceBody :: (SEnv -> IRExpr -> Bool) -> IREnv -> Bool
 anyInferenceBody p env0 =
-  or [ p senv body | g <- funcs, Just (body, _) <- [probFun g, integFun g] ]
+  or [ p (enterMethod (groupName g ++ suffix) senv) body
+     | g <- funcs, (suffix, Just (body, _)) <- [("_prob", probFun g), ("_integ", integFun g)] ]
   where
     IREnv funcs adts _ = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (retireUnrenderableVariants "batched Python" env0))
-    senv = adtEnv adts
+    senv = (adtEnv adts) { sMethodSCCs = methodSCCs [] funcs }
 
 -- | Does this prepared body contain a split point?
 usesSplit :: IRExpr -> Bool
@@ -822,6 +851,7 @@ splitStructureSelects env0 e0 = evalState (go env0 e0) (0 :: Int)
       _ -> irDescendM (go env) e
     sel env c t f orig
       | listValued env t || listValued env f
+          || undescendingRecCall env t || undescendingRecCall env f
       , null (enumBlame env c)
       , batchPure env c = do
           c' <- go env c
@@ -832,6 +862,59 @@ splitStructureSelects env0 e0 = evalState (go env0 e0) (0 :: Int)
           let n = "_sp" ++ show k
           return (IRLetIn n (IRApply (IRVar splitUniformName) c') (IRIf (IRVar n) t' f'))
       | otherwise = irDescendM (go env) orig
+
+-- | The runtime function a recursive generator's guarding branch is emitted
+-- through (@pythonLibBatched.gen_branch@, 'splitGenRecursion').
+genBranchName :: String
+genBranchName = "gen_branch"
+
+-- | Split a generate body's batch at every value-dependent branch guarding a
+-- call into its own recursive component ('sRecCallees') -- the generate twin
+-- of 'splitStructureSelects', for a recursion whose depth each element
+-- decides for itself (task batched-value-dependent-recursion). An eager
+-- @torch.where@ would run the recursive arm for every element, so the
+-- recursion would never stop; split, each element runs only the arm it takes,
+-- so it recurses exactly as deep as its scalar generate would.
+--
+-- A generate body may not be re-run the way 'split_retry' re-runs a
+-- prob/integ kernel: its condition is a fresh draw. So the condition is
+-- evaluated once and let-bound, and the two arms become closures that
+-- 'genBranchName' runs on the two halves of the batch:
+--
+-- > select c t f
+-- >   ==>  let _gmN = c in gen_branch(_gmN, _batchN, \_batchN v.. -> t, \_batchN v.. -> f, v..)
+--
+-- where @v..@ are the arms' free local variables (parameters and enclosing
+-- @let@s, each a @[_batchN]@ tensor or a batch-shared value). The runtime
+-- slices each to its half, and the arm's own @_batchN@ is the half's size, so
+-- the draws inside it are drawn for that half only. A condition that agrees
+-- across the batch (a Python bool, @dice@'s @x == 1.0@) runs one arm and slices
+-- nothing.
+splitGenRecursion :: SEnv -> [String] -> IRExpr -> IRExpr
+splitGenRecursion env0 params e0
+  | null (sRecCallees env0) = e0
+  | otherwise = evalState (go env0 params e0) (0 :: Int)
+  where
+    go env locals e = case e of
+      IRLambda n b  -> IRLambda n <$> go env (n : locals) b
+      IRLetIn n v b -> IRLetIn n <$> go env locals v <*> go (bindS env n v) (n : locals) b
+      IRSelect c t f -> branch env locals c t f e
+      IRIf c t f | not (structural env c) -> branch env locals c t f e
+      _ -> irDescendM (go env locals) e
+    branch env locals c t f orig
+      | undescendingRecCall env t || undescendingRecCall env f = do
+          c' <- go env locals c
+          t' <- go env locals t
+          f' <- go env locals f
+          k  <- get
+          put (k + 1)
+          let m    = "_gm" ++ show k
+              free = [ v | v <- irFreeVars (IRConstruct TgTuple [t', f'])
+                         , v `elem` locals, v /= batchNVar ]
+              arm a = foldr IRLambda a (batchNVar : free)
+          return (IRLetIn m c' (foldl IRApply (IRVar genBranchName)
+                    ([IRVar m, IRVar batchNVar, arm t', arm f'] ++ map IRVar free)))
+      | otherwise = irDescendM (go env locals) orig
 
 -- | Strip a root query-type guard @if (sample conforms) then body else error@,
 -- taking the conforming arm. Leaves a guard-less body untouched.
@@ -1065,6 +1148,16 @@ data SEnv = SEnv
     -- | The post-rename names generate bodies call other groups' generate
     -- methods by: references to them draw randomness ('batchPure').
   , sGenNames     :: [String]
+    -- | Every prob/integ method's recursive strongly connected component, by
+    -- raw method name: the members it calls that can call it back, by both
+    -- their raw and their post-rename (@group.forward@) names
+    -- ('methodSCCs'). 'enterMethod' reads the current method's entry into
+    -- 'sRecCallees'.
+  , sMethodSCCs   :: [(String, [String])]
+    -- | The current method's recursive callees ('enterMethod'): a
+    -- value-dependent branch guarding a call to one of them, which does not
+    -- descend into a list tail, is split ('splitStructureSelects').
+  , sRecCallees   :: [String]
   }
 
 -- | The environment for one program: nothing bound yet, and the three name sets
@@ -1096,6 +1189,8 @@ adtEnvWith enums decls = SEnv
                                                         , (cn, _) <- constructors d ]
   , sEnumDeps     = []
   , sGenNames     = []
+  , sMethodSCCs   = []
+  , sRecCallees   = []
   }
 
 -- | The collapsed enumerations whose @is\<Ctor\>@ tests this expression reads,
@@ -1328,6 +1423,11 @@ hasStructuralIf env e = case e of
              | otherwise        -> any (hasStructuralIf env) [c, t, f]
   IRLetIn n v b -> hasStructuralIf env v || hasStructuralIf (bindS env n v) b
   IRBuiltin BMap [IRLambda _ _, t] -> hasStructuralIf env t
+  -- An inner lambda renders as a Python @lambda@ (a single expression), so a
+  -- structural if in its body stays a conditional expression there: hoisting
+  -- it out would evaluate it eagerly, outside the scope of the lambda's own
+  -- parameters ('splitGenRecursion's arms are exactly such lambdas).
+  IRLambda _ _  -> False
   _             -> any (hasStructuralIf env) (getIRSubExprs e)
 
 -- ---------------------------------------------------------------------------
@@ -1337,13 +1437,11 @@ hasStructuralIf env e = case e of
 -- | Batched mode admits cross-function calls (the neural read-logits pattern:
 -- @main_prob@ → @readLogits_prob@ → a network invocation), but only to functions
 -- it actually emits from a prob/integ path -- the @forward@ (@_prob@) and
--- @integrate@ (@_integ@) methods -- and only when the call graph is acyclic.
--- Two constructs it must keep refusing (both were caught for free by the old
--- blanket @IRApply@ refusal): a prob/integ call reaching a @generate@/@normal@
--- method (a different compiled artifact entirely -- e.g. scalar
--- @factorial@'s prob path), and recursion (unbounded, data-dependent
--- depth is outside the tensor fragment and both-arm-eager evaluation would not
--- terminate; e.g. scalar @dice@).
+-- @integrate@ (@_integ@) methods. It refuses a prob/integ call reaching a
+-- @generate@/@normal@ method (a different compiled artifact entirely -- e.g.
+-- scalar @factorial@'s prob path), and a recursion that both-arm-eager
+-- evaluation would not terminate ('recOffenders': a recursive call under a
+-- value-dependent branch the batch is not split at).
 --
 -- This check is unchanged by generate's own admission (M4, 'renderGen'):
 -- generate is now sometimes emitted, but it is checked and rendered
@@ -1356,26 +1454,23 @@ hasStructuralIf env e = case e of
 checkCallGraph :: SEnv -> [IRFunGroup] -> Either Refusal ()
 checkCallGraph env funcs = do
     () <$ foldM (walk []) [] roots
-    mapM_ checkRecursion [(n, prepBatchedBody env b) | (n, b) <- methods, isEmittedMethod n]
+    mapM_ checkRecursion [ (n, env', prepBatchedBody env' b)
+                         | (n, b) <- methods, isEmittedMethod n, let env' = enterMethod n env ]
   where
     methods  = concatMap groupMethods funcs
     roots    = [n | (n, _) <- methods, isEmittedMethod n]
     callees  = graphCallees methods
-    -- Every method that can reach itself: the calls this body makes to any of
-    -- them are the ones that need a structural guard.
-    cyclic   = [n | (n, _) <- methods, isEmittedMethod n, n `elem` reachable n]
-    reachable = go [] . callees
-      where go seen []     = seen
-            go seen (n:ns)
-              | n `elem` seen = go seen ns
-              | otherwise     = go (n : seen) (callees n ++ ns)
-    checkRecursion (n, body) = case pickOffender (recOffenders cyclic env (Just []) body) of
+    -- Only a call into the caller's own strongly connected component is
+    -- recursion; an entry call from outside it (@main = rec@) is bounded by
+    -- the callee's own recursion, judged in the callee's body.
+    checkRecursion (n, env', body) = case pickOffender (recOffenders (sRecCallees env') env' Nothing body) of
       Nothing           -> Right ()
       Just (blame, why) -> Left $ Refusal blame $ "batched mode: " ++ n ++ " " ++ why
-                     ++ ". Structure-directed recursion is admitted (design "
-                     ++ "heterogeneous-batch-inference, Component 1: within a "
-                     ++ "shape bucket its depth is uniform, so it runs unchanged "
-                     ++ "over [B] leaves), but value-dependent recursion is not."
+                     ++ ". Recursion is admitted when every value-dependent branch "
+                     ++ "guarding it is split (the batch re-run per half, so each "
+                     ++ "element recurses exactly as deep as on the scalar backend), "
+                     ++ "or when it descends into a list tail (design "
+                     ++ "heterogeneous-batch-inference, Component 1)."
     -- DFS with a grey path (cycle detection) and a black memo (already proven
     -- clean, so a shared sub-DAG is not re-walked).
     walk grey black name
@@ -1464,47 +1559,60 @@ renameBound fresh = go
       IRLambda n b  -> IRLambda (fresh n) (go (n : bound) b)
       _             -> irDescend (go bound) e
 
--- | Why a recursive call site is /not/ admissible, if it is not. Recursion is
--- in the fragment exactly when it is structure-directed, which needs two things
--- at every call to a cycle member:
+-- | Why a recursive call site is /not/ admissible, if it is not. A call to a
+-- member of the caller's own strongly connected component (@scc@,
+-- 'methodSCCs') terminates in batched mode exactly when it does on the scalar
+-- backend, provided each element reaches it along the control path it takes
+-- there. Two kinds of branch preserve that:
 --
---   1. it is reached only through a structural (shape-directed) @if@ — so the
---      call is skipped, at Python level, for the bucket that bottoms out.
---      Under eager select semantics a call sitting under a @torch.where@ is
---      /always/ evaluated, so a value-guarded recursion would not terminate;
---   2. it descends: some argument is the tail of a list, so the shrinking
---      structure is what bounds the depth. Together these are the termination
---      argument — the same one the sample's own finite length gives the scalar
---      backend.
+--   * a structural (shape-directed) @if@, uniform within a bucket, and a
+--     split-bound one ('splitStructureSelects'), uniform within each half of
+--     the batch it re-runs: either is a real Python @if@, so the call runs
+--     only for the elements that take its arm;
+--   * any branch at all, when the call descends into the tail of a list
+--     argument: the bucket's uniform length bounds the depth even when both
+--     arms are evaluated eagerly (design heterogeneous-batch-inference,
+--     Component 1).
 --
--- @unguarded@ tracks (1) down the traversal: 'Nothing' under a structural
--- @if@, otherwise the collapsed enums ('enumBlame') read by the enclosing
--- non-structural @if@ conditions -- uncollapsing them could guard the call, so
--- they are its offence's blame. The descent offence is never collapse's doing.
--- @env@ tracks which names hold structural values ('structural').
+-- What is left is a call under a value-dependent branch the split pass did
+-- not reach -- an eager @torch.where@ arm, which would run the call for every
+-- element whether or not it takes that arm, and so not terminate.
+--
+-- @guarded@ tracks the enclosing value-dependent branches: 'Nothing' outside
+-- any, otherwise the collapsed enums ('enumBlame') their conditions read --
+-- uncollapsing them could make the branch structural, so they are the
+-- offence's blame. @env@ tracks which names hold structural values
+-- ('structural').
 recOffenders :: [String] -> SEnv -> Maybe [String] -> IRExpr -> [([String], String)]
-recOffenders cyc env unguarded e = case e of
-  IRLetIn n v b -> recOffenders cyc env unguarded v
-                ++ recOffenders cyc (bindS env n v) unguarded b
+recOffenders scc env guarded e = case e of
+  IRLetIn n v b -> recOffenders scc env guarded v
+                ++ recOffenders scc (bindS env n v) guarded b
   IRIf c t f
-    | structural env c ->
-       recOffenders cyc env unguarded c
-    ++ recOffenders cyc env Nothing t
-    ++ recOffenders cyc env Nothing f
-    | otherwise ->
-       let arms = (++ enumBlame env c) <$> unguarded
-       in recOffenders cyc env unguarded c
-       ++ recOffenders cyc env arms t
-       ++ recOffenders cyc env arms f
-  _ | (IRVar n, args) <- collectApplyChain e, n `elem` cyc ->
-       [ (nub blame, "calls " ++ n ++ " recursively from a position that is not guarded by a "
-         ++ "structural (shape-directed) test, so both-arm-eager select semantics "
-         ++ "would not terminate") | Just blame <- [unguarded] ]
-    ++ [ ([], "calls " ++ n ++ " recursively without descending into the tail of a list "
-         ++ "argument, so the recursion is not bounded by the sample's structure")
-       | not (any hasTailDescent args) ]
-    ++ concatMap (recOffenders cyc env unguarded) args
-  _ -> concatMap (recOffenders cyc env unguarded) (getIRSubExprs e)
+    | structural env c -> concatMap (recOffenders scc env guarded) [c, t, f]
+    | otherwise        -> valueBranch c t f
+  IRSelect c t f       -> valueBranch c t f
+  _ | (IRVar n, args) <- collectApplyChain e, n `elem` scc ->
+       [ (nub blame, "calls " ++ n ++ " recursively under a value-dependent branch "
+         ++ "the batch is not split at, so both-arm-eager select semantics would not "
+         ++ "terminate")
+       | Just blame <- [guarded], not (any hasTailDescent args) ]
+    ++ concatMap (recOffenders scc env guarded) args
+  _ -> concatMap (recOffenders scc env guarded) (getIRSubExprs e)
+  where
+    valueBranch c t f =
+      let arms = Just (fromMaybe [] guarded ++ enumBlame env c)
+      in recOffenders scc env guarded c
+      ++ recOffenders scc env arms t
+      ++ recOffenders scc env arms f
+
+-- | Does this expression call a member of the current method's recursive
+-- component ('sRecCallees') without descending into a list tail -- a call
+-- whose termination needs every value-dependent branch above it split?
+undescendingRecCall :: SEnv -> IRExpr -> Bool
+undescendingRecCall env e = case collectApplyChain e of
+  (IRVar n, args) | n `elem` sRecCallees env ->
+    not (any hasTailDescent args) || any (undescendingRecCall env) args
+  _ -> any (undescendingRecCall env) (getIRSubExprs e)
 
 -- | Does this argument expression take the tail of a list anywhere?
 hasTailDescent :: IRExpr -> Bool
@@ -1518,6 +1626,32 @@ groupMethods (IRFunGroup n gen prob integ enc normal _ _ _ _) =
   ++ [(n ++ "_integ",  b) | Just (b, _) <- [integ]]
   ++ [(n ++ "_writeLogits", b) | Just (b, _) <- [enc]]
   ++ [(n ++ "_normal", b) | Just (b, _) <- [normal]]
+
+-- | Every prob/integ method's recursive strongly connected component: the
+-- methods it reaches that reach it back (itself included when it is directly
+-- or mutually recursive), by raw name and, through @lut@, by the name an
+-- emitted body calls it by. A method on no cycle has an empty component.
+methodSCCs :: [(String, String)] -> [IRFunGroup] -> [(String, [String])]
+methodSCCs lut funcs = [ (m, sccIn lut methods m) | (m, _) <- methods, isEmittedMethod m ]
+  where methods = concatMap groupMethods funcs
+
+-- | The recursive strongly connected component of @m@ in the call graph of
+-- @methods@ ('graphCallees'), by raw name and by its @lut@ rename.
+sccIn :: [(String, String)] -> [(String, IRExpr)] -> String -> [String]
+sccIn lut methods m = scc ++ [r | Just r <- map (`lookup` lut) scc]
+  where
+    scc       = [n | n <- reachable m, m `elem` reachable n]
+    callees   = graphCallees methods
+    reachable = go [] . callees
+      where go seen []     = seen
+            go seen (n:ns)
+              | n `elem` seen = go seen ns
+              | otherwise     = go (n : seen) (callees n ++ ns)
+
+-- | The environment for preparing one method's body: its recursive callees
+-- ('sRecCallees') read off 'sMethodSCCs' by its raw name.
+enterMethod :: String -> SEnv -> SEnv
+enterMethod raw env = env { sRecCallees = fromMaybe [] (lookup raw (sMethodSCCs env)) }
 
 -- | The only call targets a prob/integ path may reach ('checkCallGraph').
 -- Generate has its own, separate admission rule ('renderGen'/'hasGenCycle').

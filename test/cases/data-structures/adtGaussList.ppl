@@ -1,0 +1,7 @@
+-- gaussList with the list spelled as a recursive ADT: the recursion descends
+-- through the self-typed field `tl` rather than a list tail, guarded by the
+-- constructor test, which is part of the bucket signature (task
+-- batched-recursion-descent-through-adt-fields). Its rows agree with
+-- gaussList's.
+data L = Nil | Cons2 hd::Float, tl::L
+main = if Uniform > 0.5 then Nil else Cons2 Normal main

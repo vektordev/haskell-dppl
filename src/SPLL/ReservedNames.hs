@@ -406,7 +406,7 @@ pythonRuntimeValueNames =
   , "dense_positions", "dense_query", "density_normal", "density_uniform"
   , "denskey", "dist", "e", "eq", "erf", "erfc", "exp", "exp2", "expm1"
   , "fabs", "factorial", "floor", "fma", "fmod", "frexp", "fromLeft"
-  , "fromRight", "fsum", "functools", "gamma", "gather_dense", "gauss"
+  , "fromRight", "fsum", "functools", "gamma", "gather_dense", "gauss", "gen_branch"
   , "gcd", "hypot", "indexOf", "inf", "isAny", "isPossible", "is_ctor"
   , "is_member", "isclose", "isfinite", "isinf", "isnan", "isqrt"
   , "itertools", "lcm", "ldexp", "lgamma", "listConcat", "listProd", "log", "log10"
