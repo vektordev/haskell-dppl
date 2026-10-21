@@ -190,6 +190,9 @@ budgetZeroKnownDivergentRows =
   -- rather than the density (task letfree-cdf-density-atom-reports-zero-mass).
   [ ("observeContinuousEqualsLetfree",  VEither (Right (VInt 1)))
   , ("observeContinuousEqualsLetfree",  VEither (Right VAny))
+  -- its if-flip, the same two rows for the same reasons
+  , ("observeNegatedContinuousEqualsLetfree",  VEither (Right (VInt 1)))
+  , ("observeNegatedContinuousEqualsLetfree",  VEither (Right VAny))
   , ("observeContinuousEqualsLetBound", VEither (Right (VInt 0)))
   , ("observeContinuousEqualsLetBound", VEither (Right VAny)) ]
 

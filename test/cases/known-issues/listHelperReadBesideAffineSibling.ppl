@@ -1,0 +1,13 @@
+g y = y
+f x = [g x, x + 1.0]
+main = f Normal
+-- A parameter read through an identity helper in one list cell and through
+-- an affine step in the next: p([0.3, 1.3]) answers impossible. The same
+-- body under `draw x = Normal in ..`, the tuple `(g x, x + 1.0)`, the list
+-- `[x, x + 1.0]` and `[g x, x]` all answer phi(0.3) = 0.3814 at dim 1.
+-- Found by the rewrite-sequence net (seed 20261016 over
+-- conditionals/witnessThroughDetIfNamed, injf-identity then helper-extract
+-- of `1.0 * x`) once the null-set-negation corpus additions moved what the
+-- seed draws. Verified on dev at the fix of
+-- null-set-conventions-not-preserved-under-negation, interpreter. Docs task
+-- list-parameter-helper-read-beside-affine-sibling-impossible.

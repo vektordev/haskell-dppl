@@ -1,0 +1,6 @@
+-- The other side of setWitnessNegatedComparisonBoundary's closure: a point
+-- removed from the inside of an interval stays removed, so p(Right 0.0) is
+-- impossible, while the interval's own closed bound -1.0 answers the density.
+-- (An interior point is an event of its own: `x == 0.0` meeting its
+-- complement is empty, set-witness/setWitnessContinuousEqualsTwice.)
+main = draw v = Normal in if (v > -1.0) && not (v == 0.0) then right v else left ()
