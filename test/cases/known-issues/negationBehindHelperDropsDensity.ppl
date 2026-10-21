@@ -1,0 +1,12 @@
+g b = not b
+main = if g (Normal == 0.5) then 2 else 1
+-- `if not (Normal == 0.5) then 2 else 1` with the negation behind a helper.
+-- The IfThenElse rule derives the False weight as the complement of the True
+-- weight; the True weight of the negated equality is the mass 1, so the
+-- complement is the mass 0 and the equality's density convention is lost:
+-- p(1) answers impossible. The bare `not` is fixed by swapping the arms (task
+-- null-set-conventions-not-preserved-under-negation); a negation behind a
+-- call, a binding (`(\z -> not z) (Normal == 0.5)`) or a projection (`fst
+-- (not (Normal == 0.5), 1)`) is not. The idealized row is the un-negated
+-- spelling's. Verified on dev at the fix of that task, interpreter. Docs task
+-- if-complement-drops-hidden-negation-density.
