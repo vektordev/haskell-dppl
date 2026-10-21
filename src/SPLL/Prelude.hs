@@ -109,7 +109,7 @@ import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo
 import SPLL.Typing.PType (PType(..))
 import SPLL.ObservationMask
 import SPLL.MaskVariants
-import SPLL.AutoNeural (validateWriteLogitsGaussian, topLevelWriteLogitsPlan)
+import SPLL.AutoNeural (validateWriteLogitsGaussian, topLevelWriteLogitsPlan, fitPlanToSupport)
 import SPLL.CompileWarnings
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
@@ -1112,7 +1112,9 @@ programWarnings conf p = case rtypedProgram p of
 
 -- | The compile-time warnings that depend on what @compiled@ (the compile of
 -- @p@) emitted: one per function whose emitted writeLogits encodes correlated
--- slots independently ('correlatedWriteLogitsClasses'). A function with no
+-- slots independently ('correlatedWriteLogitsClasses'), and one per function
+-- whose emitted writeLogits lays a discrete leaf out over a registered domain
+-- its output is not known to lie in ('fitPlanToSupport'). A function with no
 -- writeLogits gets no warning, however its slots are correlated.
 --
 -- The latent walk needs the chain-named program, so it is only run when some
@@ -1132,9 +1134,18 @@ compiledWarnings _ p (IREnv groups _ _)
            , n `elem` candidates
            , isTree (observationTree decls decl)
            , Just plan <- [topLevelWriteLogitsPlan decls (writeLogitsDecls named)
-                             (rType (getTypeInfo (stripLambdas body)))]
+                             (rType (getTypeInfo (stripLambdas body)))
+                             (getValuesFromExpr (stripLambdas body))]
            , let classes = correlatedWriteLogitsClasses decls fenv plan decl
            , not (null classes) ]
+           ++
+           [ WriteLogitsSupportUnverified n unverified
+           | (n, body) <- fenv
+           , n `elem` candidates
+           , Just plan <- [topLevelWriteLogitsPlan decls (writeLogitsDecls named)
+                             (rType (getTypeInfo (stripLambdas body))) Nothing]
+           , let unverified = snd (fitPlanToSupport (getValuesFromExpr (stripLambdas body)) plan)
+           , not (null unverified) ]
   where
     candidates = [ groupName g | g <- groups, isJust (writeLogitsFun g) ]
     isTree ObsCon{} = True

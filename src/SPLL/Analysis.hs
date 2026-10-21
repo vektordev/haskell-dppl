@@ -6,6 +6,7 @@ module SPLL.Analysis (
   enumerableApplication,
   headIsConditional,
   enumerableDomain,
+  getValuesFromExpr,
   materializationDomain,
   withinMaterializationBudget,
   structuralTag,

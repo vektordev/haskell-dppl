@@ -16,6 +16,7 @@ module SPLL.AutoNeural(
 , validateWriteLogitsGaussian
 , makeTopLevelWriteLogitsFun
 , topLevelWriteLogitsPlan
+, fitPlanToSupport
 , neuralReadLogitsSuffix
 , deadSlotFill
 , stripDeadSlotFills
@@ -917,12 +918,13 @@ availableNormalFns (IREnv groups _ _) =
 makeTopLevelWriteLogitsFun :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)]
                       -> String       -- ^ host function name (e.g. "main", "isRed")
                       -> RType        -- ^ the binding's (return) RType
+                      -> Maybe MultiValue -- ^ the binding's output support (its @DiscreteValues@ tag)
                       -> [String]     -- ^ outer parameter names of the host function
                       -> Bool         -- ^ whether the host's prob function was generated
                       -> [IRFunGroup] -- ^ groups carrying the host's normal functions (base + tuple components)
                       -> Maybe IRFunDecl
-makeTopLevelWriteLogitsFun adtDecls conf registry fnName rty paramNames probAvailable normalGroups
-  = case topLevelWriteLogitsPlan adtDecls registry rty of
+makeTopLevelWriteLogitsFun adtDecls conf registry fnName rty support paramNames probAvailable normalGroups
+  = case topLevelWriteLogitsPlan adtDecls registry rty support of
       Nothing -> Nothing
       Just plan
         | normalsOk plan && probOk plan ->
@@ -941,14 +943,77 @@ makeTopLevelWriteLogitsFun adtDecls conf registry fnName rty paramNames probAvai
 -- when the type is in neither (Int, Symbol, a recursive ADT). Whether the
 -- writeLogits is then actually built also depends on which prob/normal
 -- functions the compile generated ('makeTopLevelWriteLogitsFun').
-topLevelWriteLogitsPlan :: [ADTDecl] -> [(RType, MultiValue)] -> RType -> Maybe PartitionPlan
-topLevelWriteLogitsPlan adtDecls registry rty = case tag of
-  Just _  -> Just (makePartitionPlan adtDecls rty tag)   -- explicit registry entry
+--
+-- The registry is keyed by type, but a function's output need not lie in its
+-- type's registered domain: @readD a + readD b@ over digits @0..6@ ranges over
+-- @0..12@. So each discrete leaf is then fitted to the function's own output
+-- support, its 'SPLL.Analysis' @DiscreteValues@ tag @support@
+-- ('fitPlanToSupport'; task writelogits-int-output-truncated-to-registry-domain).
+topLevelWriteLogitsPlan :: [ADTDecl] -> [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe PartitionPlan
+topLevelWriteLogitsPlan adtDecls registry rty support = case tag of
+  Just _  -> Just (fitted (makePartitionPlan adtDecls rty tag))   -- explicit registry entry
   Nothing -> case autoDeriveMultiValue adtDecls rty of
-               Right _ -> Just (makePartitionPlan adtDecls rty tag)
+               Right _ -> Just (fitted (makePartitionPlan adtDecls rty tag))
                Left _  -> Nothing
   where
     tag = resolvePartitionAnnotation registry rty Nothing
+    fitted = fst . fitPlanToSupport support
+
+-- | Fit a writeLogits plan's discrete leaves to the host function's own output
+-- support (its @DiscreteValues@ tag, the matching sub-tag at each plan
+-- position). A leaf whose support lies inside the registered domain keeps the
+-- registered layout, so a function that returns a network read writes exactly
+-- the layout that network's reader expects. A leaf whose support reaches outside
+-- it is laid out over the support instead: the registered layout would drop the
+-- mass of every value it does not list, and the vector would no longer sum to
+-- one. Per function, so one program can read digits over @0..6@ and write their
+-- sum over @0..12@.
+--
+-- The second component lists the discrete leaves (by type) whose support is not
+-- statically known and whose registered domain is not the type's whole domain:
+-- for those the registered layout is kept, but nothing shows the output lies in
+-- it ('SPLL.CompileWarnings.WriteLogitsSupportUnverified').
+fitPlanToSupport :: Maybe MultiValue -> PartitionPlan -> (PartitionPlan, [RType])
+fitPlanToSupport support plan = case plan of
+  Discretes ty (MultiDiscretes ds) -> case support of
+    Just mv | not (multiValueContainsContinuous mv), multiValueIsFinite mv ->
+      let vs = multiValueToValueList mv
+      in if all (`elem` ds) vs then (plan, []) else (Discretes ty (MultiDiscretes vs), [])
+    _ | closedDomainCovered ty ds -> (plan, [])
+      | otherwise                 -> (plan, [ty])
+  TuplePlan a b -> case support of
+    Just (MultiTuple sa sb) -> both TuplePlan (fitPlanToSupport (Just sa) a) (fitPlanToSupport (Just sb) b)
+    _                       -> both TuplePlan (fitPlanToSupport Nothing a) (fitPlanToSupport Nothing b)
+  EitherPlan a b -> case support of
+    Just (MultiEither sa sb) -> both EitherPlan (fitPlanToSupport (Just sa) a) (fitPlanToSupport (Just sb) b)
+    _                        -> both EitherPlan (fitPlanToSupport Nothing a) (fitPlanToSupport Nothing b)
+  ADTPlan name ctors ->
+    let ctorSupport cn = case support of
+          Just (MultiADT cs) -> Just (lookup cn cs)
+          _                  -> Nothing
+        fitCtor (cn, fps) = case ctorSupport cn of
+          -- The support omits this constructor: it is never produced, so its
+          -- fields have nothing to fit and nothing to verify.
+          Just Nothing -> ((cn, fps), [])
+          Just (Just fss) | length fss == length fps ->
+            let rs = zipWith (fitPlanToSupport . Just) fss fps in ((cn, map fst rs), concatMap snd rs)
+          _ -> let rs = map (fitPlanToSupport Nothing) fps in ((cn, map fst rs), concatMap snd rs)
+        rs' = map fitCtor ctors
+    in (ADTPlan name (map fst rs'), concatMap snd rs')
+  Continuous -> (plan, [])
+  Discretes _ _ -> (plan, [])
+  where
+    both k (p1, u1) (p2, u2) = (k p1 p2, u1 ++ u2)
+
+-- | Whether a registered discrete domain already lists every value of its type,
+-- so no output support can reach outside it: a 'TBool' (or a tuple of them)
+-- with every combination listed. 'TInt' and lists have no finite whole domain.
+closedDomainCovered :: RType -> [Value] -> Bool
+closedDomainCovered ty ds = maybe False (all (`elem` ds)) (closedDomain ty)
+  where
+    closedDomain TBool         = Just [VBool True, VBool False]
+    closedDomain (Tuple t1 t2) = (\xs ys -> [VTuple x y | x <- xs, y <- ys]) <$> closedDomain t1 <*> closedDomain t2
+    closedDomain _             = Nothing
 
 -- | Whether a writeLogits plan references the program's prob function: true for any discrete /
 -- Either / ADT slot, false for a pure-Continuous plan (which queries only the normal

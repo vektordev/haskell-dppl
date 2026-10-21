@@ -35,7 +35,7 @@ import SPLL.Typing.RType
 import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
 import PredefinedFunctions
-import SPLL.Analysis (enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
+import SPLL.Analysis (getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (partitionEithers)
@@ -510,6 +510,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
               makeTopLevelWriteLogitsFun progADTs conf (writeLogitsDecls p)
                 name
                 (rType (getTypeInfo (stripLambdas binding)))
+                (getValuesFromExpr (stripLambdas binding))
                 bindingParamNames
                 (isJust (probFun baseFunGroup))
                 (baseFunGroup : tupleNormalFuns)

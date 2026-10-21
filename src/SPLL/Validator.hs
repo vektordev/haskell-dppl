@@ -32,7 +32,10 @@ validateWriteLogitsDecls decls = mapM_ checkGroup grouped
     grouped = groupBy ((==) `on` fst) (sortOn fst decls)
     checkGroup g = case nub (map snd g) of
       (_:_:_) -> Left ("Compiler Error: conflicting PartitionPlan annotations for type "
-                        ++ show (fst (head g)) ++ ": " ++ show (map snd g))
+                        ++ show (fst (head g)) ++ ": " ++ show (map snd g)
+                        ++ ". One type has one registered layout. A function whose output "
+                        ++ "reaches outside it (a sum of two digits) needs no wider declaration: "
+                        ++ "its writeLogits is laid out over its own output values.")
       _ -> Right ()
 
 -- | A neural declaration forward-declares the read-logits network (input -> target): NN1,

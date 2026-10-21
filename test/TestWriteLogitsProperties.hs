@@ -856,6 +856,54 @@ writeLogitsTests = testGroup "WriteLogits"
   , deadArmTests
   , continuousUnderSumTests
   , readPassthroughTests
+  , outputSupportTests
+  ]
+
+------------------------------------------------------------------------
+-- A discrete leaf is laid out over the function's own output support when that
+-- reaches outside the domain registered for its type (task
+-- writelogits-int-output-truncated-to-registry-domain). The registry is keyed by
+-- type, so `readD a ++ readD b` over digits 0..6 used to be written over 0..6 and
+-- the vector summed to 4/7 with uniform digits.
+
+digitSumSrc :: String
+digitSumSrc = unlines
+  [ "neural readD :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6]"
+  , "add a b = readD a ++ readD b"
+  , "main a b = add a b" ]
+
+outputSupportTests :: TestTree
+outputSupportTests = testGroup "outputSupport"
+  [ testCase "sumWiderThanRegistryDomain" $ do
+      -- Uniform digits: P(sum = k) = (7 - |k - 6|) / 49 over 0..12.
+      prog  <- parseOrFail digitSumSrc
+      let uniform = mockLiteral (replicate 7 (1 / 7))
+      slots <- writeLogitsSlots prog [uniform, uniform]
+      checkVector "digit sum" [ fromIntegral (7 - abs (k - 6)) / 49 | k <- [0 .. 12 :: Int] ] slots
+  , testCase "supportInsideRegistryKeepsReaderLayout" $ do
+      -- The other side of the boundary: an output inside 0..6 keeps the registered
+      -- layout, the one readD's own reader expects, zeros included.
+      prog  <- parseOrFail $ unlines
+        [ "neural readD :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6]"
+        , "main a = if readD a == 0 then 1 else 2" ]
+      slots <- writeLogitsSlots prog [mockLiteral [0.4, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]]
+      checkVector "remap inside 0..6" [0, 0.4, 0.6, 0, 0, 0, 0] slots
+  , testCase "boundedSupportDoesNotWarn" $ do
+      prog <- parseOrFail digitSumSrc
+      env  <- compileOrFail prog
+      assertEqual "support warnings" []
+        [ w | w@WriteLogitsSupportUnverified{} <- compiledWarnings defaultCompilerConfig prog env ]
+  , testCase "unboundedSupportWarns" $ do
+      -- A geometric count has no finite support to fit to: the registered layout is
+      -- kept, and the compile says the mass past 3 is dropped.
+      prog <- parseOrFail $ unlines
+        [ "neural writeLogits :: Int of [0, 1, 2, 3]"
+        , "geo n = if Uniform < 0.5 then n else geo (n + 1)"
+        , "main = geo 0" ]
+      env  <- compileOrFail prog
+      assertEqual "support warnings"
+        [ WriteLogitsSupportUnverified "geo" [TInt], WriteLogitsSupportUnverified "main" [TInt] ]
+        [ w | w@WriteLogitsSupportUnverified{} <- compiledWarnings defaultCompilerConfig prog env ]
   ]
 
 ------------------------------------------------------------------------

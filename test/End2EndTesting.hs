@@ -27,10 +27,10 @@ import TestCaseParser
 import TestTolerances (probTolerance, writeLogitsSlotTolerance, normalizationTolerance, samplingTolerance)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
-import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, PartitionPlan, getSize, InputSlot(..), inputSlots, inputWidth)
+import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, topLevelWriteLogitsPlan, PartitionPlan, getSize, InputSlot(..), inputSlots, inputWidth)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.ForwardChaining (annotateProg)
-import SPLL.Analysis (annotateEnumsProg)
+import SPLL.Analysis (annotateEnumsProg, getValuesFromExpr)
 import Data.Foldable (toList)
 import Test.QuickCheck hiding (sample, verbose)
 import Test.Tasty (TestTree, testGroup)
@@ -620,20 +620,26 @@ writeLogitsArgsFor p explicitArgs
 
 -- | The logit layout for an endpoint function's own output type, resolved exactly as the
 -- compiler resolves it when emitting that function's writeLogitsFun (registry entry, else
--- auto-derive). Used to map an `indexOf(value)` directive to a flat slot index.
+-- auto-derive, its discrete leaves fitted to the function's own output support,
+-- 'topLevelWriteLogitsPlan'). Used to map an `indexOf(value)` directive to a flat slot index.
 endpointPlan :: Program -> String -> PartitionPlan
-endpointPlan p target = makePartitionPlan (adts p) rt (resolvePartitionAnnotation (writeLogitsDecls p) rt Nothing)
-  where rt = endpointReturnRType p target
+endpointPlan p target = fromMaybe
+  (makePartitionPlan (adts p) rt (resolvePartitionAnnotation (writeLogitsDecls p) rt Nothing))
+  (topLevelWriteLogitsPlan (adts p) (writeLogitsDecls p) rt (getValuesFromExpr body))
+  where body = endpointBody p target
+        rt   = rType (getTypeInfo body)
 
-endpointReturnRType :: Program -> String -> RType
-endpointReturnRType p target =
+-- | The endpoint function's body under its parameter lambdas, typed and
+-- enumeration-annotated.
+endpointBody :: Program -> String -> Expr
+endpointBody p target =
   case lookup target (functions typed) of
-    Just binding -> rType (getTypeInfo (stripLambdasE binding))
-    Nothing      -> error ("endpointReturnRType: no function named " ++ target ++ " in program")
+    Just binding -> stripLambdasE binding
+    Nothing      -> error ("endpointBody: no function named " ++ target ++ " in program")
   where
     typed = case addTypeInfo (annotateProg (annotateEnumsProg p)) of
       Right (tp, _) -> tp
-      Left err      -> error ("endpointReturnRType: type inference failed: " ++ show err)
+      Left err      -> error ("endpointBody: type inference failed: " ++ show err)
     stripLambdasE (Expr _ (Lambda _ b)) = stripLambdasE b
     stripLambdasE e = e
 

@@ -25,7 +25,7 @@ module SPLL.CompileWarnings
   ) where
 
 import SPLL.Lang.Types
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs, prettyRType)
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.ForwardChaining (FCData, witnessPath, untag)
 import SPLL.ReservedNames (uniformName, normalName, isFrontendBinder)
@@ -59,6 +59,12 @@ data CompileWarning
     -- the slots they are recovered through, not the density with respect to
     -- the support's Hausdorff measure, and so depends on how the program is
     -- written (task warn-chart-dependent-cov-factor). One entry per group.
+  | WriteLogitsSupportUnverified String [RType]
+    -- ^ The function's writeLogits lays out these discrete leaves (by type)
+    -- over their registered domain, but the compiler cannot bound the values
+    -- the function produces there: mass outside the domain would be dropped
+    -- (task writelogits-int-output-truncated-to-registry-domain;
+    -- 'SPLL.AutoNeural.fitPlanToSupport'). One entry per leaf.
   deriving (Eq, Show)
 
 -- | A group of writeLogits slots that are correlated, and why.
@@ -90,6 +96,7 @@ warningFunction :: CompileWarning -> String
 warningFunction (MarginalSlotsOverBudget f _ _)  = f
 warningFunction (CorrelatedWriteLogitsSlots f _) = f
 warningFunction (ChartDependentDensity f _)      = f
+warningFunction (WriteLogitsSupportUnverified f _) = f
 
 -- | The one-paragraph text a warning prints as, prefixed @Warning: @.
 renderCompileWarning :: CompileWarning -> String
@@ -109,6 +116,11 @@ renderCompileWarning w = "Warning: " ++ case w of
     ++ "Hausdorff measure, so an equivalent program with those slots reordered or rescaled reports "
     ++ "a different number. A cumulative query, the probability of a set, carries no such factor. "
     ++ "Compiled anyway."
+  WriteLogitsSupportUnverified f tys ->
+    "the writeLogits of '" ++ f ++ "' lays out its " ++ intercalate ", " (map prettyRType tys)
+    ++ " output over the domain registered for that type, but the values '" ++ f
+    ++ "' produces there are not statically bounded: any probability of a value outside "
+    ++ "that domain is dropped, and the vector can sum to less than one. Compiled anyway."
   where
     chartClause (ChartClass slots k latents witnesses) =
       "slots " ++ intercalate ", " slots ++ " depend on only " ++ show k
