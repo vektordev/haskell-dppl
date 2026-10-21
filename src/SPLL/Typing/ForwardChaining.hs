@@ -6,6 +6,7 @@ module SPLL.Typing.ForwardChaining
   , annotateProg
   , progToFCData
   , InvChain(..)
+  , exposeConstructIR
   , toInvExpr
   , toInvExprMaybe
   , toInvExprMaybeWith
@@ -1242,8 +1243,51 @@ mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
   ]
 mergeExpr _ _ _ [x] = x
 mergeExpr varName lambdaCN candidateCNs (x:xs) =
-  let m = mergeExpr2 id x (mergeExpr varName lambdaCN candidateCNs xs)
+  let m = mergeExpr2 id (exposeConstruct x) (exposeConstruct (mergeExpr varName lambdaCN candidateCNs xs))
   in pointChain (invValue m) (invCoV m) (invGuard m) (invReadsAny m)
+
+-- | Make a chain's value syntactically the construction it is, so 'mergeExpr2' can
+-- merge it field by field. An occurrence read through a wrapper the chain
+-- inverts structurally -- @fst (e, 0.0)@ recovers @e@ as the first field of
+-- the let-bound @(e', ANY)@ -- ends in a projection of a let-bound tuple, or
+-- in a variable bound to one, not in the tuple itself. 'mergeExpr2' then
+-- treated it as an opaque whole value and kept it over the sibling path's
+-- @(ANY, b)@: the field the sibling constrained went unobserved (task
+-- fst-of-pair-wrapper-loses-structured-draw-constraint). The let prefix
+-- stays; only the body is resolved, and only to a construction (whose
+-- fields are the same let-bound variables, so nothing is recomputed).
+exposeConstruct :: InvChain -> InvChain
+exposeConstruct c = c{invValue = exposeConstructIR (invValue c)}
+
+-- | 'exposeConstruct' on a bare witness expression: the body under the let
+-- prefix, when it resolves to a construction -- through variables the prefix
+-- binds, projections ('AcFst', 'AcSnd', 'AcFromLeft', 'AcFromRight') of a
+-- matching construction, and an @if@ whose arms both resolve -- becomes that
+-- construction, recursively in its fields. A projection selects the field
+-- as it is when that field resolves no further. Anything else is left as it
+-- is. Also used by IRCompiler's set-witness merge ('mergeWitnessValue').
+exposeConstructIR :: IRExpr -> IRExpr
+exposeConstructIR = go Map.empty
+  where
+    go env (IRLetIn n v b) = IRLetIn n v (go (Map.insert n v env) b)
+    go env e = fromMaybe e (resolve env e)
+    -- Terminates without a depth bound: every step is structural except a
+    -- variable's dereference, which drops that name from the environment.
+    resolve env e = case e of
+      IRConstruct t fs -> Just (IRConstruct t (map (\f -> fromMaybe f (resolve env f)) fs))
+      IRIf c a b -> IRIf c <$> arm a <*> arm b
+      IRVar n -> Map.lookup n env >>= resolve (Map.delete n env)
+      IRDestruct AcFst t -> field TgTuple 0 t
+      IRDestruct AcSnd t -> field TgTuple 1 t
+      IRDestruct AcFromLeft t -> field TgLeft 0 t
+      IRDestruct AcFromRight t -> field TgRight 0 t
+      _ -> Nothing
+      where
+        arm x@(IRConst _) = Just x
+        arm x = resolve env x
+        field tag i t = case resolve env t of
+          Just (IRConstruct tag' fs) | tag' == tag -> Just (fs !! i)
+          _ -> Nothing
 
 -- The wildcard test merges by disjunction wherever the guards merge by
 -- conjunction: a merged value is built out of both paths, so either path

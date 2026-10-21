@@ -1,0 +1,1 @@
+main = draw e = (Normal, Uniform) in (fst (fst (fst (e, 0.0), 0.0)), snd e)

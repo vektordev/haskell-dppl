@@ -108,16 +108,24 @@ knownDivergences :: [Known]
 knownDivergences =
   -- A structured random value read through a second binder -- an alias, or
   -- a helper's parameter -- loses a field's constraint.
+  -- (A helper projecting one field, `h q = fst q` beside `snd e`, is fixed:
+  -- task fst-of-pair-wrapper-loses-structured-draw-constraint.) What is left:
+  -- an alias, a helper taking the whole tuple (`h e = (fst e, snd e)`), and a
+  -- projecting helper behind a second one (`g x = h x`).
   [ Known "drawDestructuredShared" DrawIntro "" structuredReread
   , Known "drawDestructuredShared" AliasIntro "" structuredReread
-  , Known "drawDestructuredShared" HelperExtract "" structuredReread
-  , Known "setWitnessTupleDisjointFields" HelperExtract "" structuredReread
-  , Known "letBoundEitherDestructure" HelperExtract "isLeft" structuredReread
-  -- `isR m = isRight m` on the draw-bound Maybe m: every point query answers
-  -- P(isRight) = 0.5, the payload's density dropped. Pre-existing (the same
-  -- 0.5 at the base compiler); exposed when observeMaybePayloadRightAny left
-  -- known-issues for the corpus.
-  , Known "observeMaybePayloadRightAny" HelperExtract "isRight" structuredReread
+  , Known "fstOfPairWrapperStructuredDraw" DrawIntro "" structuredReread
+  , Known "fstOfPairWrapperStructuredDraw" AliasIntro "" structuredReread
+  , Known "fstOfPairWrapperStructuredDraw" HelperExtract "extract (TCons" structuredReread
+  , Known "fstOfPairWrapperNestedStructuredDraw" DrawIntro "" structuredReread
+  , Known "fstOfPairWrapperNestedStructuredDraw" AliasIntro "" structuredReread
+  , Known "fstOfPairWrapperNestedStructuredDraw" HelperExtract "extract (TCons" structuredReread
+  , Known "sndOfPairWrapperStructuredDraw" DrawIntro "" structuredReread
+  , Known "sndOfPairWrapperStructuredDraw" AliasIntro "" structuredReread
+  , Known "sndOfPairWrapperStructuredDraw" HelperExtract "extract (TCons" structuredReread
+  , Known "structuredDrawHelperProjectsField" DrawIntro "" structuredReread
+  , Known "structuredDrawHelperProjectsField" AliasIntro "" structuredReread
+  , Known "structuredDrawHelperProjectsField" HelperExtract "" structuredReread
   -- The swapped wrapper re-read through a second binder: before per-mask
   -- variants the concrete query refused ("binding 'x' is unobserved"); f's
   -- variants now answer the split sub-queries, so p((0.7, 0.6)) is 1.0
@@ -134,13 +142,6 @@ knownDivergences =
   , Known "gaussianTrajectory4" DrawIntro "" aliasChainMarginalTail
   , Known "gaussianTrajectory4" AliasIntro "" aliasChainMarginalTail
   -- The M3 families (task transformation-differential-testing-m3-catalog-expansion).
-  -- A structured draw read twice, one read through `fst (e, 0.0)`: a field's
-  -- constraint or dimension is lost (`draw e = (Normal, Uniform) in (fst (fst
-  -- (e, 0.0)), snd e)` answers dim 1, not 2).
-  , Known "drawDestructuredShared" TupleLaw "pair-fst" fstPairWrapper
-  , Known "setWitnessTupleDisjointFields" TupleLaw "pair-fst" fstPairWrapper
-  , Known "letBoundEitherDestructure" TupleLaw "pair-fst" fstPairWrapper
-  , Known "observeMaybePayloadRightAny" TupleLaw "pair-fst" fstPairWrapper
   -- The same impossible (0.7, 0.6) answered 1.0 as the other families above.
   , Known "maskSwappedWrapper" TupleLaw "pair-fst" variantsSilenceReread
   -- `draw z = Normal in 0.0 * z` is a point mass since M6; under `+ 0.0`,
@@ -157,7 +158,6 @@ knownDivergences =
   , Known "observeDisjointTails" CompareFlip "compare-negate" nullSetNegation
   ]
   where
-    fstPairWrapper = "fst-of-pair-wrapper-loses-structured-draw-constraint"
     diracLawLost = "dirac-law-point-lost-under-plus-or-helper"
     nanComparison = "nan-operand-comparison-measured-through-cdf"
     nullSetNegation = "null-set-conventions-not-preserved-under-negation"
@@ -184,7 +184,17 @@ knownSequenceDivergences =
   -- density), as knownDivergences' nullSetNegation on the let-free spelling.
   -- Pinned by known-issues/negatedContinuousEqualityDropsDensity. Reached once
   -- d3dd60a's corpus addition moved what seeds 20261015/20261016 draw.
-  , KnownSeq "observeContinuousEqualsLetBound" [LinearInline, IfFlip] "null-set-conventions-not-preserved-under-negation" ]
+  , KnownSeq "observeContinuousEqualsLetBound" [LinearInline, IfFlip] "null-set-conventions-not-preserved-under-negation"
+  -- `v < 2` swapped to `2 > v` and bound by `draw z = ..` as the if
+  -- condition: p(Right 2) is 1.0 and p(Left ()) impossible. Pinned by
+  -- known-issues/drawBoundLiteralLeftComparisonCondition. Reached once the
+  -- fst-of-pair-wrapper corpus additions moved what seed 20261014 draws.
+  , KnownSeq "observeContinuousEqualsLetfree" [CompareFlip, DrawIntro] "draw-bound-literal-left-comparison-condition-wrong"
+  -- The parameter aliased, the noise drawn into a binding and `+ 0.0` added:
+  -- the (x, ANY) marginal loses the Uniform's dimension. Pinned by
+  -- known-issues/aliasedParameterPlusZeroMarginalDim; reached by seed
+  -- 20261017 after the same corpus additions.
+  , KnownSeq "rewriteProbeHelperScaledNoise" [DrawIntro, InjFIdentity, AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim" ]
 
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =
