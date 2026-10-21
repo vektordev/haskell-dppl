@@ -3403,7 +3403,13 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   (IRConst (VList (ListCont (VInt 2) EmptyList))))
       -- A leaf with no batched form still refuses the whole list.
       assertRefusal "constant with no batched representation (VList"
-        (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont VUnit EmptyList))))
+        (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont (VAnyExcept [IRConst (VInt 1)]) EmptyList))))
+  , testCase "a unit constant is accepted (task batched-refuses-unit-constant)" $ do
+      -- Unit is pure structure, spelled @None@ like the scalar backend's
+      -- 'pyVal'; nested in a list or Either it is a leaf with a spelling too.
+      assertAccepted (IROp OpEq (IRVar "x") (IRConst VUnit))
+      assertAccepted (IROp OpEq (IRVar "x") (IRConst (VEither (Left VUnit))))
+      assertAccepted (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont VUnit EmptyList))))
   , testCase "an ADT constant is accepted, a value-dependent select between two is not" $ do
       -- Task batched-backend-refuses-neural-adt-constants: its runtime
       -- counterpart is a class the backend emits itself, so the constant is
