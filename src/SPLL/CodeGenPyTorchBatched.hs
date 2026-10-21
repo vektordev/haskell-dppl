@@ -805,11 +805,13 @@ hoistArmSpines c t f
 --
 -- This predicate gates whether 'distributeSelects' pushes a select through
 -- the tuple's components at all -- not just accepted by 'batchedExpr's
--- unconditional catch-all further down. Missing the case does not fall back
--- to a degraded-but-safe emission the way most of this file's dual-shape gaps
--- do -- it leaves the select undistributed, and 'torchWhere' then hands
--- @torch.where@ a whole Python tuple object where it expects a tensor, which
--- is a runtime 'TypeError', not a compile-time refusal. Found via the design
+-- unconditional catch-all further down. Missing the case leaves the select
+-- undistributed, and 'torchWhere' then hands the runtime's @where_anchored@
+-- two whole Python @T@ objects; it selects those leaf by leaf (task
+-- batched-guarded-select-over-tuple-result), which is how an arm that only
+-- /evaluates/ to a tuple (a CSE name, a hoisted @_hsN@, a call, a tuple
+-- constant) is served. Splitting here keeps the leaves visible to the
+-- emitted code, so a literal tuple arm still goes this way. Found via the design
 -- ir-reengineering S1e landing: 'packResult' (Semiring.hs) switching to
 -- 'IRConstruct TgTuple' made this the shape of every probability-mode
 -- function's own result tuple, which is exactly what a whole-result

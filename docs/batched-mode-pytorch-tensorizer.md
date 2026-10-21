@@ -29,6 +29,14 @@ the split, its binders renamed fresh; pure parts are copied as before, so
 prob/integ bodies emit unchanged. Corpus
 `let-bindings/drawDestructuredAgreement*`.
 
+The split only sees an arm that is syntactically a tuple (`tupleValued`).
+An arm that merely evaluates to one -- a CSE name, a hoisted structural
+block `_hsN`, a call, a tuple constant -- reaches the runtime's
+`where_anchored` as a whole `T`, which selects two `T` arms leaf by leaf
+(task `batched-guarded-select-over-tuple-result`). Corpus
+`conditionals/guardSelectOverTupleResult`, and the topK pruning selects of
+`data-structures/adt{KeywordNames,FieldNamesAB,NullaryOneTwoField,MixedArityCtors}`.
+
 An ADT whose constructors are all nullary (`data Color = Red | Green |
 Blue`) is an *enumeration*: its tag is a value, not a structure, so the
 signature keys the whole ADT as one bucket and `_pack` stacks the tags into
