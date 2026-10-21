@@ -51,8 +51,58 @@ end
 # erfc form, unlike 1 + erf, does not cancel in the lower tail -- where the
 # compiler puts every upper tail too, as Phi(-z) (Semiring.upperTailComplement;
 # task cumulative-normal-upper-tail-cancellation).
-function cumulative_IRNormal(x)
+#
+# The libm call takes a Float64, so it serves only the types that convert to one
+# losslessly. Any other Real -- a ForwardDiff dual number, a BigFloat -- goes
+# through `_erfc_generic` instead, written in plain arithmetic so that an AD
+# number passes through it and carries its derivative (task
+# emitted-runtime-differentiability-gaps; casting it with Float64(x) threw).
+const _LibmReal = Union{Base.IEEEFloat, Integer, Rational}
+
+function cumulative_IRNormal(x::_LibmReal)
     return ccall((:erfc, Base.Math.libm), Float64, (Float64,), -Float64(x) / sqrt(2.0)) / 2.0
+end
+
+function cumulative_IRNormal(x::Real)
+    return _erfc_generic(-x / sqrt(2.0)) / 2.0
+end
+
+# erfc in generic arithmetic: the Taylor series of erf for |x| < 1.5 and a
+# continued fraction for erfc beyond, which keeps the lower tail free of the
+# 1 - erf cancellation. This is the algorithm CPython's math.erfc used before it
+# delegated to libm (25 series terms, 50 continued-fraction terms, 0 past 30).
+# Within 6e-14 relative of libm over [-8, 27]; the derivative an AD number picks
+# up is that of the approximation, within the same order of exp(-x^2) * 2/sqrt(pi).
+function _erfc_generic(x)
+    ax = abs(x)
+    if ax < 1.5
+        x2 = x * x
+        acc = zero(x2)
+        fk = 25.5
+        for _ in 1:25
+            acc = 2.0 + x2 * acc / fk
+            fk -= 1.0
+        end
+        return 1.0 - acc * x * exp(-x2) / sqrt(pi)
+    end
+    if ax >= 30.0
+        cf = zero(ax)
+    else
+        x2 = ax * ax
+        a = 0.0
+        da = 0.5
+        p = one(x2); p_last = zero(x2)
+        q = da + x2; q_last = one(x2)
+        for _ in 1:50
+            a += da
+            da += 2.0
+            b = da + x2
+            p, p_last = b * p - a * p_last, p
+            q, q_last = b * q - a * q_last, q
+        end
+        cf = p / q * ax * exp(-x2) / sqrt(pi)
+    end
+    return x > 0 ? cf : 2.0 - cf
 end
 
 # Native log-pdf/log-cdf (task log-space-probability-computation), computed
@@ -354,7 +404,9 @@ listConcat(lst1::EmptyInferenceList, lst2::InferenceList) = lst2
 listConcat(lst1::ConsInferenceList, lst2::InferenceList) =
     ConsInferenceList(head(lst1), listConcat(tail(lst1), lst2))
 
-function isclose(a::Float64, b::Float64)
+# Real, not Float64: a dual number (or any AD scalar) reaches it on the float
+# path (task emitted-runtime-differentiability-gaps).
+function isclose(a::Real, b::Real)
     return abs(a - b) <= 10e-10
 end
 
