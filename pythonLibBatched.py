@@ -237,6 +237,16 @@ def where_anchored(c, t, f):
   # torchWhere). torch.where on two python-float arms has no dtype anchor and
   # builds its result in torch's global default dtype -- float32 -- which is
   # how a folded tail constant lost half its digits.
+  #
+  # Two tuple arms select per leaf (task batched-guarded-select-over-tuple-
+  # result). distributeSelects splits a select whose arm is syntactically a
+  # tuple at compile time; an arm that only evaluates to one -- a variable
+  # (CSE, a hoisted structural block `_hsN`), a call, a tuple constant -- is
+  # invisible to it and reaches here as a whole T. Both arms are evaluated
+  # already, so selecting leaf by leaf is the same value.
+  if isinstance(t, T) and isinstance(f, T):
+    m = asmask(c)
+    return T(where_anchored(m, t.t1, f.t1), where_anchored(m, t.t2, f.t2))
   return torch.where(asmask(c), _anchor(t), _anchor(f))
 
 def table_select(x, keys, vals, default):

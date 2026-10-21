@@ -63,7 +63,7 @@ import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 import End2EndTesting (findTorchPython, noTorch)
 import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
-                         runPythonBatchWith, runJuliaBatchWith, Disagreement(..),
+                         runPythonBatchWith, runJuliaBatchWith, Disagreement(..), interpreterGenerateFails,
                          prepareBatchedCase, runBatchedPythonBatch)
 
 
@@ -1947,6 +1947,34 @@ test_nestedEqualityChainAnyArmConstant = testCase "nestedEqualityChainAnyArmCons
     nest d = "main = " ++ iterate (\e -> "(" ++ e ++ " == True)") "(Uniform < 0.5)" !! d
     sizeOf :: Int -> IO Int
     sizeOf d = case tryParseProgram "eqChain" (nest d) of
+      Left err -> assertFailure ("parse error: " ++ show err) >> return 0
+      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
+        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+        Right ir -> return (length (show ir))
+
+-- | Task slow-fuzz-seed-findings-2026-10-06 (SharedDrawInvariants seed
+-- 825059 timed out on it): @draw x = Normal in if x < 0.0 then <inner> else
+-- 2.0@, nested. The set-witness engine measures the x-free then-arm as a
+-- factor at a 'WChoice' point, and that choice folded the arm's whole compile
+-- into each of the four result fields; the condition's statically dead
+-- polarity also kept its worlds, compiling every arm twice. The -O0 IR grew
+-- ~9x per level (11 MB at depth 4), the -O2 compile ~4.5x. Pinned as the -O0
+-- IR growth from depth 2 to depth 6: ~3x now (linear), ~6500x before; the
+-- bound of 8x fails on the old shape.
+test_setWitnessNestedDrawIfLinear :: TestTree
+test_setWitnessNestedDrawIfLinear = testCase "setWitnessNestedDrawIfLinear" $ do
+  small <- sizeOf 2
+  large <- sizeOf 6
+  let ratio = fromIntegral large / fromIntegral small :: Double
+  assertBool ("-O0 IR grew " ++ show ratio ++ "x from depth 2 to depth 6 ("
+              ++ show small ++ " -> " ++ show large ++ ")")
+    (ratio < 8)
+  where
+    nest :: Int -> String
+    nest 0 = "1.0"
+    nest d = "draw x" ++ show d ++ " = Normal in if x" ++ show d ++ " < 0.0 then (" ++ nest (d - 1) ++ ") else 2.0"
+    sizeOf :: Int -> IO Int
+    sizeOf d = case tryParseProgram "nestedDrawIf" ("main = " ++ nest d) of
       Left err -> assertFailure ("parse error: " ++ show err) >> return 0
       Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
         Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
@@ -3941,6 +3969,29 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
       check runPythonBatchWith
       julia <- findJulia
       maybe (return ()) (check . runJuliaBatchWith) julia
+  , testCase "a backend raising at a generate query is no disagreement where the interpreter's generate also fails on some path" $ do
+      -- Task slow-fuzz-seed-findings-2026-10-06, BackendsAgree seed 194375:
+      -- @head@ of an empty list on a 5% arm slipped past the interpreter's
+      -- ten reference draws, and a backend's seed then took it (Julia raises,
+      -- Python returns None).
+      let caseOf src = do
+            prog <- parseOrFail src
+            env <- either (\e -> assertFailure (src ++ ": " ++ show e)) return (compile defaultCompilerConfig prog)
+            return (AgreementCase prog env [] [] [ (QGen k TInt [], Generates) | k <- [1 .. 4] ])
+      rare <- caseOf "main = head (if Uniform < 0.95 then [1] else tail [1])"
+      total <- caseOf "main = if Uniform < 0.5 then 1 else 2"
+      always <- caseOf "main = head (tail [1])"
+      rareFails <- interpreterGenerateFails rare []
+      assertBool "a 5% failing arm is found" rareFails
+      totalFails <- interpreterGenerateFails total []
+      assertBool "a total program does not fail" (not totalFails)
+      let check run = do
+            (ds, outcomes) <- run [always]
+            assertBool (concatMap renderDisagreement ds) (null ds)
+            assertEqual "every failure is excused" (replicate 4 "backend failed where the interpreter's generate also fails") outcomes
+      check runPythonBatchWith
+      julia <- findJulia
+      maybe (return ()) (check . runJuliaBatchWith) julia
   , testCase "the batched arm round-trips structure-of-arrays and bucketed batches, and a wrong answer disagrees" $ do
       -- Task backend-agreement-batched-arm. The prob points include ANY, so
       -- they go through the bucketing wrapper; the integrate points are one
@@ -5776,6 +5827,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_gaussianChainIRNotExponential
   , test_shortGaussianTrajectoryVariantsCompact
   , test_nestedEqualityChainAnyArmConstant
+  , test_setWitnessNestedDrawIfLinear
   , test_wideConstructorPruneGuardLinear
   , test_witnessFoldOpenBodyShared
   , test_recursiveListMissedCSE
