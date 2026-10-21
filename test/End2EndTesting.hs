@@ -1860,6 +1860,8 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
   , testProperty "a comprehension whose body is too deep becomes a loop, imports and evaluates" (once deepComprehensionCase)
   , testProperty "a shallow comprehension stays a comprehension" (once shallowComprehensionCase)
   , testProperty "24 nested noisy ifs over an enumerated draw import and match the idealized value" (once enumIfChainCase)
+  , testProperty "a too-deep comprehension nested in another's body becomes nested loops, imports and evaluates" (once nestedComprehensionCase)
+  , testProperty "a chain of 11 two-field answers under an enumerated latent imports and matches the idealized values" (once chainedAnswersCase)
   ]
   where
     x = IRVar "x"
@@ -1989,6 +1991,66 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
     shallowComprehensionCase =
       let src = comprehensionSource 5
       in counterexample src (" for x in " `isInfixOf` src && null (spillLines src))
+    -- Task chained-answers-exceed-python-paren-depth: an enumerated draw's
+    -- comprehension whose body holds another enumerated draw's comprehension.
+    -- The inner one sits under the outer one's binder, out of the spill's
+    -- reach, so the outer one has to move whole -- which needs a pure
+    -- comprehension to count as pure. Over y in [1, 2]:
+    -- (1 + 3k) + (2 + 3k), plus the parameter.
+    nestedComprehensionCase = ioProperty $ do
+      let depth = 80
+          outer = IROp OpPlus
+                    (IRBuiltin (BReduce ROpAdd 0)
+                      [IRBuiltin BMap [ IRLambda "y" (IROp OpPlus (IRVar "y") (comprehensionSum depth))
+                                      , IRBuiltin (BTensor [EFixed 2]) [lit 1.0, lit 2.0] ]])
+                    x
+          -- 'comprehensionSum' adds @x@ after its sum, outside its own
+          -- binder: the parameter, once per outer element. Its inner loop
+          -- also binds @x@, so a loop that kept the name would clobber it.
+          src = sourceOf (envWith outer)
+          loops = length (filter (isPrefixOf "for _v" . dropWhile (== ' ')) (lines src))
+      (code, out, err) <- runPythonChecks "nested_comprehension_spill.py" src
+        [ "for q in [10.0, 0.5]:"
+        , "    got = main.forward(q)"
+        , "    want = " ++ show (3 + 6 * fromIntegral depth :: Double) ++ " + 3 * q"
+        , "    if got != want:"
+        , "        raise ValueError('forward(%r) = %r, expected %r' % (q, got, want))"
+        ]
+      return $ counterexample ("the emitted module failed:\n" ++ out ++ err ++ "\n" ++ src)
+                 (code == ExitSuccess)
+          .&&. counterexample ("expected both comprehensions as loops, got " ++ show loops ++ ":\n" ++ src)
+                 (loops == 2)
+    -- The ticket's repro (formerly the known-issues pin
+    -- chainedAnswersPythonParenDepth): an enumerated coin, twelve readings
+    -- gated on it, and 11 overlapping two-field answers. Ten loaded before the
+    -- fix, eleven did not. Values idealized by brute force over the 2^12
+    -- readings. Kept out of the corpus for its compile cost (a few seconds at
+    -- 11, growing ~1.6x per question in the compiler, not in codegen).
+    chainedAnswersCase = ioProperty $ do
+      let n = 11 :: Int
+          reading i = "  draw h" ++ show i ++ " = (if s then Uniform < 0.9 else Uniform < 0.2) in"
+          answer i | even i    = "(if h" ++ show i ++ " then True else h" ++ show (i + 1) ++ ")"
+                   | otherwise = "(if h" ++ show i ++ " then h" ++ show (i + 1) ++ " else False)"
+          progSrc = unlines (["main =", "  draw s = Uniform < 0.5 in"] ++ map reading [0 .. n]
+                             ++ ["  (s, [" ++ intercalate ", " (map answer [0 .. n - 1]) ++ "])"])
+          rows = [ ("T(True, L([True] * 11))", 0.17433922005000008 :: Double)
+                 , ("T(False, L([True] * 11))", 5.120000000000003e-08)
+                 , ("T('ANY', L([True, False] * 5 + [True]))", 8.75121185e-05) ]
+      case either (Left . show) Right (tryParseProgram "" progSrc) >>= compile defaultCompilerConfig of
+        Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
+        Right env -> do
+          (code, out, err) <- runPythonChecks "chained_answers.py" (sourceOf env) $
+            [ "def L(xs):"
+            , "    r = EmptyInferenceList()"
+            , "    for v in reversed(xs): r = ConsInferenceList(v, r)"
+            , "    return r"
+            ] ++ concat
+            [ [ "got = main.forward(" ++ q ++ ")[0]"
+              , "if abs(got - " ++ show want ++ ") > " ++ show probTolerance ++ ":"
+              , "    raise ValueError(" ++ show ("forward(" ++ q ++ ") = %r, expected " ++ show want) ++ " % got)" ]
+            | (q, want) <- rows ]
+          return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
+                     (code == ExitSuccess)
 
 -- | The scalar Python module for an 'IREnv', with torch's @Module@ replaced by
 -- a stub so that a plain @python3@ can import it.
