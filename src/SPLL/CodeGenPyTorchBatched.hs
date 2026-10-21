@@ -1684,6 +1684,10 @@ batchedVal (VTuple a b) = do
 -- narrower marginal-exclusion contexts) is a known, deliberate gap: it is not
 -- just an ANY-flavoured structural marker (the exclusion set matters to
 -- enumeration semantics elsewhere), so it stays refused, same as before.
+-- Unit is pure structure, spelled @None@ as in the scalar backend's @pyVal@
+-- and in '_pack''s unit-payload arm; @signature@ buckets it as @'U'@ and
+-- @None == None@ holds at a query point.
+batchedVal VUnit = Just "None"
 batchedVal VAny = Just "'ANY'"
 -- An ADT constant (task batched-backend-refuses-neural-adt-constants): unlike
 -- a list or an Either, its runtime counterpart is not a library name but a

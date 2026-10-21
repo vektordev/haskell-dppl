@@ -671,6 +671,8 @@ def signature(v):
   # Empty) and would otherwise silently collide with the empty-list bucket.
   if isAny(v):
     return 'ANY'
+  if v is None:
+    return 'U'
   if isinstance(v, InferenceList):
     return ('L',) + tuple(signature(x) for x in v)
   if isinstance(v, T):

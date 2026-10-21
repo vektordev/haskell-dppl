@@ -1659,8 +1659,6 @@ batchedRefusalTable =
   -- the program; the row then leaves the table with its ticket.
   -- task batched-prob-path-calls-helper-normal-params
   , ("normalThroughFunctionNested", "a prob/integ path calls shifted_normal, which is not a forward/integrate method")
-  -- task batched-refuses-unit-constant
-  , ("observeKeyword",            "main's forward uses a construct outside the tensor fragment: constant with no batched representation (VUnit)")
   -- task batched-recursion-entry-call-needs-descent
   , ("nestedIfEmptyListIntCdf",   "main_prob calls rec_prob recursively without descending into the tail of a list argument")
   ]
@@ -2773,6 +2771,9 @@ containsStructureV (VList _)    = True
 containsStructureV (VEither _)  = True
 containsStructureV (VTuple a b) = containsStructureV a || containsStructureV b
 containsStructureV VAny         = True
+-- Unit carries no per-element data: structure, spelled @None@ by 'pyVal' and
+-- keyed @'U'@ by @pythonLibBatched.signature@ (task batched-refuses-unit-constant).
+containsStructureV VUnit        = True
 -- An ADT value has no structure-of-arrays literal ('batchLiteral'), but the
 -- bucketing wrapper takes it as-is: @signature@ keys an enumeration as one
 -- bucket and any other ADT by constructor tag and field shape. Routing it
@@ -2820,6 +2821,7 @@ noEnumCtors = const Nothing
 -- concrete case at that position). Used only to predict the bucket count.
 shapeSig :: EnumCtors -> IRValue -> String
 shapeSig _ VAny                 = "ANY"
+shapeSig _ VUnit                = "U"
 shapeSig _ (VList AnyList)      = "ANY"
 shapeSig e (VList l)            = "L(" ++ intercalate "," (map (shapeSig e) (toList l)) ++ ")"
 shapeSig e (VTuple a b)         = "T(" ++ shapeSig e a ++ "," ++ shapeSig e b ++ ")"

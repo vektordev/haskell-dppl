@@ -26,6 +26,7 @@
 -- the guard cases around that read are pinned in the last three rows. A payload outside the
 -- domain (either side) has no position and no mass; a top-level ANY is the
 -- whole mass, diagonal plus off-diagonal.
+batched
 p(Right 0,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3]))=(0.05, 0.0)
 p(Right 1,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3]))=(0.18, 0.0)
 p(Right 2,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3]))=(0.06, 0.0)
