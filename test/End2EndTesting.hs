@@ -12,7 +12,7 @@ import Data.List (groupBy)
 import Data.Function (on)
 import Control.Monad.Random
 import Data.Maybe
-import Data.List (intercalate, nub, isInfixOf, isPrefixOf, transpose, zip4, sort)
+import Data.List (intercalate, nub, isInfixOf, isPrefixOf, stripPrefix, transpose, zip4, sort)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -848,15 +848,34 @@ juliaMockDefs nets =
     def (NetMock nm _ n) = nm ++ "(s) = vcat(_nest_flat(s), fill(1.0, " ++ show n ++ "))[1:" ++ show n ++ "]\n"
 
 -- | The batched-Python mock: a column of @[B, ...]@ inputs in, @[B, n]@ logits
--- out. Only a tensor input has a batched mock (its trailing axes flattened,
--- row-major); any other shaped input raises, so a @batched@ declaration on
--- such a program fails loudly rather than passing on the identity.
+-- out. A tensor input has its trailing axes flattened, row-major. A scalar or
+-- a tuple of scalars is the batched twin of 'pyMockDef': its leaves flattened
+-- left to right into @[B, k]@, padded with ones and cut to @n@ columns. Any
+-- other input raises, so a @batched@ declaration on such a program fails
+-- loudly rather than passing on the identity.
 batchedMockExpr :: NetMock -> String
 batchedMockExpr (NetMock _ TSymbol _) = "(lambda s: s)"
 batchedMockExpr (NetMock _ (TTensor sh _) n) =
   "(lambda s: s.flatten(" ++ show (negate (shapeRank sh)) ++ ")[..., :" ++ show n ++ "])"
-batchedMockExpr (NetMock nm ty _) =
-  "(lambda s: (_ for _ in ()).throw(NotImplementedError(" ++ show ("no batched mock for network " ++ nm ++ " with input " ++ prettyRType ty) ++ ")))"
+batchedMockExpr (NetMock nm ty n) = case flatCols ty "s" of
+  Just flat ->
+    "(lambda s: (lambda x: torch.cat([x, torch.ones(x.shape[0], " ++ show n ++ ")], -1)[..., :"
+    ++ show n ++ "])(" ++ flat ++ "))"
+  Nothing ->
+    "(lambda s: (_ for _ in ()).throw(NotImplementedError(" ++ show ("no batched mock for network " ++ nm ++ " with input " ++ prettyRType ty) ++ ")))"
+  where
+    -- A column (@[B]@, or a broadcast Python scalar) of the input's leaves as
+    -- a float @[B, k]@ (@[1, k]@ for a scalar) block.
+    flatCols t v
+      | t `elem` [TFloat, TInt, TBool] =
+          Just ("torch.as_tensor(" ++ v ++ ", dtype=torch.float).reshape(-1, 1)")
+    flatCols (Tuple a b) v = do
+      fa <- flatCols a (v ++ ".t1")
+      fb <- flatCols b (v ++ ".t2")
+      -- broadcast the batch axis only: the two blocks' widths differ
+      Just ("(lambda a, b: torch.cat([a.expand(max(a.shape[0], b.shape[0]), -1), "
+            ++ "b.expand(max(a.shape[0], b.shape[0]), -1)], -1))(" ++ fa ++ ", " ++ fb ++ ")")
+    flatCols _ _ = Nothing
 
 -- | How many julia processes the corpus is split across ('testJuliaAll').
 juliaShards :: Int
@@ -1316,7 +1335,7 @@ batchedPythonFixtures :: [CorpusEntry]
                              , [String]
                              , [(String, String, [BatchGroup], [NetMock])]
                              , [(String, String, [BatchGroup], [NetMock])]
-                             , ([(String, String, [BatchGroup], [NetMock])], [String])
+                             , ([(String, String, [BatchGroup], [NetMock])], [String], [String])
                              , [(String, String, [BatchGroup], [NetMock])]
                              , Maybe FilePath
                              , [(String, [String])] )
@@ -1362,7 +1381,7 @@ batchedPythonFixtures corpusEntries' = do
       -- expectations are already retargeted to the *interpreter's* value at
       -- that threshold, so running them through the dense path checks dense
       -- mode inherits topK rather than merely agreeing with itself.
-      denseTopK = [ e | e@(n, src, _, _) <- fst topkEligible
+      denseTopK = [ e | let (pairs, _, _) = topkEligible, e@(n, src, _, _) <- pairs
                       , takeWhile (/= '@') n `elem` denseNames
                       , not (null (denseEntryPoints src)) ]
   mpy <- findTorchPython
@@ -1505,7 +1524,7 @@ batchedEligibilityCensus p tcs = do
       env <- compile defaultCompilerConfig{batched = True} prog
       srcLines <- generateFunctionsBatched True env
       groups <- maybe (Left "query samples are not structure-of-arrays batchable") Right
-                      (batchGroups (not (null netNames)) qtcs)
+                      (batchGroups (collapsedEnumCtors (adts prog) (intercalate "\n" srcLines)) (not (null netNames)) qtcs)
       let census = batchedUncertifiedConstructs (batchedProgramCensus (Right env :: Either () IREnv))
       return ((intercalate "\n" srcLines, groups, netNames), census)
 
@@ -2616,6 +2635,8 @@ data BatchGroup = BatchGroup
   , bgSamples    :: [IRValue]
   , bgExpProb    :: [Double]
   , bgExpDim     :: [Int]
+  -- | How the samples go to the kernel ('batchSamples').
+  , bgBatch      :: SampleBatch
   } deriving (Show)
 
 -- | Split a program's prob/cumulative test cases into batchable groups, or
@@ -2624,8 +2645,8 @@ data BatchGroup = BatchGroup
 -- a query kind form one group and each per-point symbol argument is batched
 -- into a @[B, n]@ tensor; for a non-neural program, points are grouped by
 -- identical parameter list and the shared parameters broadcast as scalars.
-batchGroups :: Bool -> [TestCase] -> Maybe [BatchGroup]
-batchGroups isNeural tcs = mapM build grouped
+batchGroups :: EnumCtors -> Bool -> [TestCase] -> Maybe [BatchGroup]
+batchGroups enumOf isNeural tcs = mapM build grouped
   where
     -- Marginal (ANY) query points are included as of design
     -- heterogeneous-batch-inference Component 3/M4: ANY-ness is a structural
@@ -2643,14 +2664,15 @@ batchGroups isNeural tcs = mapM build grouped
     build g@((c, _, _, _, _):_) =
       let samples = [s | (_, _, s, _, _) <- g]
           paramRows = [ps | (_, ps, _, _, _) <- g]
-      in do _ <- batchSamples samples
+      in do sb <- batchSamples enumOf samples
             paramExprs <- if isNeural
               then batchSymParamCols paramRows
               else Just (map pyVal (head paramRows))
             Just BatchGroup { bgIsCumul = c, bgParamExprs = paramExprs
                             , bgParamRows = paramRows, bgSamples = samples
                             , bgExpProb = [ep | (_, _, _, ep, _) <- g]
-                            , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
+                            , bgExpDim  = [ed | (_, _, _, _, ed) <- g]
+                            , bgBatch   = sb }
     build [] = Nothing
     -- 'Impossible' rows (no stated dim) fall through to the final wildcard and
     -- are simply not batched, the same treatment 'containsAnyExceptV' above
@@ -2673,10 +2695,17 @@ batchSymParamCols rows
   | any ((/= length (head rows)) . length) rows = Nothing
   | otherwise = mapM batchSymColumn (transpose rows)
 
+--
+-- The column is float64, the interpreter's precision. In float32 a path mass
+-- that equals a topK cutoff in exact arithmetic rounds onto the cutoff
+-- (@0.2 + 0.8 * 0.5@ is @0.6f@, and @0.6f > 0.6@ is false once the cutoff is
+-- cast to float32), while in Double it lands just above it; the batched topK
+-- differential then pruned a path the interpreter kept (task
+-- batched-topk-per-element-failures-on-redeclared-programs, class E).
 batchSymColumn :: [IRValue] -> Maybe String
 batchSymColumn vs = do
   logitRows <- mapM logitsOf vs
-  return ("torch.tensor([" ++ intercalate ", " (map renderRow logitRows) ++ "])")
+  return ("torch.tensor([" ++ intercalate ", " (map renderRow logitRows) ++ "], dtype=torch.float64)")
   where
     logitsOf (VTuple (VInt 2) (VList ls)) = Just (toList ls)
     -- a shaped tensor input ('shapeNeuralParams'): one row of the [B, numel]
@@ -2714,16 +2743,17 @@ data SampleBatch
   -- number of distinct signatures the wrapper must find -- the M1 acceptance
   -- criterion ("bucket count = distinct shapes"), asserted in the driver.
   | Bucketed String Int
+  deriving (Show)
 
 -- | The Python form of a group's samples, or 'Nothing' if they are not
 -- batchable at all (a @VAnyExcept@ sample, or a leaf that is neither numeric,
 -- bool, nor a structure of those).
-batchSamples :: [IRValue] -> Maybe SampleBatch
-batchSamples vs
+batchSamples :: EnumCtors -> [IRValue] -> Maybe SampleBatch
+batchSamples enumOf vs
   | any containsAnyExceptV vs  = Nothing
   | any containsStructureV vs =
       Just (Bucketed ("[" ++ intercalate ", " (map pyVal vs) ++ "]")
-                     (length (nub (map shapeSig vs))))
+                     (length (nub (map (shapeSig enumOf) vs))))
   | otherwise            = SoA <$> batchLiteral vs
 
 -- | Does this sample carry structure a batch can differ in — a list length, an
@@ -2757,26 +2787,47 @@ containsAnyExceptV (VEither e)    = either containsAnyExceptV containsAnyExceptV
 containsAnyExceptV (VTuple a b)   = containsAnyExceptV a || containsAnyExceptV b
 containsAnyExceptV _              = False
 
+-- | Which constructors the emitted batched program collapsed into an
+-- enumeration, mapped to their ADT's name: the ADTs whose classes carry an
+-- @_enum@ attribute ('SPLL.CodeGenPyTorchBatched.generateADTClassesBatched').
+-- Read off the emitted source rather than recomputed from the declarations,
+-- because the backend un-collapses an all-nullary ADT whose test a refusal
+-- blames, so "all-nullary" alone does not decide it.
+type EnumCtors = String -> Maybe String
+
+-- | 'EnumCtors' of a program's declarations and its emitted batched source.
+collapsedEnumCtors :: [ADTDecl] -> String -> EnumCtors
+collapsedEnumCtors decls src cn = lookup cn table
+  where
+    collapsed = [ n | l <- lines src, Just q <- [stripPrefix "_enum = " (dropWhile (== ' ') l)]
+                    , [(n, "")] <- [reads q :: [(String, String)]] ]
+    table = [ (c, dataName d) | d <- decls, dataName d `elem` collapsed, (c, _) <- constructors d ]
+
+-- | No collapsed enumeration: for a caller that ignores the bucket count.
+noEnumCtors :: EnumCtors
+noEnumCtors = const Nothing
+
 -- | The Haskell twin of @pythonLibBatched.signature@: the sample's structural
 -- skeleton with every scalar leaf erased, ANY-ness (M4) checked first exactly
 -- as @signature@ checks @isAny@ first (a bare 'VAny' or an @AnyList@ nested
 -- under a concrete constructor is its own bucket, not conflated with the
 -- concrete case at that position). Used only to predict the bucket count.
-shapeSig :: IRValue -> String
-shapeSig VAny                 = "ANY"
-shapeSig (VList AnyList)      = "ANY"
-shapeSig (VList l)            = "L(" ++ intercalate "," (map shapeSig (toList l)) ++ ")"
-shapeSig (VTuple a b)         = "T(" ++ shapeSig a ++ "," ++ shapeSig b ++ ")"
-shapeSig (VEither (Left v))   = "L?(" ++ shapeSig v ++ ")"
-shapeSig (VEither (Right v))  = "R?(" ++ shapeSig v ++ ")"
--- An ADT leaf is erased like a scalar. That is exact for an enumeration (an
--- all-nullary ADT, which @signature@ keys as one bucket -- task
--- batched-bucketing-splits-on-nullary-constructors) and under-counts for any
--- other ADT, whose tag and fields @signature@ does key on; telling the two
--- apart needs the program's declarations, which this does not see. No corpus
--- sample carries a non-enumeration ADT today; one that does will fail the
--- bucket-count assertion loudly rather than pass wrongly.
-shapeSig _                    = "x"
+shapeSig :: EnumCtors -> IRValue -> String
+shapeSig _ VAny                 = "ANY"
+shapeSig _ (VList AnyList)      = "ANY"
+shapeSig e (VList l)            = "L(" ++ intercalate "," (map (shapeSig e) (toList l)) ++ ")"
+shapeSig e (VTuple a b)         = "T(" ++ shapeSig e a ++ "," ++ shapeSig e b ++ ")"
+shapeSig e (VEither (Left v))   = "L?(" ++ shapeSig e v ++ ")"
+shapeSig e (VEither (Right v))  = "R?(" ++ shapeSig e v ++ ")"
+-- A collapsed enumeration is one bucket for the whole ADT (task
+-- batched-bucketing-splits-on-nullary-constructors). Any other ADT value is
+-- keyed by its constructor tag and its fields' shapes, as @signature@ keys it:
+-- two constructors are two structures (task
+-- batched-topk-per-element-failures-on-redeclared-programs).
+shapeSig e (VADT cn fs)         = case e cn of
+  Just adt -> "E(" ++ adt ++ ")"
+  Nothing  -> "A(" ++ cn ++ concatMap ((',' :) . shapeSig e) fs ++ ")"
+shapeSig _ _                    = "x"
 
 -- | Build a structure-of-arrays batch tensor literal from a homogeneous list of
 -- sample values: numeric leaves stack into a float tensor, bools into a bool
@@ -2916,7 +2967,7 @@ batchedDriver accArg eligible = unlines $
       [ "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
-    groupCall name (BatchGroup isCumul paramExprs _ samples expP expD) =
+    groupCall name (BatchGroup isCumul paramExprs _ _ expP expD sb) =
       let method = if isCumul then "integrate" else "forward"
           -- A topK-compiled prob function takes an accumulated-probability
           -- parameter right after the sample, then the runtime cutoff (see
@@ -2928,8 +2979,8 @@ batchedDriver accArg eligible = unlines $
             | isCumul    = ", _ns['TOP_K_CUTOFF']"
             | otherwise  = ", 1.0, _ns['TOP_K_CUTOFF']"
           paramStr = concatMap (", " ++) paramExprs
-          (bucketCheck, call) = case batchSamples samples of
-            Just (SoA xs) ->
+          (bucketCheck, call) = case sb of
+            SoA xs ->
               ([], "_main." ++ method ++ "(" ++ xs ++ accStr ++ paramStr ++ ")")
             -- Heterogeneous samples go through the host bucketing wrapper, and
             -- the bucket count is asserted: the M1 acceptance criterion is that
@@ -2939,11 +2990,10 @@ batchedDriver accArg eligible = unlines $
             -- The literal is evaluated inside the program's own namespace: a
             -- sample may name the program's ADT constructors (@Cube()@), which
             -- exist only there.
-            Just (Bucketed xs n) ->
+            Bucketed xs n ->
               ( [ "    _samples = eval(" ++ show xs ++ ", _ns)"
                 , "    _bucket_count(" ++ show name ++ ", _samples, " ++ show n ++ ")" ]
               , "bucketed(_main." ++ method ++ ", _samples" ++ accStr ++ paramStr ++ ")" )
-            Nothing -> ([], "None")
       in bucketCheck
          ++ [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
               ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
@@ -3178,10 +3228,14 @@ topKDiffThresholds = [0.3, 0.6]
 -- Returns the driver entries plus the number of programs on which the threshold
 -- actually bites (some point's pruned value differs from its topK-off value) —
 -- the property asserts that is non-zero, so the differential can never quietly
--- degenerate into "topK changed nothing anywhere".
-topKEntries :: [(String, Program, [TestCase])] -> ([(String, String, [BatchGroup], [NetMock])], [String])
-topKEntries entries = (map fst built, nub [n | ((n, _, _, _), True) <- built])
+-- degenerate into "topK changed nothing anywhere". The third component names
+-- the declared programs with a prob query that produced no pair at all, so a
+-- silent drop is visible on stderr ('runBatchedTopK').
+topKEntries :: [(String, Program, [TestCase])] -> ([(String, String, [BatchGroup], [NetMock])], [String], [String])
+topKEntries entries = (map fst built, nub [n | ((n, _, _, _), True) <- built], dropped)
   where
+    dropped = [ n | (n, _, tcs) <- entries, any isProbTestCase tcs
+                  , not (any (\((m, _, _, _), _) -> takeWhile (/= '@') m == n) built) ]
     -- env0 (the plain default compile, used only to retarget expectations) does
     -- not depend on the threshold, so it is bound once per program -- outside
     -- the per-threshold loop -- rather than once per (program, threshold) pair.
@@ -3203,7 +3257,7 @@ topKEntries entries = (map fst built, nub [n | ((n, _, _, _), True) <- built])
       , let envK    = withTopKCutoff thresh envK0
       , let envKint = withTopKCutoff thresh envKint0
       , Right srcLines <- [generateFunctionsBatched True envK]
-      , Just groups  <- [batchGroups (not (null netNames)) qtcs]
+      , Just groups  <- [batchGroups (collapsedEnumCtors (adts p) (intercalate "\n" srcLines)) (not (null netNames)) qtcs]
       , Just groups' <- [mapM (retarget p envKint) groups]
       , Just groups0 <- [mapM (retarget p env0) groups]
       , let src = intercalate "\n" srcLines
@@ -3225,8 +3279,8 @@ topKBites withK withoutK =
   or [ abs (a - b) > probTolerance
      | (gk, g0) <- zip withK withoutK, (a, b) <- zip (bgExpProb gk) (bgExpProb g0) ]
 
-runBatchedTopK :: FilePath -> ([(String, String, [BatchGroup], [NetMock])], [String]) -> Property
-runBatchedTopK py (topkEligible, biting)
+runBatchedTopK :: FilePath -> ([(String, String, [BatchGroup], [NetMock])], [String], [String]) -> Property
+runBatchedTopK py (topkEligible, biting, dropped)
   | null topkEligible = counterexample "BatchedPython topK: no eligible programs" False
   | null biting = counterexample
       ("BatchedPython topK: thresholds " ++ show topKDiffThresholds
@@ -3234,7 +3288,10 @@ runBatchedTopK py (topkEligible, biting)
   | otherwise = ioProperty $ do
       hPutStrLn stderr ("BatchedPython topK: " ++ show (length topkEligible)
                         ++ " program/threshold pairs over " ++ show topKDiffThresholds
-                        ++ " (pruning bites on " ++ intercalate ", " biting ++ "), via " ++ py)
+                        ++ " (pruning bites on " ++ intercalate ", " biting ++ "), via " ++ py
+                        ++ (if null dropped then "" else
+                              "\n  dropped (no topK compile, batchable groups or interpreter answer at a cutoff): "
+                              ++ intercalate ", " dropped))
       cwd <- getCurrentDirectory
       let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n"
                    ++ batchedDriver True topkEligible
