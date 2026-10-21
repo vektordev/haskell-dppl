@@ -1703,11 +1703,6 @@ knownDisagreements =
       (ByAnswer (\c _ a -> raisedWith "module did not load" a && raisedWith "SyntaxError" a
                          && not (null [ () | IRConformsTo _ (IRConst _) <- caseUniverse c ])))
       (batchedRepro (IRIf (IRConformsTo TFloat (IRConst (VInt 0))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
-  -- A reduction stacks its elements, which fails when a constant (a 0-d
-  -- tensor) sits next to a batched ([B]) one.
-  , KnownFamily "batched-reduction-over-constant-and-batched-elements-fails" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "stack expects each tensor to be equal size" a))
-      (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 2]) [IRUnaryOp OpLog (IRConst (VFloat 0.25)), IRVar "a0"]]) (VFloat 0.5))
   -- The batched categorical index reads its weights as a tensor, so a list
   -- of batched weights is indexed by a tuple.
   , KnownFamily "batched-categorical-index-over-batched-weights-fails" ["batched"]

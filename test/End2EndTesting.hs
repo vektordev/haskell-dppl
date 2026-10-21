@@ -1606,12 +1606,13 @@ batchedRefusalTable =
   -- Either. Since heterogeneous M2 the tag is *structure*: it is part of the
   -- bucket signature, so the constructors, destructors and predicates are all
   -- in the fragment (`either`, `either_const`, `eitherDeconstruction`,
-  -- `nestedDeconstruction`, `either_both_cont` are eligible programs now). What
-  -- is refused is the dichotomy's other half -- `either_isleft` chooses which
-  -- *arm* to build from a coin flip (`if Uniform < 0.4 then left .. else
-  -- right ..`), so the sample's structure is per element and there is no bucket
-  -- to run it in.
-  , ("either_isleft",             "arms have different structure")
+  -- `nestedDeconstruction`, `either_both_cont` are eligible programs now). The
+  -- dichotomy's other half -- a value-dependent select between two arms, as
+  -- isLeft's inverse in `either_isleft` -- left this table with task
+  -- batched-value-dependent-structure-select: the batch is split at the
+  -- select ('pythonLibBatched.split_retry'). What the split does not cover (a
+  -- per-element structure select inside a tensor map's body) has no corpus
+  -- trigger; its refusal is a synthetic-IR row in "TestInternals".
   -- `eitherNeural`'s read-logits network (Either Int Bool) used to be refused here too --
   -- not for the Either shape itself (M2 handles that), but because its Bool
   -- arm's enum-index lookup built an `indexOf(x, [True, False])` call that
@@ -1658,8 +1659,6 @@ batchedRefusalTable =
   -- the program; the row then leaves the table with its ticket.
   -- task batched-prob-path-calls-helper-normal-params
   , ("normalThroughFunctionNested", "a prob/integ path calls shifted_normal, which is not a forward/integrate method")
-  -- task batched-refuses-unit-constant
-  , ("observeKeyword",            "main's forward uses a construct outside the tensor fragment: constant with no batched representation (VUnit)")
   -- task batched-recursion-entry-call-needs-descent
   , ("nestedIfEmptyListIntCdf",   "main_prob calls rec_prob recursively without descending into the tail of a list argument")
   ]
@@ -2772,6 +2771,9 @@ containsStructureV (VList _)    = True
 containsStructureV (VEither _)  = True
 containsStructureV (VTuple a b) = containsStructureV a || containsStructureV b
 containsStructureV VAny         = True
+-- Unit carries no per-element data: structure, spelled @None@ by 'pyVal' and
+-- keyed @'U'@ by @pythonLibBatched.signature@ (task batched-refuses-unit-constant).
+containsStructureV VUnit        = True
 -- An ADT value has no structure-of-arrays literal ('batchLiteral'), but the
 -- bucketing wrapper takes it as-is: @signature@ keys an enumeration as one
 -- bucket and any other ADT by constructor tag and field shape. Routing it
@@ -2819,6 +2821,7 @@ noEnumCtors = const Nothing
 -- concrete case at that position). Used only to predict the bucket count.
 shapeSig :: EnumCtors -> IRValue -> String
 shapeSig _ VAny                 = "ANY"
+shapeSig _ VUnit                = "U"
 shapeSig _ (VList AnyList)      = "ANY"
 shapeSig e (VList l)            = "L(" ++ intercalate "," (map (shapeSig e) (toList l)) ++ ")"
 shapeSig e (VTuple a b)         = "T(" ++ shapeSig e a ++ "," ++ shapeSig e b ++ ")"

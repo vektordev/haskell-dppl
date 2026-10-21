@@ -106,11 +106,47 @@ It made 15 more corpus programs batched-eligible (`flip`, `adt`,
 also now routes ADT-valued query samples through the bucketing wrapper, which
 it previously refused as unbatchable.
 
+**Per-structure split.** Shape-signature bucketing fixes every structure
+the *input* carries. A value-dependent select between two structures picks
+one per element instead: isLeft's inverse `if sample then Left ANY else
+Right ANY` (corpus `either_isleft`, `isLeftOfRightDiscardsComparedDraw`),
+or a helper choosing `Right w` or `Left ()` by `w == 1`. `torch.where` has
+nothing to choose between two shapes, so the dichotomy guard refused these.
+The second bucketing strategy splits the batch at the select:
+`splitStructureSelects` (prob/integ bodies only, in `prepBatchedBody`)
+rewrites the select to `let _spN = split_uniform(c) in if _spN then t else
+f`, which `structural` treats as a shape-directed `if`, and the method body
+becomes a local `_split_kernel` run under `split_retry`. At run time
+`split_uniform` answers a Python bool when the condition agrees across the
+call. A mixed condition raises, and `split_retry` re-runs the kernel on the
+two halves of the batch (`_slice_batch` indexes every `[B]` leaf of every
+argument, and `_scatter` merges the results as `bucketed` does). Re-running
+the body's prefix is exact because a forward/integrate kernel is a pure
+function of its arguments. A generate body is never split (`prepGenBody`):
+re-running would redraw the condition. Every split leaves two smaller,
+non-empty halves, so the retry terminates. Three shapes are left to the
+guard: a condition that draws, a condition reading a collapsed enumeration's
+test (the enum fallback above makes it structural instead), and a select
+inside a tensor map's body, a comprehension element with no statement
+position for the binding. A select there whose condition reads only the
+map's element is not per-element at all: the element is a domain constant
+(`bindMap` puts it in `sBound`), so it is a Python conditional (corpus
+`either-maybe/enumeratedEitherSelectOnDomainConstant`). The impact census
+labels a program that splits (`CertifiedCensus.structureSplitLabel`), so its
+rows always run on the batched backend. Docs-repo task
+`batched-value-dependent-structure-select`.
+
+A per-mask variant that still carries a `VAnyExcept` placeholder is retired
+to a runtime refusal of that one mask (`retireUnrenderableVariants`,
+rendered by `retiredMethod` as a `throw` of the shared message), as on the
+scalar text backends, instead of refusing the whole program (corpus
+`tupleCtorTestOfSharedDraw`).
+
 A call-graph guard refuses value-dependent recursion (e.g. `dice`); other
-non-fragment constructs (marginal `VAny`, composite enumeration,
-mismatched-shape select arms) are refused with a diagnostic naming the
-construct rather than compiling to something silently wrong. Runtime lib:
-`pythonLibBatched.py`.
+non-fragment constructs (marginal `VAny`, composite enumeration, a
+structure select the split does not reach) are refused with a diagnostic
+naming the construct rather than compiling to something silently wrong.
+Runtime lib: `pythonLibBatched.py`.
 
 When a group's query domain is statically finite, **dense enumeration
 mode** evaluates the kernel once over the whole domain, giving a `[V]`

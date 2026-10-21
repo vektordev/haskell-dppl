@@ -29,7 +29,7 @@ import MockNN (flattenMockInput, mockInputFor, shapedMockLogits)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
-import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, structural)
+import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, prepBatchedBody, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic, Bottom))
@@ -3353,6 +3353,26 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       assertRefusal "arms have different structure"
         (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
                   (IRConstruct TgLeft [IRVar "x"]) (IRConstruct TgRight [IRVar "x"]))
+  -- Task batched-value-dependent-structure-select: the guard rows above see
+  -- the raw term; a prob/integ body is prepared first, and preparation splits
+  -- the batch at such a select ('splitStructureSelects'), binding its
+  -- condition through split_uniform so the select is a structural if. The
+  -- guard is the diagnostic for what the split leaves alone.
+  , testCase "a prepared prob body splits a value-dependent select between Either arms" $ do
+      let e = IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
+                       (IRConstruct TgLeft [IRVar "x"]) (IRConstruct TgRight [IRVar "x"])
+          prepped = prepBatchedBody (adtEnv []) e
+      assertBool ("no split_uniform in the prepared body: " ++ show prepped)
+        (any isSplitVar (universeIR prepped))
+      assertAccepted prepped
+  , testCase "a structure select decided by a tensor map's constant element is structural" $
+      -- The map's element is a domain constant ('bindMap'), so the choice is
+      -- the same for the whole batch: accepted unsplit, even raw.
+      assertAccepted (mapOverDomain (IROp OpGreaterThan (IRVar "d") (IRConst (VFloat 0.0))))
+  , testCase "a per-element structure select inside a tensor map's body stays refused" $
+      -- No statement position for the split's binding inside a comprehension.
+      assertRefusal "arms have different structure"
+        (prepBatchedBody (adtEnv []) (mapOverDomain (IROp OpGreaterThan (IRVar "x") (IRVar "d"))))
   , testCase "an offender nested deep in a let-spine is still found" $
       -- 'batchedGuard' walks the whole tree, not just the root.
       assertRefusal "list map (IRMap)"
@@ -3383,7 +3403,13 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   (IRConst (VList (ListCont (VInt 2) EmptyList))))
       -- A leaf with no batched form still refuses the whole list.
       assertRefusal "constant with no batched representation (VList"
-        (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont VUnit EmptyList))))
+        (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont (VAnyExcept [IRConst (VInt 1)]) EmptyList))))
+  , testCase "a unit constant is accepted (task batched-refuses-unit-constant)" $ do
+      -- Unit is pure structure, spelled @None@ like the scalar backend's
+      -- 'pyVal'; nested in a list or Either it is a leaf with a spelling too.
+      assertAccepted (IROp OpEq (IRVar "x") (IRConst VUnit))
+      assertAccepted (IROp OpEq (IRVar "x") (IRConst (VEither (Left VUnit))))
+      assertAccepted (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont VUnit EmptyList))))
   , testCase "an ADT constant is accepted, a value-dependent select between two is not" $ do
       -- Task batched-backend-refuses-neural-adt-constants: its runtime
       -- counterpart is a class the backend emits itself, so the constant is
@@ -3590,9 +3616,14 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- A value-dependent choice between list shapes whose condition reads no
       -- constructor test: uncollapsing cannot help, so the program is refused
       -- exactly as it is with nothing collapsed -- even beside a blamable one.
+      -- It sits in a tensor map's body, the one place the per-structure split
+      -- (task batched-value-dependent-structure-select) does not reach: at
+      -- statement level it would be split rather than refused.
       let body = IRConstruct TgTuple
                    [ IRIf (IRApply (IRVar "isRed") (IRVar "sample")) (IRConst (VList EmptyList)) oneElemList
-                   , IRIf (IRVar "sample") (IRConst (VList EmptyList)) oneElemList ]
+                   , IRBuiltin BMap
+                       [ IRLambda "d" (IRIf (IRVar "sample") (IRConst (VList EmptyList)) oneElemList)
+                       , IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat 1.0)] ] ]
       in case generateFunctionsBatched False (enumEnv body) of
            Right ls -> assertFailure ("batched mode accepted a structure-choosing select: " ++ unlines ls)
            Left msg -> assertEqual "refusal differs from the uncollapsed backend's"
@@ -3773,6 +3804,14 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     assertAccepted e = case batchedGuard (adtEnv []) "g" "forward" e of
       Right () -> return ()
       Left msg -> assertFailure ("batchedGuard refused a node inside the fragment: " ++ msg)
+    universeIR x = x : concatMap universeIR (getIRSubExprs x)
+    isSplitVar (IRVar "split_uniform") = True
+    isSplitVar _ = False
+    -- A tensor map over a constant domain whose body chooses between two
+    -- Either arms by the given condition.
+    mapOverDomain c = IRBuiltin BMap
+      [ IRLambda "d" (IRIf c (IRConstruct TgLeft [IRVar "d"]) (IRConstruct TgRight [IRVar "d"]))
+      , IRBuiltin (BTensor [EFixed 2]) [IRConst (VFloat 1.0), IRConst (VFloat 2.0)] ]
 
 -- ---------------------------------------------------------------------------
 -- Decomposability gate: shared enumerated latent (design decomposability-gate-shared-latent)

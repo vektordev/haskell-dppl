@@ -1,0 +1,5 @@
+-- Task batched-value-dependent-structure-select. Each isLeft's inverse picks
+-- `Left ANY` or `Right ANY` by its slot of the queried pair, so the batched
+-- backend splits the batch at both selects. A batch holding all four pairs
+-- is mixed at the first split and again, in each half, at the second.
+main = (isLeft (if Uniform < 0.4 then left 1.0 else right 1.0), isLeft (if Uniform < 0.3 then left 2.0 else right 2.0))

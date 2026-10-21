@@ -336,7 +336,9 @@ def is_member(x, vals):
 def _tensor_stack(xs):
   # [E, B] from a list of [B] tensors. Elements that are Python scalars (a
   # folded constant arm) are broadcast up against the tensor elements, so a
-  # partially-folded axis still stacks.
+  # partially-folded axis still stacks. So are 0-d tensors: an element that is
+  # batch-independent (a map over an enumeration domain whose body reads only
+  # the domain constant) is a 0-d tensor next to its siblings' [B] ones.
   ts = [x for x in xs if torch.is_tensor(x)]
   if not ts:
     return torch.stack([astensor(x) for x in xs])
@@ -344,7 +346,9 @@ def _tensor_stack(xs):
   dt = ref.dtype
   for t in ts[1:]:
     dt = torch.promote_types(dt, t.dtype)
-  return torch.stack([x.to(dt) if torch.is_tensor(x) else torch.full(ref.shape, float(x), dtype=dt, device=ref.device)
+  shape = torch.broadcast_shapes(*[t.shape for t in ts])
+  return torch.stack([x.to(dt).expand(shape) if torch.is_tensor(x)
+                      else torch.full(shape, float(x), dtype=dt, device=ref.device)
                       for x in xs])
 
 def tensor_sum(xs):
@@ -667,6 +671,8 @@ def signature(v):
   # Empty) and would otherwise silently collide with the empty-list bucket.
   if isAny(v):
     return 'ANY'
+  if v is None:
+    return 'U'
   if isinstance(v, InferenceList):
     return ('L',) + tuple(signature(x) for x in v)
   if isinstance(v, T):
@@ -783,6 +789,70 @@ def bucketed(fn, samples, *args):
     parts.append(fn(packed, *[_slice_arg(a, idx, total) for a in args]))
     idxs.append(idx)
   return _scatter(parts, idxs, total)
+
+# --- per-structure split at a select (task batched-value-dependent-structure-
+# select) --------------------------------------------------------------------
+# The second bucketing strategy, next to shape signatures. A value-dependent
+# select between two *structures* (isLeft's inverse: `Left ANY` if the queried
+# bool is True, else `Right ANY`) picks a shape per element, which no input
+# signature fixes. The compiler binds such a select's condition through
+# `split_uniform` and runs the method body as a kernel under `split_retry`:
+# a condition that agrees across the call is a plain Python bool, so the select
+# is an ordinary `if`; a mixed one raises, and the wrapper re-runs the kernel on
+# the two halves of the batch it splits into, scattering the results back.
+# Re-running is exact because a forward/integrate kernel is a pure function of
+# its arguments (generate bodies are never split). Every split leaves two
+# non-empty, strictly smaller halves, so the retry terminates.
+
+class MixedSplit(Exception):
+  def __init__(self, mask):
+    Exception.__init__(self, "mixed split condition")
+    self.mask = mask
+
+def split_uniform(c):
+  if not torch.is_tensor(c) or c.dim() == 0:
+    return bool(c)
+  m = c.to(torch.bool)
+  if bool(m.all()):
+    return True
+  if not bool(m.any()):
+    return False
+  raise MixedSplit(m)
+
+def _slice_batch(v, idx, total):
+  # One half of a packed (structure-of-arrays) argument: every [B] leaf indexed
+  # by `idx`; structure, wildcards and shared values (a 0-d tensor, a python
+  # number, a tensor not of the batch's length) pass through, as in _slice_arg.
+  if isAny(v) or v is None:
+    return v
+  if torch.is_tensor(v):
+    return v[idx] if v.dim() > 0 and v.shape[0] == total else v
+  if isinstance(v, T):
+    return T(_slice_batch(v.t1, idx, total), _slice_batch(v.t2, idx, total))
+  if isinstance(v, InferenceList):
+    if isinstance(v, (EmptyInferenceList, AnyInferenceList)):
+      return v
+    return toList([_slice_batch(x, idx, total) for x in v])
+  if isinstance(v, (Left, Right)):
+    return type(v)(_slice_batch(v.val, idx, total))
+  if isinstance(v, EnumBatch):
+    return EnumBatch(v._enum, _slice_batch(v.tags, idx, total))
+  if hasattr(v, '_fields') and not _is_enum_value(v):
+    return type(v)(*[_slice_batch(f, idx, total) for f in v._fields])
+  if isinstance(v, list):
+    return [_slice_batch(x, idx, total) for x in v]
+  return v
+
+def split_retry(kernel, *args):
+  try:
+    return kernel(*args)
+  except MixedSplit as split:
+    mask = split.mask
+    total = mask.shape[0]
+    halves = [torch.nonzero(mask).flatten(), torch.nonzero(~mask).flatten()]
+    parts = [split_retry(kernel, *[_slice_batch(a, idx, total) for a in args])
+             for idx in halves]
+    return _scatter(parts, [idx.tolist() for idx in halves], total)
 
 # --- dense enumeration mode (Component 2, M3) --------------------------------
 # When the *query* domain is finite -- the program returns one of V statically

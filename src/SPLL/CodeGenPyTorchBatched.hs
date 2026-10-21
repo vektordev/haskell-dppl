@@ -30,13 +30,16 @@
 -- turns every shape-directed test into a plain Python bool, which this backend
 -- keeps as a real @if@ statement ('structural', 'hoistStructural') over
 -- structure-of-arrays data, and makes list recursion terminate at a
--- bucket-uniform depth. What stays refused is the other half of the dichotomy:
--- a *value*-dependent branch that chooses between structures, and
+-- bucket-uniform depth. The other half of the dichotomy -- a *value*-dependent
+-- branch that chooses between structures -- is served by a second strategy,
+-- a per-structure split of the batch at the select ('splitStructureSelects');
+-- the guard still refuses the shapes the split does not reach, and
 -- value-dependent recursion ('recOffenders').
 module SPLL.CodeGenPyTorchBatched
   ( generateFunctionsBatched
   , batchedGuard
   , prepBatchedBody
+  , usesStructureSplit
   , structural
   , hoistStructural
   , SEnv(..)
@@ -105,7 +108,12 @@ emitBatched genBoil env0 = do
       -- reference to them is renamed to match. The declarations keep the
       -- user's names, so 'ctorNames' below -- which is analysis, matched
       -- against IR variable names rather than printed -- is mangled explicitly.
-      let env@(IREnv funcs adts consts) = inlineDetGenCalls (mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle env0))
+      --
+      -- A per-mask variant still carrying a @VAnyExcept@ placeholder is
+      -- retired to a runtime refusal of that one mask, as on the scalar
+      -- backends ('retireUnrenderableVariants', rendered by 'retiredMethod'),
+      -- rather than refusing the whole program.
+      let env@(IREnv funcs adts consts) = inlineDetGenCalls (mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (retireUnrenderableVariants "batched Python" env0)))
       let lut = envToLUT env
           -- Every group's generate method, raw (pre-rename) name and body: the
           -- self-contained recursion check ('hasGenCycle') walks these
@@ -307,9 +315,11 @@ renderConst (n, v) = case batchedVal v of
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
 generateClass :: (String -> String) -> SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either Refusal [String]
-generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc _ dom _) = do
-  p <- maybe (Right []) (generateMethod env lut "forward" name) prob
-  i <- maybe (Right []) (generateMethod env lut "integrate" name) integ
+generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc _ dom variantOf) = do
+  let method m d | Just ls <- retiredMethod variantOf m d = Right ls
+                 | otherwise = generateMethod env lut m name d
+  p <- maybe (Right []) (method "forward") prob
+  i <- maybe (Right []) (method "integrate") integ
   g <- maybe (Right []) (renderGen env lut genArities genMethods name) gen
   let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ clsName name ++ "(Module):"
@@ -441,7 +451,26 @@ generateMethod env lut methodName groupNameStr (expr0, doc) = do
   () <- batchedGuardBlamed env groupNameStr methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
-  return $ docLines ++ [l1] ++ indentOnce (batchedBlock (Just (groupNameStr ++ "." ++ methodName)) env body)
+      block = batchedBlock (Just (groupNameStr ++ "." ++ methodName)) env body
+      -- A body with a per-structure split point runs as a local kernel under
+      -- the runtime's retry wrapper ('splitStructureSelects').
+      split = [ "def " ++ splitKernelName ++ "(" ++ intercalate ", " args ++ "):" ]
+              ++ indentOnce block
+              ++ [ "return " ++ splitRetryName ++ "(" ++ intercalate ", " (splitKernelName : args) ++ ")" ]
+  return $ docLines ++ [l1] ++ indentOnce (if usesSplit body then split else block)
+
+-- | A per-mask variant's method that 'retireUnrenderableVariants' replaced by
+-- a bare refusal: it raises that refusal's own message (the same text the
+-- scalar Python backend raises), keeping the parameters the dispatcher calls
+-- it with. Rendered here rather than as the generic 'IRError' @poison()@,
+-- whose NaN would surface through @check_result@ as an unmasked-poison
+-- diagnostic that names the wrong cause.
+retiredMethod :: Maybe String -> String -> IRFunDecl -> Maybe [String]
+retiredMethod (Just _) methodName (expr, _)
+  | (args, IRError msg) <- unwrapLambdas expr =
+      Just [ "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
+           , "    return throw(" ++ show msg ++ ")" ]
+retiredMethod _ _ _ = Nothing
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name : otherNames, plainTree)
@@ -513,7 +542,7 @@ renderGen env lut genArities genRaw groupNameStr (expr0, doc)
           ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
   | otherwise =
       let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
-          (args, body) = unwrapLambdas (prepBatchedBody env expr)
+          (args, body) = unwrapLambdas (prepGenBody env expr)
       in case batchedGuardBlamed env groupNameStr "generate" body of
            -- Drawing a *structurally heterogeneous* sample -- a value-dependent
            -- branch between two shapes -- is the same Component 4 situation as
@@ -645,9 +674,115 @@ attachBatchCall _ e = e
 --      of these (Component 3/M4: ANY-ness is itself a structural marker, so
 --      whether a given slot is a wildcard is bucket-uniform, just like a list
 --      length or constructor tag).
+--
+-- A prob/integ body additionally gets its value-dependent structure selects
+-- split ('splitStructureSelects'), between steps 2 and 3; a generate body
+-- ('prepGenBody') does not, since its conditions draw randomness.
 prepBatchedBody :: SEnv -> IRExpr -> IRExpr
-prepBatchedBody env (IRLambda n b) = IRLambda n (prepBatchedBody env b)
-prepBatchedBody env e = hoistStructural env (distributeSelects env (foldConst (stripRootGuard e)))
+prepBatchedBody = prepBody True
+
+-- | 'prepBatchedBody' for a generate body: no per-structure split.
+prepGenBody :: SEnv -> IRExpr -> IRExpr
+prepGenBody = prepBody False
+
+prepBody :: Bool -> SEnv -> IRExpr -> IRExpr
+prepBody split env (IRLambda n b) = IRLambda n (prepBody split env b)
+prepBody split env e =
+  hoistStructural env (distributeSelects env (splitIf (foldConst (stripRootGuard e))))
+  where splitIf | split     = splitStructureSelects env
+                | otherwise = id
+
+-- ---------------------------------------------------------------------------
+-- Per-structure split at a select (task batched-value-dependent-structure-
+-- select; design heterogeneous-batch-inference, "Bucketing strategies").
+--
+-- Shape-signature bucketing makes every /input/-structure test bucket-uniform.
+-- A value-dependent select whose arms are different structures -- isLeft's
+-- inverse @if sample then Left ANY else Right ANY@, or @if u < 0.4 then left u
+-- else right 1.0@ -- chooses a structure from a per-element value, which no
+-- input signature fixes. The second strategy splits the batch at the select
+-- instead: the condition is bound through 'splitUniformName', which answers a
+-- plain Python bool when the condition agrees across the call and otherwise
+-- raises; the method body runs under 'splitRetryName', which catches that,
+-- splits its arguments by the condition's value and re-runs the body on each
+-- half, scattering the two results back into input order. Inside a half the
+-- condition is uniform, so the select is a structural Python @if@ and only the
+-- legal arm runs.
+--
+-- Re-running the prefix of the body on each half is exact because a prob/integ
+-- body is a pure function of its arguments; a generate body is not (it would
+-- redraw the condition), and is never split ('prepGenBody'). Termination:
+-- a split happens only on a mixed condition, so both halves are non-empty and
+-- strictly smaller than the call that split.
+-- ---------------------------------------------------------------------------
+
+-- | The runtime function a split condition is bound through
+-- (@pythonLibBatched.split_uniform@), and the method-level retry wrapper
+-- (@pythonLibBatched.split_retry@).
+splitUniformName, splitRetryName :: String
+splitUniformName = "split_uniform"
+splitRetryName   = "split_retry"
+
+-- | The local name of a split method's kernel ('generateMethod').
+splitKernelName :: String
+splitKernelName = "_split_kernel"
+
+-- | Does the batched backend split any prob/integ body of this environment
+-- at a structure select? The impact census ('CertifiedCensus') keys on it:
+-- the split is runtime code no IR construct names.
+--
+-- Judged uncollapsed: collapse only ever leaves a split-eligible select
+-- unsplit (its blamed condition), and the uncollapsed retry makes that
+-- condition structural, so neither emits a split there.
+usesStructureSplit :: IREnv -> Bool
+usesStructureSplit env0 =
+  or [ usesSplit (prepBatchedBody senv body)
+     | g <- funcs, Just (body, _) <- [probFun g, integFun g] ]
+  where
+    IREnv funcs adts _ = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (retireUnrenderableVariants "batched Python" env0))
+    senv = adtEnv adts
+
+-- | Does this prepared body contain a split point?
+usesSplit :: IRExpr -> Bool
+usesSplit body = splitUniformName `elem` allVarNames body
+
+-- | Rewrite every value-dependent select whose arms differ in structure (the
+-- dichotomy guard's 'structureSelect') into a structural 'IRIf' over a
+-- split-bound condition: @select c t f@ becomes
+-- @let _spN = split_uniform(c) in if _spN then t else f@.
+--
+-- Three shapes are left alone, so the guard still refuses them:
+--
+--   * a condition that draws randomness (only a generate body could; this pass
+--     never runs on one, the check is a backstop);
+--   * a condition reading a collapsed enumeration's constructor test
+--     ('enumBlame'): the guard's blame on it makes 'generateFunctionsBatched'
+--     retry with that ADT uncollapsed, which makes the test bucket-uniform
+--     without any split;
+--   * a select inside a 'BMap' body, which renders as a comprehension
+--     element with no statement position for the split's binding.
+splitStructureSelects :: SEnv -> IRExpr -> IRExpr
+splitStructureSelects env0 e0 = evalState (go env0 e0) (0 :: Int)
+  where
+    go env e = case e of
+      IRLambda n b  -> IRLambda n <$> go env b
+      IRLetIn n v b -> IRLetIn n <$> go env v <*> go (bindS env n v) b
+      IRBuiltin BMap [l@(IRLambda _ _), t] -> (\t' -> IRBuiltin BMap [l, t']) <$> go env t
+      IRSelect c t f -> sel env c t f (IRSelect c t f)
+      IRIf c t f | not (structural env c) -> sel env c t f (IRIf c t f)
+      _ -> irDescendM (go env) e
+    sel env c t f orig
+      | listValued env t || listValued env f
+      , null (enumBlame env c)
+      , batchPure env c = do
+          c' <- go env c
+          t' <- go env t
+          f' <- go env f
+          k  <- get
+          put (k + 1)
+          let n = "_sp" ++ show k
+          return (IRLetIn n (IRApply (IRVar splitUniformName) c') (IRIf (IRVar n) t' f'))
+      | otherwise = irDescendM (go env) orig
 
 -- | Strip a root query-type guard @if (sample conforms) then body else error@,
 -- taking the conforming arm. Leaves a guard-less body untouched.
@@ -698,6 +833,8 @@ distributeSelects env0 e0 = evalState (go env0 e0) (0 :: Int)
   where
     go env (IRLambda n b)  = IRLambda n <$> go env b
     go env (IRLetIn n v b) = IRLetIn n <$> go env v <*> go (bindS env n v) b
+    go env (IRBuiltin BMap [IRLambda n b, t]) =
+      (\b' t' -> IRBuiltin BMap [IRLambda n b', t']) <$> go (bindMap env n t) b <*> go env t
     go env (IRSelect c t f) | tupleValued t || tupleValued f = split env IRSelect c t f
     go env (IRIf c t f) | not (structural env c), tupleValued t || tupleValued f =
       split env IRIf c t f
@@ -1007,6 +1144,13 @@ structural env e = case e of
   -- batched-ctor-test-not-structural-eager-accessor).
   _ | (IRVar n, [_]) <- collectApplyChain e
     , n `elem` sCtorPreds env -> True
+  -- A split-bound condition ('splitStructureSelects'): the runtime answers it
+  -- as a Python bool, re-running the body on each half of a batch where it is
+  -- mixed, so it is uniform across every call that gets past it.
+  IRApply (IRVar n) _ | n == splitUniformName -> True
+  -- A field of a bucket-uniform value is bucket-uniform: a payload read off
+  -- an enumerated domain constant ('bindMap'), say.
+  IRDestruct _ a    -> structural env a
   _                 -> False
 
 -- | Extend the structural environment with a @let@ binding (shadowing a
@@ -1018,6 +1162,22 @@ bindS env n v = bound { sEnumDeps = [(n, deps) | not (null deps)]
     deps = enumBlame env v
     bound | structural env v = env { sBound = nub (n : sBound env) }
           | otherwise        = env { sBound = filter (/= n) (sBound env) }
+
+-- | Extend the structural environment with a tensor map's binder: one
+-- element of the mapped tensor per comprehension step. When that tensor is a
+-- literal of constants -- an enumeration domain, which is what every 'BMap'
+-- the compiler builds maps over -- each element is a compile-time Python value,
+-- the same for the whole batch, so the binder is structure and a select it
+-- alone decides is a Python conditional rather than a @torch.where@
+-- (@Right(w) if w == 1 else Left(())@ over an enumerated @Maybe@, task
+-- batched-value-dependent-structure-select). Any other tensor shadows the
+-- name as per-element.
+bindMap :: SEnv -> String -> IRExpr -> SEnv
+bindMap env n t
+  | IRBuiltin (BTensor _) elems <- t, all isConst elems = env { sBound = nub (n : sBound env) }
+  | otherwise = env { sBound = filter (/= n) (sBound env) }
+  where isConst (IRConst _) = True
+        isConst _           = False
 
 isEmptyListConst :: IRExpr -> Bool
 isEmptyListConst (IRConst (VList EmptyList)) = True
@@ -1358,15 +1518,17 @@ batchedGuardBlamed env0 groupNameStr methodName body =
                         -- did with a Varname field -- so the walk goes through
                         -- it to the body, skipping the lambda node itself
                         -- (design ir-tensor-values).
-                        IRBuiltin BMap [IRLambda _ b, t] ->
-                          offenders env b ++ offenders env t
+                        IRBuiltin BMap [IRLambda n b, t] ->
+                          offenders (bindMap env n t) b ++ offenders env t
                         _             -> concatMap (offenders env) (getIRSubExprs e)
     -- The dichotomy guard (design heterogeneous-batch-inference): a per-element
     -- branch may not choose between two *structures*. Bucketing removes the
     -- structural branches whose condition is shape-directed; one whose condition
     -- is value-dependent has no tensor form at all (torch.where cannot select
-    -- between lists of different length), so it is refused here rather than
-    -- emitted as something that dies at run time.
+    -- between lists of different length). 'splitStructureSelects' has already
+    -- turned the ones it can into structural ifs over a split condition; what
+    -- reaches here is refused rather than emitted as something that dies at
+    -- run time.
     structureSelect env (IRSelect _ t f) = listValued env t || listValued env f
     structureSelect env (IRIf c t f)     = not (structural env c)
                                         && (listValued env t || listValued env f)
@@ -1522,6 +1684,10 @@ batchedVal (VTuple a b) = do
 -- narrower marginal-exclusion contexts) is a known, deliberate gap: it is not
 -- just an ANY-flavoured structural marker (the exclusion set matters to
 -- enumeration semantics elsewhere), so it stays refused, same as before.
+-- Unit is pure structure, spelled @None@ as in the scalar backend's @pyVal@
+-- and in '_pack''s unit-payload arm; @signature@ buckets it as @'U'@ and
+-- @None == None@ holds at a query point.
+batchedVal VUnit = Just "None"
 batchedVal VAny = Just "'ANY'"
 -- An ADT constant (task batched-backend-refuses-neural-adt-constants): unlike
 -- a list or an Either, its runtime counterpart is not a library name but a
@@ -1781,7 +1947,7 @@ batchedExpr env (IRBuiltin (BTensor sh) elems)
   | shapeRank sh == 1 = "[" ++ intercalate ", " (map (batchedExpr env) elems) ++ "]"
   | otherwise = error (batchedRankUnsupported "BTensor" (shapeRank sh))
 batchedExpr env (IRBuiltin BMap [IRLambda name body, t]) =
-  "[" ++ batchedExpr env body ++ " for " ++ name ++ " in " ++ batchedExpr env t ++ "]"
+  "[" ++ batchedExpr (bindMap env name t) body ++ " for " ++ name ++ " in " ++ batchedExpr env t ++ "]"
 batchedExpr env (IRBuiltin BMap [f, t]) =
   "list(map(" ++ batchedExpr env f ++ ", " ++ batchedExpr env t ++ "))"
 batchedExpr env (IRBuiltin (BReduce op 0) [t]) =

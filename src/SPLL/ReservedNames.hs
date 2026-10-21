@@ -376,7 +376,8 @@ pythonKeywords =
 pythonRuntimeClassNames :: [String]
 pythonRuntimeClassNames =
   [ "Module", "Iterable", "T", "Left", "Right", "InferenceList"
-  , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "EnumBatch" ]
+  , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "EnumBatch"
+  , "MixedSplit" ]
 
 -- | The non-class values the emitted Python module has in scope before any of
 -- its own definitions: everything @from pythonLib import *@ and
@@ -414,6 +415,7 @@ pythonRuntimeValueNames =
   , "math", "modf", "nan", "nextafter", "nn_gather", "perm", "pi", "poison"
   , "pow", "prod", "radians", "rand", "randn", "random", "remainder"
   , "safe_div", "safe_exp", "safe_log", "sign", "signature", "sin", "sinh"
+  , "split_retry", "split_uniform"
   , "sqrt", "sumprod", "sys", "table_select", "tan", "tanh", "tau", "tensor_index"
   , "tensor_logsumexp", "tensor_sum", "throw", "toList", "torch", "trunc"
   , "ulp", "where_anchored"
