@@ -2633,10 +2633,17 @@ batchSymParamCols rows
   | any ((/= length (head rows)) . length) rows = Nothing
   | otherwise = mapM batchSymColumn (transpose rows)
 
+--
+-- The column is float64, the interpreter's precision. In float32 a path mass
+-- that equals a topK cutoff in exact arithmetic rounds onto the cutoff
+-- (@0.2 + 0.8 * 0.5@ is @0.6f@, and @0.6f > 0.6@ is false once the cutoff is
+-- cast to float32), while in Double it lands just above it; the batched topK
+-- differential then pruned a path the interpreter kept (task
+-- batched-topk-per-element-failures-on-redeclared-programs, class E).
 batchSymColumn :: [IRValue] -> Maybe String
 batchSymColumn vs = do
   logitRows <- mapM logitsOf vs
-  return ("torch.tensor([" ++ intercalate ", " (map renderRow logitRows) ++ "])")
+  return ("torch.tensor([" ++ intercalate ", " (map renderRow logitRows) ++ "], dtype=torch.float64)")
   where
     logitsOf (VTuple (VInt 2) (VList ls)) = Just (toList ls)
     -- a shaped tensor input ('shapeNeuralParams'): one row of the [B, numel]
