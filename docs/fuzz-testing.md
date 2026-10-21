@@ -852,9 +852,12 @@ four batches a run, and for each program:
 All programs of a batch then go through **one** `python3` and **one** `julia
 --compile=min` process (`test/BackendAgreement.hs`; a subprocess costs 70 ms /
 470 ms against a ~1 ms compile). Each program loads into its own namespace (a
-fresh `dict` for Python, its own `module ProgN` for Julia), every load and every
-query sits in its own `try`, and results are printed one line per query with
-`repr`, so one broken program reports against itself only. A query point is
+fresh `dict` for Python, its own `module ProgN` for Julia, N its position in the
+batch and never derived from the program, since a batch can draw one program
+twice), every load and every query sits in its own `try`, and results are
+printed one line per query with `repr`, so one broken program reports against
+itself only. A module that fails to load reports its load error (the driver's
+`L` line) for every query, not the error each call then meets. A query point is
 evaluated inside the program's namespace, since it names that program's ADT
 classes. Python additionally bounds each query with a 10 s alarm; both
 processes have a 300 s bound. Comparison: `probAgrees` on the probability

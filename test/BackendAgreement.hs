@@ -553,31 +553,38 @@ readNum s0 = case map toLower s0 of
 -- query's outcome, for tabulation.
 runBatch :: String
          -> (String -> String)                            -- ^ the backend's name mangling (an ADT constructor's class name)
-         -> (AgreementCase -> IO (Either String String))   -- ^ emitted module text
+         -> (AgreementCase -> IO (Either String String))   -- ^ emitted source (Left: codegen threw)
+         -> (Int -> AgreementCase -> String -> String)    -- ^ wrap it into the module the driver loads as its i-th
          -> String                                        -- ^ module file extension
          -> (FilePath -> [(FilePath, [IRValue], [Query])] -> String)
          -> (FilePath -> IO (ExitCode, String, String))    -- ^ run the driver file
          -> [AgreementCase] -> IO ([Disagreement], [String])
-runBatch backend mangle emit ext driver runDriver cases =
+runBatch backend mangle emit wrap ext driver runDriver cases =
   withSystemTempDirectory ("nest-" ++ backend) $ \dir -> do
     projectDir <- getCurrentDirectory
     sources <- mapM emit cases
-    let files = [ dir </> ("prog" ++ show i ++ ext) | i <- [0 .. length cases - 1] ]
-    sequence_ [ writeFile f s | (f, Right s) <- zip files sources ]
-    let entries = [ (f, acBackendArgs c, map fst (acQueries c))
-                  | (f, c, Right _) <- zip3 files cases sources ]
-        -- Programs whose codegen threw are not in the driver; keep the
-        -- driver's indices aligned with 'entries', not with 'cases'.
-        emitted = [ c | (c, Right _) <- zip cases sources ]
+    -- Programs whose codegen threw are not in the driver; the driver's
+    -- indices, its module names (Julia's @ProgN@) and 'answerFor' all count
+    -- 'emitted', not 'cases'. The module name is given here, from that
+    -- index, rather than recovered from the case: one batch can hold two
+    -- identical draws (task fuzz-backends-agree-julia-module-fails-to-load).
+    let emittedSrc = [ (c, s) | (c, Right s) <- zip cases sources ]
+        emitted = map fst emittedSrc
         failedGen = [ (c, e) | (c, Left e) <- zip cases sources ]
+        files = [ dir </> ("prog" ++ show i ++ ext) | i <- [0 .. length emitted - 1] ]
+    sequence_ [ writeFile f (wrap i c s) | (i, f, (c, s)) <- zip3 [0 ..] files emittedSrc ]
+    let entries = [ (f, acBackendArgs c, map fst (acQueries c)) | (f, c) <- zip files emitted ]
         driverPath = dir </> ("driver" ++ ext)
     writeFile driverPath (driver projectDir entries)
     (_, out, err) <- runDriver driverPath
     let parsed = [ x | Just x <- map parseAnswerLine (lines out) ]
         tailErr = oneLine (reverse (take 400 (reverse err)))
-        answerFor i j = case [ a | (i', Just j', a) <- parsed, i' == i, j' == j ] of
+        -- A module that did not load still has every query line (each one
+        -- raising the downstream @UndefVarError: ProgN@), so its @L@ line is
+        -- checked first: the load error is the one worth reporting.
+        answerFor i j = case [ a | (i', Nothing, a) <- parsed, i' == i ] of
           (a : _) -> a
-          [] -> case [ a | (i', Nothing, a) <- parsed, i' == i ] of
+          [] -> case [ a | (i', Just j', a) <- parsed, i' == i, j' == j ] of
             (a : _) -> a
             [] -> Raised ("no answer from the " ++ backend ++ " process; stderr: " ++ tailErr)
         fromRun = [ Disagreement backend (acProgram c) q ia ba
@@ -749,10 +756,11 @@ runPythonBatch = fmap fst . runPythonBatchWith
 
 -- | 'runPythonBatch', with every generate query's outcome ('runBatch').
 runPythonBatchWith :: [AgreementCase] -> IO ([Disagreement], [String])
-runPythonBatchWith = runBatch "python" Py.pyMangle emit ".py" pythonDriver (\f -> runBounded "python3" [f])
+runPythonBatchWith = runBatch "python" Py.pyMangle emit wrap ".py" pythonDriver (\f -> runBounded "python3" [f])
   where
-    emit c = fmap (fmap (\src -> mocks c ++ stubTorch src))
-                  (forcedSource (return (Py.generateFunctions True (acEnv c))))
+    emit c = forcedSource (return (Py.generateFunctions True (acEnv c)))
+    -- Each Python module runs in its own namespace; the index is unused.
+    wrap _ c src = mocks c ++ stubTorch src
     mocks c = concatMap (\nm -> "def " ++ nm ++ "(s):\n    return s\n") (acNets c)
     stubTorch = unpack . replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") . pack
 
@@ -766,23 +774,13 @@ runJuliaBatch julia = fmap fst . runJuliaBatchWith julia
 
 -- | 'runJuliaBatch', with every generate query's outcome ('runBatch').
 runJuliaBatchWith :: FilePath -> [AgreementCase] -> IO ([Disagreement], [String])
-runJuliaBatchWith julia cases = runBatch "julia" Jl.juliaMangle emit ".jl" juliaDriver (\f -> runBounded julia (juliaTestFlags ++ [f])) cases
+runJuliaBatchWith julia = runBatch "julia" Jl.juliaMangle emit wrap ".jl" juliaDriver (\f -> runBounded julia (juliaTestFlags ++ [f]))
   where
-    indexed = zip [0 :: Int ..] cases
-    emit c = do
-      let i = head [ k | (k, c') <- indexed, sameCase c c' ]
-          modName = "Prog" ++ show i
-      fmap (fmap (\src -> "module " ++ modName ++ "\nusing ..JuliaSPPLLib\n"
-                           ++ concatMap (\nm -> nm ++ "(s) = s\n") (acNets c)
-                           ++ src ++ "\nend\n"))
-           (forcedSource (return (Jl.generateFunctions (acEnv c))))
-    -- Cases have no identity of their own; programs in one batch are
-    -- distinct draws, so their printed forms are distinct enough to index by
-    -- -- with the arguments, since one parameterised program is compared at
-    -- two argument tuples, over the same points (TestFuzz's
-    -- prepareAgreementNeighbour).
-    sameCase a b = show (acProgram a) == show (acProgram b) && acBackendArgs a == acBackendArgs b
-                   && map fst (acQueries a) == map fst (acQueries b)
+    emit c = forcedSource (return (Jl.generateFunctions (acEnv c)))
+    -- 'juliaDriver' calls the i-th loaded module @Prog<i>@.
+    wrap i c src = "module Prog" ++ show i ++ "\nusing ..JuliaSPPLLib\n"
+                   ++ concatMap (\nm -> nm ++ "(s) = s\n") (acNets c)
+                   ++ src ++ "\nend\n"
 
 -- ---------------------------------------------------------------------------
 -- The batched arm (task backend-agreement-batched-arm)
