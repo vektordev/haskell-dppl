@@ -115,12 +115,22 @@ A line whose depth is *inside* a comprehension body -- an enumerated `draw`'s
 `sum([body for b in xs])`, where nested ifs over the latent render as a
 walrus/tuple let chain ~10 brackets per `if` -- has nothing strict outside the
 body to cut. There, a `BMap` over a lambda whose body and list are both pure
-(`loopable`) is spilled whole as a loop (`generateSpillStatement`):
+(`spillable` admits one, though not a bare lambda) is spilled whole as a loop
+(`generateSpillStatement`):
 `_sN = []`, `for _vM in xs:`, the body as statements into `_eM`,
 `_sN.append(_eM)`. Same list, same order, so `sum(_sN)` adds the same floats.
 The loop variable is renamed to a fresh `_vM` because a `for` target, unlike a
 comprehension's, lands in the function scope. Docs-repo task
 `python-emitted-expression-exceeds-parser-nesting`.
+
+Purity is checked recursively, so a comprehension whose body holds another
+pure comprehension moves too, and the inner one is spilled from its own line
+in the loop body. That is the shape of nested enumerated `draw`s (an
+enumerated latent, readings gated on it, answers over pairs of readings):
+before, the inner comprehension counted as a lambda, the outer one was not
+pure, and the line stayed at 200+ brackets. Pinned by the `deep expression
+spill` group (a hand-built nested pair, and the 11-answer chain through the
+pipeline). Docs-repo task `chained-answers-exceed-python-paren-depth`.
 
 ## Python methods indented past 99 levels hoist their deep blocks
 

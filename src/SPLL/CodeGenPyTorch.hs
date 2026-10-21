@@ -756,7 +756,7 @@ generateLetInStatement name x = do
 --   short-circuiting @and@/@or@, or anything under a binder (a lambda or a
 --   comprehension body), since the guard is what protects it and the binder
 --   is not in scope before the line. (A pure comprehension can still move
---   /whole/, becoming a statement-level loop: 'loopable'.);
+--   /whole/, becoming a statement-level loop: see 'spillable'.);
 -- * one that is /pure arithmetic/ ('spillable'): no random draw, no call
 --   other than of an inference method ('inferenceMethodCall'). Any other call
 --   may be a generator or may not terminate, and moving it ahead of a sibling
@@ -855,6 +855,22 @@ spillable callables = go
     go e@(IRApply _ _) =
       let (f, args) = collectApplyChain e
       in inferenceMethodCall f && all go args
+    -- A comprehension whose body and list are pure. A bare lambda is
+    -- refused below, which is right for one that stays a value, but a 'BMap'
+    -- applies its lambda on the spot to every element, so moving the whole
+    -- comprehension is the same move as moving any other pure subterm. It is
+    -- emitted as a statement-level loop ('generateSpillStatement').
+    --
+    -- This is what reaches a line whose depth is /inside/ a comprehension
+    -- body (task python-emitted-expression-exceeds-parser-nesting): an
+    -- enumerated 'draw' sums @[body for b in xs]@, and the body -- a chain of
+    -- CSE lets and conditionals rendered as walrus tuples -- is ~10 levels
+    -- per nested @if@, with nothing on the strict spine outside it to cut.
+    -- Purity is checked recursively, so a comprehension whose body holds
+    -- another enumerated draw's comprehension moves too (task
+    -- chained-answers-exceed-python-paren-depth); the inner one, out of
+    -- reach under the outer binder before, then sits on a line of its own.
+    go (IRBuiltin BMap [IRLambda _ body, t]) = go body && go t
     go (IRLambda _ _) = False
     go (IRVar n)      = not (n `elem` callables || isEffectfulVar n
                              || ".generate" `isSuffixOf` n)
@@ -868,24 +884,8 @@ inferenceMethodCall :: IRExpr -> Bool
 inferenceMethodCall (IRVar n) = ".forward" `isSuffixOf` n || ".integrate" `isSuffixOf` n
 inferenceMethodCall _ = False
 
--- | A comprehension that may be spilled as a whole, as a statement-level loop
--- ('generateSpillStatement'): a 'BMap' over a lambda whose body and list are
--- both pure arithmetic. 'spillable' refuses it for its lambda, which is right
--- for a lambda that stays a value, but a 'BMap' applies its lambda on the spot
--- to every element, so hoisting the whole comprehension ahead of its line is
--- the same move as hoisting any other pure subterm.
---
--- This is what reaches a line whose depth is /inside/ a comprehension body
--- (task python-emitted-expression-exceeds-parser-nesting): an enumerated
--- 'draw' sums @[body for b in xs]@, and the body -- a chain of CSE lets and
--- conditionals rendered as walrus tuples -- was ~10 levels per nested @if@,
--- with nothing on the strict spine outside it to cut.
-loopable :: [String] -> IRExpr -> Bool
-loopable callables (IRBuiltin BMap [IRLambda _ body, t]) =
-  spillable callables body && spillable callables t
-loopable _ _ = False
-
--- | Emit one spill binding. A 'loopable' comprehension becomes
+-- | Emit one spill binding. A comprehension ('spillable' admits pure ones)
+-- becomes
 --
 -- > name = []
 -- > for _vN in <list>:
@@ -997,7 +997,7 @@ spillDeep callables e0 = do
                 kids' = [k | (_, k, _) <- cut]
             return (binds, rebuild kids', 1 + maximum (lazyDepth : [d | (_, _, d) <- cut]))
     spillOne (b, k, d)
-      | compound k && (spillable callables k || loopable callables k) = do
+      | compound k && spillable callables k = do
           n <- demandUniqueNumber
           let tmp = "_s" ++ show n
           return (b ++ [(tmp, k)], IRVar tmp, 0)
