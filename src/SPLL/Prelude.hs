@@ -95,6 +95,7 @@ module SPLL.Prelude
   , renderMarginalReport
   , CompileWarning(..)
   , CorrelatedClass(..)
+  , ChartClass(..)
   , warningFunction
   , renderCompileWarning
   , programWarnings
@@ -131,7 +132,7 @@ import qualified SPLL.CodeGenPyTorch
 import qualified SPLL.CodeGenJulia
 import Debug.Trace
 import Data.Either
-import SPLL.Typing.ForwardChaining (annotateProg, FCData)
+import SPLL.Typing.ForwardChaining (annotateProg, FCData, progToFCData)
 import SPLL.Typing.Determinism (knownAnchors)
 import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
@@ -1077,15 +1078,37 @@ maskPlans conf rtyped
         k     = length enums
 
 -- | The compile-time warnings that read only the program, not what the compile
--- emitted: one per function over the @--marginalSlots@ budget. Empty when the
--- program does not type (the compile itself reports that). The CLI prints these
--- for every subcommand, before compiling.
+-- emitted: one per function over the @--marginalSlots@ budget, then one per
+-- function whose reported density is chart-dependent
+-- ('chartDependentClasses'). Empty when the program does not type (the compile
+-- itself reports that). The CLI prints these for every subcommand, before
+-- compiling.
+--
+-- The chart warning is read off the program rather than the compile: it holds
+-- for the probability function whenever that is emitted, and it has to reach
+-- the @probability@ / @cumulative@ subcommands, which print no compile's
+-- warnings. It costs a chain naming only when some function's result is a
+-- constructor tree, and forward chaining only when some group is reported.
 programWarnings :: CompilerConfig -> Program -> [CompileWarning]
 programWarnings conf p = case rtypedProgram p of
   Left _ -> []
   Right rtyped ->
     [ MarginalSlotsOverBudget n k (marginalSlots conf)
     | (n, MasksOverBudget k) <- maskPlans conf rtyped ]
+    ++ chartWarnings rtyped
+  where
+    chartWarnings rtyped
+      | noProbability conf = []
+      | not (any (isTree . observationTree (adts rtyped)) (functions rtyped)) = []
+      | otherwise =
+          let named = chainNamedProgram rtyped
+              fc    = progToFCData (knownAnchors named) named
+          in [ ChartDependentDensity n classes
+             | decl@(n, _) <- functions named
+             , let classes = chartDependentClasses (adts named) (functions named) fc decl
+             , not (null classes) ]
+    isTree ObsCon{} = True
+    isTree _        = False
 
 -- | The compile-time warnings that depend on what @compiled@ (the compile of
 -- @p@) emitted: one per function whose emitted writeLogits encodes correlated

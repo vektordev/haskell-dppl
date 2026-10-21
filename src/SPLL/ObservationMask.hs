@@ -25,6 +25,7 @@ module SPLL.ObservationMask
   , ObsTree(..)
   , Binding(..)
   , LetEnv
+  , lookupBinding
   , observationTree
   , obsPath
   , obsLeaves
@@ -34,6 +35,7 @@ module SPLL.ObservationMask
   , latentsOverlap
   , slotLatents
   , slotLatentNames
+  , namedLatentsOf
   , localSlotLatents
     -- * Correlation and self-containment
   , correlationClasses
@@ -260,6 +262,7 @@ framesToEnv frames outer = foldl' step outer (zip [0 ..] frames)
               , bndEnv         = acc
               } : acc
 
+-- | The innermost binding of a name in an environment.
 lookupBinding :: String -> LetEnv -> Maybe Binding
 lookupBinding x env = case filter ((== x) . bndName) env of
   (b:_) -> Just b
