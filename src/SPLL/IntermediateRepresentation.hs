@@ -33,6 +33,7 @@ module SPLL.IntermediateRepresentation (
 , irDescend
 , irDescendM
 , getIRSubExprs
+, collectApplyChain
 , isPure
 , isEffectfulVar
 , isPureGiven
@@ -919,6 +920,12 @@ retireUnrenderableVariants lang (IREnv groups decls consts) = IREnv (map retire 
     allSubExprsOf ir = ir : concatMap allSubExprsOf (getIRSubExprs ir)
     isAnyExceptConst (IRConst (VAnyExcept _)) = True
     isAnyExceptConst _ = False
+
+-- | An application spine, uncurried: the callee and its arguments in source
+-- order. A non-application collects zero arguments.
+collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
+collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])
+collectApplyChain expr = (expr, [])
 
 getIRSubExprs :: IRExpr -> [IRExpr]
 getIRSubExprs (IRIf a b c) = [a, b, c]
