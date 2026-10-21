@@ -189,6 +189,13 @@ knownSequenceDivergences =
   -- the scaled draw's Jacobian twice (2x the density). The alias alone and
   -- the helper alone are right. Found by the sequence property's first run.
   [ KnownSeq "rewriteProbeHelperScaledNoise" [AliasIntro, HelperExtract] "aliased-draw-through-helper-scaled-by-parameter-double-jacobian"
+  -- Probe row 5, `draw x = Uniform in (x, x * Normal)`, with the Uniform drawn
+  -- into a binding and `x` aliased: two alias levels, and the outer witness
+  -- carries the `|1/y|` Jacobian of `y * Normal` a second time (2x at (0.5,
+  -- 0.2)). One alias alone is right. Pinned by
+  -- known-issues/doubleAliasedDrawParameterScaledSibling. Found by seed
+  -- 20261017.
+  , KnownSeq "probe5" [DrawIntro, AliasIntro] "double-aliased-draw-parameter-scaled-sibling-double-jacobian"
   -- Probe row 10, `0.0 * Normal`, with the Normal drawn into a binding and
   -- the product wrapped in `0 - (0 - .)`: knownDivergences' diracLawLost on
   -- drawBoundRandomTimesLiteralZero, which the sweep skips as slow.
