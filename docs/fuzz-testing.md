@@ -947,7 +947,13 @@ ones are the masked dead-arm draw. Of the first 15 runs, 5 found a
 disagreement; the families are filed (see the task doc in the docs repo). With generate added
 (2026-10-13), a run asks ~280-290 generate queries per backend, and in three
 runs 99-100% of the samples were judged in support (the rest: the interpreter
-raised at the sample); none disagreed.
+raised at the sample); none disagreed. A generate query is only asked where
+the interpreter's ten reference draws all succeeded, which a partial
+destructor on a rarely taken arm slips past (`head` of an empty list on a
+12% arm). A backend that raises there (Julia) or returns an undecodable
+sample (Python's `None`) is excused when 1000 further interpreter draws
+also fail (`BackendAgreement.interpreterGenerateFails`); an off-support
+sample that decodes is still a disagreement.
 
 ## IR-level backend agreement (`prop_Fuzz_IRBackendsAgree`)
 

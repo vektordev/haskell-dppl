@@ -33,7 +33,8 @@
 -- value-free: a 'QGen' query calls @main@'s generate function once per
 -- backend, under a fixed seed, and the sample comes back as a token stream
 -- ('decodeSample', typed by @main@'s return type). The backend must not raise
--- where the interpreter's generate does not, and the interpreter's
+-- (or return an undecodable sample) where the interpreter's generate does not
+-- fail on any path ('interpreterGenerateFails'), and the interpreter's
 -- probability function must not call the sample impossible
 -- ('supportCheck'). That covers the generate-only lowerings an inference body
 -- never reaches: a let-bound draw read twice must stay one draw, and a spilled
