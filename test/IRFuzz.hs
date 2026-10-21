@@ -1675,11 +1675,6 @@ knownDisagreements =
       (ByAnswer (\c _ a -> raisedWith "not supported between instances of 'tuple' and 'int'" a
                          && not (null [ () | IRBuiltin BListIndex _ <- caseUniverse c ])))
       (batchedRepro (IRBuiltin BListIndex [IRConstruct TgCons [IRConst (VFloat 0.5), IRConst (VList EmptyList)], IRConst (VInt 0)]) (VFloat 1))
-  -- The batched runtime defines none of the list functions of the standard
-  -- library the backend calls.
-  , KnownFamily "batched-runtime-lacks-the-list-standard-library" ["batched"]
-      (ByAnswer (\_ _ a -> any (\f -> raisedWith ("NameError: name '" ++ f ++ "' is not defined") a) ["listProd", "indexOf", "listConcat"]))
-      (batchedRepro (IRApply (IRVar "listProd") (IRConstruct TgCons [IRConst (VFloat 0.5), IRConst (VList EmptyList)])) (VFloat 1))
   -- The batched @isclose@ scales its tolerance by the operands' magnitude, so
   -- an infinity is close to every number.
   , KnownFamily "batched-isclose-holds-at-an-infinity" ["batched"]
