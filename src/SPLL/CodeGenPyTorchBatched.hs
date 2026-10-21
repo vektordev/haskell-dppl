@@ -1447,9 +1447,9 @@ emittable e = case e of
 -- This deliberately does /not/ reuse the scalar backend's
 -- 'SPLL.CodeGenPyTorch.pyVal', and that is the whole point: @pyVal@ is total
 -- over @IRValue@ against the *scalar* @pythonLib.py@, so it happily names
--- runtime constructors that do not exist in @pythonLibBatched.py@ —
--- @ConsInferenceList@/@EmptyInferenceList@ for lists, @Left@/@Right@ for
--- 'VEither', ADT constructors, @throw@, @None@. Emitting any of those
+-- whatever runtime constructor the scalar library has, whether or not
+-- @pythonLibBatched.py@ defines it (when this was written it defined none of
+-- the list classes, @Left@/@Right@ or the ADT constructors). Emitting one it lacks
 -- produces batched Python that dies with a @NameError@ at run time instead of
 -- being refused at compile time. Borrowing @pyVal@ here was a live defect, not
 -- a hypothetical one: six corpus programs (the @planEnumCont*@ family,
@@ -1457,14 +1457,17 @@ emittable e = case e of
 -- and emitted @indexOf(..., ConsInferenceList(True, ...))@ — the enum-index
 -- lookup 'SPLL.AutoNeural.indexOf' builds over a 'VList' constant, which the
 -- old blanket @IRConst{} -> True@ admitted. The list survives to codegen
--- whenever 'SPLL.IROptimizer.indexmagic' cannot fold it away (it only fires for
--- a @[0..n]@ naturals list, so a @[True, False]@ enumeration keeps the call).
+-- whenever 'SPLL.IROptimizer.indexmagic' cannot fold it away (it only fired
+-- for a @[0..n]@ naturals list then; it folds every constant scalar
+-- enumeration since task batched-bool-enum-index, and at -O0 the call
+-- survives and resolves to @pythonLibBatched.indexOf@).
 --
--- @'ANY'@/@AnyInferenceList()@ (design heterogeneous-batch-inference, M4) are
--- the one deliberate exception: 'pythonLibBatched.py' defines both, spelled
--- and behaving exactly as their 'SPLL.CodeGenPyTorch.pyVal' counterparts, so
--- those two cases are admitted here even though the rest of @pyVal@ is not
--- reused.
+-- Since then the batched runtime has grown its own counterparts, each case
+-- below admitted only once @pythonLibBatched.py@ defines its spelling: the
+-- list classes (heterogeneous-batch-inference M1, and non-empty constants in
+-- task batched-refuses-list-constants-with-data), @Left@/@Right@ (M2),
+-- @'ANY'@/@AnyInferenceList()@ (M4) and the ADT classes this module emits.
+-- @pyVal@ itself is still not reused.
 --
 -- Keeping this partial, and gating 'IRConst' on it in 'emittable', makes the
 -- whole class of defect a compile-time refusal by construction rather than one
@@ -1474,13 +1477,22 @@ batchedVal :: IRValue -> Maybe String
 batchedVal (VFloat f) = Just (pyDouble f)
 batchedVal (VInt i)   = Just (show i)
 batchedVal (VBool b)  = Just (if b then "True" else "False")
--- The empty-list constant is the one list constant with a batched form: it is
--- pure structure, and both the shape probe (@sample == []@) and a fixed-length
--- list's spine terminator need it (design heterogeneous-batch-inference, M1). A
--- *non-empty* list constant stays refused — it carries per-element data (e.g.
--- the enumeration `SPLL.AutoNeural.indexOf` builds over, see task
--- batched-bool-enum-index) that the batched runtime has no reader for.
+-- The empty-list constant is pure structure: both the shape probe
+-- (@sample == []@) and a fixed-length list's spine terminator need it (design
+-- heterogeneous-batch-inference, M1).
 batchedVal (VList EmptyList) = Just "EmptyInferenceList()"
+-- A non-empty list constant is spelled as the runtime's own cons structure
+-- (task batched-refuses-list-constants-with-data). Its length is a
+-- compile-time fact, so it is uniform across every bucket, and its leaves are
+-- constants, which broadcast against the [B] leaves of a batched sample
+-- exactly as a scalar constant does ('InferenceList.__eq__' compares
+-- elementwise through 'eq'). A choice /between/ two list constants on a
+-- per-element condition stays refused: 'listValued' calls any list constant
+-- structure, so admitting the constant cannot put one inside a @torch.where@.
+batchedVal (VList (ListCont x xs)) = do
+  x'  <- batchedVal x
+  xs' <- batchedVal (VList xs)
+  return ("ConsInferenceList(" ++ x' ++ ", " ++ xs' ++ ")")
 -- A wildcard list -- "any length, any content" -- is pure structure (its own
 -- bucket, M4), same spelling as the scalar backend's.
 batchedVal (VList AnyList) = Just "AnyInferenceList()"

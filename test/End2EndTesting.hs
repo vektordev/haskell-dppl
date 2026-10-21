@@ -1573,12 +1573,12 @@ batchedRefusalTable =
   -- lists. With M1 (design heterogeneous-batch-inference) the list *spine*
   -- operations are in the fragment -- within a shape bucket they are uniform
   -- Python structure over [B] leaves -- so what is refused here is what
-  -- bucketing does not rescue: a list *constant* carrying per-element data
-  -- (`listLiteralDeconstruction`'s `[1.0, 2.0]`, the same shape as the
-  -- enumeration `SPLL.AutoNeural.indexOf` builds, see task
-  -- batched-bool-enum-index) and IRMap.
-  [ ("listLiteralDeconstruction", "constant with no batched representation (VList")
-  , ("map",                       "list map (IRMap)")
+  -- bucketing does not rescue: IRMap. A non-empty list *constant* is in the
+  -- fragment since task batched-refuses-list-constants-with-data (spelled as
+  -- the runtime's cons structure over constant leaves), so
+  -- `listLiteralDeconstruction` and `andInsideListOverDraws` (the `[ANY]` a
+  -- per-mask variant introduces) left this table and declare `batched`.
+  [ ("map",                       "list map (IRMap)")
   -- Either. Since heterogeneous M2 the tag is *structure*: it is part of the
   -- bucket signature, so the constructors, destructors and predicates are all
   -- in the fragment (`either`, `either_const`, `eitherDeconstruction`,
@@ -1636,8 +1636,6 @@ batchedRefusalTable =
   , ("normalThroughFunctionNested", "a prob/integ path calls shifted_normal, which is not a forward/integrate method")
   -- task batched-refuses-unit-constant
   , ("observeKeyword",            "main's forward uses a construct outside the tensor fragment: constant with no batched representation (VUnit)")
-  -- task batched-refuses-any-list-constant-in-mask-variant
-  , ("andInsideListOverDraws",    "main__m1's forward uses a construct outside the tensor fragment: constant with no batched representation (VList (ListCont VAny EmptyList))")
   -- task batched-recursion-entry-call-needs-descent
   , ("nestedIfEmptyListIntCdf",   "main_prob calls rec_prob recursively without descending into the tail of a list argument")
   ]
