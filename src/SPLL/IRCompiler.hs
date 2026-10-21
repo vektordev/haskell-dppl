@@ -3902,7 +3902,41 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
-    (pLeft, leftBinds) <- listen (operandProb meta mTblL left (IRVar x2))
+    -- The inversion's own applicability (task mult-enumerable-zero-divisor-crash):
+    -- 'invExpr' (e.g. mult's c/e) is undefined at some enumerated values (e.g.
+    -- e=0), and it sits as an argument to 'IRIsPossible', so it must be
+    -- evaluated before any membership test can run. Gating via 'IRIf' rather
+    -- than 'OpAnd' matters here: both operands of an IR boolean op are
+    -- evaluated, so an 'OpAnd' would still divide by zero.
+    let possibleExpr = IRIf appTest (IRIsPossible enumListR invExpr) (IRConst (VBool False))
+    -- Without topK, pLeft is read once, inside the 'possible' arm below, and the
+    -- optimizer's let-inlining moves its bindings there: a cell whose inverted
+    -- value lies outside the right-hand domain never descends into @left@.
+    -- Under topK the cutoff test reads pLeft a second time, so its bindings
+    -- stayed in front of the guard and every cell descended into @left@
+    -- whether or not it was possible. On a left-nested chain that eager
+    -- descent compounds per level into a product of the domain sizes, where
+    -- the guarded one only walks the possible splits (task
+    -- topk-compiled-scene-count-query-exponential-in-slots: p(0) on a 7-slot
+    -- scene count took 34 s against 0.1 s topK-off). So under topK pLeft is
+    -- bound once, behind 'possible', and reads as zero elsewhere -- a value
+    -- nothing consumes there, since the cutoff test is conjoined with
+    -- 'possible'. Its pure loop-invariant bindings (a network call) are
+    -- released into the writer first, as pRight's are below, so hoisting
+    -- still lifts them out of the loop.
+    (pLeft, leftNames, possible) <- case topKThreshold (compilerConfig meta) of
+      Nothing -> do
+        (pL, lBinds) <- listen (operandProb meta mTblL left (IRVar x2))
+        return (pL, map fst lBinds, possibleExpr)
+      Just _ -> do
+        (pL, lBinds) <- lift (runWriterT (operandProb meta mTblL left (IRVar x2)))
+        let (lFree, lGuarded) = splitHoistable [x2, x3] lBinds
+        setVariables lFree
+        possibleV <- mkVariable "possible"
+        pLeftV <- mkVariable "pLeft"
+        setVariables [ (possibleV, possibleExpr)
+                     , (pLeftV, IRIf (IRVar possibleV) (generateLetInExpr lGuarded pL) (srZero sr)) ]
+        return (IRVar pLeftV, map fst lGuarded ++ [possibleV, pLeftV], IRVar possibleV)
     -- pRight is computed in a nested writer so its bindings can be guarded by the topK check,
     -- avoiding the inner right-side inference work whenever acc_prob * pLeft is already below cutoff.
     -- The right-hand key is the INVERTED value, an expression rather than an
@@ -3925,16 +3959,9 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     -- MNIST sum). Pure bindings that read no loop variable and nothing bound
     -- per iteration are released into this writer instead, so they are
     -- hoisted exactly like pLeft's; everything else stays guarded.
-    let (rFree, rGuarded) = splitHoistable (x2 : x3 : map fst leftBinds) pRightBinds
+    let (rFree, rGuarded) = splitHoistable (x2 : x3 : leftNames) pRightBinds
     setVariables rFree
     let wrapR e = generateLetInExpr rGuarded e
-    -- The inversion's own applicability (task mult-enumerable-zero-divisor-crash):
-    -- 'invExpr' (e.g. mult's c/e) is undefined at some enumerated values (e.g.
-    -- e=0), and it sits as an argument to 'IRIsPossible', so it must be
-    -- evaluated before any membership test can run. Gating via 'IRIf' rather
-    -- than 'OpAnd' matters here: both operands of an IR boolean op are
-    -- evaluated, so an 'OpAnd' would still divide by zero.
-    let possible = IRIf appTest (IRIsPossible enumListR invExpr) (IRConst (VBool False))
     -- accProb * pLeft is a semiring product (srTimes): under logSpace both
     -- operands are log-probabilities, so a hardcoded OpMult here silently
     -- pruned every branch (task topk-logspace-unsound). The comparison against
@@ -4381,9 +4408,30 @@ anyBoundsNothing sr sample = IRIf (IRUnaryOp OpIsAny sample) (srOne sr)
 -- no longer does: its point is a projection of the query sample, which a
 -- marginal query does make a runtime VAny (see there).
 equalityGuard :: RType -> IRExpr -> IRExpr -> IRExpr
+--
+-- The sample is tested first, and a tuple @v@ builds syntactically (under
+-- its let-bindings) is compared field by field, each field under its own
+-- let-bindings only: an observed wildcard constrains nothing, and the part of
+-- @v@ it observes need not be evaluable there. A residue factor fixes a bound
+-- variable at a wildcard witness ('transportDirect'), and @(x + 0.0, 1.0)@ at
+-- @x = ANY@ against @(ANY, 1.0)@ evaluated @x + 0.0@ -- a raw type error --
+-- to test the whole tuple, and again to project its second field (task
+-- any-slot-through-injf-inverse-reaches-condition). A constructed tuple is
+-- never itself a wildcard, so its own 'OpIsAny' test is not needed.
 equalityGuard rt v sample =
-  IRIf (IRUnaryOp OpIsAny v) constTrueIR
-    (IRIf (IRUnaryOp OpIsAny sample) constTrueIR (equalityGuardBody equalityGuard rt v sample))
+  IRIf (IRUnaryOp OpIsAny sample) constTrueIR $ case (rt, constructedTuple v) of
+    (Tuple ft st, Just (wrap, a, b)) ->
+      IROp OpAnd (equalityGuard ft (wrap a) (IRDestruct AcFst sample))
+                 (equalityGuard st (wrap b) (IRDestruct AcSnd sample))
+    _ -> IRIf (IRUnaryOp OpIsAny v) constTrueIR (equalityGuardBody equalityGuard rt v sample)
+  where
+    constructedTuple (IRConstruct TgTuple [a, b]) = Just (id, a, b)
+    -- A nested tuple's field is its own let-bound construction.
+    constructedTuple (IRLetIn n e (IRVar n')) | n == n' = constructedTuple e
+    constructedTuple (IRLetIn n e inner) = do
+      (wrap, a, b) <- constructedTuple inner
+      return (pruneDeadLetIns . IRLetIn n e . wrap, a, b)
+    constructedTuple _ = Nothing
 
 equalityGuardStatic :: RType -> IRExpr -> IRExpr -> IRExpr
 equalityGuardStatic = equalityGuardBody equalityGuardStatic
@@ -5411,25 +5459,34 @@ distributeChoice c (ga, sa) (gb, sb) = ([IRIf c (conjIR ga) (conjIR gb)], WChoic
 -- not per field -- see there for why); this function never rejects, only
 -- chooses.
 mergeWitnessValue :: IRExpr -> IRExpr -> IRExpr
-mergeWitnessValue (IRConstruct TgTuple [a1, b1]) (IRConstruct TgTuple [a2, b2]) =
-  IRConstruct TgTuple [mergeWitnessValue a1 a2, mergeWitnessValue b1 b2]
+mergeWitnessValue p1 p2 = mergeWitnessFields (exposeConstructIR p1) (exposeConstructIR p2)
+
+-- | 'mergeWitnessValue' on witnesses whose tuples are syntactic. A witness
+-- read through a structural wrapper (@fst (e, 0.0)@) is a projection of a
+-- let-bound tuple instead, which the runtime pick below took whole over the
+-- sibling's complementary field (task
+-- fst-of-pair-wrapper-loses-structured-draw-constraint), hence
+-- 'exposeConstructIR' first.
+mergeWitnessFields :: IRExpr -> IRExpr -> IRExpr
+mergeWitnessFields (IRConstruct TgTuple [a1, b1]) (IRConstruct TgTuple [a2, b2]) =
+  IRConstruct TgTuple [mergeWitnessFields a1 a2, mergeWitnessFields b1 b2]
 -- A user-ADT constructor, field by field, as a tuple: @isDCons ds@ witnesses
 -- @DCons ANY ANY@, @dig ds * 3 == 21@ witnesses @DCons 7 ANY@, and taking the
 -- first whole (it is no wildcard at its root) answered P(DCons) with the digit
 -- never constrained (fuzz-admission-oracle-bugs item 9). A witness built
 -- under let-bindings (an inverse's own temporaries) is merged under them;
 -- chain-named binders are unique, so nothing is captured.
-mergeWitnessValue (IRLetIn n v b) p2 = IRLetIn n v (mergeWitnessValue b p2)
-mergeWitnessValue p1 (IRLetIn n v b) = IRLetIn n v (mergeWitnessValue p1 b)
-mergeWitnessValue p1 p2
+mergeWitnessFields (IRLetIn n v b) p2 = IRLetIn n v (mergeWitnessFields b p2)
+mergeWitnessFields p1 (IRLetIn n v b) = IRLetIn n v (mergeWitnessFields p1 b)
+mergeWitnessFields p1 p2
   | Just (c1, fs1) <- ctorSpineIR p1, Just (c2, fs2) <- ctorSpineIR p2
   , c1 == c2, length fs1 == length fs2 =
-  foldl IRApply (IRVar c1) (zipWith mergeWitnessValue fs1 fs2)
+  foldl IRApply (IRVar c1) (zipWith mergeWitnessFields fs1 fs2)
 -- A bare wildcard on the second side is the least informative witness of all,
 -- so the first wins even when it is only partly known: @isRight m@ witnesses
 -- @Right ANY@, @right m@ at @Right ANY@ witnesses a bare @ANY@, and taking the
 -- latter measured the draw at a sentinel (a type error in its @isLeft@).
-mergeWitnessValue p1 p2 = IRIf (IRUnaryOp OpIsAny p2) p1 (IRIf (irRuntimeContainsAny p1) p2 p1)
+mergeWitnessFields p1 p2 = IRIf (IRUnaryOp OpIsAny p2) p1 (IRIf (irRuntimeContainsAny p1) p2 p1)
 
 -- | A witness built with a wildcard inside a constructor (not at its root):
 -- statically a set of values rather than one.
@@ -6080,11 +6137,31 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
   [occ] -> case target of
     WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
-      Just InvChain{invValue = g0, invCoV = cov0, invGuard = guard0} -> do
+      Just InvChain{invValue = g0, invCoV = cov0, invGuard = guard0, invReadsAny = ra0} -> do
         g     <- pruneDeadLetIns <$> materializeAnchors meta g0
         cov   <- pruneDeadLetIns <$> materializeAnchors meta cov0
         guard <- pruneDeadLetIns <$> materializeAnchors meta guard0
+        ra    <- pruneDeadLetIns <$> materializeAnchors meta ra0
         let applyTo e arg = IRApply (IRLambda bodyCN e) arg
+        -- A step of the chain reading a marginal wildcard ('invReadsAny'):
+        -- @x + 0.0@ observed at ANY. The step has no value to compute -- its
+        -- arithmetic on the wildcard was a raw type error (@Minus (VAny, 0.0)@,
+        -- or the comparison of a condition evaluated at the witness) -- and
+        -- the observation says nothing about the bound variable through this
+        -- occurrence: the set is 'WFull', as the bare @x@ in the same slot
+        -- recovers the wildcard itself, and no guard, value or change of
+        -- variables of the chain is evaluated on that side. The world's
+        -- domain guard holds there, as the point-witness fold's does
+        -- ('pointInvert'). Task any-slot-through-injf-inverse-reaches-condition.
+        -- Decided statically where the target is a literal (an if's
+        -- canonical True/False target): no wildcard there, and the set keeps
+        -- the shape its consumers match on.
+        let readsAny = case foldWildcardTest (substIRVar bodyCN s ra) of
+              IRConst (VBool False) -> Nothing
+              r -> Just r
+            unlessAny e = maybe e (\r -> IRIf r constTrueIR e) readsAny
+            wildcardSide set = maybe set (\r -> WChoice r WFull set) readsAny
+            wildValue rt v = maybe v (\r -> IRIf r (IRConst (anyOfType rt)) v) readsAny
         -- The inversion may pass through a deconstructing InjF (e.g.
         -- fromLeft/fromRight) only applicable on one arm; fold that as an
         -- extra world guard so measureWorld zeroes this world instead of
@@ -6102,7 +6179,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
           Just spine@(_:_)
             | any (\n -> isFieldCtorNode meta n || isNamedCallNode n || letHidesField meta n) (init spine)
             , Expr occTI (Var boundName) <- last spine -> do
-                f <- residueFactor meta exprBody boundName (rType occTI) value s
+                f <- residueFactor meta exprBody boundName (rType occTI) (wildValue (rType occTI) value) s
                 return [WFactor [] f]
           _ -> return []
         -- A path through an '==' (or constructor test) observed False
@@ -6124,7 +6201,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
         case witnessSet value (IROp OpMult c0 (applyTo cov s)) of
           WPoint v _ | hasAnyExceptExpr v -> return Nothing
           _ | not (null factors), hasAnyExceptExpr value -> return Nothing
-          set -> return (Just [WWorld [applyTo guard s] set factors])
+          set -> return (Just [WWorld [unlessAny (applyTo guard s)] (wildcardSide set) factors])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, dir) -> do
@@ -6144,6 +6221,25 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
     _ -> return Nothing
   _ -> return Nothing
   where bodyCN = chainName (getTypeInfo exprBody)
+
+-- | Folds a wildcard test ('invReadsAny' applied to a target) as far as its
+-- literals decide it: 'OpIsAny' of a constant, a projection of a constant
+-- tuple, an 'IRIf' on a constant, a let of a constant.
+foldWildcardTest :: IRExpr -> IRExpr
+foldWildcardTest = pruneDeadLetIns . irMap step
+  where
+    step e = case e of
+      IRUnaryOp OpIsAny (IRConst v) -> IRConst (VBool (isHole v))
+      IRDestruct AcFst (IRConst (VTuple a _)) -> IRConst a
+      IRDestruct AcSnd (IRConst (VTuple _ b)) -> IRConst b
+      IRIf (IRConst (VBool b)) t f -> if b then t else f
+      IRLetIn n _ b@(IRConst _) | not (freeInIR n b) -> b
+      -- A constant side operand (@==@'s compared value) is let-bound.
+      IRLetIn n c@(IRConst _) b -> foldWildcardTest (substIRVar n c b)
+      _ -> e
+    isHole VAny = True
+    isHole (VList AnyList) = True
+    isHole _ = False
 
 -- | The nodes from @e@'s root down to (and including) the node carrying chain
 -- name @cn@, root first; Nothing when no node in @e@ carries it.
@@ -6382,13 +6478,20 @@ equalityWorlds meta occs side other target = do
   b <- toIRGenerate meta other
   wsT <- invertToWorlds meta occs side (WPoint b const1)
   return $ case wsT of
-    Just ts@[WWorld gs (WPoint xb _) []] ->
+    -- A transport that may read a wildcard target ('transportDirect') wraps
+    -- its point in that runtime choice; @b@ is a deterministic value, not a
+    -- query's wildcard, so the point is what it constrains.
+    Just ts@[WWorld gs set []] | Just xb <- plainPoint set ->
       -- nested 'IRIf', not 'OpAnd': a guard protects the ones after it
       let g = foldr (\gd acc -> IRIf gd acc constFalseIR) constTrueIR gs
           fs = [ WWorld [g] (WExcept WFull xb) []
                , WWorld [notIR g] WFull [] ]
       in Just (boolWorlds target ts fs)
     _ -> Nothing
+  where
+    plainPoint (WPoint xb _) = Just xb
+    plainPoint (WChoice _ WFull (WPoint xb _)) = Just xb
+    plainPoint _ = Nothing
 
 -- ===== Plan-guided lazy enumeration (design plan-guided-lazy-enumeration, M1) =====
 --
@@ -9236,12 +9339,20 @@ applyBinding meta cumulative rt binding sample = do
         let wildcardHasOwnAnswer = case rt of
               TArrow _ _ -> False
               _ -> cumulative || inlineBody
-        let resReadable = if wildcardHasOwnAnswer
-              then IRIf readsAnyW (IRConst (VBool False)) (notIR (IRUnaryOp OpIsAny appliedSample))
-              else notIR readsAnyW
+        --
+        -- Where a wildcard witness has no answer of its own, the operand's
+        -- result IS read at it, as the operand's marginal: one, as
+        -- 'toIRInferenceSave' answers a wildcard, before the operand's own
+        -- inverse steps apply arithmetic to it. Unguarded, a compound operand
+        -- -- @snd (if ..) + 0.0@ handed a helper's chain-made wildcard -- died
+        -- in its @plus@ inverse's @Minus (VAny, 0.0)@ at -O0 (task
+        -- any-slot-through-injf-inverse-reaches-condition).
+        let wildW = IRUnaryOp OpIsAny appliedSample
+        let resReadable = IRIf readsAnyW (IRConst (VBool False)) (notIR wildW)
+        let wildcardSafe = if wildcardHasOwnAnswer then id else anySafe sr appliedSample id
         let operandAt c = do
               (res0, resBinds) <- lift (runWriterT (toIRInference (covOperandMeta cumulative appliedCoV meta) c v appliedSample))
-              if null resBinds then return res0
+              wildcardSafe <$> if null resBinds then return res0
                 else shareResult sr "inverted" [guard, resReadable] resBinds res0
         res <- operandAt cumulative
         -- Change of variables for the inverse the observation was pushed through;

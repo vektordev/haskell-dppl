@@ -488,9 +488,6 @@ jlConformsShape d (TTensor sh t) e
          ++ " && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
 jlConformsShape _ _ _ = "true"
 
-collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
-collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])
-collectApplyChain expr = (expr, [])
 
 generateLambdaExpression :: IRExpr -> GlobalVariableSupply String
 generateLambdaExpression expr = do

@@ -1,0 +1,7 @@
+-- Task batched-value-dependent-structure-select. The probability path
+-- enumerates m's three values in a tensor map, and the inner `if` chooses
+-- between two Either arms by a test on the map's element. That element is a
+-- domain constant, the same for the whole batch, so the batched backend
+-- keeps the select as a Python conditional. The dichotomy guard used to
+-- refuse it as a value-dependent choice between structures.
+main = draw m = (if Uniform < 0.3 then right True else if Uniform < 0.5 then right False else left False) in if isRight m then (if fromRightPartial m then right 5 else left True) else left False

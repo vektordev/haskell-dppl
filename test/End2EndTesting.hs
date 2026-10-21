@@ -1577,21 +1577,26 @@ batchedRefusalTable =
   -- lists. With M1 (design heterogeneous-batch-inference) the list *spine*
   -- operations are in the fragment -- within a shape bucket they are uniform
   -- Python structure over [B] leaves -- so what is refused here is what
-  -- bucketing does not rescue: IRMap. A non-empty list *constant* is in the
+  -- bucketing does not rescue. A non-empty list *constant* is in the
   -- fragment since task batched-refuses-list-constants-with-data (spelled as
   -- the runtime's cons structure over constant leaves), so
   -- `listLiteralDeconstruction` and `andInsideListOverDraws` (the `[ANY]` a
   -- per-mask variant introduces) left this table and declare `batched`.
-  [ ("map",                       "list map (IRMap)")
+  -- `map`, `mapMultList`, `partialInjFMapPlus` and `wrappedHoAdt` left this
+  -- table with task batched-refuses-list-map, and `either_arith_inv`, `injApply`
+  -- and `twiceApplication` with task batched-refuses-inner-lambda: a list map is a
+  -- Python walk over the bucketed spine and an inner lambda a Python closure.
+  -- They declare `batched`.
   -- Either. Since heterogeneous M2 the tag is *structure*: it is part of the
   -- bucket signature, so the constructors, destructors and predicates are all
   -- in the fragment (`either`, `either_const`, `eitherDeconstruction`,
-  -- `nestedDeconstruction`, `either_both_cont` are eligible programs now). What
-  -- is refused is the dichotomy's other half -- `either_isleft` chooses which
-  -- *arm* to build from a coin flip (`if Uniform < 0.4 then left .. else
-  -- right ..`), so the sample's structure is per element and there is no bucket
-  -- to run it in.
-  , ("either_isleft",             "arms have different structure")
+  -- `nestedDeconstruction`, `either_both_cont` are eligible programs now). The
+  -- dichotomy's other half -- a value-dependent select between two arms, as
+  -- isLeft's inverse in `either_isleft` -- left this table with task
+  -- batched-value-dependent-structure-select: the batch is split at the
+  -- select ('pythonLibBatched.split_retry'). What the split does not cover (a
+  -- per-element structure select inside a tensor map's body) has no corpus
+  -- trigger; its refusal is a synthetic-IR row in "TestInternals".
   -- `eitherNeural`'s read-logits network (Either Int Bool) used to be refused here too --
   -- not for the Either shape itself (M2 handles that), but because its Bool
   -- arm's enum-index lookup built an `indexOf(x, [True, False])` call that
@@ -1621,25 +1626,16 @@ batchedRefusalTable =
   -- which is the *other* reason 'recOffenders' still finds for it: the call
   -- does not descend into the tail of a list argument, since dice's recursion
   -- is genuinely value-dependent (a coin flip), not structure-directed.
-  , ("dice",                      "calls dice_prob recursively without descending into the tail of a list argument")
+  [ ("dice",                      "calls dice_prob recursively without descending into the tail of a list argument")
   -- a prob/integ path reaching a method batched mode does not emit: a
   -- *recursive* generator, which 'inlineDetGenCalls' cannot beta-reduce away
   , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
-  -- an inner lambda that did not reduce, once in each of the three method
-  -- bodies (twiceApplication's forward/integrate *do* reduce; only its
-  -- generate body keeps the literal lambda -- the accepted cost of generate's
-  -- hard refusal rule, see 'generateFunctionsBatched')
-  , ("either_arith_inv",          "main's forward uses a construct outside the tensor fragment: inner lambda (IRLambda)")
-  , ("injApply",                  "main's integrate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
-  , ("twiceApplication",          "main's generate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
   -- Refusals pinned as open bugs under universal batched admission (task
   -- batched-admission-universal), one row per refusal class without a row
   -- above. Each fails, as every row here does, the day batched mode accepts
   -- the program; the row then leaves the table with its ticket.
   -- task batched-prob-path-calls-helper-normal-params
   , ("normalThroughFunctionNested", "a prob/integ path calls shifted_normal, which is not a forward/integrate method")
-  -- task batched-refuses-unit-constant
-  , ("observeKeyword",            "main's forward uses a construct outside the tensor fragment: constant with no batched representation (VUnit)")
   -- task batched-recursion-entry-call-needs-descent
   , ("nestedIfEmptyListIntCdf",   "main_prob calls rec_prob recursively without descending into the tail of a list argument")
   ]
@@ -1862,6 +1858,8 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
   , testProperty "a comprehension whose body is too deep becomes a loop, imports and evaluates" (once deepComprehensionCase)
   , testProperty "a shallow comprehension stays a comprehension" (once shallowComprehensionCase)
   , testProperty "24 nested noisy ifs over an enumerated draw import and match the idealized value" (once enumIfChainCase)
+  , testGroup "BatchedPython"
+      [ testProperty "24 nested noisy ifs over an enumerated draw import batched and match the idealized value" (once enumIfChainBatchedCase) ]
   , testProperty "a too-deep comprehension nested in another's body becomes nested loops, imports and evaluates" (once nestedComprehensionCase)
   , testProperty "a chain of 11 two-field answers under an enumerated latent imports and matches the idealized values" (once chainedAnswersCase)
   ]
@@ -1967,12 +1965,15 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
     -- original blocker, now compiles it in under a second (task
     -- batched-codegen-exponential-in-nested-enum-ifs); its corpus twin at
     -- depth 6 is enumerability/noisyIfChainOverDraw6.
+    enumIfChainLevels = 24 :: Int
+    enumIfChainProgram =
+      let cond = "(if Uniform < 0.1 then (not b) else b)"
+          chain = iterate (\e -> "(if " ++ cond ++ " then " ++ e ++ " else False)") "True" !! enumIfChainLevels
+      in "main = draw b = Uniform < 0.5 in " ++ chain
+    enumIfChainPTrue = 0.5 * 0.9 ^ enumIfChainLevels + 0.5 * 0.1 ^ enumIfChainLevels :: Double
     enumIfChainCase = ioProperty $ do
-      let levels = 24 :: Int
-          cond = "(if Uniform < 0.1 then (not b) else b)"
-          chain = iterate (\e -> "(if " ++ cond ++ " then " ++ e ++ " else False)") "True" !! levels
-          progSrc = "main = draw b = Uniform < 0.5 in " ++ chain
-          pTrue = 0.5 * 0.9 ^ levels + 0.5 * 0.1 ^ levels :: Double
+      let progSrc = enumIfChainProgram
+          pTrue = enumIfChainPTrue
       case either (Left . show) Right (tryParseProgram "" progSrc) >>= compile defaultCompilerConfig of
         Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
         Right env -> do
@@ -1990,6 +1991,38 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
             readProcessWithExitCode "python3" [tmpPath] ""
           return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
                      (code == ExitSuccess)
+    -- Task batched-enum-comprehension-exceeds-parser-nesting: the same
+    -- program through the batched backend, whose enum-mass line
+    -- @tensor_sum([body for b in xs])@ was 200+ brackets deep. It is spilled
+    -- into a loop over the domain, with the domain still a literal so the
+    -- latent's structural reads stay Python conditionals.
+    enumIfChainBatchedCase = ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorchProperty "deep expression spill: batched enum if chain"
+        Just py ->
+          case either (Left . show) Right (tryParseProgram "" enumIfChainProgram)
+                 >>= compile defaultCompilerConfig{batched = True} >>= generateFunctionsBatched True of
+            Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
+            Right srcLines -> do
+              cwd <- getCurrentDirectory
+              (code, out, err) <- withSystemTempFile "enum_if_chain_batched.py" $ \tmpPath tmpHandle -> do
+                hPutStr tmpHandle $ unlines
+                  [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", unlines srcLines
+                  , "import torch"
+                  , "got = torch.as_tensor(main.forward(torch.tensor([True, False, True]))[0])"
+                  , "want = torch.tensor([" ++ show enumIfChainPTrue ++ ", " ++ show (1 - enumIfChainPTrue)
+                      ++ ", " ++ show enumIfChainPTrue ++ "], dtype=got.dtype)"
+                  , "if not bool(((got - want).abs() <= " ++ show probTolerance ++ ").all()):"
+                  , "    raise ValueError('batched forward = %r, expected %r' % (got, want))"
+                  ]
+                hClose tmpHandle
+                readProcessWithExitCode py [tmpPath] ""
+              return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
+                         (code == ExitSuccess)
+                  .&&. counterexample "the enum-mass comprehension was not spilled into a loop over the literal domain"
+                         (any (\l -> "for _v" `isPrefixOf` dropWhile (== ' ') l && " in [True, False]:" `isInfixOf` l)
+                              (concatMap lines srcLines))
     shallowComprehensionCase =
       let src = comprehensionSource 5
       in counterexample src (" for x in " `isInfixOf` src && null (spillLines src))
@@ -2070,6 +2103,31 @@ runPythonChecks name src checks = do
     hPutStr tmpHandle $ unlines (["import sys", "sys.path.insert(0, " ++ show cwd ++ ")", src] ++ checks)
     hClose tmpHandle
     readProcessWithExitCode "python3" [tmpPath] ""
+
+-- ===========================================================================
+-- A let in a comprehension iterable
+-- (task backends-agree-python-walrus-in-comprehension-iterable)
+-- ===========================================================================
+--
+-- CPython refuses an assignment expression anywhere in a comprehension's
+-- iterable, and at -O2 the cumulative of an int product compiled its
+-- materialized cell list, whose cells carry CSE lets, into exactly that, so
+-- the module did not load. The corpus program pins the answers on the
+-- interpreter, but its constructs are all certified by the agreement
+-- fuzzers, so the corpus does not run it on Python; this does. The IR-level
+-- cases (scalar, Julia and batched) are in "IRFuzz".
+comprehensionIterableLetTests :: TestTree
+comprehensionIterableLetTests = testGroup "let in a comprehension iterable (backends-agree-python-walrus-in-comprehension-iterable)"
+  [ testProperty name $ once $ ioProperty $ do
+      prog <- corpusPplPath name >>= parseProgram
+      (_, _, _, tcs) <- corpusTstPath name >>= parseTestCases
+      let env = compile defaultCompilerConfig prog
+          bindsAnIterable = either (const False) (isInfixOf "((_it" . torchFreePythonModule) env
+      return $ counterexample "the module binds no comprehension iterable, so this no longer reaches the fix"
+                 bindsAnIterable
+          .&&. testPython [] env tcs
+  ]
+  where name = "intProductLetInComprehensionIterable"
 
 -- ===========================================================================
 -- Deeply indented blocks are hoisted
@@ -2752,6 +2810,9 @@ containsStructureV (VList _)    = True
 containsStructureV (VEither _)  = True
 containsStructureV (VTuple a b) = containsStructureV a || containsStructureV b
 containsStructureV VAny         = True
+-- Unit carries no per-element data: structure, spelled @None@ by 'pyVal' and
+-- keyed @'U'@ by @pythonLibBatched.signature@ (task batched-refuses-unit-constant).
+containsStructureV VUnit        = True
 -- An ADT value has no structure-of-arrays literal ('batchLiteral'), but the
 -- bucketing wrapper takes it as-is: @signature@ keys an enumeration as one
 -- bucket and any other ADT by constructor tag and field shape. Routing it
@@ -2799,6 +2860,7 @@ noEnumCtors = const Nothing
 -- concrete case at that position). Used only to predict the bucket count.
 shapeSig :: EnumCtors -> IRValue -> String
 shapeSig _ VAny                 = "ANY"
+shapeSig _ VUnit                = "U"
 shapeSig _ (VList AnyList)      = "ANY"
 shapeSig e (VList l)            = "L(" ++ intercalate "," (map (shapeSig e) (toList l)) ++ ")"
 shapeSig e (VTuple a b)         = "T(" ++ shapeSig e a ++ "," ++ shapeSig e b ++ ")"

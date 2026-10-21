@@ -96,13 +96,14 @@ is **pure arithmetic** (`spillable`: no draw, no generator reference, no call,
 no lambda). A whole conditional expression may move, intact with its guard.
 The no-call rule is the approved scope, and it is why `writeLogits`'s V-deep
 `ConsInferenceList(main.forward(..)[0], ...)` chain is still refused at V = 200
-(docs-repo task `writelogits-cons-chain-nests-v-deep`). The Julia and batched
-Python emitters have no such pass and were not checked. Pinned by `End2End`'s
+(docs-repo task `writelogits-cons-chain-nests-v-deep`). The measurement, the
+walk and its admission rules live in `SPLL.PythonNesting`, shared with the
+batched emitter (below); the Julia emitter has no such pass and was not
+checked. Pinned by `End2End`'s
 `deep expression spill` group (hand-built IR: a 300-term sum, with a
 divide-by-zero arm as the laziness canary).
 
-The batched emitter has no spill, but its one known V-deep line no longer
-arises: a select chain `x == k0 ? v0 : x == k1 ? v1 : .. : d` with scalar
+The batched emitter's one known V-deep line no longer arises: a select chain `x == k0 ? v0 : x == k1 ? v1 : .. : d` with scalar
 constant keys and arms and a pure scrutinee -- what `indexOfChain` makes of a
 read-logits network's value-to-slot lookup for a non-contiguous domain -- is
 emitted as one `table_select(x, keys, vals, d)` (`tableSelect`, from two keys
@@ -132,6 +133,22 @@ pure, and the line stayed at 200+ brackets. Pinned by the `deep expression
 spill` group (a hand-built nested pair, and the 11-answer chain through the
 pipeline). Docs-repo task `chained-answers-exceed-python-paren-depth`.
 
+The batched emitter spills the same way (`CodeGenPyTorchBatched.batchedLine`,
+the counterpart of `liftedLine`, running `SPLL.PythonNesting.spillDeep`): its
+enumerated `draw` sums `tensor_sum([body for b in xs])`, ~20 nested ifs over
+the latent pass 200 brackets, and the comprehension becomes a loop
+(`batchedSpillStatement`) appending one `[B]` tensor per domain element, so
+`tensor_sum` stacks the same `[E, B]` tensor. Two batched-specific points.
+Each spill binding is threaded into the structural environment (`bindS`), and
+the loop variable is bound as the comprehension's was (`bindMap`), so a
+structural read of the latent is still a Python `if`, not a `torch.where`.
+That needs the domain to stay a literal at the `for`: `spillDeep` never cuts a
+`BTensor` of constants (one bracket level, nothing to gain). And `IRSelect`
+(a `torch.where` call, all three operands evaluated) counts as strict in all
+its operands; the scalar emitter never sees one. Pinned by the `deep
+expression spill` group's `BatchedPython` case (the 24-if chain). Docs-repo
+task `batched-enum-comprehension-exceeds-parser-nesting`.
+
 ## Python methods indented past 99 levels hoist their deep blocks
 
 Statement emission trades bracket depth for **indentation** depth, one level
@@ -159,6 +176,24 @@ and `stCallables` stay globals. Pinned by `End2End`'s `deep indentation hoist`
 group (hand-built 150-deep chains in return, let and loop-body position, a
 60-deep chain that must not hoist, and the 100-if program through the
 pipeline). Docs-repo task `python-nested-conditionals-exceed-indentation-limit`.
+
+## A walrus never sits in a comprehension's iterable
+
+Both Python backends lower an expression-position `IRLetIn` to an assignment
+expression, `((v := e), body)[1]`, and `BMap`, `BZip` and a list or tensor
+`IRConformsTo` check to comprehensions. CPython refuses `:=` anywhere inside
+a comprehension's iterable, even under a lambda or a nested comprehension
+there, and the optimizer's CSE does put lets there (a cumulative's
+materialized cell list, `[T(((l := ...), ...)[1]), ...]`), so such a module
+did not load. `PythonNesting.bindIterable` binds an iterable whose rendered
+text contains `:=` to a temporary first, `((_itN := it), [b for v in
+_itN])[1]`. That is the same evaluation (a comprehension evaluates its first
+iterable once, eagerly, in the enclosing scope), and an iterable without a
+walrus is emitted as before, so every module that loaded before is
+byte-identical. Pinned by the corpus program
+`arithmetic/intProductLetInComprehensionIterable` and the IR fuzz group's "a
+let in a comprehension's operand" cases (scalar, Julia, batched). Docs-repo
+task `backends-agree-python-walrus-in-comprehension-iterable`.
 
 ## Unary math must not raise where the interpreter answers
 

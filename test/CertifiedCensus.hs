@@ -38,12 +38,16 @@ module CertifiedCensus
   , batchedCertifiedConstructs
   , batchedProgramCensus
   , batchedUncertifiedConstructs
+  , structureSplitLabel
+  , lineSpillLabel
+  , selectDemotionLabel
   ) where
 
-import Data.Char (isSpace)
-import Data.List (nub, sort, (\\))
+import Data.Char (isDigit, isSpace)
+import Data.List (isPrefixOf, nub, sort, (\\))
 
 import SPLL.IntermediateRepresentation
+import SPLL.CodeGenPyTorchBatched (usesStructureSplit, usesSelectDemotion, generateFunctionsBatched)
 import SPLL.Lang.Types (GenericValue(..), GenericList(..))
 
 -- | Every IR construct a body uses, as a label naming its kind:
@@ -229,8 +233,54 @@ batchedCertifiedConstructs =
 -- | A program's batched census: the constructs of the probability and
 -- integrate bodies of its batched compile (after the select pass), which is
 -- what @batched-vs-expected@ calls. A refused compile contributes nothing.
+--
+-- Plus 'structureSplitLabel' when the batched backend splits a body at a
+-- structure select ('SPLL.CodeGenPyTorchBatched.usesStructureSplit'): the
+-- split is runtime code (@split_retry@) that no IR construct names, so the
+-- census has to name it itself. The fuzz arms' reach is counted from IR
+-- constructs alone, so the label is never in 'batchedCertifiedConstructs',
+-- and a program that splits always has its batched-vs-expected check.
+--
+-- Likewise 'selectDemotionLabel' when the batched backend turns a select back
+-- into a structural @if@ ('SPLL.CodeGenPyTorchBatched.usesSelectDemotion'):
+-- the census still counts an 'IRSelect' there, which the fuzz arms certify as
+-- an eager @torch.where@, but the module emits a Python @if@ they never
+-- compared -- and a select over a shape probe that was emitted eagerly is how
+-- a list program read the head of its empty tail (task
+-- batched-draw-bound-list-element-reads-empty-tail).
+--
+-- Likewise 'lineSpillLabel' when the emitted module spilled a line too deep for
+-- CPython into statements (@_sN = ...@, 'SPLL.PythonNesting'). Whether a line
+-- is that deep depends on the program's scale (a 250-value domain, 24 nested
+-- ifs), which no IR construct names and the fuzz arms' small programs never
+-- reach, so a census of constructs alone would certify a module that does not
+-- even import (task batched-enum-comprehension-exceeds-parser-nesting).
 batchedProgramCensus :: Either e IREnv -> [String]
-batchedProgramCensus = either (const []) (irEnvConstructs inferenceBodies)
+batchedProgramCensus = either (const []) census
+  where census env = sort (nub (irEnvConstructs inferenceBodies env
+                                ++ [ structureSplitLabel | usesStructureSplit env ]
+                                ++ [ selectDemotionLabel | usesSelectDemotion env ]
+                                ++ [ lineSpillLabel | spillsALine env ]))
+        spillsALine env = either (const False) (any isSpillLine . concatMap lines)
+                                 (generateFunctionsBatched True env)
+        isSpillLine l = case dropWhile isSpace l of
+          '_' : 's' : rest@(c : _) | isDigit c -> " = " `isPrefixOf` dropWhile isDigit rest
+          _ -> False
+
+-- | The batched census label of a per-structure split (task
+-- batched-value-dependent-structure-select).
+structureSplitLabel :: String
+structureSplitLabel = "Batched:structure split"
+
+-- | The batched census label of a select the batched backend demotes back to
+-- a structural @if@ (task batched-draw-bound-list-element-reads-empty-tail).
+selectDemotionLabel :: String
+selectDemotionLabel = "Batched:structural select"
+
+-- | The batched census label of a line spilled for CPython's bracket limit.
+lineSpillLabel :: String
+lineSpillLabel = "Batched:deep line spill"
+
 
 -- | The constructs of a batched census the batched arm does not certify.
 batchedUncertifiedConstructs :: [String] -> [String]

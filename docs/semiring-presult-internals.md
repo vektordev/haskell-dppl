@@ -243,6 +243,17 @@ while `z + (x + y)` keeps the exact `0.027`. `Corpus.TopKOperandOrder` (Slow)
 checks every commutative site of the corpus. No other corpus program diverges
 (task `topk-prunes-on-left-operand-marginal-only`).
 
+The guard must not make that loop **eager**. Topk-off, `p(l = e)` is read
+once, inside the cell's `isPossible` arm, and the optimizer inlines it there,
+so a cell whose inverted value is outside `r`'s domain never descends into `l`.
+The cutoff test reads it a second time, so under topK it is let-bound behind
+that same `isPossible` guard (zero elsewhere, where the conjoined cutoff test
+ignores it). Bound in front of the guard, every cell descended into `l`, and a
+left-nested chain such as a scene count paid the product of its split domains:
+p(0) on a 7-slot count took 34 s against 0.1 s topK-off (task
+`topk-compiled-scene-count-query-exponential-in-slots`, pinned by
+`Internals.wideProductSceneTopKQueryPolynomial`).
+
 ## A pruned probability is a lower bound — and complements are not
 
 A pruned result is a **lower bound** on the exact one, and lower bounds

@@ -129,6 +129,10 @@ def logsumexp(xs):
     ref = ts[0]
     return t.logsumexp(t.stack([x if t.is_tensor(x) else t.tensor(float(x), dtype=ref.dtype)
                                 for x in xs]), 0)
+  # A NaN term makes the reduction NaN, as in the interpreter and Julia
+  # (the builtin max skips a NaN that is not in front, which would answer -inf).
+  if any(x != x for x in xs):
+    return math.nan
   m = max(xs)
   if m == -math.inf:
     return -math.inf

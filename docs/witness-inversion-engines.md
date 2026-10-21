@@ -272,6 +272,28 @@ so `exp leaf == -1.0` is impossible rather than a NaN density. Corpus:
 nested, two-sided and always-false `exp` shapes) and
 `test/cases/plan-enumeration/planEnumContExp*`.
 
+### A point transport that reads a wildcard
+
+A point transported through an arithmetic step (`x + 0.0`, `log x`) at a
+marginal query's `ANY` has no value: the step's inverse is a raw type error
+on the wildcard (`Minus (VAny, 0.0)`), and so is its domain guard (`exp`'s
+`s > 0`). The bare `x` in the same slot recovers the wildcard itself, which
+every consumer of a `WPoint` reads as "unconstrained". `transportDirect`
+gives the arithmetic chain the same meaning: where the chain's
+`invReadsAny` (`ForwardChaining.readsAnyChain`) holds at run time, the set
+is `WFull` (a `WChoice` on that test), the domain guard holds, and the
+residue factor fixes the variable at the wildcard. Nothing of the chain is
+evaluated on that side. The residue factor stays safe because
+`equalityGuard` tests the sample before the value, and compares a tuple it
+builds syntactically (under its let-bindings) field by field, each field
+under its own bindings only. So `x + 0.0` under an `ANY` field is never
+computed. The point-witness fold has the matching rule: where a wildcard
+witness has no answer of its own (a non-inline body in probability mode),
+the operand's result is read at it as its marginal, one (`anySafe`), before
+the operand's own inverse steps run. Task
+`any-slot-through-injf-inverse-reaches-condition`; corpus
+`test/cases/set-witness/anySlotThrough*`.
+
 ## Plan engine: entry points, several reads, case splits
 
 The plan engine is entered from a `draw` of a neural read **and from a call of
@@ -594,3 +616,60 @@ from above, so it misses a rank-deficient map with as many draws as slots
 skipped. Dependence through a comparison, an integer or an `if` condition does
 not count, which keeps the piecewise-isometric `(x, if x > 0.5 then 1.0 else
 2.0)` quiet.
+
+## A point inversion's change of variables is its spine's
+
+`toValuePath` hands back every solved clause up to the one concluding the
+witnessed occurrence, in topological order: the value-carrying **spine** from
+the observed slot (`chainSpine`), plus side computations that recover the
+other operands of each inverse step, often other latents (the divisor of a
+`mult` inverse, the subtrahend of a `plus` one), plus whatever unrelated
+clauses happen to sort earlier. The change of variables (`invCoV`) is the
+product of the inverse derivatives along the spine alone
+(`ForwardChaining.jacobianClauses`). The joint Jacobian of a point inversion
+is triangular, and its determinant is the product of the diagonal entries,
+one per latent; a side computation's derivative is another latent's own
+diagonal entry, which that latent's witness already carries. A side operand
+supplies its value, never its derivative. The cumulative step direction
+(`cumulativeStep`) reads the same spine.
+
+Multiplying over the whole path applied a sibling's scaling twice whenever
+its recovery sorted ahead of the witness's own: `(a + 3.0*b, 3.0*b)`, a
+comparison slot ahead of the slot recovering its operand, and above all an
+alias (`draw x0 = z`), which adds a binding level and so reorders the sort.
+Where a spine step's value-carrying premise cannot be identified,
+`jacobianClauses` falls back to every clause the start needs; no corpus
+program reaches that fallback. Corpus: `crossLatentSideOperandJacobian`,
+`comparisonSiblingJacobian`, `aliasedDrawScaledSibling`,
+`aliasedDrawScaledChain`, `aliasedDrawThroughScalingHelper`,
+`doubleAliasedDrawParameterScaledSibling`.
+
+## Several reads of a structured variable merge field by field
+
+A variable read more than once has one inverse chain per read, and
+`ForwardChaining.mergeExpr` combines them (the set-witness engine's
+`IRCompiler.mergeWitnessValue` does the same for its point witnesses). Two
+witnesses that are tuples or constructions with complementary wildcard fields
+merge field by field, with the product of their Jacobians; any other pair is
+taken as two routes to the same value, and one is kept (`mergeExpr2`: the
+first, or the one holding no wildcard; `mergeWitnessValue`: picked at run
+time by a shallow `isAny` test). Both tests read the witness's shape off its
+syntax, so a read inverted through a structural wrapper hid it: `fst (e,
+0.0)` recovers `e` as the first field of the let-bound `(e', ANY)`, a
+projection of a let-bound variable, not a tuple. Beside `snd e`'s `(ANY, b)`
+it counted as a whole value and won, and the other field went unobserved
+(`draw e = (Normal, Uniform) in (fst (fst (e, 0.0)), snd e)` answered at dim
+1, and points off the Uniform's support were possible). `isLeft (fst (e,
+0.0))` likewise hid its `Left ANY` from the `fromLeft e` read's `Left x`, and
+a helper `h q = fst q` hid its tuple the same way.
+
+`ForwardChaining.exposeConstructIR`, applied to every candidate before
+either merge, resolves the body under the witness's let prefix through the
+variables the prefix binds, `fst`/`snd`/`fromLeft`/`fromRight` of a matching
+construction, and an `if` whose arms both resolve, down to the construction
+(recursively in its fields, which stay the let-bound names, so nothing is
+recomputed). Corpus: `data-structures/fstOfPairWrapperStructuredDraw`,
+`sndOfPairWrapperStructuredDraw`, `structuredDrawHelperProjectsField`.
+Not covered: a structured variable re-read through an alias (`draw s = t`),
+through a helper taking the whole tuple, or through a projecting helper
+behind a second helper (task structured-draw-reread-through-binder-drops-field).

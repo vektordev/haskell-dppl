@@ -108,16 +108,24 @@ knownDivergences :: [Known]
 knownDivergences =
   -- A structured random value read through a second binder -- an alias, or
   -- a helper's parameter -- loses a field's constraint.
+  -- (A helper projecting one field, `h q = fst q` beside `snd e`, is fixed:
+  -- task fst-of-pair-wrapper-loses-structured-draw-constraint.) What is left:
+  -- an alias, a helper taking the whole tuple (`h e = (fst e, snd e)`), and a
+  -- projecting helper behind a second one (`g x = h x`).
   [ Known "drawDestructuredShared" DrawIntro "" structuredReread
   , Known "drawDestructuredShared" AliasIntro "" structuredReread
-  , Known "drawDestructuredShared" HelperExtract "" structuredReread
-  , Known "setWitnessTupleDisjointFields" HelperExtract "" structuredReread
-  , Known "letBoundEitherDestructure" HelperExtract "isLeft" structuredReread
-  -- `isR m = isRight m` on the draw-bound Maybe m: every point query answers
-  -- P(isRight) = 0.5, the payload's density dropped. Pre-existing (the same
-  -- 0.5 at the base compiler); exposed when observeMaybePayloadRightAny left
-  -- known-issues for the corpus.
-  , Known "observeMaybePayloadRightAny" HelperExtract "isRight" structuredReread
+  , Known "fstOfPairWrapperStructuredDraw" DrawIntro "" structuredReread
+  , Known "fstOfPairWrapperStructuredDraw" AliasIntro "" structuredReread
+  , Known "fstOfPairWrapperStructuredDraw" HelperExtract "extract (TCons" structuredReread
+  , Known "fstOfPairWrapperNestedStructuredDraw" DrawIntro "" structuredReread
+  , Known "fstOfPairWrapperNestedStructuredDraw" AliasIntro "" structuredReread
+  , Known "fstOfPairWrapperNestedStructuredDraw" HelperExtract "extract (TCons" structuredReread
+  , Known "sndOfPairWrapperStructuredDraw" DrawIntro "" structuredReread
+  , Known "sndOfPairWrapperStructuredDraw" AliasIntro "" structuredReread
+  , Known "sndOfPairWrapperStructuredDraw" HelperExtract "extract (TCons" structuredReread
+  , Known "structuredDrawHelperProjectsField" DrawIntro "" structuredReread
+  , Known "structuredDrawHelperProjectsField" AliasIntro "" structuredReread
+  , Known "structuredDrawHelperProjectsField" HelperExtract "" structuredReread
   -- The swapped wrapper re-read through a second binder: before per-mask
   -- variants the concrete query refused ("binding 'x' is unobserved"); f's
   -- variants now answer the split sub-queries, so p((0.7, 0.6)) is 1.0
@@ -125,32 +133,15 @@ knownDivergences =
   , Known "maskSwappedWrapper" DrawIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" AliasIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" HelperExtract "" variantsSilenceReread
-  -- `draw z = Normal in draw x0 = z in (x0, 0.5 * Normal)`: re-binding the
-  -- witnessed draw through an alias applies a scaled sibling draw's Jacobian
-  -- twice (p((0, 0)) = 4 phi(0)^2, not 2 phi(0)^2). Pre-existing; exposed when
-  -- ouChainUnrolled joined the corpus.
-  , Known "ouChainUnrolled" DrawIntro "draw-intro Normal" aliasDoubleJacobian
-  , Known "ouChainUnrolled" AliasIntro "" aliasDoubleJacobian
-  -- The same through a helper's parameter, `rwh0 x0 x1 = draw x2 = 0.9 * x1 +
-  -- 0.5 * Normal in [x0, x1, x2]`: refused until task
-  -- binding-resolver-one-application-rule let forward chaining copy the
-  -- helper's `draw` into the call's per-invocation clauses.
-  , Known "ouChainUnrolled" HelperExtract "draw x2" aliasDoubleJacobian
-  -- `draw y = Normal in draw s1 = y in draw s2 = s1 + 0.5 * Normal in draw s3 =
-  -- s2 + 0.5 * Normal in (s1, (s2, s3))`: an aliased first step doubles the
-  -- third step's Jacobian (25x at four steps), and an aliased third step
-  -- answers the (_, _, _, ANY) marginal as impossible. Pre-existing (identical
-  -- at abc449c); exposed when gaussianTrajectory4 joined the corpus.
-  , Known "gaussianTrajectory4" DrawIntro "" aliasChainJacobian
-  , Known "gaussianTrajectory4" AliasIntro "" aliasChainJacobian
+  -- An aliased third step of the trajectory (`draw s3 = .. in draw y = s3 in
+  -- draw s4 = y + .. in (s1, (s2, (y, s4)))`) answers the (_, _, _, ANY)
+  -- marginal as impossible. Pre-existing; exposed when gaussianTrajectory4
+  -- joined the corpus. (The same entries used to cover a doubled Jacobian
+  -- on an aliased first step, fixed with task
+  -- aliased-draw-scaled-sibling-double-jacobian.)
+  , Known "gaussianTrajectory4" DrawIntro "" aliasChainMarginalTail
+  , Known "gaussianTrajectory4" AliasIntro "" aliasChainMarginalTail
   -- The M3 families (task transformation-differential-testing-m3-catalog-expansion).
-  -- A structured draw read twice, one read through `fst (e, 0.0)`: a field's
-  -- constraint or dimension is lost (`draw e = (Normal, Uniform) in (fst (fst
-  -- (e, 0.0)), snd e)` answers dim 1, not 2).
-  , Known "drawDestructuredShared" TupleLaw "pair-fst" fstPairWrapper
-  , Known "setWitnessTupleDisjointFields" TupleLaw "pair-fst" fstPairWrapper
-  , Known "letBoundEitherDestructure" TupleLaw "pair-fst" fstPairWrapper
-  , Known "observeMaybePayloadRightAny" TupleLaw "pair-fst" fstPairWrapper
   -- The same impossible (0.7, 0.6) answered 1.0 as the other families above.
   , Known "maskSwappedWrapper" TupleLaw "pair-fst" variantsSilenceReread
   -- `draw z = Normal in 0.0 * z` is a point mass since M6; under `+ 0.0`,
@@ -167,12 +158,10 @@ knownDivergences =
   , Known "observeDisjointTails" CompareFlip "compare-negate" nullSetNegation
   ]
   where
-    fstPairWrapper = "fst-of-pair-wrapper-loses-structured-draw-constraint"
     diracLawLost = "dirac-law-point-lost-under-plus-or-helper"
     nanComparison = "nan-operand-comparison-measured-through-cdf"
     nullSetNegation = "null-set-conventions-not-preserved-under-negation"
-    aliasDoubleJacobian = "aliased-draw-scaled-sibling-double-jacobian"
-    aliasChainJacobian = "aliased-draw-chain-scaled-step-double-jacobian"
+    aliasChainMarginalTail = "aliased-chain-step-marginal-tail-impossible"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
 
@@ -185,28 +174,27 @@ data KnownSeq = KnownSeq { ksProg :: String, ksFams :: [Family], ksDoc :: String
 
 knownSequenceDivergences :: [KnownSeq]
 knownSequenceDivergences =
-  -- `h y = (y, y * Normal)`, `main = draw x = Uniform in draw y = x in h y`:
-  -- the scaled draw's Jacobian twice (2x the density). The alias alone and
-  -- the helper alone are right. Found by the sequence property's first run.
-  [ KnownSeq "rewriteProbeHelperScaledNoise" [AliasIntro, HelperExtract] "aliased-draw-through-helper-scaled-by-parameter-double-jacobian"
-  -- Probe row 5, `draw x = Uniform in (x, x * Normal)`, with the Uniform drawn
-  -- into a binding and `x` aliased: two alias levels, and the outer witness
-  -- carries the `|1/y|` Jacobian of `y * Normal` a second time (2x at (0.5,
-  -- 0.2)). One alias alone is right. Pinned by
-  -- known-issues/doubleAliasedDrawParameterScaledSibling. Found by seed
-  -- 20261017.
-  , KnownSeq "probe5" [DrawIntro, AliasIntro] "double-aliased-draw-parameter-scaled-sibling-double-jacobian"
   -- Probe row 10, `0.0 * Normal`, with the Normal drawn into a binding and
   -- the product wrapped in `0 - (0 - .)`: knownDivergences' diracLawLost on
   -- drawBoundRandomTimesLiteralZero, which the sweep skips as slow.
-  , KnownSeq "probe10" [DrawIntro, InjFIdentity] "dirac-law-point-lost-under-plus-or-helper"
+  [ KnownSeq "probe10" [DrawIntro, InjFIdentity] "dirac-law-point-lost-under-plus-or-helper"
   -- `draw x = Normal in if x == 0.0 then 0 else 2`, inlined to
   -- `if Normal == 0.0 ...` and then if-flipped to `if not (Normal == 0.0)`:
   -- the negation drops the equality's density convention (p(0) = 0, not the
   -- density), as knownDivergences' nullSetNegation on the let-free spelling.
   -- Pinned by known-issues/negatedContinuousEqualityDropsDensity. Reached once
   -- d3dd60a's corpus addition moved what seeds 20261015/20261016 draw.
-  , KnownSeq "observeContinuousEqualsLetBound" [LinearInline, IfFlip] "null-set-conventions-not-preserved-under-negation" ]
+  , KnownSeq "observeContinuousEqualsLetBound" [LinearInline, IfFlip] "null-set-conventions-not-preserved-under-negation"
+  -- `v < 2` swapped to `2 > v` and bound by `draw z = ..` as the if
+  -- condition: p(Right 2) is 1.0 and p(Left ()) impossible. Pinned by
+  -- known-issues/drawBoundLiteralLeftComparisonCondition. Reached once the
+  -- fst-of-pair-wrapper corpus additions moved what seed 20261014 draws.
+  , KnownSeq "observeContinuousEqualsLetfree" [CompareFlip, DrawIntro] "draw-bound-literal-left-comparison-condition-wrong"
+  -- The parameter aliased, the noise drawn into a binding and `+ 0.0` added:
+  -- the (x, ANY) marginal loses the Uniform's dimension. Pinned by
+  -- known-issues/aliasedParameterPlusZeroMarginalDim; reached by seed
+  -- 20261017 after the same corpus additions.
+  , KnownSeq "rewriteProbeHelperScaledNoise" [DrawIntro, InjFIdentity, AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim" ]
 
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =
@@ -956,15 +944,19 @@ data KnownConfig = KnownConfig { kcProg :: String, kcFam :: Family, kcSite :: St
 
 knownConfigDivergences :: [KnownConfig]
 knownConfigDivergences =
-  -- Drawing the tuple mixture leaves the -O0 compile reading the draw's name
-  -- where nothing binds it ("Variable rwv0 not declared"); -O2 folds the
-  -- reference away.
-  [ KnownConfig "helperDiscardsComparedMixture" DrawIntro "draw-intro (if False" "-O0" "drawn-tuple-mixture-field-read-dangles-at-o0"
-  -- The mask's VAny reaches the identity's inverse (minus / divide) at -O0
-  -- only, the -O0 face of the family M3 filed.
-  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "plus-zero (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition"
-  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "one-times (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition"
-  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "double-negate (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition" ]
+  -- A set-witness residue factor fixes the bound variable at a wildcard
+  -- witness, and where the spine reaches it through a draw or a call the
+  -- factor evaluates the variable's arithmetic (x + 0.0, log x) on the
+  -- wildcard at -O0; -O2 folds the comparison against the ANY slot first.
+  [ KnownConfig "anySlotThroughPlusInverse" DrawIntro "draw-intro (plus x 0.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughPlusInverse" DrawIntro "draw-intro 1.0" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughPlusInverse" HelperExtract "extract (TCons (plus x 0.0) 1.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughPlusInverseTupleSplit" DrawIntro "draw-intro (plus h 0.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro (log x)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro 2.0" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  -- Drawing the isRight test leaves the -O0 compile applying fromRight to a
+  -- Left ("fromRight of a Left"); -O2 agrees with the original.
+  , KnownConfig "enumeratedEitherSelectOnDomainConstant" DrawIntro "draw-intro (isRight m)" "-O0" "drawn-isright-test-reads-fromright-of-left-at-o0" ]
 
 knownConfigDivergence :: String -> Family -> String -> String -> Maybe KnownConfig
 knownConfigDivergence prog fam site cfg =
