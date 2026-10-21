@@ -1,0 +1,1 @@
+main a = if Uniform < 0.5 then (\b -> \c -> a + b + c) else (\b -> \c -> a * b * c)
