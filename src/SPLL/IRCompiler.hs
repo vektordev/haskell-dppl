@@ -6096,8 +6096,18 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
         -- a point (@w@ through @draw v = w in v == 1@ at False answered 0).
         -- That transport is declined: the structural cases invert through
         -- the binding instead.
+        --
+        -- The residue factor is the subtree compiled with the bound variable
+        -- fixed at 'value', so it, too, is only defined where the witness is
+        -- a point. With an exclusion set on the other side, it bound the
+        -- variable to the sentinel itself, which no backend can render
+        -- (@draw v = Normal in if True then (0.0, v == 1.0) else (0.0, True)@;
+        -- task slow-fuzz-seed-findings-2026-10-06, BackendsAgree seed 801831).
+        -- Measuring the set against a residue would take the complement of a
+        -- product, which 'equalityWorlds' declines for the same reason.
         case witnessSet value (IROp OpMult c0 (applyTo cov s)) of
           WPoint v _ | hasAnyExceptExpr v -> return Nothing
+          _ | not (null factors), hasAnyExceptExpr value -> return Nothing
           set -> return (Just [WWorld [applyTo guard s] set factors])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
@@ -6312,11 +6322,17 @@ witnessSet value cov = case anyExceptSampleShape value of
       Right (IRConst (VBool b), isPosAny, non, ex)
         | b == isPosAny -> WExcept WFull (wrap ex)
         | otherwise     -> WPoint (wrap non) cov
+      -- The polarity is the observed Bool, which a marginal query can leave
+      -- as the wildcard: it then constrains nothing, and branching on it was
+      -- the interpreter's "Condition is not a boolean: VAny" (@draw v =
+      -- Normal in if Uniform < 0.5 then (0.0, v == 1.0) else (1.0, True)@ at
+      -- @(0.0, ANY)@; task slow-fuzz-seed-findings-2026-10-06).
       Right (cond, isPosAny, non, ex) ->
         let exceptSide = WExcept WFull (wrap ex)
             pointSide  = WPoint (wrap non) cov
-        in if isPosAny then WChoice (wrap cond) exceptSide pointSide
-                       else WChoice (wrap cond) pointSide exceptSide
+            byPolarity = if isPosAny then WChoice (wrap cond) exceptSide pointSide
+                                     else WChoice (wrap cond) pointSide exceptSide
+        in WChoice (IRUnaryOp OpIsAny (wrap cond)) WFull byPolarity
 
 -- | Worlds of an @==@ node against a deterministic operand @other@ (value
 -- @b@), the bound variable reaching @side@ through at least one inverse step.
