@@ -64,6 +64,7 @@ module SPLL.Prelude
   , StageValue(..)
   , admissionTyped
   , rtypedProgram
+  , normalizeAndInfer
   , chainNamedProgram
   , batchedRefusal
   , CodeGenTarget(..)
@@ -118,7 +119,7 @@ import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..), renderJu
 import qualified Data.Map.Strict as Map
 import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
-import SPLL.CalleeNormalize (normalizeCallees)
+import SPLL.CalleeNormalize (normalizeCallees, etaExpandArrowResults)
 import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.PerValue (validateSignatures, expandPerValue, perValuePlans, checkSignatureTypes, dropSlotProbes, installPerValue)
 import IRInterpreter (generateRand, generateDet, generateRandE)
@@ -490,7 +491,19 @@ frontEndS conf p0 = do
   -- partial-function crash on genuinely ill-typed input; (2) every later pass
   -- -- enum annotation, forward chaining, the modality pass -- sees real RType
   -- instead of NotSetYet, in case any of them can make use of it.
-  rtyped <- liftE (addRTypeInfoAt (verbose conf) normalized)
+  rtyped0 <- liftE (addRTypeInfoAt (verbose conf) normalized)
+  -- A declaration whose result is still a function past its parameters
+  -- (`main = if Uniform < 0.5 then f else g`) is eta-expanded into the
+  -- `main x = (if ..) x` a user would write, then normalised and inferred
+  -- again (task arrow-result-main-entry-points). Type-directed, so it needs
+  -- the first inference's arities; see 'etaExpandArrowResults'.
+  rtyped <- case etaExpandArrowResults rtyped0 normalized of
+    Nothing -> return rtyped0
+    Just expanded -> do
+      let renormalized = fromMaybe expanded (normalizeCallees expanded)
+      printIfMoreVerbose conf "\n=== Arrow-result eta expansion rewrote the program ==="
+      stage conf "After Arrow-Result Eta Expansion" renormalized
+      liftE (addRTypeInfoAt (verbose conf) renormalized)
   printIfMoreVerbose conf "\n=== RType-inferred Program ==="
   pPrintIfMoreVerbose conf rtyped
   stage conf "After RType Inference" rtyped
@@ -943,7 +956,19 @@ rtypedProgram :: Program -> Either CompilerError Program
 rtypedProgram p0 = do
   validateProgram p0
   p <- resolveNeuralDecls p0
-  addRTypeInfo (fromMaybe p (normalizeCallees p))
+  normalizeAndInfer p
+
+-- | Callee normalisation, RInfer, and the arrow-result eta expansion with its
+-- re-normalisation and re-inference: 'frontEnd''s rewriting core without the
+-- validation, neural resolution and stage records, for a caller that has a
+-- parsed program and needs it typed exactly as 'compile' types it.
+normalizeAndInfer :: Program -> Either CompilerError Program
+normalizeAndInfer p = do
+  let normalized = fromMaybe p (normalizeCallees p)
+  rtyped <- addRTypeInfo normalized
+  case etaExpandArrowResults rtyped normalized of
+    Nothing -> return rtyped
+    Just expanded -> addRTypeInfo (fromMaybe expanded (normalizeCallees expanded))
 
 -- | Enum annotation plus chain naming. The analysis needs chain names because
 -- latent identity is keyed by them.

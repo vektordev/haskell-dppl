@@ -26,7 +26,7 @@ import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.ForwardChaining (annotateProg, progToFCData, FCData)
 import SPLL.Typing.Infer (addTypeInfo, addModalityLaws)
 import SPLL.Typing.RInfer (addRTypeInfo)
-import SPLL.CalleeNormalize (normalizeCallees)
+import SPLL.Prelude (normalizeAndInfer)
 import Data.Maybe (fromMaybe)
 import SPLL.Typing.Determinism (knownAnchors)
 import SPLL.Typing.ModalityInfer (perNodeOuterGrounds, Law(..), LawTable, IMod(..), renderJustification, bindingLawEnv, reinferCtx)
@@ -878,8 +878,8 @@ corpusPartialSetTests corpus = corpusSweepAll corpus SweepSpec
 -- found in one corpus program, keyed by the offending chain name.
 filePartialSetViolations :: FilePath -> Program -> IO [(FilePath, ChainName, CapabilitySet)]
 filePartialSetViolations fp p =
-  case addRTypeInfo (fromMaybe p (normalizeCallees p)) of
-    Left e -> error ("addRTypeInfo failed on " ++ fp ++ ": " ++ e)
+  case normalizeAndInfer p of
+    Left e -> error ("normalizeAndInfer failed on " ++ fp ++ ": " ++ e)
     Right rtyped ->
       let preAnnotated   = annotateEnumsProg rtyped
           forwardChained = annotateProg preAnnotated

@@ -83,6 +83,36 @@ One declaration-level rewrite runs before all of these, from task
   site, into the `alias x = coin x` shape that already worked
   (`test/cases/higher-order/pointFreeAlias*`).
 
+A second declaration-level rewrite runs *after* RInfer, from task
+`arrow-result-main-entry-points`, because it needs types:
+
+- **A declaration whose result is still a function past its parameters is
+  eta-expanded**: `main = if Uniform < 0.5 then f else g` becomes `main =
+  \p_eta0 -> (if Uniform < 0.5 then f else g) p_eta0`, one binder per arrow
+  of the result type (`etaExpandArrowResults`), which is the source program
+  `main x = (if ..) x` exactly. `Prelude.frontEnd` then normalises callees
+  again (the `if` is now in callee position) and infers again; the stage
+  shows as "After Arrow-Result Eta Expansion". Left alone, `generate` applied
+  the sampled closure to the query's extra argument (`p(a | x)`) while
+  probability and integrate compiled a density *over closures* with no
+  parameter for `x`, admitted and crashing at run time. Since a declaration
+  is queried once per call, drawing the function once and applying it once
+  is the same distribution, so all three variants now answer `p(a | x)`
+  (`higher-order/arrowResultMain*`). `draw` and `define` inside the body
+  need no special case: the expanded tree is the hand-expanded one, and the
+  stage diff of the two is empty (`TestRewrites`, "eta expansion").
+  The rewrite is taken only where **every use of the name in the program is
+  a call with all the new arguments at once**. A use applied to fewer
+  (`draw h = pick in (h 1.0, h 2.0)`) binds one drawn function and applies
+  it twice; expanding `pick` would draw twice, so such a declaration stays as
+  it is (and still crashes forward chaining,
+  `known-issues/sharedFunctionValueFromHelper`). An expansion can complete another declaration's calls (`main =
+  pick` becomes `main p_eta0 = pick p_eta0`), so the check repeats to a
+  fixpoint. This also covers a helper returning a selected lambda,
+  `mk b = if b then (\x -> ..) else (\x -> ..)` called as `(mk True) v`
+  (`higher-order/namedHelperReturnsSelectedLambda*`, formerly known-issues
+  pins of a forward-chaining crash).
+
 Whatever the pass does not reach is refused by IRCompiler's point-inversion
 `Apply` arm ("does not resolve to a lambda the compiler can see"), an absent
 variant rather than the `error` it used to be.
