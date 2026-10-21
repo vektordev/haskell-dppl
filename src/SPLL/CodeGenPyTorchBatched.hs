@@ -56,7 +56,7 @@ import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
-import SPLL.CodeGenPyTorch (envToLUT, renameFree, replaceCalls, pyMangle, pyDouble, groupClassName)
+import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble, groupClassName)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
@@ -66,6 +66,8 @@ import Control.Monad (foldM)
 import Control.Monad.State (State, evalState, get, put)
 import qualified Data.Set as Set
 import SPLL.IROptimizer (deterministicGens, allNamesIR)
+import SPLL.PythonNesting (tooDeepForPython, spillDeep, renameFree)
+import Utils (Supply, demandUniqueNumber, evalSupply)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
 -- batched backend and fallible: it runs the fragment guard over every emitted
@@ -1789,18 +1791,28 @@ reason e = case e of
 -- guard a static reachability analysis of which 'IRError's are dominated by a
 -- select and which are not.
 batchedBlock :: Maybe String -> SEnv -> IRExpr -> [String]
-batchedBlock ctx env (IRLetIn name val body) =
-  batchedAssign env name val ++ batchedBlock ctx (bindS env name val) body
+batchedBlock ctx env e = evalSupply (blockM ctx env e)
+
+-- | 'batchedBlock' with the method's fresh-name supply threaded through, for
+-- the temporaries of a spilled line ('batchedLine').
+blockM :: Maybe String -> SEnv -> IRExpr -> Supply [String]
+blockM ctx env (IRLetIn name val body) =
+  (++) <$> batchedAssign env name val <*> blockM ctx (bindS env name val) body
 -- A structural (shape-directed) if is real Python control flow: within a shape
 -- bucket its condition is a plain Python bool, so only one arm runs -- which is
 -- what makes structure-directed recursion terminate and what keeps an arm that
 -- is illegal for this shape (e.g. `head sample` on an empty list) unevaluated.
-batchedBlock ctx env (IRIf c t f) | structural env c =
-  ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedBlock ctx env t)
-  ++ ["else:"] ++ indentOnce (batchedBlock ctx env f)
-batchedBlock ctx env (IRConstruct TgTuple [f, s]) =
-  batchedAssign env "_r0" f ++ batchedAssign env "_r1" s ++ [returnStmt ctx "T(_r0, _r1)"]
-batchedBlock ctx env e = [returnStmt ctx (batchedExpr env e)]
+blockM ctx env (IRIf c t f) | structural env c = do
+  ts <- blockM ctx env t
+  fs <- blockM ctx env f
+  return (["if " ++ structuralCond env c ++ ":"] ++ indentOnce ts ++ ["else:"] ++ indentOnce fs)
+blockM ctx env (IRConstruct TgTuple [f, s]) = do
+  r0 <- batchedAssign env "_r0" f
+  r1 <- batchedAssign env "_r1" s
+  return (r0 ++ r1 ++ [returnStmt ctx "T(_r0, _r1)"])
+blockM ctx env e = do
+  (stmts, x) <- batchedLine env e
+  return (stmts ++ [returnStmt ctx x])
 
 -- | One @return@ statement, optionally routed through the runtime NaN guard.
 -- See 'batchedBlock's header for why this can't just wrap a call site instead.
@@ -1811,18 +1823,81 @@ returnStmt (Just ctx) expr  = "return check_result(" ++ expr ++ ", " ++ show ctx
 -- | Emit a let binding as one or more assignment statements, splitting a
 -- let-spine and a tuple construction into separate statements so sharing and
 -- statement form are preserved down the tree.
-batchedAssign :: SEnv -> String -> IRExpr -> [String]
+batchedAssign :: SEnv -> String -> IRExpr -> Supply [String]
 batchedAssign env name (IRLetIn innerName innerVal body) =
-  batchedAssign env innerName innerVal
-  ++ batchedAssign (bindS env innerName innerVal) name body
-batchedAssign env name (IRIf c t f) | structural env c =
-  ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedAssign env name t)
-  ++ ["else:"] ++ indentOnce (batchedAssign env name f)
-batchedAssign env name (IRConstruct TgTuple [f, s]) =
-  batchedAssign env (name ++ "_0") f
-  ++ batchedAssign env (name ++ "_1") s
-  ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"]
-batchedAssign env name e = [name ++ " = " ++ batchedExpr env e]
+  (++) <$> batchedAssign env innerName innerVal
+       <*> batchedAssign (bindS env innerName innerVal) name body
+batchedAssign env name (IRIf c t f) | structural env c = do
+  ts <- batchedAssign env name t
+  fs <- batchedAssign env name f
+  return (["if " ++ structuralCond env c ++ ":"] ++ indentOnce ts ++ ["else:"] ++ indentOnce fs)
+batchedAssign env name (IRConstruct TgTuple [f, s]) = do
+  a <- batchedAssign env (name ++ "_0") f
+  b <- batchedAssign env (name ++ "_1") s
+  return (a ++ b ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"])
+batchedAssign env name e = do
+  (stmts, x) <- batchedLine env e
+  return (stmts ++ [name ++ " = " ++ x])
+
+-- | Render one line's expression, as 'SPLL.CodeGenPyTorch.liftedLine' does for
+-- the scalar backend (task batched-enum-comprehension-exceeds-parser-nesting):
+-- as before, unless that is nested deeper than CPython accepts
+-- ('tooDeepForPython'). Then its deep strict, pure subterms are let-bound into
+-- @_sN@ temporaries first ('SPLL.PythonNesting.spillDeep', the same walk and
+-- admission rules as the scalar backend), and the residual is rendered with
+-- them in scope. Every module that parsed before is byte-identical. Returns
+-- the prefix statements and the rendered expression.
+--
+-- What reaches this in practice is an enumerated @draw@'s mass,
+-- @tensor_sum([body for b in xs])@: nested ifs over the latent make the body a
+-- walrus/tuple let chain about ten brackets per @if@, so ~20 of them are past
+-- the limit, and the comprehension is spilled whole as a loop
+-- ('batchedSpillStatement'). Each binding is threaded into the environment
+-- ('bindS'), so a spilled structural value still renders as one.
+batchedLine :: SEnv -> IRExpr -> Supply ([String], String)
+batchedLine env e
+  | not (tooDeepForPython rendered) = return ([], rendered)
+  | otherwise = do
+      (binds, e') <- spillDeep (sNullaryCtors env ++ sGenNames env) e
+      if null binds
+        -- Nothing strict and pure to cut out; emit as before.
+        then return ([], rendered)
+        else do
+          let step (acc, en) (n, v) = do
+                ss <- batchedSpillStatement en n v
+                return (acc ++ ss, bindS en n v)
+          (stmts, env') <- foldM step ([], env) binds
+          (stmts', x) <- batchedLine env' e'
+          return (stmts ++ stmts', x)
+  where rendered = batchedExpr env e
+
+-- | Emit one spill binding. A comprehension -- an enumeration's list of @[B]@
+-- tensors, one per domain element -- becomes the loop
+--
+-- > name = []
+-- > for _vN in <list>:
+-- >     <body as statements, into _eN>
+-- >     name.append(_eN)
+--
+-- which builds the same list in the same order, so the consumer
+-- (@tensor_sum@, @tensor_index@, ...) stacks the same @[E, B]@ tensor. The body
+-- goes through 'batchedAssign' with the loop variable bound as the
+-- comprehension's was ('bindMap'), so its lets become statements, its
+-- structural ifs @if@/@else@ blocks with the lets inside their arms, its
+-- selects the same @torch.where@s, and each resulting line is measured and
+-- spilled on its own. The loop variable is renamed to a fresh @_vN@, because a
+-- @for@ target, unlike a comprehension's, lands in the function's scope.
+-- Anything else is an ordinary assignment.
+batchedSpillStatement :: SEnv -> String -> IRExpr -> Supply [String]
+batchedSpillStatement env name (IRBuiltin BMap [IRLambda v body, t]) = do
+  (tStmts, tt) <- batchedLine env t
+  n <- demandUniqueNumber
+  let loopVar = "_v" ++ show n
+      elemVar = "_e" ++ show n
+  bodyStmts <- batchedAssign (bindMap env loopVar t) elemVar (renameFree v loopVar body)
+  return (tStmts ++ [name ++ " = []", "for " ++ loopVar ++ " in " ++ tt ++ ":"]
+          ++ indentOnce (bodyStmts ++ [name ++ ".append(" ++ elemVar ++ ")"]))
+batchedSpillStatement env name e = batchedAssign env name e
 
 -- | Emit a /structural/ condition ('structural') as a plain Python bool
 -- expression, rather than the tensor form 'batchedExpr' would give it. The
@@ -2127,8 +2202,3 @@ batchedDist :: Distribution -> String
 batchedDist IRNormal  = "normal"
 batchedDist IRUniform = "uniform"
 
--- | Flatten a left-nested application spine into the callee and its arguments,
--- in source order (mirrors the scalar backend's 'collectApplyChain').
-collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
-collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])
-collectApplyChain e = (e, [])

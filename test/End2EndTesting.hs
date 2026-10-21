@@ -258,6 +258,9 @@ readLogitsLinearOnly =
   -- from known-issues; its per-slot enumeration measures the untouched slots
   -- through readScene_auto.forward.
   , "planCrossSlotConditionalAllAny"
+  -- task batched-enum-comprehension-exceeds-parser-nesting: moved here from
+  -- known-issues; reads both experts through lmA_auto/lmB_auto.forward.
+  , "batchedMaskVariantNeuralReadChain"
   -- task neural-read-query-outside-domain-unchecked: moved here from
   -- known-issues; a bare read (or its point inversion) answered by
   -- readD_auto.forward / readS_auto.forward.
@@ -1881,6 +1884,8 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
   , testProperty "a comprehension whose body is too deep becomes a loop, imports and evaluates" (once deepComprehensionCase)
   , testProperty "a shallow comprehension stays a comprehension" (once shallowComprehensionCase)
   , testProperty "24 nested noisy ifs over an enumerated draw import and match the idealized value" (once enumIfChainCase)
+  , testGroup "BatchedPython"
+      [ testProperty "24 nested noisy ifs over an enumerated draw import batched and match the idealized value" (once enumIfChainBatchedCase) ]
   , testProperty "a too-deep comprehension nested in another's body becomes nested loops, imports and evaluates" (once nestedComprehensionCase)
   , testProperty "a chain of 11 two-field answers under an enumerated latent imports and matches the idealized values" (once chainedAnswersCase)
   ]
@@ -1986,12 +1991,15 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
     -- original blocker, now compiles it in under a second (task
     -- batched-codegen-exponential-in-nested-enum-ifs); its corpus twin at
     -- depth 6 is enumerability/noisyIfChainOverDraw6.
+    enumIfChainLevels = 24 :: Int
+    enumIfChainProgram =
+      let cond = "(if Uniform < 0.1 then (not b) else b)"
+          chain = iterate (\e -> "(if " ++ cond ++ " then " ++ e ++ " else False)") "True" !! enumIfChainLevels
+      in "main = draw b = Uniform < 0.5 in " ++ chain
+    enumIfChainPTrue = 0.5 * 0.9 ^ enumIfChainLevels + 0.5 * 0.1 ^ enumIfChainLevels :: Double
     enumIfChainCase = ioProperty $ do
-      let levels = 24 :: Int
-          cond = "(if Uniform < 0.1 then (not b) else b)"
-          chain = iterate (\e -> "(if " ++ cond ++ " then " ++ e ++ " else False)") "True" !! levels
-          progSrc = "main = draw b = Uniform < 0.5 in " ++ chain
-          pTrue = 0.5 * 0.9 ^ levels + 0.5 * 0.1 ^ levels :: Double
+      let progSrc = enumIfChainProgram
+          pTrue = enumIfChainPTrue
       case either (Left . show) Right (tryParseProgram "" progSrc) >>= compile defaultCompilerConfig of
         Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
         Right env -> do
@@ -2009,6 +2017,38 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
             readProcessWithExitCode "python3" [tmpPath] ""
           return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
                      (code == ExitSuccess)
+    -- Task batched-enum-comprehension-exceeds-parser-nesting: the same
+    -- program through the batched backend, whose enum-mass line
+    -- @tensor_sum([body for b in xs])@ was 200+ brackets deep. It is spilled
+    -- into a loop over the domain, with the domain still a literal so the
+    -- latent's structural reads stay Python conditionals.
+    enumIfChainBatchedCase = ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorchProperty "deep expression spill: batched enum if chain"
+        Just py ->
+          case either (Left . show) Right (tryParseProgram "" enumIfChainProgram)
+                 >>= compile defaultCompilerConfig{batched = True} >>= generateFunctionsBatched True of
+            Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
+            Right srcLines -> do
+              cwd <- getCurrentDirectory
+              (code, out, err) <- withSystemTempFile "enum_if_chain_batched.py" $ \tmpPath tmpHandle -> do
+                hPutStr tmpHandle $ unlines
+                  [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", unlines srcLines
+                  , "import torch"
+                  , "got = torch.as_tensor(main.forward(torch.tensor([True, False, True]))[0])"
+                  , "want = torch.tensor([" ++ show enumIfChainPTrue ++ ", " ++ show (1 - enumIfChainPTrue)
+                      ++ ", " ++ show enumIfChainPTrue ++ "], dtype=got.dtype)"
+                  , "if not bool(((got - want).abs() <= " ++ show probTolerance ++ ").all()):"
+                  , "    raise ValueError('batched forward = %r, expected %r' % (got, want))"
+                  ]
+                hClose tmpHandle
+                readProcessWithExitCode py [tmpPath] ""
+              return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
+                         (code == ExitSuccess)
+                  .&&. counterexample "the enum-mass comprehension was not spilled into a loop over the literal domain"
+                         (any (\l -> "for _v" `isPrefixOf` dropWhile (== ' ') l && " in [True, False]:" `isInfixOf` l)
+                              (concatMap lines srcLines))
     shallowComprehensionCase =
       let src = comprehensionSource 5
       in counterexample src (" for x in " `isInfixOf` src && null (spillLines src))

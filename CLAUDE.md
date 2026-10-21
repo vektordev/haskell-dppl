@@ -133,6 +133,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `IRSelectPass` — `IRIf` → `IRSelect` for batched mode.
 - `IROptimizer` — constant folding, CSE and let-in optimization.
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.
+- `PythonNesting` — CPython's per-line bracket and indentation limits, and the deep-line spill both Python backends share.
 - `AutoNeural` — generated readLogits/writeLogits functions and partition plans for neural declarations.
 - `CompileWarnings` — compile-time warnings (non-blocking diagnostics), computed by `Prelude.programWarnings`/`compiledWarnings`.
 - `ReservedNames` — the single registry of compiler-claimed and target-language names.
