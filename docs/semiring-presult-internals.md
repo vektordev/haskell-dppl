@@ -73,13 +73,17 @@ semiring-aware too. Two consequences worth internalising before touching
   `cumulative-normal-upper-tail-cancellation`). End2End's
   `normal upper-tail precision` group checks this to 1e-12 relative on
   every backend, which the corpus's 1e-4 absolute tolerance cannot.
-- **Not everything is semiring-aware.** The `ReadNN`/AutoNeural read-logits
-  network's inference function (`<nn>_auto`) stays linear-only under
-  `logSpace`. Neural programs are outside `Corpus.LogSpaceMatchesLinear`'s pool
-  altogether; End2End's `PlanEngineLogSpaceMatchesLinear` checks the neural
-  corpus at budget 0 (the plan engine) and skips the programs that still reach
-  `_auto` (`End2EndTesting.readLogitsLinearOnly`). Branch *counts* stay linear
-  everywhere.
+- **The read-logits reader is semiring-aware too.** The `ReadNN`/AutoNeural
+  network's inference function (`<nn>_auto`, `AutoNeural.makeProb`) builds its
+  answer from `fromLinearSR` (a softmax slot), `scaledNormalDensity` (a
+  Gaussian slot pair), `srTimes`, `srComplement` (the Either right flag) and
+  `sumAllSR` (constructor alternatives), so under `logSpace` it answers a log
+  like every other producer, and its linear form is the arithmetic it always
+  emitted (task `read-logits-network-linear-under-logspace`). Neural programs
+  are outside `Corpus.LogSpaceMatchesLinear`'s pool; End2End's
+  `PlanEngineLogSpaceMatchesLinear` (budget 0, the plan engine) and
+  `NeuralLogSpaceMatchesLinear` (default budget, dense enumeration through
+  `_auto`) check them instead. Branch *counts* stay linear everywhere.
 - **A linear quantity with no native log leaf** — a sum of softmax slot
   probabilities, a `|change-of-variables|` factor — enters the semiring
   through `fromLinearSR`. A CDF difference is `measureDiffSR`, not `srMinus`:
