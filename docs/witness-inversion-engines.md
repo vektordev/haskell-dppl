@@ -272,6 +272,28 @@ so `exp leaf == -1.0` is impossible rather than a NaN density. Corpus:
 nested, two-sided and always-false `exp` shapes) and
 `test/cases/plan-enumeration/planEnumContExp*`.
 
+### A point transport that reads a wildcard
+
+A point transported through an arithmetic step (`x + 0.0`, `log x`) at a
+marginal query's `ANY` has no value: the step's inverse is a raw type error
+on the wildcard (`Minus (VAny, 0.0)`), and so is its domain guard (`exp`'s
+`s > 0`). The bare `x` in the same slot recovers the wildcard itself, which
+every consumer of a `WPoint` reads as "unconstrained". `transportDirect`
+gives the arithmetic chain the same meaning: where the chain's
+`invReadsAny` (`ForwardChaining.readsAnyChain`) holds at run time, the set
+is `WFull` (a `WChoice` on that test), the domain guard holds, and the
+residue factor fixes the variable at the wildcard. Nothing of the chain is
+evaluated on that side. The residue factor stays safe because
+`equalityGuard` tests the sample before the value, and compares a tuple it
+builds syntactically (under its let-bindings) field by field, each field
+under its own bindings only. So `x + 0.0` under an `ANY` field is never
+computed. The point-witness fold has the matching rule: where a wildcard
+witness has no answer of its own (a non-inline body in probability mode),
+the operand's result is read at it as its marginal, one (`anySafe`), before
+the operand's own inverse steps run. Task
+`any-slot-through-injf-inverse-reaches-condition`; corpus
+`test/cases/set-witness/anySlotThrough*`.
+
 ## Plan engine: entry points, several reads, case splits
 
 The plan engine is entered from a `draw` of a neural read **and from a call of
