@@ -1,0 +1,1 @@
+main x = if Uniform < 0.5 then (\y -> y + x) else (\y -> y * x)

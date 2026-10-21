@@ -47,10 +47,10 @@ import SPLL.Typing.PType (PType(..))
 import SPLL.Lang.Lang (freeVarsExpr, getTypeInfo)
 import SPLL.IntermediateRepresentation (IREnv, IRValue, CompilerConfig(..), defaultCompilerConfig, pattern VProbDim, pattern VProbDimBC)
 import SPLL.Parser (tryParseProgram)
-import SPLL.Prelude (compile, compileStages, runProbC, runGenC, StageSnapshot(..), StageValue(..))
+import SPLL.Prelude (compile, compileStages, runProbC, runGenC, rtypedProgram, StageSnapshot(..), StageValue(..))
 import TestCaseParser (TestCase(..), Backend(..))
 import CorpusSweep
-import SPLL.StageDiff (StageDiffOpts(..), StageReport(..), StageRow(Rewrite, Same, Diverges), defaultStageDiffOpts, stageDiff, stageDiffStages, renderStageReport)
+import SPLL.StageDiff (StageDiffOpts(..), StageReport(..), StageRow(Rewrite, Same, Diverges), defaultStageDiffOpts, stageDiff, stageDiffStages, renderStageReport, answersStage)
 import TestTolerances (probTolerance, samplingTolerance)
 import Rewrites
 import ImpactManifest
@@ -725,8 +725,49 @@ unitTests = testGroup "Units"
       r <- stageDiff (defaultStageDiffOpts defaultCompilerConfig)
                 (parseSrc "a" "main = 1.0 + 2.0") (parseSrc "b" "main = 1.0 + True")
       fmap fst (firstDivergence r) @?= Just "After RType Inference"
+  -- Task arrow-result-main-entry-points: a function-valued main is
+  -- eta-expanded after RInfer into the program a user writes by hand, under
+  -- `if`, `draw` and `define` alike. The stage diff against the hand-expanded
+  -- spelling must show the expansion stage, and no divergence anywhere.
+  , testCase "eta expansion: an arrow-result main is its hand-expanded spelling" $
+      etaPair "main = if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 3.0)"
+              "main y = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 3.0)) y"
+              [(VFloat 2.0, [VFloat 1.0]), (VFloat 3.0, [VFloat 1.0]), (VFloat 2.5, [VFloat 1.0])]
+  , testCase "eta expansion: under a draw" $
+      etaPair "main = draw u = Uniform < 0.3 in if u then (\\x -> x + 1.0) else (\\x -> x * 3.0)"
+              "main y = (draw u = Uniform < 0.3 in if u then (\\x -> x + 1.0) else (\\x -> x * 3.0)) y"
+              [(VFloat 2.0, [VFloat 1.0]), (VFloat 3.0, [VFloat 1.0])]
+  , testCase "eta expansion: under a define" $
+      etaPair "main = define u = Uniform in if u < 0.5 then (\\x -> x + u) else (\\x -> x * 2.0)"
+              "main y = (define u = Uniform in if u < 0.5 then (\\x -> x + u) else (\\x -> x * 2.0)) y"
+              [(VFloat 2.2, [VFloat 2.0]), (VFloat 4.0, [VFloat 2.0])]
+  -- The other side of the decision: a helper whose function value is bound
+  -- once and applied twice shares one draw between the calls, which an
+  -- expanded helper would turn into two. It must stay as written, while the
+  -- same helper called with its argument is expanded.
+  , testCase "eta expansion: a function value applied twice is not expanded" $ do
+      let pick = "pick = if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 3.0)\n"
+          isLam q n = case lookup n (functions q) of
+            Just (Expr _ Lambda{}) -> True
+            _ -> False
+      shared <- either (assertFailure . ("rtypedProgram: " ++)) return
+                  (rtypedProgram (parseSrc "a" (pick ++ "main = draw h = pick in (h 1.0, h 2.0)")))
+      assertBool "pick stays a function value" (not (isLam shared "pick"))
+      called <- either (assertFailure . ("rtypedProgram: " ++)) return
+                  (rtypedProgram (parseSrc "b" (pick ++ "main = pick")))
+      assertBool "main is expanded" (isLam called "main")
+      assertBool "pick is expanded once main calls it fully" (isLam called "pick")
   ]
   where
+    -- An arrow-result program and its hand-expanded spelling: the automatic
+    -- expansion ran, and nothing diverges, answers included.
+    etaPair a b qs = do
+      r <- stageDiff (defaultStageDiffOpts defaultCompilerConfig) { sdQueries = qs, sdTolerance = probTolerance }
+                (parseSrc "auto" a) (parseSrc "manual" b)
+      assertBool ("the expansion ran:\n" ++ renderStageReport r)
+        (isJust (lookup "After Arrow-Result Eta Expansion" (stageRows r)))
+      assertBool (renderStageReport r) (isNothing (firstDivergence r))
+      assertBool ("both answer:\n" ++ renderStageReport r) (lookup answersStage (stageRows r) == Just Same)
     -- The first step of a family whose site label contains the text.
     stepAt fam txt q = case [ st | st <- stepsOf q, stepFamily st == fam, txt `isInfixOf` stepSite st ] of
       (st : _) -> st

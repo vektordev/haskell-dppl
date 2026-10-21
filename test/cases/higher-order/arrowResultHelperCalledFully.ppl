@@ -1,0 +1,2 @@
+pick = if Uniform < 0.5 then (\x -> x + 1.0) else (\x -> x * 3.0)
+main = pick

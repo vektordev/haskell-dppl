@@ -63,6 +63,7 @@
 -- and the whole pipeline annotates the rewritten tree from scratch.
 module SPLL.CalleeNormalize
   ( normalizeCallees
+  , etaExpandArrowResults
   ) where
 
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -71,6 +72,7 @@ import qualified Data.Set as Set
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.ReservedNames (etaBinderPrefix)
+import SPLL.Typing.RType (RType(..))
 
 -- | The @let@-bound values in scope, innermost first. Only bindings introduced
 -- by a directly-applied lambda go in here: a lambda parameter's value is not
@@ -116,6 +118,78 @@ etaExpandAliases decls = [ (n, expand body) | (n, body) <- decls ]
     leadingLambdas e = case node e of
       Lambda _ b -> 1 + leadingLambdas b
       _          -> 0 :: Int
+
+-- | Eta-expand every declaration whose result, past its leading lambdas, is
+-- still a function (task @arrow-result-main-entry-points@): @main = if Uniform
+-- < 0.5 then f else g@ becomes @main = \p_eta0 -> (if Uniform < 0.5 then f else
+-- g) p_eta0@, one binder per remaining arrow, which is exactly the program a
+-- user writes as @main x = (if ..) x@. Left alone, @generate@ applied the
+-- sampled closure to the extra argument while probability and integrate
+-- compiled a density /over closures/ and crashed at run time. Type-directed,
+-- so it reads the arity off @typed@ (the same program after RType inference)
+-- and rewrites the unannotated @untyped@; the caller normalises callees and
+-- infers again. 'Nothing' when nothing changed.
+--
+-- Sound only where every use of the name is a call with all the new arguments
+-- at once: then each evaluation draws the function once and applies it once,
+-- which the expanded body does too. A use applied to fewer arguments could
+-- bind the function value and apply it twice -- one draw shared by both calls
+-- -- which the expanded body would turn into two draws, so such a declaration
+-- is left as it is. A query from outside always supplies every argument. An
+-- expansion can make a callee fully applied (@main = pick@ becomes @main p =
+-- pick p@), so the check is repeated until nothing more expands. A shadowing
+-- binder of the same name is counted as a use, which only ever blocks.
+etaExpandArrowResults :: Program -> Program -> Maybe Program
+etaExpandArrowResults typed untyped
+  | null wanted = Nothing
+  | expanded == untyped = Nothing
+  | otherwise   = Just expanded
+  where
+    expanded = go Set.empty (functions untyped)
+    -- name -> number of arrows past the spine, from the typed program
+    wanted = [ (n, m) | (n, body) <- functions typed
+                      , let m = arrows (rType (ann (pastSpine body))), m > 0 ]
+    go done decls =
+      case [ n | (n, m) <- wanted, n `Set.notMember` done
+               , Just body <- [lookup n decls]
+               , all (>= spineLength body + m) (concatMap (usesOf n . snd) decls) ] of
+        [] -> untyped { functions = decls }
+        ns -> go (Set.union done (Set.fromList ns))
+                 [ (n, if n `elem` ns then maybe body (expand body) (lookup n wanted) else body)
+                 | (n, body) <- decls ]
+    expand body m =
+      let taken = containedVars names body
+          ps = take m [ c | i <- [(0 :: Int) ..], let c = etaBinderPrefix ++ show i
+                          , c `Set.notMember` taken ]
+          at = Expr (ann body)
+          inner = underSpine body
+          applied e = foldl (\f p -> at (Apply f (at (Var p)))) e ps
+      in inner (foldr (\p b -> at (Lambda p b)) (applied (pastSpine body)) ps)
+    names e = case node e of
+      Var x      -> Set.singleton x
+      Lambda x _ -> Set.singleton x
+      _          -> Set.empty
+    arrows t = case t of
+      TArrow _ r -> 1 + arrows r
+      _          -> 0 :: Int
+    pastSpine e = case node e of
+      Lambda _ b -> pastSpine b
+      _          -> e
+    spineLength e = case node e of
+      Lambda _ b -> 1 + spineLength b
+      _          -> 0 :: Int
+    -- rebuild the leading lambdas around a replacement body
+    underSpine e r = case node e of
+      Lambda x b -> Expr (ann e) (Lambda x (underSpine b r))
+      _          -> r
+    -- the number of arguments each occurrence of @n@ is applied to
+    usesOf n = uses (0 :: Int)
+      where
+        uses k e = case node e of
+          Apply f a -> uses (k + 1) f ++ uses 0 a
+          Var m | m == n -> [k]
+          Lambda x b | x == n -> 0 : uses 0 b
+          other -> concatMap (uses 0) other
 
 -- | Rewrite one expression under the @let@-bindings enclosing it.
 rewrite :: [ADTDecl] -> Env -> Expr -> Expr
