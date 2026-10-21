@@ -643,3 +643,33 @@ program reaches that fallback. Corpus: `crossLatentSideOperandJacobian`,
 `comparisonSiblingJacobian`, `aliasedDrawScaledSibling`,
 `aliasedDrawScaledChain`, `aliasedDrawThroughScalingHelper`,
 `doubleAliasedDrawParameterScaledSibling`.
+
+## Several reads of a structured variable merge field by field
+
+A variable read more than once has one inverse chain per read, and
+`ForwardChaining.mergeExpr` combines them (the set-witness engine's
+`IRCompiler.mergeWitnessValue` does the same for its point witnesses). Two
+witnesses that are tuples or constructions with complementary wildcard fields
+merge field by field, with the product of their Jacobians; any other pair is
+taken as two routes to the same value, and one is kept (`mergeExpr2`: the
+first, or the one holding no wildcard; `mergeWitnessValue`: picked at run
+time by a shallow `isAny` test). Both tests read the witness's shape off its
+syntax, so a read inverted through a structural wrapper hid it: `fst (e,
+0.0)` recovers `e` as the first field of the let-bound `(e', ANY)`, a
+projection of a let-bound variable, not a tuple. Beside `snd e`'s `(ANY, b)`
+it counted as a whole value and won, and the other field went unobserved
+(`draw e = (Normal, Uniform) in (fst (fst (e, 0.0)), snd e)` answered at dim
+1, and points off the Uniform's support were possible). `isLeft (fst (e,
+0.0))` likewise hid its `Left ANY` from the `fromLeft e` read's `Left x`, and
+a helper `h q = fst q` hid its tuple the same way.
+
+`ForwardChaining.exposeConstructIR`, applied to every candidate before
+either merge, resolves the body under the witness's let prefix through the
+variables the prefix binds, `fst`/`snd`/`fromLeft`/`fromRight` of a matching
+construction, and an `if` whose arms both resolve, down to the construction
+(recursively in its fields, which stay the let-bound names, so nothing is
+recomputed). Corpus: `data-structures/fstOfPairWrapperStructuredDraw`,
+`sndOfPairWrapperStructuredDraw`, `structuredDrawHelperProjectsField`.
+Not covered: a structured variable re-read through an alias (`draw s = t`),
+through a helper taking the whole tuple, or through a projecting helper
+behind a second helper (task structured-draw-reread-through-binder-drops-field).

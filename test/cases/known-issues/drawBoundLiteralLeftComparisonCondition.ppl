@@ -1,0 +1,1 @@
+main = draw v = (if Uniform < 0.3 then 1 else 2) in draw z = 2 > v in if z then 1 else 0

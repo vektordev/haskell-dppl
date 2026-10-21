@@ -5459,25 +5459,34 @@ distributeChoice c (ga, sa) (gb, sb) = ([IRIf c (conjIR ga) (conjIR gb)], WChoic
 -- not per field -- see there for why); this function never rejects, only
 -- chooses.
 mergeWitnessValue :: IRExpr -> IRExpr -> IRExpr
-mergeWitnessValue (IRConstruct TgTuple [a1, b1]) (IRConstruct TgTuple [a2, b2]) =
-  IRConstruct TgTuple [mergeWitnessValue a1 a2, mergeWitnessValue b1 b2]
+mergeWitnessValue p1 p2 = mergeWitnessFields (exposeConstructIR p1) (exposeConstructIR p2)
+
+-- | 'mergeWitnessValue' on witnesses whose tuples are syntactic. A witness
+-- read through a structural wrapper (@fst (e, 0.0)@) is a projection of a
+-- let-bound tuple instead, which the runtime pick below took whole over the
+-- sibling's complementary field (task
+-- fst-of-pair-wrapper-loses-structured-draw-constraint), hence
+-- 'exposeConstructIR' first.
+mergeWitnessFields :: IRExpr -> IRExpr -> IRExpr
+mergeWitnessFields (IRConstruct TgTuple [a1, b1]) (IRConstruct TgTuple [a2, b2]) =
+  IRConstruct TgTuple [mergeWitnessFields a1 a2, mergeWitnessFields b1 b2]
 -- A user-ADT constructor, field by field, as a tuple: @isDCons ds@ witnesses
 -- @DCons ANY ANY@, @dig ds * 3 == 21@ witnesses @DCons 7 ANY@, and taking the
 -- first whole (it is no wildcard at its root) answered P(DCons) with the digit
 -- never constrained (fuzz-admission-oracle-bugs item 9). A witness built
 -- under let-bindings (an inverse's own temporaries) is merged under them;
 -- chain-named binders are unique, so nothing is captured.
-mergeWitnessValue (IRLetIn n v b) p2 = IRLetIn n v (mergeWitnessValue b p2)
-mergeWitnessValue p1 (IRLetIn n v b) = IRLetIn n v (mergeWitnessValue p1 b)
-mergeWitnessValue p1 p2
+mergeWitnessFields (IRLetIn n v b) p2 = IRLetIn n v (mergeWitnessFields b p2)
+mergeWitnessFields p1 (IRLetIn n v b) = IRLetIn n v (mergeWitnessFields p1 b)
+mergeWitnessFields p1 p2
   | Just (c1, fs1) <- ctorSpineIR p1, Just (c2, fs2) <- ctorSpineIR p2
   , c1 == c2, length fs1 == length fs2 =
-  foldl IRApply (IRVar c1) (zipWith mergeWitnessValue fs1 fs2)
+  foldl IRApply (IRVar c1) (zipWith mergeWitnessFields fs1 fs2)
 -- A bare wildcard on the second side is the least informative witness of all,
 -- so the first wins even when it is only partly known: @isRight m@ witnesses
 -- @Right ANY@, @right m@ at @Right ANY@ witnesses a bare @ANY@, and taking the
 -- latter measured the draw at a sentinel (a type error in its @isLeft@).
-mergeWitnessValue p1 p2 = IRIf (IRUnaryOp OpIsAny p2) p1 (IRIf (irRuntimeContainsAny p1) p2 p1)
+mergeWitnessFields p1 p2 = IRIf (IRUnaryOp OpIsAny p2) p1 (IRIf (irRuntimeContainsAny p1) p2 p1)
 
 -- | A witness built with a wildcard inside a constructor (not at its root):
 -- statically a set of values rather than one.
