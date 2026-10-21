@@ -1,5 +1,0 @@
-data Color = Red | Green
-data Object = Nil | Obj color::Color, px::Float
-data Scene = Scene ob1::Object, ob2::Object
-neural readScene :: (Symbol -> Scene)
-main sym = draw sc = readScene sym in Scene (if isObj (ob1 sc) then Obj Red (px (ob1 sc) - 1.0) else Nil) (if isObj (ob2 sc) then Obj Red (px (ob2 sc)) else Nil)

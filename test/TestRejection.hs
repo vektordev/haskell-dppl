@@ -378,14 +378,18 @@ queryTypeGuardTests = testGroup "QueryTypeGuard"
 -- keeps this program on the point-inversion path the test is about. With a
 -- discrete second slot (@f :: Bool@, observed as @f o@) the plan-guided engine
 -- answers the whole tuple exactly since task
--- plan-path-coverage-for-over-budget-bodies, and never tests a hole; it still
--- declines arithmetic over a continuous leaf at the observed position.
+-- plan-path-coverage-for-over-budget-bodies, and never tests a hole. Since task
+-- scene-rebuild-with-float-leaf-loses-probability it also transports the
+-- observation through a monotone chain at the observed position (@f o + 1.0@),
+-- so the scale is a non-literal deterministic operand: the plan engine declines
+-- a product whose direction it cannot read statically, and point inversion
+-- does not mind.
 anyCtorProgSrc :: String
 anyCtorProgSrc = unlines
   [ "data Color = Red | Green | Blue"
   , "data Obj = Mk c :: Color, f :: Float"
   , "neural readObj :: (Symbol -> Obj)"
-  , "main sym = draw o = readObj sym in (if isRed (c o) then 0 else 1, f o + 1.0)"
+  , "main sym = draw o = readObj sym in (if isRed (c o) then 0 else 1, f o * (1.0 + 1.0))"
   ]
 
 -- A constructor named after a Python keyword. Emitting it verbatim produced

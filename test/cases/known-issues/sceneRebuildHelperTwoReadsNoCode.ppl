@@ -1,6 +1,0 @@
-data Color = Red | Green
-data Object = Nil | Obj color::Color, px::Float
-data P = P a::Object, b::Object
-neural readObj :: (Symbol -> Object)
-sh o = if isObj o then Obj (color o) (px o - 1.0) else o
-main s1 s2 = P (sh (readObj s1)) (sh (readObj s2))

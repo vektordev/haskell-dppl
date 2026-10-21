@@ -340,6 +340,35 @@ It falls back to the old dispatch if the value cannot be enumerated. Corpus
 `plan-enumeration/planFoldDisjunction*`; tests
 `Internals.planSharedFoldValueMatchesDense`, `planFoldDisjunctionPolynomial`.
 
+### Factored observations and count guards
+
+A point observation of a product region (`sc` against a `Scene` value), or of
+a constructed value (`Scene (soften (o1 sc)) ...`), factors over the fields:
+its worlds are a conjunction of per-field world lists on disjoint leaves
+(`PlanConj`, built by `planInvertConj`/`planRefConj`, kept disjoint by
+`conjAdd`). Crossed, N fields of c alternatives are c^N worlds; `conjFlatten`
+instead collapses every multi-world conjunct but the largest into one summed
+mass (the value grouping on a single value, so the clash rule still applies).
+Where at most one conjunct has several worlds nothing changes.
+
+An `if` whose condition is a comparison of a plan-dependent sum against a
+deterministic bound, and whose branch observation factors (`planConjShape`),
+goes through `planInvertIfConj` (task
+`scene-count-conditional-edit-exponential`): each branch's conjuncts are pushed
+down the sum into the one summand whose static footprint (`planFootprint`)
+holds their leaves, and intersected into that summand's worlds *before* the
+count is grouped (`planEnumAbsorb`). Without this the branch constrained every
+leaf the count had baked, every world clashed and the traversal reran
+ungrouped: "if at least two objects are metal, make them rubber" was 2 MB at 6
+slots and OOM at 10. Now it is the DP over (slot, count so far), 160 KB at 10
+slots. A conjunct that arrives grouped clashes when absorbed; the branch is then
+rebuilt with its own grouping off (`planUngroupedLocally`, the attempt
+discarded by `planAttempt`). Dead-branch gating is decided on a traceless probe
+of the condition (`planProbe`). Corpus `plan-enumeration/sceneCountConditionalEdit`;
+growth test `Internals.sceneCountConditionalEditPolynomial`. Not covered: a
+count threaded through a helper (`bump c o` folded over the slots), whose
+summands are not separate operands.
+
 ## Set witnesses: equality through a transform
 
 An `==` whose bound-variable operand is not the bare occurrence (`exp x ==

@@ -1,0 +1,16 @@
+data Mat = Rubber | Metal
+data Object = Nil | Obj mat::Mat
+data Scene = Scene o1::Object, o2::Object, o3::Object
+neural readScene :: (Symbol -> Scene)
+main sym = draw sc = readScene sym in Scene (o1 sc) (if isObj (o1 sc) then (if isMetal (mat (o1 sc)) then (if isObj (o2 sc) then Obj Rubber else o2 sc) else o2 sc) else o2 sc) (o3 sc)
+-- A cross-slot conditional edit: "if object 1 is metal, object 2 becomes
+-- rubber". The all-ANY query used to raise "isNil: constructor test on an
+-- unobserved value (ANY)" in Python, and so did writeLogits, whose first line
+-- asks for exactly that normaliser: the passed-through slots' sub-observations
+-- reached is<Ctor> on the wildcard (was
+-- known-issues/crossSlotConditionalAllAnyQueryCrashes; fixed with task
+-- writelogits-dropped-for-read-passthrough-continuous-leaf, docs task
+-- cross-slot-conditional-all-any-query-crashes). Found by experiments_nest
+-- symbolic-latent-scene-editing.
+-- p(Scene ANY (Obj Rubber) ANY) = 0.5 (0.42 + 0.58 x 0.2) = 0.268
+-- p(Scene ANY ANY (Obj Metal)) = 0.9 x 0.4 = 0.36; p(Scene (Obj ANY) ANY ANY) = 0.6

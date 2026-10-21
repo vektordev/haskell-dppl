@@ -42,7 +42,7 @@ import Data.Either (partitionEithers)
 import Data.List (isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
-import SPLL.AutoNeural hiding (planReadOf)
+import SPLL.AutoNeural hiding (planReadOf, planProjectedReadOf)
 import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
@@ -7208,8 +7208,18 @@ planInvert meta env planBody target
           return (Right [planAddGuard (planDetGuard (rType (getTypeInfo planBody)) bIR target) (pw1 [])])
         else planFactorFree meta env planBody target
 planInvert meta env planBody target
-  | Just refE <- planEvalRef meta env planBody =
-      either (return . Left) (\(ref, cons) -> planRefWorlds (adtDecls meta) ref cons target) refE
+  | Just refE <- planEvalRef meta env planBody = case (refE, target) of
+      (Left why, _) -> return (Left why)
+      -- A point observation of a product region whose fields each split into
+      -- several worlds: summed field by field, not crossed ('conjFlatten').
+      (Right (ref, cons), PTPoint y) -> do
+        ksE <- planRefConj (adtDecls meta) ref cons y
+        case ksE of
+          Left why -> return (Left why)
+          Right ks
+            | conjMultiCount ks > 1 -> Right <$> conjFlatten ks
+            | otherwise -> return (Right (foldl liveIntersects [pw1 []] ks))
+      (Right (ref, cons), _) -> planRefWorlds (adtDecls meta) ref cons target
 -- A plan-dependent value shared by several children of this node is
 -- enumerated once and the node traversed per value ('planShareSplit').
 --
@@ -7239,6 +7249,10 @@ planInvertNode meta env planBody target = case planBody of
         wsT <- planInvert meta env t target
         wsE <- planInvert meta env e target
         return ((\ts es -> map (planAddGuard g) ts ++ map (planAddGuard (IRUnaryOp OpNot g)) es) <$> wsT <*> wsE)
+    -- A branch whose observation factors over the plan (a scene returned
+    -- whole, or rebuilt field by field): see 'planInvertIfConj'.
+    | subtreeHasOcc occs c, PTPoint _ <- target
+    , planConjShape meta env t || planConjShape meta env e -> planInvertIfConj meta env c t e target
     | subtreeHasOcc occs c -> do
         cb <- planInvertBool meta env c
         case cb of
@@ -7314,16 +7328,45 @@ planInvertNode meta env planBody target = case planBody of
     opened <- planOpenBinding meta env lam x b a
     case opened of
       Left why -> return (Left why)
-      Right (env', b') -> planInvert meta env' b' target
+      Right (env', b', cons) -> fmap (map (addSliceCons cons)) <$> planInvert meta env' b' target
   Expr _ (Apply {}) -> planApplyTarget meta env planBody target
   -- Arithmetic over plan-dependent operands at the observed position
   -- (@numRed scene + 1.0@): enumerate the node's values exactly as value
   -- enumeration already does under a comparison, and guard each against the
   -- target -- the same thing 'planApplyTarget' does for a value-returning call.
+  --
+  -- A monotone transform chain over a continuous leaf (@px (ob1 sc) - 1.0@,
+  -- the moved object of a scene edit) has no values to enumerate; the
+  -- observation is transported down the chain instead, as the comparison and
+  -- equality cases already do ('planPeelSlice'): a point target pins the leaf
+  -- at the inverse-transformed value with the chain's change-of-variables
+  -- factor, an up-to target becomes the half-line the chain's direction
+  -- selects (task scene-rebuild-with-float-leaf-loses-probability).
   Expr ti (InjF (Named nm) args)
-    | isJust (planArithOp nm (length args)) -> do
-        vsE <- planEnumValues meta env planBody
-        return ((\pairs -> [ planAddGuard (planDetGuard (rType ti) v target) w | (v, w) <- pairs ]) <$> vsE)
+    | nm `elem` ["plus", "mult", "neg", "double", "exp", "log"] || isJust (planArithOp nm (length args)) -> do
+        peelM <- if nm `elem` ["plus", "mult", "neg", "double", "exp", "log"]
+                   then planPeelSlice meta env planBody
+                   else return Nothing
+        case peelM of
+          Just (Right (PlanRef _ off, cons, steps, dir)) -> case target of
+            PTPoint s -> do
+              (bnd, cov, imgGs) <- peelPoint steps s
+              bv <- lift (mkVariable "obs_bnd")
+              lift (setVariables [(bv, bnd)])
+              return (Right [pw1 (insertLeafCon (PLeafPt off (IRVar bv) cov imgGs) cons)])
+            PTUpTo s -> do
+              bnd <- peelBound steps s
+              bv <- lift (mkVariable "obs_bnd")
+              lift (setVariables [(bv, bnd)])
+              let ivl = if dir == MonInc then PLeafIvl off WNegInf (WFinite (IRVar bv))
+                                         else PLeafIvl off (WFinite (IRVar bv)) WPosInf
+              return (Right [pw1 (insertLeafCon ivl cons)])
+          Just (Left why) -> return (Left why)
+          Nothing
+            | isJust (planArithOp nm (length args)) -> do
+                vsE <- planEnumValues meta env planBody
+                return ((\pairs -> [ planAddGuard (planDetGuard (rType ti) v target) w | (v, w) <- pairs ]) <$> vsE)
+            | otherwise -> return (Left ("unsupported node in plan traversal: " ++ planNodeName planBody))
   -- Structural inversion of a built-in constructor: a tuple, a list cons, or an
   -- 'Either' injection. The user-ADT case below, spelled for the built-in
   -- accessors: the observation must have this shape, and each field's
@@ -7523,6 +7566,296 @@ planInvertNode meta env planBody target = case planBody of
       (_, Just (Left why)) -> return (Left why)
       _ -> return (Left "a comparison with both sides plan-dependent is only supported between two continuous plan leaves (single pairwise coupling)")
 
+-- | A conjunction of world disjunctions (task
+-- scene-count-conditional-edit-exponential): the worlds of an observation that
+-- factors over disjoint parts of the plan, kept factored instead of crossed.
+-- Each conjunct is a world list in the usual sense (a partition of its event);
+-- the conjunction's worlds are the cross intersection of the conjuncts. Built
+-- only through 'conjAdd', which keeps the conjuncts' leaf footprints pairwise
+-- disjoint, so the cross product is a product of independent masses.
+--
+-- Two things use the factored form. 'conjFlatten' sums each conjunct into one
+-- world before crossing them -- the distributive law, @prod_i sum_j m_ij@
+-- instead of @sum over all combinations@ -- which is what makes a point
+-- observation of an N-slot product scene N worlds instead of c^N. And an @if@
+-- whose condition counts over the slots absorbs each slot's conjunct into that
+-- slot's summand before the count is value-grouped ('planEnumAbsorb'), the DP
+-- over (slot, count so far) instead of one world per scene path.
+type PlanConj = [[PlanWorld]]
+
+-- | The leaf regions a disjunction reads.
+conjLeaves :: [PlanWorld] -> [Int]
+conjLeaves = nub . concatMap pwLeaves
+
+-- | Conjoin a disjunction onto a factored conjunction, keeping the conjuncts
+-- leaf-disjoint: every conjunct sharing a leaf with it is crossed into it.
+conjAdd :: [PlanWorld] -> PlanConj -> PlanConj
+conjAdd d ks =
+  let ls = conjLeaves d
+      overlaps k = any (`elem` ls) (conjLeaves k)
+      (hit, miss) = (filter overlaps ks, filter (not . overlaps) ks)
+  in miss ++ [foldl liveIntersects d hit]
+
+-- | How many conjuncts split into several worlds: below two, crossing them
+-- does not multiply.
+conjMultiCount :: PlanConj -> Int
+conjMultiCount = length . filter ((> 1) . length)
+
+-- | Conjoin several conjunctions.
+conjAll :: [PlanConj] -> PlanConj
+conjAll = foldl (foldr conjAdd) []
+
+-- | The flat world list of a factored conjunction: the conjuncts, being
+-- leaf-disjoint, are exactly the independent "fields" 'planFieldProduct'
+-- collapses one by one before crossing (when two or more split), under its
+-- 'psFactor' gate and clash retry.
+conjFlatten :: PlanConj -> PlanM [PlanWorld]
+conjFlatten = planFieldProduct
+
+-- | Does the observation of this node factor over the plan? A slice of a
+-- single-constructor (product) ADT region with several fields, or a
+-- user-constructor application with several arguments. Static, so the
+-- factored @if@ path is chosen without traversing anything.
+planConjShape :: CompilerMetadata -> PlanEnv -> Expr -> Bool
+planConjShape meta env e = case planEvalRef meta env e of
+  Just (Right (PlanRef (ADTPlan _ [(_, fps)]) _, _)) -> length fps > 1
+  Just _ -> False
+  Nothing -> case e of
+    Expr _ (InjF (Named nm) args) | Just fields <- lookupADTConstructor (adtDecls meta) nm ->
+      length fields == length args && length args > 1 && subtreeHasOcc (planEnvOccs env) e
+    _ -> False
+
+-- | 'planInvert' in factored form: a point observation of a product region or
+-- of a constructed ADT value is one conjunct per field (plus the constructor
+-- test), anything else is the single conjunct 'planInvert' returns.
+planInvertConj :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Either String PlanConj)
+planInvertConj meta env e target@(PTPoint y)
+  | subtreeHasOcc (planEnvOccs env) e
+  , Just (Right (ref, cons)) <- planEvalRef meta env e =
+      planRefConj (adtDecls meta) ref cons y
+  | Expr _ (InjF (Named nm) args) <- e
+  , subtreeHasOcc (planEnvOccs env) e
+  , Nothing <- planEvalRef meta env e
+  , Just fields <- lookupADTConstructor (adtDecls meta) nm
+  , length fields == length args =
+      case mapM (\(f, fty) -> planSafeField (adtDecls meta) nm f fty y) fields of
+        Left why -> return (Left why)
+        Right subTargets -> do
+          fieldsE <- zipWithM (\a s -> fmap (conjAnySplit s) <$> planInvertConj meta env a (PTPoint s)) args subTargets
+          return (conjAll . ([[planAddGuard (planIsCtor nm y) (pw1 [])]] :) <$> sequence fieldsE)
+  | otherwise = fmap (: []) <$> planInvert meta env e target
+planInvertConj meta env e target = fmap (: []) <$> planInvert meta env e target
+
+-- | 'planRefWorlds' against a point, in factored form: a lone constructor's
+-- fields are independent regions, so each is its own conjunct. A field's
+-- sub-observation may be a wildcard, so each of its conjuncts is split on it
+-- ('conjAnySplit').
+planRefConj :: [ADTDecl] -> PlanRef -> [PLeafCon] -> IRExpr -> PlanM (Either String PlanConj)
+planRefConj adtDecls' (PlanRef (ADTPlan adtName [(cn, fps)]) off) cons s
+  | not (null fps) = case lookupADTConstructor adtDecls' cn of
+      Nothing -> return (Left ("constructor " ++ cn ++ " of ADT " ++ adtName ++ " is in the partition plan but not among the declared constructors"))
+      Just fields -> do
+        let flagWorlds = adtFlagWorlds off [(cn, fps)] [(0, planIsCtor cn s)] cons
+            cbase = head (adtCtorBases off [(cn, fps)])
+        fieldConjs <- forM (zip3 [0 ..] fps fields) $ \(j, fp, (fname, fty)) ->
+          case planSafeField adtDecls' cn fname fty s of
+            Left why -> return (Left why)
+            Right sub -> fmap (conjAnySplit sub)
+                           <$> planRefConj adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] sub
+        return (conjAll . ([flagWorlds] :) <$> sequence fieldConjs)
+planRefConj adtDecls' ref cons s = fmap (: []) <$> planRefWorlds adtDecls' ref cons (PTPoint s)
+
+-- | 'planAnySplit' over a factored conjunction, one conjunct at a time. When
+-- the sub-observation is a wildcard every conjunct takes its unconstrained
+-- world (mass 1 each); otherwise every conjunct takes its own worlds. A
+-- combination of the two has contradictory guards and measures 0, so the
+-- conjunction still partitions.
+conjAnySplit :: IRExpr -> PlanConj -> PlanConj
+conjAnySplit s = map (planAnySplit s)
+
+-- | The plan regions a subtree can read, as half-open flat-offset ranges:
+-- every maximal plan slice it mentions, plus the accessor constraints on the
+-- way to it. Static and conservative. A callee body only reaches the plan
+-- through its arguments, so a call's footprint is its arguments'. Nothing
+-- when a local binding or lambda could carry the plan somewhere this does not
+-- look (the caller then absorbs nothing).
+planFootprint :: CompilerMetadata -> PlanEnv -> Expr -> Maybe [(Int, Int)]
+planFootprint meta env = go
+  where
+    occs = planEnvOccs env
+    go e
+      | not (subtreeHasOcc occs e) = Just []
+      | Just r <- planEvalRef meta env e = case r of
+          Right (PlanRef p off, cons) -> Just ((off, off + getSize p) : [ (plcBase c, plcBase c + 1) | c <- cons ])
+          Left _ -> Nothing
+      | otherwise = case e of
+          Expr _ (Lambda _ _) -> Nothing
+          Expr _ (Apply (Expr _ (Lambda _ _)) _) -> Nothing
+          Expr _ (ReadNN _ _) -> Nothing
+          _ -> concat <$> mapM go (getSubExprs e)
+
+inRanges :: [(Int, Int)] -> Int -> Bool
+inRanges rs b = any (\(lo, hi) -> lo <= b && b < hi) rs
+
+-- | Run a traversal with the value grouping off and fresh specialization
+-- memos (so neither ungrouped results leak into the grouped memo nor grouped
+-- ones are reused here), restoring both afterwards.
+planUngroupedLocally :: PlanM a -> PlanM a
+planUngroupedLocally act = do
+  st0 <- get
+  put st0 { psMerge = False, psFactor = False, psBoolMemo = Map.empty, psEnumMemo = Map.empty }
+  r <- act
+  st1 <- get
+  put st1 { psMerge = psMerge st0, psFactor = psFactor st0, psBoolMemo = psBoolMemo st0, psEnumMemo = psEnumMemo st0 }
+  return r
+
+-- | Run a traversal for its result only: its variable bindings are dropped and
+-- the plan state and name supply rewound, so it leaves no trace in the IR.
+-- The result's worlds may name dropped variables; use only their structure.
+planProbe :: PlanM a -> PlanM a
+planProbe act = do
+  st0 <- get
+  sup0 <- lift get
+  r <- lift (censor (const []) (fst <$> runStateT act st0))
+  lift (put sup0)
+  return r
+
+-- | 'planEnumValues' with conjuncts absorbed (task
+-- scene-count-conditional-edit-exponential). Each conjunct is pushed down an
+-- arithmetic node into the one operand whose static footprint
+-- ('planFootprint') holds all of its leaves while no other operand's touches
+-- them, and at the bottom it is intersected into that operand's worlds
+-- /before/ they are value-grouped. The grouped masses then already carry the
+-- conjunct, and the operands stay leaf-disjoint, so nothing clashes: for a
+-- count over the slots of a product scene observed slot by slot, this is the
+-- DP over (slot, count so far). The operand receiving a conjunct is
+-- enumerated ungrouped below that point ('planUngroupedLocally'), since its
+-- own grouped masses would bake the leaves the conjunct constrains.
+--
+-- Returns the (value, world) pairs, the conjuncts not absorbed (to be
+-- intersected by the caller as usual), and whether anything was absorbed.
+-- Sound for any assignment: a conjunct intersected into some operand's
+-- partition still yields a partition of (value, conjunct) outcomes.
+planEnumAbsorb :: CompilerMetadata -> PlanEnv -> PlanConj -> Expr -> PlanM (Either String ([(IRExpr, PlanWorld)], PlanConj, Bool))
+planEnumAbsorb meta env ks e
+  | null ks = fmap (\ps -> (ps, [], False)) <$> planEnumValues meta env e
+  | Expr _ (InjF (Named nm) args) <- e
+  , Just f <- planArithOp nm (length args)
+  , all (subtreeHasOcc (planEnvOccs env)) args
+  , Just fps <- mapM (planFootprint meta env) args =
+      let owner k = case [ i | (i, fp) <- zip [0 :: Int ..] fps, any (inRanges fp) (conjLeaves k) ] of
+            [i] | all (inRanges (fps !! i)) (conjLeaves k), not (null (conjLeaves k)) -> Just i
+            _ -> Nothing
+          owned = [ (k, owner k) | k <- ks ]
+          leftover = [ k | (k, Nothing) <- owned ]
+      in if all (isNothing . snd) owned
+        then fmap (\ps -> (ps, ks, False)) <$> planEnumValues meta env e
+        else do
+          rs <- forM (zip [0 :: Int ..] args) $ \(i, a) ->
+            planEnumAbsorb meta env [ k | (k, Just j) <- owned, j == i ] a
+          case sequence rs of
+            Left why -> return (Left why)
+            Right parts -> do
+              let combos = filter (not . pwUnsat . snd)
+                    [ (f (map fst c), foldl1 intersectPlanW (map snd c)) | c <- sequence [ ps | (ps, _, _) <- parts ] ]
+              grouped <- planGroupValues combos
+              return (Right (grouped, leftover ++ concat [ l | (_, l, _) <- parts ], True))
+  | otherwise = do
+      rawE <- planUngroupedLocally (planEnumValues meta env e)
+      case rawE of
+        Left why -> return (Left why)
+        Right raw -> do
+          let pairs = filter (not . pwUnsat . snd)
+                [ (v, foldl intersectPlanW w combo) | (v, w) <- raw, combo <- sequence ks ]
+          grouped <- planGroupValues pairs
+          return (Right (grouped, [], True))
+
+-- | 'planInvert' of a Bool condition against a polarity target, absorbing
+-- conjuncts into it where it is a comparison of an arithmetic value with a
+-- deterministic side ('planEnumAbsorb'); anything else is inverted as usual
+-- and hands every conjunct back.
+planInvertAbsorb :: CompilerMetadata -> PlanEnv -> PlanConj -> Expr -> PTarget -> PlanM (Either String ([PlanWorld], PlanConj, Bool))
+planInvertAbsorb meta env ks c target = case c of
+  Expr _ (InjF (Named op) [a, b])
+    | op `elem` ["gt", "lt", "eq"], absorbable a, isDetSide b -> via op a b False
+    | op `elem` ["gt", "lt", "eq"], absorbable b, isDetSide a -> via op b a True
+  _ -> plain
+  where
+    occs = planEnvOccs env
+    plain = fmap (\ws -> (ws, ks, False)) <$> planInvert meta env c target
+    isDetSide x = not (subtreeHasOcc occs x) && pType (getTypeInfo x) == Deterministic
+    absorbable x = case x of
+      Expr _ (InjF (Named nm) args) -> isJust (planArithOp nm (length args)) && all (subtreeHasOcc occs) args
+      _ -> False
+    via op pe de flipped = do
+      r <- planEnumAbsorb meta env ks pe
+      case r of
+        Left why -> return (Left why)
+        Right (pairs, left, absorbed) -> do
+          d <- planGenDet meta env de
+          dv <- lift (mkVariable (if op == "eq" then "eq_rhs" else "cmp_rhs"))
+          lift (setVariables [(dv, d)])
+          let rt = rType (getTypeInfo pe)
+              holds v = case op of
+                "eq" -> planDetGuard rt v (PTPoint (IRVar dv))
+                _    -> IROp (if (op == "gt") /= flipped then OpGreaterThan else OpLessThan) v (IRVar dv)
+              tw = [ planAddGuard (holds v) w                    | (v, w) <- pairs ]
+              fw = [ planAddGuard (IRUnaryOp OpNot (holds v)) w | (v, w) <- pairs ]
+          return (Right (planBoolWorlds target tw fw, left, absorbed))
+
+-- | The factored inversion of @if c then t else e@ against a point target,
+-- for a plan-dependent condition and a branch whose observation factors
+-- ('planConjShape'). Each branch's observation is kept as conjuncts, the
+-- condition absorbs what it can of them ('planInvertAbsorb'), and the rest is
+-- conjoined and flattened ('conjFlatten'). Dead-branch gating is decided on a
+-- probe of the condition ('planProbe'), as the unfactored path decides it on
+-- the condition's worlds: a branch whose polarity is statically impossible is
+-- never traversed.
+planInvertIfConj :: CompilerMetadata -> PlanEnv -> Expr -> Expr -> Expr -> PTarget -> PlanM (Either String [PlanWorld])
+planInvertIfConj meta env c t e target = do
+  probe <- planProbe (planInvertBool meta env c)
+  case probe of
+    Left why -> return (Left why)
+    Right (cts0, cfs0) -> do
+      let live = not . all pwUnsat
+      wsT <- if live cts0 then branch t constTrueIR else return (Right [])
+      wsE <- if live cfs0 then branch e constFalseIR else return (Right [])
+      return ((++) <$> wsT <*> wsE)
+  where
+    -- The branch's conjuncts are first built as usual. A conjunct that comes
+    -- back value-grouped has baked the leaves the condition's summands read,
+    -- so absorbing it clashes; the branch is then rebuilt with its own
+    -- grouping off ('planUngroupedLocally') and absorbed again. The grouped
+    -- attempt is discarded without trace ('planAttempt').
+    branch b pol = do
+      r <- planAttempt (absorbInto False b pol)
+      maybe (fst <$> absorbInto True b pol) return r
+    absorbInto ungrouped b pol = do
+      kE <- (if ungrouped then planUngroupedLocally else id) (planInvertConj meta env b target)
+      case kE of
+        Left why -> return (Left why, True)
+        Right ks -> do
+          cE <- planInvertAbsorb meta env ks c (PTPoint pol)
+          case cE of
+            Left why -> return (Left why, True)
+            Right (cws, left, _) -> do
+              ws <- conjFlatten (conjAdd (filter (not . pwUnsat) cws) left)
+              return (Right ws, not (any pwClash cws))
+
+-- | Run a traversal that reports whether its result is usable; when it is not,
+-- discard it without trace (its bindings dropped, the plan state and name
+-- supply rewound) and answer Nothing.
+planAttempt :: PlanM (a, Bool) -> PlanM (Maybe a)
+planAttempt act = do
+  st0 <- get
+  sup0 <- lift get
+  ((r, ok), st1) <- lift $ pass $ do
+    res@((_, ok), _) <- runStateT act st0
+    return (res, if ok then id else const [])
+  if ok
+    then put st1 >> return (Just r)
+    else lift (put sup0) >> put st0 >> return Nothing
+
 -- | Worlds of one constructor component whose sub-observation @s@ may be a
 -- wildcard at run time (a partial-@ANY@ query such as @(ANY, 1.0)@): a world
 -- leaving the component unconstrained when @s@ is @ANY@, and the component's
@@ -7633,11 +7966,11 @@ planBetaReduce meta env x b a
 --   one helper would share one range and their reads be counted as one draw;
 -- * a symbol argument that is not plan-free and deterministic, since the read
 --   is bound once, ahead of every world.
-planOpenBinding :: CompilerMetadata -> PlanEnv -> Expr -> String -> Expr -> Expr -> PlanM (Either String (PlanEnv, Expr))
+planOpenBinding :: CompilerMetadata -> PlanEnv -> Expr -> String -> Expr -> Expr -> PlanM (Either String (PlanEnv, Expr, [PLeafCon]))
 planOpenBinding meta env lam x b a = case planBetaReduce meta env x b a of
-  Right b' -> return (Right (env, b'))
+  Right b' -> return (Right (env, b', []))
   Left why
-    | Just (nnName, plan, symArg) <- planReadOf meta a -> do
+    | Just (nnName, plan, symArg, readNode) <- planProjectedReadOf meta a -> do
         stack <- gets psStack
         let symFree = not (subtreeHasOcc (planEnvOccs env ++ planEnvDetOccs env) symArg)
                       && pType (getTypeInfo symArg) == Deterministic
@@ -7660,7 +7993,10 @@ planOpenBinding meta env lam x b a = case planBetaReduce meta env x b a of
                     Just (rCN, LambdaInfo _ _, _) -> rCN
                     _ -> lamCN
                   occs = fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcd))
-              return (Right ((occs, PBPlan (PlanRef plan off)) : env, b))
+              -- A projected read binds its slice, the accessors' constructor
+              -- flags constraining every world of the body.
+              return ((\(ref, cons) -> ((occs, PBPlan ref) : env, b, cons))
+                        <$> planProjectedSlice meta plan off readNode a)
     | otherwise -> return (Left why)
 
 -- | Share one plan-dependent value among the children of a node (task
@@ -8080,7 +8416,7 @@ planEnumValuesNode meta env bodyExpr = case bodyExpr of
         opened <- planOpenBinding meta env lam x b a
         case opened of
           Left why -> return (Left why)
-          Right (env', b') -> planEnumValues meta env' b'
+          Right (env', b', cons) -> fmap (map (fmap (addSliceCons cons))) <$> planEnumValues meta env' b'
       Expr _ (Apply {}) -> do
         specsE <- planResolveApply meta env bodyExpr
         case specsE of
@@ -8515,7 +8851,8 @@ planWorldMass sr raws w =
 -- declined.
 planWitnessApply :: CompilerMetadata -> Bool -> RType -> Binding -> IRExpr -> CompilerMonad (Either (Maybe String) PResult)
 planWitnessApply meta0 cumulative rt binding sample
-  | Just (nnName, plan, symArg) <- planApplicable meta0 rt binding
+  | Just (nnName, plan, symArg, readNode) <- planApplicable meta0 rt binding
+  , Right (sliceRef, sliceCons) <- planProjectedSlice meta0 plan 0 readNode (bindArg binding)
   = do
       -- Bind the curried callee's leading parameters (none for a draw or a
       -- one-parameter callee) under fresh names, in the caller's scope.
@@ -8528,7 +8865,9 @@ planWitnessApply meta0 cumulative rt binding sample
       -- Deterministic here and must dispatch as such.
       let bodyExpr = reinferRecovered meta (recoveredVars meta) scopedBody
       let occs = bindOccs binding
-      let env = [(occs, PBPlan (PlanRef plan 0))]
+      -- A projected read (@draw a = ob1 (readScene sym)@) binds the slice;
+      -- its accessors' constructor flags constrain every world.
+      let env = [(occs, PBPlan sliceRef)]
       let target = if cumulative then PTUpTo sample else PTPoint sample
       -- Bind the raw logit vector up front: the milestone-4 value grouping
       -- measures collapsed worlds during the traversal, so it needs the name.
@@ -8559,7 +8898,7 @@ planWitnessApply meta0 cumulative rt binding sample
       -- factoring existed. An attempt that never factored is not repeated.
       let runPlan merge factor = do
             (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState (semiringOf meta) nnRaw (getSize plan) merge factor)
-            return ((filter (not . pwUnsat) <$> ws, psRaws st), psFactored st)
+            return ((filter (not . pwUnsat) . map (addSliceCons sliceCons) <$> ws, psRaws st), psFactored st)
           attempt merge factor = do
             supply <- get
             pass $ do
@@ -8590,6 +8929,26 @@ planWitnessApply meta0 cumulative rt binding sample
 -- ('SPLL.AutoNeural.planReadOf' in this compile's program).
 planReadOf :: CompilerMetadata -> Expr -> Maybe (String, PartitionPlan, Expr)
 planReadOf meta = AutoNeural.planReadOf (compilingProgram meta)
+
+-- | A neural read seen through field accessors, @ob1 (readScene sym)@
+-- ('SPLL.AutoNeural.planProjectedReadOf'): also answers the read node.
+planProjectedReadOf :: CompilerMetadata -> Expr -> Maybe (String, PartitionPlan, Expr, Expr)
+planProjectedReadOf meta = AutoNeural.planProjectedReadOf (compilingProgram meta)
+
+-- | The slice a projected read binds ('planProjectedReadOf'), with the
+-- constructor-flag constraints its accessors imply: the accessor chain
+-- evaluated with the read node itself bound to the whole plan at @off@.
+planProjectedSlice :: CompilerMetadata -> PartitionPlan -> Int -> Expr -> Expr -> Either String (PlanRef, [PLeafCon])
+planProjectedSlice meta plan off readNode arg =
+  fromMaybe (Left ("not an accessor chain over a neural read: " ++ planNodeName arg))
+            (planEvalRef meta [([chainName (getTypeInfo readNode)], PBPlan (PlanRef plan off))] arg)
+
+-- | Fold a projected binding's accessor constraints into a world (the
+-- call-site analogue is 'addSpecCons'); a constraint on a leaf the world
+-- already baked is a clash.
+addSliceCons :: [PLeafCon] -> PlanWorld -> PlanWorld
+addSliceCons cons w = w { pwCons = foldr insertLeafCon (pwCons w) cons
+                        , pwClash = pwClash w || any ((`elem` pwBaked w) . plcBase) cons }
 
 -- | The compiled inference function a call to top-level function @n@ must
 -- reference, given the semiring the CALLER is being compiled under.
@@ -8644,9 +9003,9 @@ dispatchEngines onAnswer engines none = go Nothing engines
 -- plan read ('planReadOf', the predicate the modality engine reads too), its
 -- body is meaningful at this call site ('bindScope'), and it is not
 -- function-valued.
-planApplicable :: CompilerMetadata -> RType -> Binding -> Maybe (String, PartitionPlan, Expr)
+planApplicable :: CompilerMetadata -> RType -> Binding -> Maybe (String, PartitionPlan, Expr, Expr)
 planApplicable meta rt binding
-  | isJust (bindScope binding), not (isTArrowType rt) = planReadOf meta (bindArg binding)
+  | isJust (bindScope binding), not (isTArrowType rt) = planProjectedReadOf meta (bindArg binding)
   | otherwise = Nothing
 
 -- | The set-witness engine's applicability to a binding: the shape walk of

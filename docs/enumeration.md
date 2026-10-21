@@ -415,6 +415,32 @@ and the 10-slot CLEVR scene compiles in 2.5 s (145 KB). Corpus:
 `planSceneFloatPassthrough*`. Growth test:
 `Internals.planSceneFloatPassthroughPolynomial`.
 
+**Moved Float leaves and projected reads** (task
+`scene-rebuild-with-float-leaf-loses-probability`). Two shapes of a scene
+rebuild declined the plan traversal, and the function compiled generate only:
+
+- A monotone transform of a continuous leaf *at the observed position*
+  (`Obj Red (px (ob1 sc) - 1.0)` observed against a scene). The arithmetic case
+  of `planInvertNode` enumerated the node's values, which only enum leaves
+  have. It now first tries `planPeelSlice`, the chain transport the comparison
+  and equality cases already use. A point target becomes a `PLeafPt` at the
+  inverse-transformed value with the chain's change of variables and image
+  guards (`peelPoint`). An up-to target becomes the half-line the chain's net
+  direction selects (`peelBound`). Corpus: `planSceneRebuildShiftedFloatLeaf`,
+  `planSceneRebuildHelperTwoReads`, `planPeeledLeafAtObservedPosition`
+  (decreasing chain, cumulative rows).
+- A binding of a field accessor chain over a read
+  (`draw a = ob1 (readScene sym)`). The plan engine was only applicable to a
+  bare read. `AutoNeural.planProjectedReadOf` peels `fst`/`snd`/ADT accessors
+  down to a read. The modality engine's plan certificate and `planRoots`, the
+  top-level entry (`planApplicable`) and a nested read (`planOpenBinding`) all
+  read it. The bound variable is the slice (`planProjectedSlice`, which is
+  `planEvalRef` with the read node bound to the whole plan). The accessors'
+  constructor flags constrain every world (`addSliceCons`, a clash on a baked
+  leaf, like `addSpecCons`). So `draw p = px (readObj s)` answers the Obj arm's
+  sub-probability, as `px o` read in a body does. Corpus:
+  `planSceneRebuildPerFieldDraws`, `planProjectedReadCtorAccessor`.
+
 ## Agreement fusion: two categoricals multiply in O(V)
 
 Combining two categorical variables by **agreement** — `let a = camNN i in

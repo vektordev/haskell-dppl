@@ -1,5 +1,0 @@
-data Mat = Rubber | Metal
-data Object = Nil | Obj mat::Mat
-data Scene = Scene o1::Object, o2::Object, o3::Object
-neural readScene :: (Symbol -> Scene)
-main sym = draw sc = readScene sym in Scene (o1 sc) (if isObj (o1 sc) then (if isMetal (mat (o1 sc)) then (if isObj (o2 sc) then Obj Rubber else o2 sc) else o2 sc) else o2 sc) (o3 sc)

@@ -1,0 +1,16 @@
+-- A unary helper that rebuilds an object with its colour passed through and
+-- its Float shifted, applied to two independent reads (task
+-- scene-rebuild-with-float-leaf-loses-probability; was the known-issues pin
+-- sceneRebuildHelperTwoReadsNoCode). Same cause as
+-- planSceneRebuildShiftedFloatLeaf: the shifted leaf at the observed position.
+-- Object plan [Nil, Obj | Red, Green | mu, sigma]; read 1
+-- [0.3, 0.7, 0.4, 0.6, 0.0, 1.0], read 2 [0.6, 0.4, 0.9, 0.1, 1.0, 2.0].
+-- p(P (Obj Green -0.5) (Obj Red 0.0)) = 0.7 * 0.6 phi(0.5) * 0.4 * 0.9 phi(0)/2 (dim 2)
+-- p(P Nil (Obj Green 2.0))            = 0.3 * 0.4 * 0.1 phi(1)/2                (dim 1)
+-- p(P Nil Nil)                        = 0.3 * 0.6                               (dim 0)
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+data P = P a::Object, b::Object
+neural readObj :: (Symbol -> Object)
+sh o = if isObj o then Obj (color o) (px o - 1.0) else o
+main s1 s2 = P (sh (readObj s1)) (sh (readObj s2))

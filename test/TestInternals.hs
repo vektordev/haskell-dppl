@@ -2382,6 +2382,43 @@ test_planFlatSumOverProductPolynomial = testCase "planFlatSumOverProductPolynomi
               ++ show s4 ++ " s7=" ++ show s7 ++ " ratio=" ++ show (fromIntegral s7 / fromIntegral s4 :: Double))
     (s7 < 3 * s4)
 
+-- | A count over the slots of a product scene as the GUARD of a scene-valued
+-- edit (task scene-count-conditional-edit-exponential): "if at least two
+-- objects are metal, make every metal object rubber". Each branch observes
+-- every slot, so before the fix the branch worlds clashed with the count's
+-- value groups, the traversal reran ungrouped, and the module grew ~4x per
+-- slot (2.0 MB at N = 6, 2 GB OOM at 10). The branch observation is now kept
+-- factored per slot and absorbed into that slot's summand before the count is
+-- grouped -- a DP over (slot, count so far), O(N^2) in size. A point
+-- observation of the bare scene (the else branch) is likewise summed per slot
+-- instead of crossed (2^N worlds before). Ungrouped, (4, 7) is ~40x; grouped
+-- it is under 2x.
+test_sceneCountConditionalEditPolynomial :: TestTree
+test_sceneCountConditionalEditPolynomial = testCase "sceneCountConditionalEditPolynomial" $ do
+  let prog n = unlines
+        [ "data Mat = Rubber | Metal"
+        , "data Size = Small | Large"
+        , "data Object = Nil | Obj mat::Mat, size::Size"
+        , "data Scene = Scene " ++ intercalate ", " [ "o" ++ show i ++ "::Object" | i <- [1 .. n :: Int] ]
+        , "neural readScene :: (Symbol -> Scene)"
+        , "metal o = if isObj o then (if isMetal (mat o) then 1 else 0) else 0"
+        , "soften o = if isObj o then (if isMetal (mat o) then Obj Rubber (size o) else o) else o"
+        , "main sym = draw sc = readScene sym in if (" ++ intercalate " + " [ "metal (o" ++ show i ++ " sc)" | i <- [1 .. n] ]
+            ++ ") > 1 then Scene" ++ concat [ " (soften (o" ++ show i ++ " sc))" | i <- [1 .. n] ] ++ " else sc"
+        ]
+  let sizeAt :: Int -> IO Int
+      sizeAt n = case tryParseProgram "countedit" (prog n) of
+        Left e  -> assertFailure ("parse error at N = " ++ show n ++ ": " ++ show e)
+        -- Budget 0: the plan engine's growth is what is pinned (see test_planFoldDisjunctionPolynomial).
+        Right p -> case compile noMaterializationConfig p of
+          Left e   -> assertFailure ("compile error at N = " ++ show n ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s4 <- sizeAt 4
+  s7 <- sizeAt 7
+  assertBool ("N=7 count-guarded scene edit IR is growing exponentially: s4="
+              ++ show s4 ++ " s7=" ++ show s7 ++ " ratio=" ++ show (fromIntegral s7 / fromIntegral s4 :: Double))
+    (s7 < 3 * s4)
+
 -- | A per-slot edit rebuilding an N-slot product scene whose objects carry a
 -- Float leaf (task scene-float-passthrough-edit-exponential). Every field of
 -- the rebuilt Scene has several worlds, some with a point density, which the
@@ -5741,6 +5778,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_wideProductSceneCountNotBatched
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
+  , test_sceneCountConditionalEditPolynomial
   , test_planSceneFloatPassthroughPolynomial
   , test_planEnumAccumulatorFoldPolynomial
   , test_planEnumSubtractionAccumulatorFoldPolynomial

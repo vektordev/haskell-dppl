@@ -73,7 +73,7 @@ import SPLL.Lang.Types
   , Value, GenericValue(..), Tag(..), MultiValue(..) )
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isZeroValue, freeVarsExpr)
 import SPLL.Analysis (enumerableDomain, enumerableApplication)
-import SPLL.AutoNeural (planReadOf)
+import SPLL.AutoNeural (planReadOf, planProjectedReadOf)
 import Data.Maybe (isJust, catMaybes, listToMaybe)
 import Data.List (intercalate, find)
 import SPLL.Typing.Typing (setPType)
@@ -846,13 +846,13 @@ bindParam ctx headCN x arg argLaw env = Map.insert x (affineBound (letBoundLaw c
     recovered c = AffineCert (Map.singleton argCN Recovered) (Map.insert argCN (marginalsOf c) (acFactors c))
     roots = planRoots ctx env arg
 
--- | The plan reads a value projects from: itself, if it is one
--- ('SPLL.AutoNeural.planReadOf'), and those of every variable it reads that
+-- | The plan reads a value projects from: itself, if it is one or a field
+-- accessor chain over one ('SPLL.AutoNeural.planProjectedReadOf'), and those of every variable it reads that
 -- is bound at 'JPlan', or at an affine form one of whose latents is a plan
 -- read (a Float network's output). Empty for a value that reads no network's
 -- output through a binding.
 planRoots :: ICtx -> Env -> Expr -> [ChainName]
-planRoots ctx env e = Set.toList (Set.fromList ([ cnOf e | isJust (planReadOf (icProg ctx) e) ] ++ boundPlanRoots ctx env e))
+planRoots ctx env e = Set.toList (Set.fromList ([ cnOf r | Just (_, _, _, r) <- [planProjectedReadOf (icProg ctx) e] ] ++ boundPlanRoots ctx env e))
 
 -- | The plan reads an expression projects from through the variables it
 -- reads ('planRoots' without the expression itself).
@@ -931,7 +931,7 @@ determinedByWitnesses env arg = not (hasRandomLeaf arg) && all pinned (Set.toLis
 bindingCerts :: ICtx -> Expr -> Expr -> Law -> [EngineCert]
 bindingCerts ctx lam arg argLaw = catMaybes
   [ CertEnumerable <$> enumerableApplication fc prog lam arg
-  , (\(n, _, _) -> CertPlan n) <$> planReadOf prog arg
+  , (\(n, _, _, _) -> CertPlan n) <$> planProjectedReadOf prog arg
   , CertWitnessed <$> pointWitnessCert fc (icADTs ctx) (icObs ctx) lamCN
   , CertAffine <$> affineBindingCert x arg argLaw body
   , CertWorlds <$> worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) permissiveDet) occs body
