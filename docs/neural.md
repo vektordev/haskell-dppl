@@ -245,6 +245,23 @@ the data flow rather than for "encode"/"decode" — those words used to collide
   tree: `main = f 0.4` with a correlated `f` warns for `f` only. Pinned by
   `test/cases/neural/correlatedSlotsWriteLogits`, which
   `WriteLogitsRoundtrip.DensityAgreement` skips for that reason.
+- **A discrete leaf is fitted to the function's own output support** (task
+  `writelogits-int-output-truncated-to-registry-domain`). The registry is keyed
+  by type, but `add a b = readD a ++ readD b` over digits `0..6` ranges over
+  `0..12`. `AutoNeural.fitPlanToSupport` compares each `Discretes` leaf of the
+  registered plan with the function's `DiscreteValues` tag at that position: a
+  support inside the registered domain keeps the registered layout (what the
+  network's own reader expects, zeros included); one reaching outside it lays
+  the leaf out over the support itself. So `add`'s writeLogits has 13 slots,
+  and no wider `neural writeLogits :: Int of ...` declaration is needed (one
+  would conflict with `readD`'s `of` clause in the validator). Where the
+  support is not statically known (a recursive count), the registered layout
+  is kept and the compile warns
+  (`CompileWarnings.WriteLogitsSupportUnverified`): mass outside it is
+  dropped. A `Bool` leaf never warns, its domain being whole. The test
+  harness's `End2EndTesting.endpointPlan` resolves the same fitted plan.
+  Pinned by `WriteLogits.outputSupport` and
+  `test/cases/neural/writeLogits_sum_wider_than_registry`.
 - A third, historical direction (`source -> Symbol`, once called "Encoder")
   named an external network with no SPLL call site; it has been removed and
   is rejected at validation (`SPLL.Validator.validateNeuralShape`).

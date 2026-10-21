@@ -111,7 +111,8 @@ is a refusal instead, `docs/modality-and-admission.md`). The channel is
   (`docs/witness-inversion-engines.md`, the end of "Forward chaining never
   re-derives a chain name it already has").
 - `compiledWarnings conf prog env`: warnings that depend on what the compile
-  `env` emitted. Today: `CorrelatedWriteLogitsSlots` (`docs/neural.md`).
+  `env` emitted. Today: `CorrelatedWriteLogitsSlots` and
+  `WriteLogitsSupportUnverified` (`docs/neural.md`).
 - `compileWarnings conf prog env`: both, for library callers.
 
 The CLI prints `programWarnings` on stderr for every subcommand, before
