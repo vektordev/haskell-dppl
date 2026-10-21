@@ -24,10 +24,11 @@ import SPLL.Typing.ForwardChaining (WorldsShape(..))
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
-import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, InputSlot(..), inputSlots, inputWidth, inputLayoutString)
+import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlot(..), inputSlots, inputWidth, inputLayoutString)
 import MockNN (flattenMockInput, mockInputFor, shapedMockLogits)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
+import SPLL.IRGatherPass (gatherPassExpr)
 import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, prepBatchedBody, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
@@ -947,6 +948,7 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   , test_makePartitionPlanWildcardMatchesNothing
   , test_makePartitionPlanMixedExplicitAuto
   , test_neuralAdtContinuousFieldDim
+  , test_neuralAdtBranchCountUnscaled
   ]
 
 -- The read-logits reader of a multi-constructor neural ADT selects a
@@ -972,6 +974,26 @@ test_neuralAdtContinuousFieldDim = testCase "a neural ADT's continuous field has
   case runProbC prog env [logits] (VADT "Nil" []) of
     Right (VProbDim p d) -> assertEqual "Nil: a mass" (0.4, 0) (p, d)
     other -> assertFailure ("Nil: " ++ show other)
+
+-- The branch count, like the dim, is selected by the constructor test and
+-- never scaled by the constructor's flag probability (task
+-- autoneural-adt-branch-count-scaled-by-constructor-flag).  No leaf of a
+-- neural read carries a branch itself, so the count is always 0 and the scaling
+-- (flag * 0) was unobservable by value; the test pins the reader's shape
+-- instead: the branch-count component must not read a logit slot.
+test_neuralAdtBranchCountUnscaled :: TestTree
+test_neuralAdtBranchCountUnscaled = testCase "a neural ADT's branch count is not scaled by a constructor flag" $ do
+  prog <- either (\e -> assertFailure ("parse: " ++ show e) >> error "unreachable") return $ tryParseProgram "<inline>" $ unlines
+    [ "data Color = Red | Green"
+    , "data Attrs = Nil | Obj color::Color, px::Float"
+    , "neural readAttrs :: (Symbol -> Attrs) of {Nil | Obj {Red | Green} Real}"
+    , "main s = readAttrs s" ]
+  let plan = makePartitionPlan (adts prog) (TADT "Attrs") Nothing
+  case makeProb (adts prog) defaultCompilerConfig plan of
+    IRLambda _ (IRLambda _ (IRLetIn _ _ (IRLetIn _ _
+      (IRConstruct TgTuple [_, IRConstruct TgTuple [_, IRConstruct TgTuple [bc, _]]])))) ->
+        assertBool ("branch count reads a logit slot: " ++ show bc) (not ("BListIndex" `isInfixOf` show bc))
+    other -> assertFailure ("unexpected reader shape: " ++ show other)
 
 -- A .tst dim is an Int (task presult-dim-as-int): written @0@ or, as the
 -- older corpus does, @0.0@; a non-integral or negative dim is a typo the
@@ -5380,6 +5402,67 @@ test_valueDependentRecursionSplits = testGroup "value-dependent recursion (batch
                    , sampleDomain = Nothing, maskVariantOf = Nothing }
       | (n, b) <- groups ] [] []
 
+-- | A prob/integ path may call a /pure callee/: a recursive deterministic
+-- helper's forward evaluator (task batched-prob-path-calls-recursive-helper-gen)
+-- or a helper's Gaussian parameters (task
+-- batched-prob-path-calls-helper-normal-params). A random recursive generator
+-- is still refused, and a pure callee no prob/integ path reaches is not
+-- emitted (so its body cannot cost the program its eligibility).
+test_batchedPureCallees :: TestTree
+test_batchedPureCallees = testGroup "pure callees of a prob path (batched)"
+  [ testCase "a recursive deterministic helper is called through its forward evaluator" $
+      expectSource (env [main_ (callOf "fact_gen"), genOnly "fact" factBody]) $ \src -> do
+        assertHas src "def evaluate(self, x):"
+        assertHas src "fact.evaluate(x)"
+        -- The evaluator is pure, so its value-dependent recursion is split
+        -- like a recursive forward's, not eagerly selected.
+        assertHas src "return split_retry(_split_kernel, x)"
+        assertHas src "fact.evaluate((x + -1.0))"
+  , testCase "a random recursive generator stays refused" $
+      case generateFunctionsBatched False (env [main_ (callOf "geo_gen"), genOnly "geo" geoBody]) of
+        Left msg -> assertBool ("unexpected refusal: " ++ msg)
+                      ("calls geo_gen, which is not a forward/integrate method" `isInfixOf` msg)
+        Right ls -> assertFailure ("batched mode admitted a prob path drawing from a random generator:\n" ++ unlines ls)
+  , testCase "an unreached evaluator is not emitted" $
+      -- Only the generate of `user` calls `fact`: no prob path reads it.
+      expectSource (env [ main_ (IRConst (VFloat 1.0)), genOnly "fact" factBody
+                        , genOnly "user" (IRLambda "x" (IRApply (IRVar "fact_gen") (IRVar "x"))) ]) $ \src ->
+        assertBool ("an evaluator nothing calls was emitted:\n" ++ src) (not ("def evaluate" `isInfixOf` src))
+  , testCase "a helper's Gaussian parameters are emitted and called" $
+      expectSource (env [main_ (IRDestruct AcFst (IRApply (IRVar "sh_normal") (IRVar "x"))), normalOnly "sh" shBody]) $ \src -> do
+        assertHas src "def normal_params(self, mu):"
+        assertHas src "sh.normal_params(x)"
+  , testCase "a nullary helper's Gaussian parameters are called, not referenced" $
+      expectSource (env [main_ (IRDestruct AcFst (IRVar "sh_normal")), normalOnly "sh" (IRConstruct TgTuple [IRConst (VFloat 0.0), IRConst (VFloat 1.0)])]) $ \src ->
+        assertHas src "(sh.normal_params)()"
+  ]
+  where
+    expectSource e k = case generateFunctionsBatched False e of
+      Left msg -> assertFailure ("batched mode refused: " ++ msg)
+      Right ls -> k (unlines ls)
+    assertHas src needle = assertBool ("no `" ++ needle ++ "` in:\n" ++ src) (needle `isInfixOf` src)
+    -- main sample x = sample == <rhs>
+    callOf g = IRApply (IRVar g) (IRVar "x")
+    main_ rhs = (group "main") { probFun = Just (IRLambda "sample" (IRLambda "x"
+                  (IRSelect (IROp OpEq (IRVar "sample") rhs) (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0)))), "") }
+    genOnly n b = (group n) { genFun = Just (b, "") }
+    normalOnly n b = (group n) { normalFun = Just (b, "") }
+    -- fact x = if x < 1.5 then 1.0 else fact (x - 1) * x
+    factBody = IRLambda "x" (IRIf (IROp OpLessThan (IRVar "x") (IRConst (VFloat 1.5)))
+                 (IRConst (VFloat 1.0))
+                 (IROp OpMult (IRApply (IRVar "fact_gen") (IROp OpPlus (IRVar "x") (IRConst (VFloat (-1.0))))) (IRVar "x")))
+    -- geo x = if Uniform < 0.5 then x else geo (x + 1)
+    geoBody = IRLambda "x" (IRIf (IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.5)))
+                 (IRVar "x")
+                 (IRApply (IRVar "geo_gen") (IROp OpPlus (IRVar "x") (IRConst (VFloat 1.0)))))
+    -- sh mu = (mu, 2.0)
+    shBody = IRLambda "mu" (IRConstruct TgTuple [IRVar "mu", IRConst (VFloat 2.0)])
+    group n = IRFunGroup { groupName = n, refusedVariants = []
+                         , probFun = Nothing, genFun = Nothing, integFun = Nothing
+                         , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
+                         , sampleDomain = Nothing, maskVariantOf = Nothing }
+    env groups = IREnv groups [] []
+
 -- ======== Utils.splitByString ========
 
 -- These two properties are deliberately *not* @prop_@-prefixed. This module's
@@ -5951,6 +6034,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , testGroup "tensor builtins" tensorBuiltinTests
   , shapedNeuralInputTests
   , categoricalIndexTests
+  , gatherPassTests
   , untaggedShortCircuit
   , annotationSpellingTests
   , structuralPropagation
@@ -6051,6 +6135,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_irConstructDestructInterpreterDispatch
   , test_hasTailDescentRecognisesNewShape
   , test_valueDependentRecursionSplits
+  , test_batchedPureCallees
   , reservedNameTests
   ]
 
@@ -6133,6 +6218,62 @@ categoricalIndexTests = testGroup "categorical index (neural-categorical-sampler
     weightList ws = IRConst (VList (foldr (ListCont . VFloat) EmptyList ws))
     idx :: Double -> IRExpr -> Either String IRValue
     idx u w = evalClosedIR (IRBuiltin (BCategoricalIndex 1 4) [IRConst (VFloat u), w])
+
+-- ===========================================================================
+-- One-hot point read as one gather (batched-mask-variant-neural-read-nests-v-deep)
+-- ===========================================================================
+
+-- | 'SPLL.IRGatherPass': a sum of @if k == x then raw[k + c] else 0.0@ over a
+-- contiguous key range becomes one range-guarded indexed read, and nothing
+-- else changes. The interpreter checks the rewrite is exact on keys inside,
+-- at the edges of and outside the range.
+gatherPassTests :: TestTree
+gatherPassTests = testGroup "one-hot read as a gather (batched-mask-variant-neural-read-nests-v-deep)"
+  [ testCase "a contiguous one-hot sum at a slot offset becomes one guarded read" $
+      gatherPassExpr (chain [(k, k - 3) | k <- [3 .. 6]]) @?=
+        IRIf (IROp OpAnd (IROp OpLessThan (IRConst (VInt 2)) x) (IROp OpLessThan x (IRConst (VInt 7))))
+             (IRBuiltin BListIndex [raw, IROp OpPlus x (IRConst (VInt (-3)))])
+             (IRConst (VFloat 0.0))
+  , testCase "the rewrite agrees with the sum on keys inside, at the edge of and outside the range" $
+      forM_ [-1, 0, 2, 3, 4, 6, 7, 100] $ \s ->
+        let at e = evalClosedIR (IRLetIn "x" (IRConst (VInt s)) (IRLetIn "raw" rawList e))
+            orig = chain [(k, k - 3) | k <- [3 .. 6]]
+        in assertEqual ("x = " ++ show s) (at orig) (at (gatherPassExpr orig))
+  , testCase "terms in any order and any + tree shape still match" $
+      assertBool "not rewritten" (isGather (gatherPassExpr
+        (IROp OpPlus (IROp OpPlus (term 2 2) (term 0 0)) (IROp OpPlus (term 1 1) (term 3 3)))))
+  , testCase "non-contiguous keys, mixed offsets, two tensors or a non-zero default are left alone" $
+      forM_ [ chain [(0, 0), (1, 1), (3, 3)]
+            , chain [(0, 0), (1, 2), (2, 2)]
+            , IROp OpPlus (term 0 0) (IRIf (IROp OpEq (IRConst (VInt 1)) x)
+                                          (IRBuiltin BListIndex [IRVar "other", IRConst (VInt 1)]) (IRConst (VFloat 0.0)))
+            , IROp OpPlus (term 0 0) (IRIf (IROp OpEq (IRConst (VInt 1)) x)
+                                          (IRBuiltin BListIndex [raw, IRConst (VInt 1)]) (IRConst (VFloat 1.0)))
+            ] $ \e -> gatherPassExpr e @?= e
+  , testCase "the pin's (_, ANY) variant reads its network once, without a per-value chain" $
+      case tryParseProgram "" pinSrc of
+        Left err -> assertFailure (show err)
+        Right p -> case compile defaultCompilerConfig{batched = True} p >>= generateFunctionsBatched True of
+          Left err -> assertFailure err
+          Right ls -> do
+            let m01 = takeWhile (not . ("class Main__m11" `isPrefixOf`)) (dropWhile (not . ("class Main__m01" `isPrefixOf`)) ls)
+            assertBool "Main__m01 missing" (not (null m01))
+            assertBool "no nn_gather in Main__m01" (any ("nn_gather(l_0_nn_raw, (sample)[0])" `isInfixOf`) m01)
+            assertBool ("Main__m01 still reads constant slots:\n" ++ unlines m01) (not (any ("[..., " `isInfixOf`) m01))
+  ]
+  where
+    x = IRVar "x"
+    raw = IRVar "raw"
+    rawList = IRConst (VList (foldr (ListCont . VFloat) EmptyList [0.1, 0.2, 0.3, 0.4]))
+    term k j = IRIf (IROp OpEq (IRConst (VInt k)) x) (IRBuiltin BListIndex [raw, IRConst (VInt j)]) (IRConst (VFloat 0.0))
+    chain kjs = foldr1 (IROp OpPlus) [term k j | (k, j) <- kjs]
+    isGather (IRIf _ (IRBuiltin BListIndex [_, IRVar "x"]) _) = True
+    isGather _ = False
+    dom = "[" ++ intercalate ", " (map show [0 .. 249 :: Int]) ++ "]"
+    pinSrc = unlines
+      [ "neural lmA :: (Symbol -> Int) of " ++ dom
+      , "neural lmB :: (Symbol -> Int) of " ++ dom
+      , "main ctxA ctxB =", "  draw a = lmA ctxA in", "  draw b = lmB ctxB in", "  (a, a == b)" ]
 
 -- ===========================================================================
 -- Partial destructors out of their domain (fuzz-structured-type-bugs, item 1)

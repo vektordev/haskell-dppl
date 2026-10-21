@@ -18,8 +18,8 @@ import SPLL.Prelude (compile)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv)
 import ImpactManifest
 import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
-                        batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs, lineSpillLabel,
-                        selectDemotionLabel)
+                        batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs, lineSpillLabel, oneHotGatherLabel,
+                        selectDemotionLabel, pureCalleeLabel)
 import End2EndTesting (interpreterKey, pythonKey, juliaKey, loadCorpusPair, networkMocks)
 import TestCaseParser (corpusPplPath, isProbTestCase, isCumulTestCase)
 
@@ -74,16 +74,30 @@ batchedCensusRouting = do
   assertEqual "a plain batched program is certified" [] (batchedUncertifiedConstructs plain)
   theta <- census <$> load "theta"
   assertEqual "a theta-tree read is not certified" ["Accessor:AcTheta"] (batchedUncertifiedConstructs theta)
-  -- A 250-value neural agreement: its mask variant's point read is spilled
-  -- for CPython's bracket limit, which the fuzz arms never reach.
-  wide <- census <$> load "batchedMaskVariantNeuralReadChain"
+  -- A 250-value neural agreement over a non-contiguous domain: its mask
+  -- variant's point read is spilled for CPython's bracket limit, which the
+  -- fuzz arms never reach.
+  wide <- census <$> load "batchedMaskVariantNeuralReadTableChain"
   assertEqual "a module with a spilled line is not certified" [lineSpillLabel] (batchedUncertifiedConstructs wide)
   assertBool "a module without one carries no spill label" (lineSpillLabel `notElem` plain)
+  -- The same over a contiguous domain: the read is one guarded nn_gather
+  -- (SPLL.IRGatherPass), no spill, and the rewrite keeps the check.
+  gathered <- census <$> load "batchedMaskVariantNeuralReadChain"
+  assertEqual "a module with a one-hot gather is not certified" [oneHotGatherLabel] (batchedUncertifiedConstructs gathered)
+  assertBool "a module without one carries no gather label" (oneHotGatherLabel `notElem` plain)
   -- A draw-bound list element: its witness guard is a select over the shape
   -- probe `sample == []`, which the batched backend emits as a Python if.
   demoted <- census <$> load "drawBoundListElementGuardsEmptyTail"
   assertEqual "a demoted structural select is not certified" [selectDemotionLabel] (batchedUncertifiedConstructs demoted)
   assertBool "a module without one carries no demotion label" (selectDemotionLabel `notElem` plain)
+  -- A prob path calling a recursive deterministic helper's evaluator, and
+  -- one reading a helper's Gaussian parameters: the callee's method body is
+  -- emitted code the fuzz arms (prob/integ bodies only) never ran.
+  forM_ ["recursiveHelperOnlyWhereGuarded", "normalThroughFunctionParam"] $ \n -> do
+    c <- census <$> load n
+    assertBool (n ++ " calls a pure callee, so it is not certified: " ++ show c)
+      (pureCalleeLabel `elem` batchedUncertifiedConstructs c)
+  assertBool "a module without one carries no pure-callee label" (pureCalleeLabel `notElem` plain)
   assertEqual "a refused compile contributes nothing" [] (batchedProgramCensus (Left "refused" :: Either String IREnv))
   assertEqual "the batched certified list certifies itself" [] (batchedUncertifiedConstructs batchedCertifiedConstructs)
 
