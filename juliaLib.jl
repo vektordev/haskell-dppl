@@ -255,15 +255,15 @@ Base.length(lst::ConsInferenceList) = begin
 end
 
 function Base.getindex(lst::InferenceList, i::Int)
-    if !(0 < i <= length(lst))
-        throw(BoundsError("Index $i is out of bounds"))
-    end
-
+    # Walk instead of calling length(lst), which would make every access O(n).
+    i >= 1 || throw(BoundsError("Index $i is out of bounds"))
     curr = lst
     while i > 1
+        curr isa ConsInferenceList || throw(BoundsError("Index $i is out of bounds"))
         i -= 1
         curr = curr.next
     end
+    curr isa ConsInferenceList || throw(BoundsError("Index $i is out of bounds"))
 
     return curr.value
 end

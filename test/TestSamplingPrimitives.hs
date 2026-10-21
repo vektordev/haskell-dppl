@@ -70,6 +70,45 @@ samplingPrimitiveTests :: TestTree
 samplingPrimitiveTests = testGroup "SamplingPrimitives (scalar-sampling-primitives-runtime-tests)"
   [ backendGroup "Python" (Just "python3") pythonScript ["list", "InferenceList", "cumsum (numpy array)"]
   , backendGroup "Julia" Nothing juliaScript ["Array", "InferenceList"]
+  , testCaseInfo "pythonLib InferenceList[i] walks i nodes, not the whole list (task inferencelist-getitem-walks-length)" $ do
+      cwd <- getCurrentDirectory
+      (code, out, err) <- withSystemTempFile "getitem_walk" $ \path h -> do
+        hPutStr h (getitemScript cwd)
+        hClose h
+        readProcessWithExitCode "python3" [path] ""
+      assertEqual ("getitem script: " ++ err) ExitSuccess code
+      assertEqual "node visits for xs[0], xs[3], xs[3000] and the out-of-range errors"
+        "0 3 3000 ok" (concatMap (\c -> if c == '\n' then "" else [c]) out)
+      return ""
+  ]
+
+-- | Counts reads of @.next@ on a 3000-element list. Prints visits for xs[0],
+-- xs[3], xs[3000] (the terminal Empty node, as before), then @ok@ when
+-- xs[3001] and xs[-3002] raise IndexError.
+getitemScript :: FilePath -> String
+getitemScript cwd = unlines
+  [ "import sys"
+  , "sys.path.insert(0, " ++ show cwd ++ ")"
+  , "from pythonLib import *"
+  , "visits = [0]"
+  , "class Counted(ConsInferenceList):"
+  , "  @property"
+  , "  def next(self):"
+  , "    visits[0] += 1"
+  , "    return self._n"
+  , "  @next.setter"
+  , "  def next(self, v): self._n = v"
+  , "l = EmptyInferenceList()"
+  , "for i in reversed(range(3000)): l = Counted(i, l)"
+  , "def cost(f):"
+  , "  visits[0] = 0; f(); return visits[0]"
+  , "res = [cost(lambda: l[0]), cost(lambda: l[3]), cost(lambda: l[3000])]"
+  , "def raises(f):"
+  , "  try: f()"
+  , "  except IndexError: return True"
+  , "  return False"
+  , "ok = raises(lambda: l[3001]) and raises(lambda: l[-3002])"
+  , "print(res[0], res[1], res[2], 'ok' if ok else 'BAD')"
   ]
 
 -- | The output of one backend's run: its lines, each a key and its values.
