@@ -1,4 +1,4 @@
--- No `batched` token: Slow.BatchedPython topk-is-per-element fails (torch.where(Tensor, T, T) TypeError); docs tasks batched-topk-per-element-failures-on-redeclared-programs, batched-guarded-select-over-tuple-result.
+batched
 slow
 p(Zero)=(0.2, 0.0, False)
 p(One 0.5)=(0.4, 1.0, False)
