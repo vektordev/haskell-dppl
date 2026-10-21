@@ -15,6 +15,7 @@ module SPLL.AutoNeural(
 , planIndexOf
 , validateWriteLogitsGaussian
 , makeTopLevelWriteLogitsFun
+, topLevelWriteLogitsPlan
 , neuralReadLogitsSuffix
 , deadSlotFill
 , stripDeadSlotFills
@@ -895,23 +896,33 @@ makeTopLevelWriteLogitsFun :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue
                       -> [IRFunGroup] -- ^ groups carrying the host's normal functions (base + tuple components)
                       -> Maybe IRFunDecl
 makeTopLevelWriteLogitsFun adtDecls conf registry fnName rty paramNames probAvailable normalGroups
-  | not buildable       = Nothing
-  | normalsOk && probOk = Just (makeWriteLogits adtDecls conf plan probFnName normalFnName paramNames, doc)
-  | otherwise           = Nothing
+  = case topLevelWriteLogitsPlan adtDecls registry rty of
+      Nothing -> Nothing
+      Just plan
+        | normalsOk plan && probOk plan ->
+            Just (makeWriteLogits adtDecls conf plan probFnName normalFnName paramNames, doc plan)
+        | otherwise -> Nothing
   where
     probFnName   = fnName ++ "_prob"
     normalFnName = fnName ++ "_normal"
-    tag          = resolvePartitionAnnotation registry rty Nothing
-    buildable    = case tag of
-                     Just _  -> True   -- explicit registry entry
-                     Nothing -> case autoDeriveMultiValue adtDecls rty of
-                                  Right _ -> True
-                                  Left _  -> False
-    plan         = makePartitionPlan adtDecls rty tag
     available    = availableNormalFns (IREnv normalGroups [] [])
-    normalsOk    = all (`elem` available) (requiredNormalFns normalFnName plan)
-    probOk       = not (planUsesProb plan) || probAvailable
-    doc          = "WriteLogits function for " ++ fnName ++ "'s own output type; " ++ planLayoutString plan
+    normalsOk plan = all (`elem` available) (requiredNormalFns normalFnName plan)
+    probOk plan    = not (planUsesProb plan) || probAvailable
+    doc plan       = "WriteLogits function for " ++ fnName ++ "'s own output type; " ++ planLayoutString plan
+
+-- | The 'PartitionPlan' a top-level function's own writeLogits is laid out by:
+-- the registry's entry for its return type, else the auto-derived one. Nothing
+-- when the type is in neither (Int, Symbol, a recursive ADT). Whether the
+-- writeLogits is then actually built also depends on which prob/normal
+-- functions the compile generated ('makeTopLevelWriteLogitsFun').
+topLevelWriteLogitsPlan :: [ADTDecl] -> [(RType, MultiValue)] -> RType -> Maybe PartitionPlan
+topLevelWriteLogitsPlan adtDecls registry rty = case tag of
+  Just _  -> Just (makePartitionPlan adtDecls rty tag)   -- explicit registry entry
+  Nothing -> case autoDeriveMultiValue adtDecls rty of
+               Right _ -> Just (makePartitionPlan adtDecls rty tag)
+               Left _  -> Nothing
+  where
+    tag = resolvePartitionAnnotation registry rty Nothing
 
 -- | Whether a writeLogits plan references the program's prob function: true for any discrete /
 -- Either / ADT slot, false for a pure-Continuous plan (which queries only the normal
