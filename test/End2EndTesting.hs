@@ -2131,6 +2131,31 @@ runPythonChecks name src checks = do
     readProcessWithExitCode "python3" [tmpPath] ""
 
 -- ===========================================================================
+-- A let in a comprehension iterable
+-- (task backends-agree-python-walrus-in-comprehension-iterable)
+-- ===========================================================================
+--
+-- CPython refuses an assignment expression anywhere in a comprehension's
+-- iterable, and at -O2 the cumulative of an int product compiled its
+-- materialized cell list, whose cells carry CSE lets, into exactly that, so
+-- the module did not load. The corpus program pins the answers on the
+-- interpreter, but its constructs are all certified by the agreement
+-- fuzzers, so the corpus does not run it on Python; this does. The IR-level
+-- cases (scalar, Julia and batched) are in "IRFuzz".
+comprehensionIterableLetTests :: TestTree
+comprehensionIterableLetTests = testGroup "let in a comprehension iterable (backends-agree-python-walrus-in-comprehension-iterable)"
+  [ testProperty name $ once $ ioProperty $ do
+      prog <- corpusPplPath name >>= parseProgram
+      (_, _, _, tcs) <- corpusTstPath name >>= parseTestCases
+      let env = compile defaultCompilerConfig prog
+          bindsAnIterable = either (const False) (isInfixOf "((_it" . torchFreePythonModule) env
+      return $ counterexample "the module binds no comprehension iterable, so this no longer reaches the fix"
+                 bindsAnIterable
+          .&&. testPython [] env tcs
+  ]
+  where name = "intProductLetInComprehensionIterable"
+
+-- ===========================================================================
 -- Deeply indented blocks are hoisted
 -- (task python-nested-conditionals-exceed-indentation-limit)
 -- ===========================================================================

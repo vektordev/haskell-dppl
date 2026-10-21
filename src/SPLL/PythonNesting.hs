@@ -1,7 +1,9 @@
 {-# LANGUAGE FlexibleContexts #-}
--- | CPython's two per-line limits, and the spill that keeps an emitted line
--- inside the bracket one -- shared by the scalar ('SPLL.CodeGenPyTorch') and
--- batched ('SPLL.CodeGenPyTorchBatched') Python backends
+-- | CPython's two per-line limits, the spill that keeps an emitted line
+-- inside the bracket one, and the binding that keeps an assignment
+-- expression out of a comprehension's iterable ('bindIterable') -- shared by
+-- the scalar ('SPLL.CodeGenPyTorch') and batched
+-- ('SPLL.CodeGenPyTorchBatched') Python backends
 -- (tasks python-codegen-exceeds-parser-nesting-limit, and for the batched
 -- backend batched-enum-comprehension-exceeds-parser-nesting).
 module SPLL.PythonNesting
@@ -13,6 +15,8 @@ module SPLL.PythonNesting
   , renameFree
   , pythonMaxIndent
   , blockIndent
+  , bindIterable
+  , hasAssignmentExpr
   ) where
 
 import SPLL.IntermediateRepresentation
@@ -72,6 +76,51 @@ pythonMaxNesting = 200
 spillNestingThreshold :: Int
 spillNestingThreshold = 64
 
+-- ---------------------------------------------------------------------------
+-- Comprehension iterables. Both backends lower an 'IRLetIn' in expression
+-- position to an assignment expression, @((v := e), body)[1]@, and 'BMap',
+-- 'BZip' and a list's type check to comprehensions. CPython refuses @:=@
+-- anywhere inside a comprehension's iterable, even under a lambda or a nested
+-- comprehension there ("assignment expression cannot be used in a
+-- comprehension iterable expression"), so a let anywhere in the mapped
+-- operand -- which the optimizer's CSE produces, e.g. under a materialized
+-- marginal's cell list -- made the whole module unloadable (tasks
+-- backends-agree-python-walrus-in-comprehension-iterable,
+-- python-let-in-a-comprehension-iterable-fails-to-parse).
+-- ---------------------------------------------------------------------------
+
+-- | Render a comprehension over a rendered iterable. An iterable with an
+-- assignment expression in it is bound to the given temporary first,
+-- @((tmp := it), comp(tmp))[1]@, which puts the @:=@ outside the
+-- comprehension: Python evaluates a comprehension's first iterable once,
+-- eagerly, in the enclosing scope, so this is the same evaluation, and a
+-- later rebinding of the temporary (by a nested comprehension reusing it)
+-- cannot reach an iteration already under way. An iterable without one is
+-- left in place, so every module that loaded before is byte-identical.
+bindIterable :: String -> String -> (String -> String) -> String
+bindIterable tmp it comp
+  | hasAssignmentExpr it = "((" ++ tmp ++ " := " ++ it ++ "), " ++ comp tmp ++ ")[1]"
+  | otherwise = comp it
+
+-- | Whether rendered Python contains an assignment expression (@:=@) outside
+-- its string literals.
+hasAssignmentExpr :: String -> Bool
+hasAssignmentExpr = go
+  where
+    go [] = False
+    go (':' : '=' : _) = True
+    go (c : cs)
+      | c == '"' || c == '\'' = go (skipPyString c cs)
+      | otherwise = go cs
+
+-- | Drop the rest of a string literal opened by the given quote.
+skipPyString :: Char -> String -> String
+skipPyString _ [] = []
+skipPyString q ('\\' : _ : cs) = skipPyString q cs
+skipPyString q (c : cs)
+  | c == q    = cs
+  | otherwise = skipPyString q cs
+
 -- | Whether a rendered line opens more brackets than CPython accepts.
 tooDeepForPython :: String -> Bool
 tooDeepForPython line = pythonNestingDepth line > pythonMaxNesting
@@ -83,15 +132,10 @@ pythonNestingDepth = go 0 0
   where
     go _ m [] = m
     go d m (c:cs)
-      | c == '"' || c == '\'' = go d m (skipString c cs)
+      | c == '"' || c == '\'' = go d m (skipPyString c cs)
       | c `elem` "([{"       = let d' = d + 1 in go d' (max m d') cs
       | c `elem` ")]}"       = go (d - 1) m cs
       | otherwise            = go d m cs
-    skipString _ [] = []
-    skipString q ('\\':_:cs) = skipString q cs
-    skipString q (c:cs)
-      | c == q    = cs
-      | otherwise = skipString q cs
 
 -- | A subterm that may be evaluated ahead of its line: pure arithmetic over
 -- names -- no random draw, no generator reference, no call, no lambda. (Tensor

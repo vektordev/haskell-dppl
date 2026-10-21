@@ -15,7 +15,7 @@ module SPLL.CodeGenPyTorch (
 import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, pythonNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
-import SPLL.PythonNesting (tooDeepForPython, spillDeep, renameFree, pythonMaxIndent, blockIndent)
+import SPLL.PythonNesting (tooDeepForPython, spillDeep, renameFree, pythonMaxIndent, blockIndent, bindIterable, hasAssignmentExpr)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
@@ -909,7 +909,7 @@ generateExpression (IRBuiltin (BTensor sh) elems)
 generateExpression (IRBuiltin BMap [IRLambda v body, t]) = do
   b <- generateExpression body
   tt <- generateExpression t
-  return ("[" ++ b ++ " for " ++ v ++ " in " ++ tt ++ "]")
+  boundIterable tt (\it -> "[" ++ b ++ " for " ++ v ++ " in " ++ it ++ "]")
 generateExpression (IRBuiltin BMap [f, t]) = do
   ff <- generateExpression f
   tt <- generateExpression t
@@ -940,8 +940,9 @@ generateExpression (IRBuiltin (BZip op) [a, b]) = do
   bb <- generateExpression b
   n <- lift demandUniqueNumber
   let (x, y) = ("_z" ++ show n ++ "a", "_z" ++ show n ++ "b")
-  return ("[((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ ")) for "
-          ++ x ++ ", " ++ y ++ " in zip(" ++ aa ++ ", " ++ bb ++ ")]")
+  boundIterable ("zip(" ++ aa ++ ", " ++ bb ++ ")")
+    (\it -> "[((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ ")) for "
+            ++ x ++ ", " ++ y ++ " in " ++ it ++ "]")
 -- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep):
 -- one runtime call, so the emitted text is O(1) in the domain size and adds no
 -- nesting, where the if-chain it replaces was one indentation level per value.
@@ -951,9 +952,12 @@ generateExpression (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
   return ("categorical_index(" ++ uu ++ ", " ++ ww ++ ", " ++ show start ++ ", " ++ show n ++ ")")
 generateExpression (IRError e) =
   return ("throw(\"" ++ escapeStr e ++ "\")")
+-- The check splices its operand textually, and a list or tensor check splices
+-- it into a comprehension's iterable, so there an operand carrying a let is
+-- bound once first (see 'bindIterable').
 generateExpression (IRConformsTo t x) = do
   sx <- generateExpression x
-  return (pyConforms t sx)
+  if checksElements t then boundIterable sx (pyConforms t) else return (pyConforms t sx)
 generateExpression x =
   error ("Unknown expression in PyTorch codegen: " ++ show x)
 
@@ -997,6 +1001,23 @@ pyConformsShape d (TTensor sh t) e
          ++ " and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
 pyConformsShape _ _ _ = "True"
 
+-- | Whether 'pyConforms' iterates over (a component of) its operand.
+checksElements :: RType -> Bool
+checksElements (ListOf _) = True
+checksElements (TTensor _ _) = True
+checksElements (Tuple a b) = checksElements a || checksElements b
+checksElements (TEither a b) = checksElements a || checksElements b
+checksElements _ = False
+
+
+-- | 'bindIterable' with a fresh temporary, drawn only when the iterable needs
+-- one, so the numbering of every other generated name is unchanged.
+boundIterable :: String -> (String -> String) -> GlobalVariableSupply String
+boundIterable it comp
+  | hasAssignmentExpr it = do
+      n <- lift demandUniqueNumber
+      return (bindIterable ("_it" ++ show n) it comp)
+  | otherwise = return (comp it)
 
 generateLambdaExpression :: IRExpr -> GlobalVariableSupply String
 generateLambdaExpression expr = do

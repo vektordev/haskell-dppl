@@ -1,0 +1,1 @@
+main = (if Uniform < 0.5 then 2 else 1) * ((if False then 4 else if True then 3 else if Uniform < 0.5 then 2 else 1) * ((\v0 -> if v0 < 2.9317011218936426 then 1 else 3) Uniform))
