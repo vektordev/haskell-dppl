@@ -103,6 +103,21 @@ extended at every `Binding` by `bindingLawEnv`, which is `inferE`'s own binder
 rule (`bindParam`). Nothing dispatches on either yet. `-d` prints each node's
 justification after Modality Inference.
 
+A Dirac's value is known for a constant, a single-valued enumeration domain,
+a product with a zero factor, an `InjF` whose operands are all points of known
+value (its forward function evaluated on them, `foldedValue`: `(0.0 * z) +
+0.0` is the point 0.0), `fst`/`snd` of a pair whose projected field is a known
+point (`projectedLaw`), and a call whose callee's result does not depend on
+its arguments. That last fact is the callee's own law, `JReturns n j`: the
+justification `j` of a lambda's body under its parameter's representative law,
+kept where it is a known point or a constructor, with every field's fact other
+than a known point or a nested constructor dropped (`argumentFree`; an affine
+form or a plan read names nodes of the callee's body, which every call would
+share), and `n` the arguments still to apply. `h z = 0.0 * z` returns the
+point 0.0, and `h z = (0.0 * z, Normal)` a pair whose `fst` is that point. The
+compiler measures any non-literal node of known point from that value
+(`IRCompiler.lawPoint`).
+
 `lawEnv` holds a binding's law as the modality engine issued it. A variable an
 engine then recovers or enumerates is pinned through `recoveredVars` and
 `reinferRecovered`, not in `lawEnv`.

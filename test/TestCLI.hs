@@ -44,11 +44,14 @@ cliTests = testGroup "CLI"
             assertBool ("expected exit 0:\n" ++ out) (code == ExitSuccess)
             assertBool out ("first divergence: none" `isInfixOf` out)
       , testCase "a divergence is placed at its stage and exits 1" $
-          -- dirac-law-point-lost-under-plus-or-helper: the `+ 0.0` loses the
-          -- product's point law in the modality pass.
-          withStageDiff "main = draw z = Normal in 0.0 * z" "main = draw z = Normal in (0.0 * z) + 0.0" ["-x", "0.0"] $ \code out -> do
+          -- A live known divergence (known-issues/negationBehindHelperDropsDensity,
+          -- docs task if-complement-drops-hidden-negation-density): every stage
+          -- dump agrees, and the answers at -O0 differ. When that is fixed, pick
+          -- another live known issue. (This pair was the `+ 0.0` under a zero
+          -- factor until dirac-law-point-lost-under-plus-or-helper closed it.)
+          withStageDiff "main = if not (Normal == 0.5) then 2 else 1" "g b = not b\nmain = if g (Normal == 0.5) then 2 else 1" ["-x", "1"] $ \code out -> do
             assertBool ("expected exit 1:\n" ++ out) (code == ExitFailure 1)
-            assertBool out ("first divergence: After Modality Inference (PType)" `isInfixOf` out)
+            assertBool out ("first divergence: Answers at -O0 (IR compilation)" `isInfixOf` out)
       ]
   ]
 

@@ -1,0 +1,2 @@
+h z = ((0.0 * z) + 1.0, Normal)
+main = draw z = Normal in fst (h z)
