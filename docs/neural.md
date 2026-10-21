@@ -220,6 +220,19 @@ the data flow rather than for "encode"/"decode" — those words used to collide
   central generate-backed guard admits in a writeLogits body -- it sees the body
   through `AutoNeural.stripDeadSlotFills`, which recognises the `l_wlarm_*`
   guards and nothing else. A near-zero arm (1e-300) is live and written.
+- **Correlated slots are encoded independently, with a warning** (task
+  `warn-correlated-slots`). Each plan leaf is written from its own marginal, so
+  `main = draw w = Uniform < 0.5 in (w, w)` writes `[0.5, 0.5, 0.5, 0.5]`: the
+  product of marginals, not the joint. The vector is unchanged, but the compile
+  warns (`CompileWarnings.CorrelatedWriteLogitsSlots`), naming the plan-leaf
+  slots and the variables the shared draws are bound to. The trigger is the
+  observation-mask latent walk (`ObservationMask.slotLatentNames`,
+  `correlationClasses`) on the function's observation tree, with slots coarsened
+  to writeLogits plan leaves (`CompileWarnings.planLeafSlot`). It only fires for
+  a function that actually has a writeLogits and whose body is a constructor
+  tree: `main = f 0.4` with a correlated `f` warns for `f` only. Pinned by
+  `test/cases/neural/correlatedSlotsWriteLogits`, which
+  `WriteLogitsRoundtrip.DensityAgreement` skips for that reason.
 - A third, historical direction (`source -> Symbol`, once called "Encoder")
   named an external network with no SPLL call site; it has been removed and
   is rejected at validation (`SPLL.Validator.validateNeuralShape`).

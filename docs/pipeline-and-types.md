@@ -96,6 +96,25 @@ inference; `PNormal`/`PLogNormal` allow closed-form Gaussian shortcuts;
 `erf`); `Bottom` values offer nothing better than sampling. Each PType
 implies the semantics of lower types are available.
 
+## Compile-time warnings
+
+A warning is a diagnostic on a program that compiles: it never changes the
+compiled result and never blocks compilation (a shape an engine cannot handle
+is a refusal instead, `docs/modality-and-admission.md`). The channel is
+`SPLL.CompileWarnings.CompileWarning`, one constructor per kind, rendered by
+`renderCompileWarning`. `SPLL.Prelude` computes them:
+
+- `programWarnings conf prog`: warnings that read only the program. Today:
+  `MarginalSlotsOverBudget` (`docs/observation-masks.md`).
+- `compiledWarnings conf prog env`: warnings that depend on what the compile
+  `env` emitted. Today: `CorrelatedWriteLogitsSlots` (`docs/neural.md`).
+- `compileWarnings conf prog env`: both, for library callers.
+
+The CLI prints `programWarnings` on stderr for every subcommand, before
+compiling, and `compiledWarnings` after a successful `compile`. A new warning
+is a constructor, a rendering line, and a producer in whichever of the two
+functions matches what it reads.
+
 ## Debug: Intermediate Stage Dump (`-d`)
 
 `showIntermediates :: Bool` (CLI `-d`/`--debugIntermediates`) prints the

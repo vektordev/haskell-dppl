@@ -37,8 +37,9 @@ chain counts, although the tree peels it off the observed core); a deterministic
 slot is self-contained trivially. For those the existing per-field `anySafe`
 guard is already exact. Every other slot is **enumerated**, and masks range over
 those. Slots partition into **correlation classes** (connected components under
-shared latents) — the trigger `warn-correlated-slots` wants is "some class has
-two or more slots", and it falls out here for free.
+shared latents). A class of two or more slots is the trigger of the
+correlated-writeLogits warning (`docs/neural.md`); `slotLatentNames` is the same
+walk, also recording the user's variable names for it.
 
 `pruneObservation mask decl` replaces each masked leaf's sub-expression by a
 **hole**: `Constant VAny` carrying the leaf's `rType`. That marker is
@@ -122,7 +123,9 @@ Things worth knowing:
   probability and integrate are both suppressed, for a root that is a single
   leaf, and when a user function already holds a variant's name. Over budget, the function compiles
   as before, `groupDoc` says why, and the CLI prints one warning naming the
-  function and `--marginalSlots` (`Prelude.marginalBudgetWarnings`).
+  function and `--marginalSlots` (`CompileWarnings.MarginalSlotsOverBudget`,
+  from `Prelude.programWarnings`; see "Compile-time warnings" in
+  `docs/pipeline-and-types.md`).
 - **The let-fold `ANY` guard is now the fallback**: over-budget functions,
   non-constructor roots, list tails. `TestInternals`' "witnessed-inference ANY
   refusal" group pins it at `marginalSlots = 0` and the dispatcher at default.

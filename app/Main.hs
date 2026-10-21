@@ -7,7 +7,7 @@ import SPLL.Parser
 import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
 import SPLL.Lang.Types (CompilerError, GenericValue (VError))
-import SPLL.Prelude (runProb, runInteg, runGen, batchedRefusal, CodeGenTarget(..), codeGenToLang, marginalReport, renderMarginalReport, marginalBudgetWarnings)
+import SPLL.Prelude (runProb, runInteg, runGen, batchedRefusal, CodeGenTarget(..), compile, emitCompiled, marginalReport, renderMarginalReport, programWarnings, compiledWarnings, renderCompileWarning)
 import SPLL.Lang.Lang (adts)
 import Control.Monad.Random (evalRandIO)
 import Text.Megaparsec (runParser)
@@ -273,14 +273,17 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
   prog <- parseProgram inFile
   let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=matBudget, marginalSlots=mSlots, extraSemirings=extraSR})
   reportMarginals wantMarginals conf prog
-  -- One warning per function whose correlated observation slots exceed
-  -- --marginalSlots: it gets no per-mask variants (task per-mask-variants-by-pruning).
-  mapM_ (hPutStrLn stderr) (marginalBudgetWarnings conf prog)
+  -- The compile-time warnings that read only the program (today: functions
+  -- over the --marginalSlots budget), for every subcommand. 'compiledWarnings'
+  -- below adds the ones that depend on what a compile emitted.
+  mapM_ (hPutStrLn stderr . renderCompileWarning) (programWarnings conf prog)
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
-      case codeGenToLang lang trnc conf prog of
+      -- 'codeGenToLang', split so the warnings read the same compile.
+      case compile conf prog >>= \compiled -> (,) compiled <$> emitCompiled lang trnc conf compiled of
         Left err -> handleError err
-        Right trans -> do
+        Right (compiled, trans) -> do
+          mapM_ (hPutStrLn stderr . renderCompileWarning) (compiledWarnings conf prog compiled)
           writeOutputFile outFile trans
           -- After the real compile, not before: the advisory is a closing note
           -- on a compile that succeeded, and there is nothing to advise about

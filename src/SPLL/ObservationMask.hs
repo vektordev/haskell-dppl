@@ -33,10 +33,12 @@ module SPLL.ObservationMask
   , Latent(..)
   , latentsOverlap
   , slotLatents
+  , slotLatentNames
   , localSlotLatents
     -- * Correlation and self-containment
   , correlationClasses
   , hasCorrelatedSlots
+  , sharedLatentNames
   , SlotVerdict(..)
   , slotVerdicts
   , selfContained
@@ -54,11 +56,14 @@ import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.AlgebraicDataTypes (fieldAccessorOwners, findField)
 import PredefinedFunctions (isObsConstructor)
+import SPLL.ReservedNames (isFrontendBinder)
 
 import Data.List (foldl', isPrefixOf, intercalate, partition)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Set as Set
 import Data.Set (Set)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 
 -- ---------------------------------------------------------------------------
 -- Accessor paths
@@ -306,8 +311,19 @@ latentsOverlap _ _ = False
 -- | The random sources each leaf slot transitively depends on, through @let@
 -- bindings.
 slotLatents :: [ADTDecl] -> [FnDecl] -> ObsTree -> [(Slot, Set Latent)]
-slotLatents decls fenv t =
-  [ (s, latentsOf decls fenv env [] e) | (s, e, env) <- obsLeaves t ]
+slotLatents decls fenv t = [ (s, Map.keysSet ls) | (s, ls) <- slotLatentNames decls fenv t ]
+
+-- | 'slotLatents', with each latent's user-facing names: the @let@-bound
+-- variables whose value draws it directly (the innermost binding on the path
+-- from the slot to the draw, skipping frontend-generated binders, so
+-- @draw (a, b) = ..@ names its draw @a@ at one slot and @b@ at the other). @draw w = Uniform < 0.5 in (w, w)@ names the one
+-- latent @w@ at both slots. A top-level function occurrence reached through no
+-- binding is named by the function; an inline draw reached through none has no
+-- name (it cannot be shared). Read by the diagnostics that have to tell a user
+-- /which/ variable two slots share ("SPLL.CompileWarnings").
+slotLatentNames :: [ADTDecl] -> [FnDecl] -> ObsTree -> [(Slot, Map Latent (Set String))]
+slotLatentNames decls fenv t =
+  [ (s, namedLatentsOf decls fenv env [] Nothing e) | (s, e, env) <- obsLeaves t ]
 
 -- | The latents a leaf slot depends on /without/ following anything bound
 -- outside its own sub-expression.
@@ -336,30 +352,41 @@ ownEnv inherited env =
   [ b { bndEnv = ownEnv inherited (bndEnv b) } | b <- take (length env - inherited) env ]
 
 latentsOf :: [ADTDecl] -> [FnDecl] -> LetEnv -> [String] -> Expr -> Set Latent
-latentsOf decls fenv env seen e = case node e of
-  Var "Uniform" -> Set.singleton (LDist (chainNameOf e))
-  Var "Normal"  -> Set.singleton (LDist (chainNameOf e))
-  ReadNN _ arg  -> Set.insert (LNeural (chainNameOf e) []) (descend arg)
+latentsOf decls fenv env seen e = Map.keysSet (namedLatentsOf decls fenv env seen Nothing e)
+
+-- | The latents of an expression, each with the names it was reached through
+-- (see 'slotLatentNames'). @via@ is the innermost binding being followed.
+namedLatentsOf :: [ADTDecl] -> [FnDecl] -> LetEnv -> [String] -> Maybe String -> Expr
+               -> Map Latent (Set String)
+namedLatentsOf decls fenv env seen via e = case node e of
+  Var "Uniform" -> Map.singleton (LDist (chainNameOf e)) here
+  Var "Normal"  -> Map.singleton (LDist (chainNameOf e)) here
+  ReadNN _ arg  -> Map.insertWith Set.union (LNeural (chainNameOf e) []) here (descend arg)
   Var x
-    | x `elem` seen -> Set.empty
+    | x `elem` seen -> Map.empty
     | Just b <- lookupBinding x env ->
-        latentsOf decls fenv (bndEnv b) (x : seen) (bndValue b)
+        -- A binder the frontend generated (@draw (a, b) = ..@ binds @p_d0@)
+        -- is no name to show a user, so the user's own name through which
+        -- it was reached stays the one recorded.
+        let via' = if isFrontendBinder x && isJust via then via else Just x
+        in namedLatentsOf decls fenv (bndEnv b) (x : seen) via' (bndValue b)
     | Just fbody <- lookup x fenv ->
         -- A reference to a top-level function is a fresh draw per occurrence if
         -- its body draws at all, so it contributes ONE latent keyed by this
         -- occurrence rather than the callee's own latents.
-        if Set.null (latentsOf decls fenv [] (x : seen) fbody)
-          then Set.empty
-          else Set.singleton (LDist (chainNameOf e))
-    | otherwise -> Set.empty   -- a parameter, or a name with no body in reach
+        if Map.null (namedLatentsOf decls fenv [] (x : seen) Nothing fbody)
+          then Map.empty
+          else Map.singleton (LDist (chainNameOf e)) (Set.singleton (fromMaybe x via))
+    | otherwise -> Map.empty   -- a parameter, or a name with no body in reach
   InjF (Named f) [a]
     | Just acc <- accessorStep decls f -> refine acc (descend a)
-  _ -> Set.unions (map descend (getSubExprs e))
+  _ -> Map.unionsWith Set.union (map descend (getSubExprs e))
   where
-    descend = latentsOf decls fenv env seen
-    refine acc ls = case Set.toList ls of
-      [LNeural cn p] -> Set.singleton (LNeural cn (p ++ [acc]))
-      _              -> ls
+    here = maybe Set.empty Set.singleton via
+    descend = namedLatentsOf decls fenv env seen via
+    refine acc ls = case Map.toList ls of
+      [(LNeural cn p, ns)] -> Map.singleton (LNeural cn (p ++ [acc])) ns
+      _                    -> ls
 
 chainNameOf :: Expr -> ChainName
 chainNameOf = chainName . getTypeInfo
@@ -386,8 +413,9 @@ accessorStep decls f = case f of
 -- member).
 --
 -- Every leaf slot is a node, so a slot sharing nothing is a singleton class.
--- That is what [[warn-correlated-slots]] wants as its trigger: /some class has
--- two or more slots/.
+-- A class of two or more slots is the trigger of the correlated-writeLogits
+-- warning ("SPLL.CompileWarnings"), applied there to slots coarsened to the
+-- writeLogits plan's leaves.
 correlationClasses :: [(Slot, Set Latent)] -> [[Slot]]
 correlationClasses table = map fst (foldl' insertSlot [] table)
   where
@@ -402,15 +430,22 @@ correlationClasses table = map fst (foldl' insertSlot [] table)
     overlapsAny ls ls' =
       or [ latentsOverlap a b | a <- Set.toList ls, b <- Set.toList ls' ]
 
--- | The trigger [[warn-correlated-slots]] asks for: does some correlation class
--- hold two or more slots?
---
--- That task is only @proposed@, so this is the one-line hook rather than a wired
--- warning: when it is approved, the diagnostic reads this and names the class's
--- slots. Nothing consults it today beyond the @--marginals@ report, which prints
--- the classes themselves.
+-- | Does some correlation class hold two or more slots?
 hasCorrelatedSlots :: [[Slot]] -> Bool
 hasCorrelatedSlots = any ((> 1) . length)
+
+-- | The names of the latents a correlation class's members share: every latent
+-- of one member that overlaps ('latentsOverlap') a latent of another member,
+-- sorted and deduplicated. A shared latent with no name (see 'slotLatentNames')
+-- contributes nothing, so the list can be shorter than the set of shared
+-- latents, but it is never empty for a class that shares a @let@-bound draw.
+sharedLatentNames :: [Map Latent (Set String)] -> [String]
+sharedLatentNames members =
+  Set.toList (Set.unions
+    [ ns
+    | (i, m) <- zip [0 :: Int ..] members
+    , (l, ns) <- Map.toList m
+    , or [ latentsOverlap l l' | (j, m') <- zip [0 ..] members, j /= i, l' <- Map.keys m' ] ])
 
 -- | Why a slot is enumerated, or that it is not.
 data SlotVerdict

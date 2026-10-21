@@ -93,7 +93,13 @@ module SPLL.Prelude
   , marginalReport
   , maskTable
   , renderMarginalReport
-  , marginalBudgetWarnings
+  , CompileWarning(..)
+  , CorrelatedClass(..)
+  , warningFunction
+  , renderCompileWarning
+  , programWarnings
+  , compiledWarnings
+  , compileWarnings
   ) where
 
 import SPLL.ReservedNames (topKCutoffName, accProbInitName)
@@ -102,7 +108,8 @@ import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo
 import SPLL.Typing.PType (PType(..))
 import SPLL.ObservationMask
 import SPLL.MaskVariants
-import SPLL.AutoNeural (validateWriteLogitsGaussian)
+import SPLL.AutoNeural (validateWriteLogitsGaussian, topLevelWriteLogitsPlan)
+import SPLL.CompileWarnings
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo, addModalityLaws)
@@ -132,7 +139,7 @@ import PrettyPrint (pPrintProg, pPrintIREnv)
 import Text.Pretty.Simple (pShow)
 import qualified Data.Text.Lazy as TL
 import Data.Char (toUpper)
-import Data.Maybe (isNothing, fromMaybe, maybeToList)
+import Data.Maybe (isNothing, isJust, fromMaybe, maybeToList)
 import Data.List (find, intercalate)
 
 -- | Build an AST node with a blank annotation. All the smart constructors
@@ -1069,15 +1076,53 @@ maskPlans conf rtyped
         enums = enumeratedSlots decls fenv tree
         k     = length enums
 
--- | One compile-time warning per function over the @--marginalSlots@ budget,
--- naming the function and the flag. Empty when the program does not type (the
--- compile itself reports that).
-marginalBudgetWarnings :: CompilerConfig -> Program -> [String]
-marginalBudgetWarnings conf p = case rtypedProgram p of
+-- | The compile-time warnings that read only the program, not what the compile
+-- emitted: one per function over the @--marginalSlots@ budget. Empty when the
+-- program does not type (the compile itself reports that). The CLI prints these
+-- for every subcommand, before compiling.
+programWarnings :: CompilerConfig -> Program -> [CompileWarning]
+programWarnings conf p = case rtypedProgram p of
   Left _ -> []
   Right rtyped ->
-    [ "Warning: " ++ overBudgetNote n k (marginalSlots conf)
+    [ MarginalSlotsOverBudget n k (marginalSlots conf)
     | (n, MasksOverBudget k) <- maskPlans conf rtyped ]
+
+-- | The compile-time warnings that depend on what @compiled@ (the compile of
+-- @p@) emitted: one per function whose emitted writeLogits encodes correlated
+-- slots independently ('correlatedWriteLogitsClasses'). A function with no
+-- writeLogits gets no warning, however its slots are correlated.
+--
+-- The latent walk needs the chain-named program, so it is only run when some
+-- function both has a writeLogits and is a constructor tree; most programs
+-- stop at the cheap test.
+compiledWarnings :: CompilerConfig -> Program -> IREnv -> [CompileWarning]
+compiledWarnings _ p (IREnv groups _ _)
+  | null candidates = []
+  | otherwise = case rtypedProgram p of
+      Left _ -> []
+      Right rtyped ->
+        let named = chainNamedProgram rtyped
+            decls = adts named
+            fenv  = functions named
+        in [ CorrelatedWriteLogitsSlots n classes
+           | decl@(n, body) <- fenv
+           , n `elem` candidates
+           , isTree (observationTree decls decl)
+           , Just plan <- [topLevelWriteLogitsPlan decls (writeLogitsDecls named)
+                             (rType (getTypeInfo (stripLambdas body)))]
+           , let classes = correlatedWriteLogitsClasses decls fenv plan decl
+           , not (null classes) ]
+  where
+    candidates = [ groupName g | g <- groups, isJust (writeLogitsFun g) ]
+    isTree ObsCon{} = True
+    isTree _        = False
+    stripLambdas (Expr _ (Lambda _ b)) = stripLambdas b
+    stripLambdas e                     = e
+
+-- | Every compile-time warning of a program and its compile: 'programWarnings'
+-- then 'compiledWarnings'. The entry point for library callers.
+compileWarnings :: CompilerConfig -> Program -> IREnv -> [CompileWarning]
+compileWarnings conf p compiled = programWarnings conf p ++ compiledWarnings conf p compiled
 
 -- | Compile every function's per-mask variants and turn its probability and
 -- integrate functions into dispatchers over them.
