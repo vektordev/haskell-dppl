@@ -154,7 +154,7 @@ stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
 | `pipeline-and-types.md` | stage order, `Expr`/`TypeInfo`/`Value`/`MultiValue`/`CompilerConfig`, the `PType` order, compile-time warnings, the `-d` dump |
 | `language-frontend.md` | `draw` vs `define`, `observe`, type signatures, reserved names and mangling, type-error provenance, monomorphization |
 | `modality-and-admission.md` | the Modality layer, conditioning inside `if` arms, re-inferring recovered variables, refusals as absent variants, the admission contract |
-| `witness-inversion-engines.md` | plan-guided enumeration, set-valued witnesses, affine Gaussian marginalisation, the one application rule (`Binding`), forward-chaining acyclicity |
+| `witness-inversion-engines.md` | plan-guided enumeration, set-valued witnesses, affine Gaussian marginalisation, the one application rule (`Binding`), forward-chaining acyclicity, the spine-only change of variables |
 | `callee-normalization.md` | callee rewrites, pointwise lifting of arrow-typed `if` mixtures |
 | `enumeration.md` | enumerated branches, enumerability across calls, draw sinking, marginal materialization, the dense budget gate, agreement fusion, tensors in the IR |
 | `semiring-presult-internals.md` | `PResult` combinators, log space, dims, the impossibility flag, branch counting, `anySafeShared`, topK and lower bounds, the query-type guard |
