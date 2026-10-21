@@ -234,15 +234,15 @@ neuralLogSpaceSweep name version note conf corpus manifest = corpusSweep corpus 
       CumulTestCase n sample params _ -> cmp (n ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
       _ -> property True
       where
-        cmp label run = ioProperty $ do
+        cmp what run = ioProperty $ do
           lin <- forceResult (linEnv >>= run)
           lg  <- forceResult (logEnv >>= run)
           return $ case (lin, lg) of
             (Left _, _) -> property True
             (Right (VProbDim p1 d1), Right (VProbDim lp2 d2)) ->
-              counterexample (label ++ ": linear " ++ show (p1, d1) ++ " /= exp of log-space " ++ show (exp lp2, d2))
+              counterexample (what ++ ": linear " ++ show (p1, d1) ++ " /= exp of log-space " ++ show (exp lp2, d2))
                 (abs (p1 - exp lp2) < probTolerance && (p1 == 0 || d1 == d2))
-            _ -> counterexample (label ++ ": linear " ++ show lin ++ " vs log-space " ++ show lg) False
+            _ -> counterexample (what ++ ": linear " ++ show lin ++ " vs log-space " ++ show lg) False
 
 -- | The corpus programs whose default compile took the plan engine until every
 -- read was tagged, and which now enumerate densely by default. They were
