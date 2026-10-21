@@ -1805,9 +1805,7 @@ scalarDiscreteMulti _ = False
 -- list/Either constructs heterogeneous M1/M2 admitted.
 reason :: IRExpr -> String
 reason e = case e of
-  IRBuiltin BMapList _ -> "list map (IRMap)"
   IRApply{}       -> "function application (IRApply); a call did not inline"
-  IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
   -- 'VAny'/'VList AnyList' are admitted by 'batchedVal' (M4); 'VAnyExcept' is

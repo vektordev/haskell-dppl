@@ -573,6 +573,16 @@ def listProd(lst):
     acc = acc * x
   return acc
 
+def listConcat(lst1, lst2):
+  # Iterative like pythonLib's twin. The first list's length is structure, so
+  # prepending its [B] leaves onto lst2 is plain Python over the bucket.
+  if isinstance(lst1, AnyInferenceList):
+    raise ValueError("Cannot concatenate an AnyList")
+  back = lst2
+  for x in reversed(list(lst1)):
+    back = ConsInferenceList(x, back)
+  return back
+
 def indexOf(sample, lst):
   # The enumeration-index lookup SPLL.AutoNeural.indexOf builds over a constant
   # list (task batched-refuses-list-constants-with-data). The optimizer folds

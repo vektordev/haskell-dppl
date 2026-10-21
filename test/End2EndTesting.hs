@@ -1600,7 +1600,7 @@ batchedRefusalTable =
   -- lists. With M1 (design heterogeneous-batch-inference) the list *spine*
   -- operations are in the fragment -- within a shape bucket they are uniform
   -- Python structure over [B] leaves -- so what is refused here is what
-  -- bucketing does not rescue: IRMap. A non-empty list *constant* is in the
+  -- bucketing does not rescue. A non-empty list *constant* is in the
   -- fragment since task batched-refuses-list-constants-with-data (spelled as
   -- the runtime's cons structure over constant leaves), so
   -- `listLiteralDeconstruction` and `andInsideListOverDraws` (the `[ANY]` a
@@ -1653,10 +1653,6 @@ batchedRefusalTable =
   -- a prob/integ path reaching a method batched mode does not emit: a
   -- *recursive* generator, which 'inlineDetGenCalls' cannot beta-reduce away
   , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
-  -- an inner lambda that did not reduce, once in each of the three method
-  -- bodies (twiceApplication's forward/integrate *do* reduce; only its
-  -- generate body keeps the literal lambda -- the accepted cost of generate's
-  -- hard refusal rule, see 'generateFunctionsBatched')
   -- Refusals pinned as open bugs under universal batched admission (task
   -- batched-admission-universal), one row per refusal class without a row
   -- above. Each fails, as every row here does, the day batched mode accepts
