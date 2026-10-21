@@ -51,7 +51,7 @@ module SPLL.Semiring (
   packResult, unpackResult, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
-  CompilerMonad, CompilerM, refuse, runCompilerMonad, mkVariable, setVariables, generateLetInExpr, wrapBlockIfRead
+  CompilerMonad, CompilerM, refuse, runCompilerMonad, mkVariable, setVariables, generateLetInExpr, wrapBlockIfRead, mentionsAny
 ) where
 
 import SPLL.IntermediateRepresentation

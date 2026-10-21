@@ -1,0 +1,1 @@
+main = draw v0 = Normal in if Uniform < 0.5 then (0.0, v0 == 1.0) else (1.0, True)
