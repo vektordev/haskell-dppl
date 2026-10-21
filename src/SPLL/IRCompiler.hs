@@ -514,6 +514,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
                 bindingParamNames
                 (isJust (probFun baseFunGroup))
                 (baseFunGroup : tupleNormalFuns)
+                nonGaussianNormals
         -- The type the query value must structurally match: the function's result
         -- type with any outer parameter lambdas stripped. Backs the query-type guard.
         returnRType = rType (getTypeInfo (stripLambdas binding))
@@ -595,7 +596,10 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
           normalFun = presentVariant normalE,
           refusedVariants = refusedVariant "gen" genE ++ refusedVariant "prob" probE
                             ++ refusedVariant "integ" integE ++ refusedVariant "normal" normalE
-                            ++ intractableRefusal "prob" noProb ++ intractableRefusal "integ" noInteg,
+                            ++ intractableRefusal "prob" noProb ++ intractableRefusal "integ" noInteg
+                            ++ [ ("writeLogits", VariantRefusal
+                                    "writeLogits: the output has a log-normal Float slot, which the Gaussian (mu, sigma) layout cannot hold (it would label the underlying Normal's parameters as the output's own)" "")
+                               | isNothing writeLogitsF, not (null nonGaussianNormals) ],
           groupDoc="Function group " ++ name}
         -- A variant absent because its pType is intractable is otherwise absent
         -- without a reason. When the intractability starts at a comparison
@@ -609,7 +613,14 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
           | otherwise = [ (lbl, VariantRefusal why cn)
                         | Just (why, cn) <- [comparisonWithoutClosedForm binding <|> bindingWithoutEngine laws binding] ]
         -- Generate per-component normal functions for tuple outputs
-        tupleNormalFuns = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
+        tupleNormalGroups = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
+        tupleNormalFuns = map fst tupleNormalGroups
+        -- Normal functions whose (mu, sigma) are those of an underlying Normal (a log-normal's
+        -- (mu_log, sigma)), not of the output itself: writeLogits' Gaussian slots must not read
+        -- them (task writelogits-labels-lognormal-as-gaussian).
+        nonGaussianNormals =
+          [ name ++ "_normal" | ptUnderLambdas == PLogNormal ]
+          ++ [ fromMaybe (groupName g) (componentNormalName (groupName g)) | (g, False) <- tupleNormalGroups ]
         -- One extra 'IRFunGroup' per 'extraSemirings' entry (task
         -- semiring-parametric-marginals, design materialized-marginals-semiring
         -- Tier 1): "<name>_<suffix>" (e.g. "main_map"), with ONLY 'probFun'
@@ -794,7 +805,7 @@ isNormalExtractable _                            = True
 -- read (@px (ob1 sc) - 1.0@) is not a projection and stays refused, as does a
 -- position two arms produce.
 -- Functions are registered via the _component_ prefix mechanism in reduceIREnv.
-generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [IRFunGroup]
+generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [(IRFunGroup, Bool)]
 generateTupleComponentNormalFunctions meta baseName expr =
   catMaybes
     [ generateComponentNormalFunction meta (baseName ++ "_normal" ++ concat path) (wrap leaf) (getTypeInfo leaf)
@@ -804,8 +815,8 @@ generateTupleComponentNormalFunctions meta baseName expr =
   -- A network read's fields are Gaussian by the read-logits plan itself (each field
   -- conditional on its constructor), so every Continuous slot of its plan below the
   -- projected position is one.
-  ++ [ componentNormalGroup fullName
-         (compileNormalWith (\m e -> readNNSlotNormal m k e) meta (wrap readE))
+  ++ [ (componentNormalGroup fullName
+         (compileNormalWith (\m e -> readNNSlotNormal m k e) meta (wrap readE)), True)
      | (env, path, leaf) <- occurrences, soleProducer path
      , Just (readE, plan, acc) <- [readProjection env leaf]
      , (slotSteps, k) <- continuousSlotPaths plan
@@ -857,10 +868,13 @@ generateTupleComponentNormalFunctions meta baseName expr =
 
 -- | Generate a single per-component normal function if the expression is extractable and PNormal/PLogNormal.
 -- Stored in normalFun field and registered via _component_ prefix in reduceIREnv (bare name, no suffix).
-generateComponentNormalFunction :: CompilerMetadata -> String -> Expr -> TypeInfo -> Maybe IRFunGroup
+-- The flag is whether the component is Gaussian: a PLogNormal one returns the parameters of the
+-- underlying Normal (mu_log, sigma), which a writeLogits Gaussian slot must not be filled from
+-- (task writelogits-labels-lognormal-as-gaussian).
+generateComponentNormalFunction :: CompilerMetadata -> String -> Expr -> TypeInfo -> Maybe (IRFunGroup, Bool)
 generateComponentNormalFunction meta fullName expr ti
   | (pType ti == PNormal || pType ti == PLogNormal) && isNormalExtractable expr =
-      Just (componentNormalGroup fullName (compileNormalExpr meta expr))
+      Just (componentNormalGroup fullName (compileNormalExpr meta expr), pType ti == PNormal)
   | otherwise = Nothing
 
 -- | The group holding one output component's normal function.

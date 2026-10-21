@@ -922,8 +922,9 @@ makeTopLevelWriteLogitsFun :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue
                       -> [String]     -- ^ outer parameter names of the host function
                       -> Bool         -- ^ whether the host's prob function was generated
                       -> [IRFunGroup] -- ^ groups carrying the host's normal functions (base + tuple components)
+                      -> [String]     -- ^ normal functions (by 'availableNormalFns' name) that are not the output's own Gaussian (a log-normal's underlying Normal)
                       -> Maybe IRFunDecl
-makeTopLevelWriteLogitsFun adtDecls conf registry fnName rty support paramNames probAvailable normalGroups
+makeTopLevelWriteLogitsFun adtDecls conf registry fnName rty support paramNames probAvailable normalGroups nonGaussian
   = case topLevelWriteLogitsPlan adtDecls registry rty support of
       Nothing -> Nothing
       Just plan
@@ -933,7 +934,7 @@ makeTopLevelWriteLogitsFun adtDecls conf registry fnName rty support paramNames 
   where
     probFnName   = fnName ++ "_prob"
     normalFnName = fnName ++ "_normal"
-    available    = availableNormalFns (IREnv normalGroups [] [])
+    available    = filter (`notElem` nonGaussian) (availableNormalFns (IREnv normalGroups [] []))
     normalsOk plan = all (`elem` available) (requiredNormalFns normalFnName plan)
     probOk plan    = not (planUsesProb plan) || probAvailable
     doc plan       = "WriteLogits function for " ++ fnName ++ "'s own output type; " ++ planLayoutString plan
