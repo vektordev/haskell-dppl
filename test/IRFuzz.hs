@@ -1366,6 +1366,59 @@ knownRefusal r = case [ t | (r', t, _) <- knownRefusals, r' == r ] of
 repro :: [(String, IRType)] -> IRType -> IRExpr -> [IRValue] -> IRCase
 repro params rt body args = IRCase NormalBody Nothing params rt [] body [args] [] [] ([], [])
 
+-- | Lets inside a comprehension's operand (task
+-- backends-agree-python-walrus-in-comprehension-iterable): mapped, zipped,
+-- list-checked, under a nested comprehension in the iterable, and two nested
+-- comprehensions mapping the same name, so a reused iterable temporary would
+-- show.
+letInComprehensionIterableCases :: [IRCase]
+letInComprehensionIterableCases =
+  [ repro [] (ITTensor [EFixed 1] ITFloat) (lcIdent (lcLetTensor "l" [IRVar "l"])) []
+  , repro [] (ITTensor [EFixed 2] ITFloat)
+      (IRBuiltin (BZip OpPlus) [lcLetTensor "l" [IRVar "l", lcLit 2], lcTensor [lcLit 10, IRLetIn "k" (lcLit 20) (IRVar "k")]]) []
+  , repro [] ITBool (IRConformsTo (ListOf TFloat) (IRLetIn "l0" (IRConst (VInt 1)) (IRConst (VList (ListCont (VFloat 1) EmptyList))))) []
+  , repro [] (ITTensor [EFixed 2] ITFloat) (lcIdent (lcDoubled (lcTensor [lcLit 1, lcLit 2]))) []
+  , repro [] (ITTensor [EFixed 2] ITFloat) (lcNestedSameName (lcLit 0)) []
+  ]
+
+-- | 'letInComprehensionIterableCases' as batched probability bodies: each
+-- tensor summed into the answered probability.
+letInComprehensionIterableBatchedCases :: [IRCase]
+letInComprehensionIterableBatchedCases =
+  [ batchedRepro (lcTotal (lcIdent (lcLetTensor "l" [IROp OpMult (IRVar "l") (IRVar "a0")]))) (VFloat 0.25)
+  , batchedRepro (lcTotal (IRBuiltin (BZip OpPlus) [lcLetTensor "l" [IRVar "a0", lcLit 0.125], lcTensor [lcLit 0.0625, IRLetIn "k" (lcLit 0.0) (IRVar "k")]])) (VFloat 0.25)
+  , batchedRepro (IROp OpMult (lcLit 0.125) (lcTotal (lcIdent (lcDoubled (lcTensor [IRVar "a0", lcLit 0.5]))))) (VFloat 0.25)
+  , batchedRepro (IROp OpMult (lcLit 0.125) (lcTotal (lcNestedSameName (IRVar "a0")))) (VFloat 0.25)
+  ]
+
+lcLit :: Double -> IRExpr
+lcLit = IRConst . VFloat
+
+lcTensor :: [IRExpr] -> IRExpr
+lcTensor xs = IRBuiltin (BTensor [EFixed (length xs)]) xs
+
+lcLetTensor :: String -> [IRExpr] -> IRExpr
+lcLetTensor n xs = IRLetIn n (lcLit 1) (lcTensor xs)
+
+lcIdent :: IRExpr -> IRExpr
+lcIdent t = IRBuiltin BMap [IRLambda "m" (IRVar "m"), t]
+
+lcTotal :: IRExpr -> IRExpr
+lcTotal t = IRBuiltin (BReduce ROpAdd 0) [t]
+
+-- | A comprehension whose body binds a let: in another's iterable, the walrus
+-- is still in that iterable.
+lcDoubled :: IRExpr -> IRExpr
+lcDoubled t = IRBuiltin BMap [IRLambda "k" (IRLetIn "q" (IROp OpMult (IRVar "k") (lcLit 2)) (IRVar "q")), t]
+
+-- | @[m + sum([m for m in (let l2 = x in [l2, 1])]) for m in (let l = 1 in [l, 2])]@:
+-- both loops map a variable named @m@ (the inner one shadowing).
+lcNestedSameName :: IRExpr -> IRExpr
+lcNestedSameName x =
+  IRBuiltin BMap [ IRLambda "m" (IROp OpPlus (IRVar "m")
+                     (lcTotal (IRBuiltin BMap [IRLambda "m" (IRVar "m"), IRLetIn "l2" x (lcTensor [IRVar "l2", lcLit 1])])))
+                 , lcLetTensor "l" [IRVar "l", lcLit 2] ]
+
 -- | A one-query probability case for a batched pin: @main a0@ answers the
 -- given probability, dimension 0, possible.
 batchedRepro :: IRExpr -> IRValue -> IRCase
@@ -1535,17 +1588,14 @@ knownDisagreements =
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (AsIf (const (irMap conformsUnitUnchecked)))
       ((repro [] ITBool (IRConformsTo (TADT "Qt") (IRConst (VBool True))) []) { icADTs = [ADTDecl "Qt" [("Qa", [])] Nothing] })
-  , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
+  , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["julia"]
       (ByAnswer (\c _ a -> raisedWith "module did not load" a
                            && not (null [ () | IRConformsTo _ x <- caseUniverse c, not (isVar x) ])))
-      -- Python cannot parse the walrus a let lowers to inside the
-      -- comprehension a list check iterates; Julia cannot parse a field
-      -- access on a negative literal (@-1.0.t1@).
-      (repro [] (ITTuple ITBool ITBool)
-         (IRConstruct TgTuple
-            [ IRConformsTo (ListOf TFloat) (IRLetIn "l0" (IRConst (VInt 1)) (IRConst (VList (ListCont (VFloat 1) EmptyList))))
-            , IRConformsTo (Tuple TFloat TFloat) (IRConst (VFloat (-1))) ])
-         [])
+      -- Julia cannot parse a field access on a negative literal
+      -- (@-1.0.t1@). (Python's half of this, a let's walrus in the
+      -- comprehension a list check iterates, is fixed: see
+      -- 'letInComprehensionIterableCases'.)
+      (repro [] ITBool (IRConformsTo (Tuple TFloat TFloat) (IRConst (VFloat (-1)))) [])
   -- M3 (builtins, tensors and function groups).
   , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
       (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
@@ -1563,11 +1613,6 @@ knownDisagreements =
       (ByAnswer (\c o a -> isValue o && isSampled a
                            && not (null [ () | IRConformsTo _ x <- caseUniverse c, IRVar "listProd" <- universe x ])))
       (repro [] ITBool (IRConformsTo TFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList)))) [])
-  -- After the ConformsTo entry above, whose repro fails to parse the same way.
-  , KnownFamily "python-let-in-a-comprehension-iterable-fails-to-parse" ["python"]
-      (ByAnswer (\_ _ a -> raisedWith "assignment expression cannot be used in a comprehension iterable expression" a))
-      (repro [] (ITTensor [EFixed 1] ITFloat)
-         (IRBuiltin BMap [IRLambda "m" (IRVar "m"), IRLetIn "l" (IRConst (VFloat 1)) (IRBuiltin (BTensor [EFixed 1]) [IRVar "l"])]) [])
   , KnownFamily "bzip-max-and-approx-have-no-text-lowering" ["python", "julia"]
       (ByAnswer (\_ _ a -> raisedWith "codegen threw" a && (raisedWith "OpMax" a || raisedWith "OpApprox" a)))
       (repro [] (ITTensor [EFixed 1] ITFloat)
@@ -2638,6 +2683,30 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
                              [] [ idWhy d | (d, t) <- zip ds others, maybe True (== kfTicket kf) t ]
         | kf <- knownDisagreements, b <- backends ]
       return (maybe "no julia on the PATH: the Julia arm was skipped" (const "") julia)
+  -- backends-agree-python-walrus-in-comprehension-iterable (and
+  -- python-let-in-a-comprehension-iterable-fails-to-parse, formerly a
+  -- knownDisagreements family): a let lowers to a walrus, which CPython
+  -- refuses anywhere in a comprehension's iterable, so a let in a mapped,
+  -- zipped or list-checked operand made the module unloadable.
+  , testCase "a let in a comprehension's operand loads and agrees on scalar Python and Julia" $ do
+      julia <- findExecutable "julia"
+      cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c)))
+                    letInComprehensionIterableCases
+      (_, pyD) <- runIRCasesPython cases
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  , testCase "batched: a let in a comprehension's operand loads and agrees" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched let in a comprehension iterable" >>= maybe (return ()) assertFailure
+        Just py -> do
+          bcs <- mapM prepareBatchedIRCase letInComprehensionIterableBatchedCases
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
   -- python-max-of-empty-tensor-in-recursive-helper: max over a zero-extent
   -- tensor is the identity -inf on every engine (Python raised ValueError).
   , testCase "max of an empty tensor is -inf on scalar Python and Julia, as in the interpreter" $ do
