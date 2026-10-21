@@ -253,7 +253,11 @@ readLogitsLinearOnly =
   -- xi (see img) in tells 0.9 0.2 truth_xi` is answered by the set-witness
   -- engine through the named callee `tells`, which measures its worlds through
   -- see_auto.forward.
-  , "drawProductReadUnderBinding", "drawProductReadPerField4" ]
+  , "drawProductReadUnderBinding", "drawProductReadPerField4"
+  -- task writelogits-dropped-for-read-passthrough-continuous-leaf: moved here
+  -- from known-issues; its per-slot enumeration measures the untouched slots
+  -- through readScene_auto.forward.
+  , "planCrossSlotConditionalAllAny" ]
 
 -- | The corpus programs whose default compile took the plan engine until every
 -- read was tagged, and which now enumerate densely by default. They were
