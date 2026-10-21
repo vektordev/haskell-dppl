@@ -1,0 +1,19 @@
+-- A scene edit over one draw of a product neural read: slot 1's object is
+-- recoloured and moved (px - 1.0), slot 2's recoloured with px passed
+-- through (task scene-rebuild-with-float-leaf-loses-probability; was the
+-- known-issues pin sceneRebuildFloatLeafSharedDrawNoCode). The shifted leaf
+-- sits at the observed position, where the plan traversal used to try to
+-- enumerate its values; it is now transported down the monotone chain
+-- ('planPeelSlice'), a point density with the chain's change of variables.
+-- Plan per Object: [Nil, Obj | Red, Green | mu, sigma]; slot 1
+-- [0.3, 0.7, 0.4, 0.6, 0.0, 1.0], slot 2 [0.6, 0.4, 0.9, 0.1, 1.0, 2.0].
+-- p(Scene (Obj Red -0.5) (Obj Red 1.0)) = 0.7 phi(0.5) * 0.4 phi(0)/2   (dim 2)
+-- p(Scene (Obj Red -1.0) Nil)           = 0.7 phi(0) * 0.6              (dim 1)
+-- p(Scene Nil (Obj Red 0.5))            = 0.3 * 0.4 phi(0.25)/2         (dim 1)
+-- p(Scene Nil Nil)                      = 0.3 * 0.6                     (dim 0)
+-- p(Scene (Obj Green -0.5) Nil)         = 0 (the edit never yields Green)
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+data Scene = Scene ob1::Object, ob2::Object
+neural readScene :: (Symbol -> Scene)
+main sym = draw sc = readScene sym in Scene (if isObj (ob1 sc) then Obj Red (px (ob1 sc) - 1.0) else Nil) (if isObj (ob2 sc) then Obj Red (px (ob2 sc)) else Nil)

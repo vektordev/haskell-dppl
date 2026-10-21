@@ -1,0 +1,15 @@
+-- The other side of planSceneRebuildShiftedFloatLeaf's fix: a net-DECREASING
+-- monotone chain over a continuous leaf at the observed position, under both
+-- a point and a cumulative target (task
+-- scene-rebuild-with-float-leaf-loses-probability). The point pins the leaf
+-- at x = (1 - y)/2 with |dx/dy| = 1/2; the up-to target y' <= c becomes the
+-- upper half-line x >= (1 - c)/2.
+-- Object plan [Nil, Obj | Red, Green | mu, sigma] = [0.3, 0.7, 0.4, 0.6, 0.0, 1.0].
+-- p(-1.0)  = 0.7 phi(1) / 2                 (dim 1)
+-- p(5.0)   = 0.3                            (dim 0, the Nil arm's atom)
+-- cdf(0.0) = 0.7 (1 - Phi(0.5))
+-- cdf(4.0) = 0.7 (1 - Phi(-1.5))            (the atom at 5.0 lies above)
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+neural readObj :: (Symbol -> Object)
+main s = draw o = readObj s in if isObj o then 1.0 - 2.0 * px o else 5.0

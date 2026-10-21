@@ -1,0 +1,12 @@
+-- A binding of a field accessor over a neural read whose accessor implies a
+-- constructor (task scene-rebuild-with-float-leaf-loses-probability): `px`
+-- is only defined on Obj, so binding `p = px (readObj s)` constrains every
+-- world to the Obj flag, exactly as `px o` read inside a body does. The
+-- answer is the sub-probability of the Obj arm (generate raises on Nil,
+-- hence no-normalization).
+-- Object plan [Nil, Obj | Red, Green | mu, sigma] = [0.3, 0.7, 0.4, 0.6, 0.0, 1.0].
+-- p(-0.5) = 0.7 phi(0.5)   (dim 1)
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+neural readObj :: (Symbol -> Object)
+main s = draw p = px (readObj s) in p - 1.0

@@ -42,7 +42,7 @@ import Data.Either (partitionEithers)
 import Data.List (isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
-import SPLL.AutoNeural hiding (planReadOf)
+import SPLL.AutoNeural hiding (planReadOf, planProjectedReadOf)
 import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
@@ -7231,16 +7231,45 @@ planInvertNode meta env planBody target = case planBody of
     opened <- planOpenBinding meta env lam x b a
     case opened of
       Left why -> return (Left why)
-      Right (env', b') -> planInvert meta env' b' target
+      Right (env', b', cons) -> fmap (map (addSliceCons cons)) <$> planInvert meta env' b' target
   Expr _ (Apply {}) -> planApplyTarget meta env planBody target
   -- Arithmetic over plan-dependent operands at the observed position
   -- (@numRed scene + 1.0@): enumerate the node's values exactly as value
   -- enumeration already does under a comparison, and guard each against the
   -- target -- the same thing 'planApplyTarget' does for a value-returning call.
+  --
+  -- A monotone transform chain over a continuous leaf (@px (ob1 sc) - 1.0@,
+  -- the moved object of a scene edit) has no values to enumerate; the
+  -- observation is transported down the chain instead, as the comparison and
+  -- equality cases already do ('planPeelSlice'): a point target pins the leaf
+  -- at the inverse-transformed value with the chain's change-of-variables
+  -- factor, an up-to target becomes the half-line the chain's direction
+  -- selects (task scene-rebuild-with-float-leaf-loses-probability).
   Expr ti (InjF (Named nm) args)
-    | isJust (planArithOp nm (length args)) -> do
-        vsE <- planEnumValues meta env planBody
-        return ((\pairs -> [ planAddGuard (planDetGuard (rType ti) v target) w | (v, w) <- pairs ]) <$> vsE)
+    | nm `elem` ["plus", "mult", "neg", "double", "exp", "log"] || isJust (planArithOp nm (length args)) -> do
+        peelM <- if nm `elem` ["plus", "mult", "neg", "double", "exp", "log"]
+                   then planPeelSlice meta env planBody
+                   else return Nothing
+        case peelM of
+          Just (Right (PlanRef _ off, cons, steps, dir)) -> case target of
+            PTPoint s -> do
+              (bnd, cov, imgGs) <- peelPoint steps s
+              bv <- lift (mkVariable "obs_bnd")
+              lift (setVariables [(bv, bnd)])
+              return (Right [pw1 (insertLeafCon (PLeafPt off (IRVar bv) cov imgGs) cons)])
+            PTUpTo s -> do
+              bnd <- peelBound steps s
+              bv <- lift (mkVariable "obs_bnd")
+              lift (setVariables [(bv, bnd)])
+              let ivl = if dir == MonInc then PLeafIvl off WNegInf (WFinite (IRVar bv))
+                                         else PLeafIvl off (WFinite (IRVar bv)) WPosInf
+              return (Right [pw1 (insertLeafCon ivl cons)])
+          Just (Left why) -> return (Left why)
+          Nothing
+            | isJust (planArithOp nm (length args)) -> do
+                vsE <- planEnumValues meta env planBody
+                return ((\pairs -> [ planAddGuard (planDetGuard (rType ti) v target) w | (v, w) <- pairs ]) <$> vsE)
+            | otherwise -> return (Left ("unsupported node in plan traversal: " ++ planNodeName planBody))
   -- Structural inversion of a built-in constructor: a tuple, a list cons, or an
   -- 'Either' injection. The user-ADT case below, spelled for the built-in
   -- accessors: the observation must have this shape, and each field's
@@ -7550,11 +7579,11 @@ planBetaReduce meta env x b a
 --   one helper would share one range and their reads be counted as one draw;
 -- * a symbol argument that is not plan-free and deterministic, since the read
 --   is bound once, ahead of every world.
-planOpenBinding :: CompilerMetadata -> PlanEnv -> Expr -> String -> Expr -> Expr -> PlanM (Either String (PlanEnv, Expr))
+planOpenBinding :: CompilerMetadata -> PlanEnv -> Expr -> String -> Expr -> Expr -> PlanM (Either String (PlanEnv, Expr, [PLeafCon]))
 planOpenBinding meta env lam x b a = case planBetaReduce meta env x b a of
-  Right b' -> return (Right (env, b'))
+  Right b' -> return (Right (env, b', []))
   Left why
-    | Just (nnName, plan, symArg) <- planReadOf meta a -> do
+    | Just (nnName, plan, symArg, readNode) <- planProjectedReadOf meta a -> do
         stack <- gets psStack
         let symFree = not (subtreeHasOcc (planEnvOccs env ++ planEnvDetOccs env) symArg)
                       && pType (getTypeInfo symArg) == Deterministic
@@ -7577,7 +7606,10 @@ planOpenBinding meta env lam x b a = case planBetaReduce meta env x b a of
                     Just (rCN, LambdaInfo _ _, _) -> rCN
                     _ -> lamCN
                   occs = fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcd))
-              return (Right ((occs, PBPlan (PlanRef plan off)) : env, b))
+              -- A projected read binds its slice, the accessors' constructor
+              -- flags constraining every world of the body.
+              return ((\(ref, cons) -> ((occs, PBPlan ref) : env, b, cons))
+                        <$> planProjectedSlice meta plan off readNode a)
     | otherwise -> return (Left why)
 
 -- | Share one plan-dependent value among the children of a node (task
@@ -7997,7 +8029,7 @@ planEnumValuesNode meta env bodyExpr = case bodyExpr of
         opened <- planOpenBinding meta env lam x b a
         case opened of
           Left why -> return (Left why)
-          Right (env', b') -> planEnumValues meta env' b'
+          Right (env', b', cons) -> fmap (map (fmap (addSliceCons cons))) <$> planEnumValues meta env' b'
       Expr _ (Apply {}) -> do
         specsE <- planResolveApply meta env bodyExpr
         case specsE of
@@ -8432,7 +8464,8 @@ planWorldMass sr raws w =
 -- declined.
 planWitnessApply :: CompilerMetadata -> Bool -> RType -> Binding -> IRExpr -> CompilerMonad (Either (Maybe String) PResult)
 planWitnessApply meta0 cumulative rt binding sample
-  | Just (nnName, plan, symArg) <- planApplicable meta0 rt binding
+  | Just (nnName, plan, symArg, readNode) <- planApplicable meta0 rt binding
+  , Right (sliceRef, sliceCons) <- planProjectedSlice meta0 plan 0 readNode (bindArg binding)
   = do
       -- Bind the curried callee's leading parameters (none for a draw or a
       -- one-parameter callee) under fresh names, in the caller's scope.
@@ -8445,7 +8478,9 @@ planWitnessApply meta0 cumulative rt binding sample
       -- Deterministic here and must dispatch as such.
       let bodyExpr = reinferRecovered meta (recoveredVars meta) scopedBody
       let occs = bindOccs binding
-      let env = [(occs, PBPlan (PlanRef plan 0))]
+      -- A projected read (@draw a = ob1 (readScene sym)@) binds the slice;
+      -- its accessors' constructor flags constrain every world.
+      let env = [(occs, PBPlan sliceRef)]
       let target = if cumulative then PTUpTo sample else PTPoint sample
       -- Bind the raw logit vector up front: the milestone-4 value grouping
       -- measures collapsed worlds during the traversal, so it needs the name.
@@ -8476,7 +8511,7 @@ planWitnessApply meta0 cumulative rt binding sample
       -- factoring existed. An attempt that never factored is not repeated.
       let runPlan merge factor = do
             (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState (semiringOf meta) nnRaw (getSize plan) merge factor)
-            return ((filter (not . pwUnsat) <$> ws, psRaws st), psFactored st)
+            return ((filter (not . pwUnsat) . map (addSliceCons sliceCons) <$> ws, psRaws st), psFactored st)
           attempt merge factor = do
             supply <- get
             pass $ do
@@ -8507,6 +8542,26 @@ planWitnessApply meta0 cumulative rt binding sample
 -- ('SPLL.AutoNeural.planReadOf' in this compile's program).
 planReadOf :: CompilerMetadata -> Expr -> Maybe (String, PartitionPlan, Expr)
 planReadOf meta = AutoNeural.planReadOf (compilingProgram meta)
+
+-- | A neural read seen through field accessors, @ob1 (readScene sym)@
+-- ('SPLL.AutoNeural.planProjectedReadOf'): also answers the read node.
+planProjectedReadOf :: CompilerMetadata -> Expr -> Maybe (String, PartitionPlan, Expr, Expr)
+planProjectedReadOf meta = AutoNeural.planProjectedReadOf (compilingProgram meta)
+
+-- | The slice a projected read binds ('planProjectedReadOf'), with the
+-- constructor-flag constraints its accessors imply: the accessor chain
+-- evaluated with the read node itself bound to the whole plan at @off@.
+planProjectedSlice :: CompilerMetadata -> PartitionPlan -> Int -> Expr -> Expr -> Either String (PlanRef, [PLeafCon])
+planProjectedSlice meta plan off readNode arg =
+  fromMaybe (Left ("not an accessor chain over a neural read: " ++ planNodeName arg))
+            (planEvalRef meta [([chainName (getTypeInfo readNode)], PBPlan (PlanRef plan off))] arg)
+
+-- | Fold a projected binding's accessor constraints into a world (the
+-- call-site analogue is 'addSpecCons'); a constraint on a leaf the world
+-- already baked is a clash.
+addSliceCons :: [PLeafCon] -> PlanWorld -> PlanWorld
+addSliceCons cons w = w { pwCons = foldr insertLeafCon (pwCons w) cons
+                        , pwClash = pwClash w || any ((`elem` pwBaked w) . plcBase) cons }
 
 -- | The compiled inference function a call to top-level function @n@ must
 -- reference, given the semiring the CALLER is being compiled under.
@@ -8561,9 +8616,9 @@ dispatchEngines onAnswer engines none = go Nothing engines
 -- plan read ('planReadOf', the predicate the modality engine reads too), its
 -- body is meaningful at this call site ('bindScope'), and it is not
 -- function-valued.
-planApplicable :: CompilerMetadata -> RType -> Binding -> Maybe (String, PartitionPlan, Expr)
+planApplicable :: CompilerMetadata -> RType -> Binding -> Maybe (String, PartitionPlan, Expr, Expr)
 planApplicable meta rt binding
-  | isJust (bindScope binding), not (isTArrowType rt) = planReadOf meta (bindArg binding)
+  | isJust (bindScope binding), not (isTArrowType rt) = planProjectedReadOf meta (bindArg binding)
   | otherwise = Nothing
 
 -- | The set-witness engine's applicability to a binding: the shape walk of
