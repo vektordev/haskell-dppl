@@ -3918,6 +3918,26 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
       check runPythonBatch
       julia <- findJulia
       maybe (return ()) (check . runJuliaBatch) julia
+  , testCase "a batch holding the same program twice loads each copy as its own module on every scalar backend" $ do
+      -- Task fuzz-backends-agree-julia-module-fails-to-load (Slow
+      -- prop_Fuzz_BackendsAgree, seed 457137): a fuzz batch drew
+      -- `main = False` twice, the Julia harness named both modules after the
+      -- first copy's index, and every query against the second raised
+      -- `UndefVarError: Prog17`.
+      let srcs = ["main = False", "main = Uniform < 0.3", "main = False"]
+      acs <- forM srcs $ \src -> do
+        prog <- parseOrFail src
+        env <- either (\e -> assertFailure (src ++ ": " ++ show e)) return (compile defaultCompilerConfig prog)
+        answered <- forM [VBool False, VBool True] $ \v -> case interpreterAnswer prog env [] (QProb v) of
+          Just a -> return (QProb v, a)
+          Nothing -> assertFailure (src ++ ": the interpreter does not answer at " ++ show v)
+        return (AgreementCase prog env [] [] answered)
+      let check run = do
+            ds <- run acs
+            assertBool (concatMap renderDisagreement ds) (null ds)
+      check runPythonBatch
+      julia <- findJulia
+      maybe (return ()) (check . runJuliaBatch) julia
   , testCase "generate samples round-trip through every scalar backend and land in the interpreter's support, and an off-support or mistyped sample disagrees" $ do
       -- Task backend-agreement-generate-support. Each row's samples are
       -- decoded as its return type and judged by the interpreter's
