@@ -1,4 +1,5 @@
 slow
+batched
 p([[False]], (2, [0.7, 0.3, 0.4, 0.6]))=(1.0, 0.0)
 p([[True]], (2, [0.7, 0.3, 0.4, 0.6])) is impossible
 -- Formerly known-issues/fuzzNeuralPlanGenerateBackedDeadBranch (found by the

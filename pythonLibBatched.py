@@ -480,14 +480,25 @@ class InferenceList:
     # a bucket-uniform ANY wildcard), giving a [B] bool tensor. `sample ==
     # EmptyInferenceList()` -- the emptiness probe the compiler emits --
     # therefore always lands in the Python-bool case.
+    #
+    # An ANY tail matches the rest of the other list, whatever its length, as in
+    # pythonLib.py and the interpreter: head's inverse queries
+    # Cons(x, AnyInferenceList()) against a constant list (task
+    # batched-refuses-list-constants-with-data; the scalar twin was task
+    # python-list-eq-any-tail-not-wildcard). Where the tail sits is structure
+    # too, so this stays a Python-bool decision until the leaves are compared.
     if not isinstance(other, InferenceList):
       return NotImplemented
-    if len(self) != len(other):
-      return False
     acc = True
-    for a, b in zip(self, other):
-      acc = eq(a, b) if acc is True else (acc & eq(a, b))
-    return acc
+    a, b = self, other
+    while True:
+      if isinstance(a, AnyInferenceList) or isinstance(b, AnyInferenceList):
+        return acc
+      a_cons, b_cons = isinstance(a, ConsInferenceList), isinstance(b, ConsInferenceList)
+      if not (a_cons and b_cons):
+        return acc if a_cons == b_cons else False
+      acc = eq(a.value, b.value) if acc is True else (acc & eq(a.value, b.value))
+      a, b = a.next, b.next
 
   def prepend(self, value):
     return ConsInferenceList(value, self)
@@ -521,6 +532,21 @@ def toList(xs):
   for x in reversed(list(xs)):
     back = ConsInferenceList(x, back)
   return back
+
+def indexOf(sample, lst):
+  # The enumeration-index lookup SPLL.AutoNeural.indexOf builds over a constant
+  # list (task batched-refuses-list-constants-with-data). The optimizer folds
+  # it into a select chain (IROptimizer.indexOfChain), so this runs only on an
+  # unoptimised (-O0) compile. The list is a compile-time constant; the sample
+  # is a [B] batch, so the answer is a [B] int64 index. Same contract as the
+  # chain: the sample is in the list, so the last element needs no comparison.
+  vals = list(lst)
+  if not vals:
+    raise ValueError("Element not found in list")
+  idx = len(vals) - 1
+  for i in range(len(vals) - 2, -1, -1):
+    idx = where_anchored(eq(sample, vals[i]), i, idx)
+  return idx
 
 # --- Either arms (heterogeneous batching, M2) --------------------------------
 # The constructor tag is *structure*, so it is part of the bucket signature and
