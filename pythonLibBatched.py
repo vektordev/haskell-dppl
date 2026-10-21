@@ -475,12 +475,18 @@ class InferenceList:
         return current.next
       raise IndexError("Slices may only be used for tail lists")
     if index < 0:
+      # Only a negative index needs the length; a non-negative one walks
+      # (O(index), not O(n)) and fails when the Cons chain ends first.
       index += len(self)
-    if index < 0 or index >= len(self):
-      raise IndexError("InferenceList index out of range")
+      if index < 0:
+        raise IndexError("InferenceList index out of range")
     current = self
     for _ in range(index):
+      if not isinstance(current, ConsInferenceList):
+        raise IndexError("InferenceList index out of range")
       current = current.next
+    if not isinstance(current, ConsInferenceList):
+      raise IndexError("InferenceList index out of range")
     return current.value
 
   def __eq__(self, other):
