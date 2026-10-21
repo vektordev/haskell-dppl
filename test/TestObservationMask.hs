@@ -9,7 +9,7 @@
 -- the per-mask lattice verdicts, and pruning followed by the existing pipeline.
 -- The last group is task @per-mask-variants-by-pruning@'s: the variants, the
 -- dispatcher, and the corpus-wide properties they must keep.
-module TestObservationMask (observationMaskTests, slowVariantCorpusTests) where
+module TestObservationMask (observationMaskTests, slowVariantCorpusTests, chartWarningCorpusTests) where
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -758,6 +758,121 @@ correlatedWarningTests = testGroup "correlated writeLogits slots warning"
     g4 = "main = draw w = Uniform < 0.5 in (w, w)"
 
 -- ---------------------------------------------------------------------------
+-- The chart-dependent-density warning (task warn-chart-dependent-cov-factor)
+-- ---------------------------------------------------------------------------
+
+-- | The program-only warnings of a program.
+programWarningsOf :: String -> IO [CompileWarning]
+programWarningsOf src = programWarnings defaultCompilerConfig <$> parseOrFail src
+
+-- | The one chart warning of @main@ over one group.
+chartWarning :: [String] -> Int -> [String] -> [(String, String)] -> [CompileWarning]
+chartWarning slots k latents witnesses =
+  [ChartDependentDensity "main" [ChartClass slots k latents witnesses]]
+
+chartWarningTests :: TestTree
+chartWarningTests = testGroup "chart-dependent density warning"
+  [ testGroup "every curve in the task's repro table warns, naming the latent and its witness slot"
+      [ testCase src $ do
+          ws <- programWarningsOf src
+          assertEqual "warnings" (chartWarning ["fst", "snd"] 1 ["x"] [("x", "fst")]) ws
+      | src <- [ "main = draw x = Uniform in (x, x*2.0)"
+               , "main = draw x = Uniform in (x*2.0, x)"
+               , "main = draw x = Normal in (x, x)"
+               , "main = draw x = Normal in (x, x*2.0)"
+               , "main = draw x = Normal in (x*2.0, x)"
+               , "main = draw x = Uniform in (x, x+x)"   -- the corpus's degenerateSameLatentSum
+               ] ]
+
+  , testCase "the rendered warning names the function, slots, latent, witness and the convention" $ do
+      ws <- programWarningsOf "main = draw x = Uniform in (x, x*2.0)"
+      let txt = concatMap renderCompileWarning ws
+      forM_ ["Warning: ", "'main'", "fst, snd", "'x'", "recovered through slot fst", "Hausdorff", "Compiled anyway"] $ \frag ->
+        assertBool ("rendered warning mentions " ++ frag ++ ": " ++ txt) (frag `isInfixOf` txt)
+
+  , testCase "an occurrence only invertible through another one is not the witness" $ do
+      -- x*x has no inverse of its own: x is recovered through the second slot,
+      -- and the density reported is the one in that slot's coordinate.
+      ws <- programWarningsOf "main = draw x = Normal in (x*x, x)"
+      assertEqual "warnings" (chartWarning ["fst", "snd"] 1 ["x"] [("x", "snd")]) ws
+
+  , testCase "an alias recovers the draw through the alias's slot" $ do
+      ws <- programWarningsOf "main = draw x = Normal in draw y = x in (y, y*2.0)"
+      assertEqual "warnings" (chartWarning ["fst", "snd"] 1 ["x"] [("x", "fst")]) ws
+
+  , testCase "a curve over three nested slots" $ do
+      ws <- programWarningsOf "main = draw x = Normal in (x, (x*2.0, x+1.0))"
+      assertEqual "warnings" (chartWarning ["fst", "snd.fst", "snd.snd"] 1 ["x"] [("x", "fst")]) ws
+
+  , testCase "a surface: two draws over three slots" $ do
+      ws <- programWarningsOf "main = draw x = Normal in draw y = Normal in (x, (y, x + y))"
+      case ws of
+        [ChartDependentDensity "main" [ChartClass slots 2 ["x", "y"] _]] ->
+          assertEqual "slots" ["fst", "snd.fst", "snd.snd"] slots
+        _ -> assertFailure ("expected one two-draw group, got " ++ show ws)
+
+  , testCase "only the degenerate group is reported, not an independent slot beside it" $ do
+      ws <- programWarningsOf "main = draw x = Normal in (x, (Normal, x*3.0))"
+      assertEqual "warnings" (chartWarning ["fst", "snd.snd"] 1 ["x"] [("x", "fst")]) ws
+
+  , testGroup "full-dimensional, isometric or discrete supports do not warn"
+      [ testCase src $ do
+          ws <- programWarningsOf src
+          assertEqual "warnings" [] ws
+      | src <- [ "main = draw x = Uniform in (x, 3.0)"                     -- isometric: the residue is constant
+               , "main = Normal + Normal"                                  -- one slot
+               , "main = draw x = Normal in (x, x + Normal)"               -- a fresh draw per slot
+               , "main = draw x = Normal in draw y = Normal in (x, x + y)" -- triangular, full rank
+               , "main = draw x = Uniform in (x, if x > 0.5 then 1.0 else 2.0)" -- piecewise isometric
+               , "main = draw x = Uniform in (x, x > 0.5)"                 -- a Bool slot has no coordinate
+               , "main = draw w = Uniform < 0.5 in (w, w)"                 -- discrete: no density
+               , "f = Normal\nmain = (f, f)"                               -- two draws
+               ] ]
+
+  , testCase "with no probability function to report a density, no warning" $ do
+      prog <- parseOrFail "main = draw x = Normal in (x, x*2.0)"
+      assertEqual "warnings" [] (programWarnings defaultCompilerConfig { noProbability = True } prog)
+
+  , testCase "the warning does not change the reported density" $ do
+      -- The chart convention stays as it is (the density convention is design
+      -- compositional-gramian-hausdorff-measures' to choose): 1.0, not 1/sqrt 5.
+      prog <- parseOrFail "main = draw x = Uniform in (x, x*2.0)"
+      case runProb defaultCompilerConfig prog [] (VTuple (VFloat 0.3) (VFloat 0.6)) of
+        Right (VTuple (VFloat p) _) -> assertBool ("p = " ++ show p) (abs (p - 1.0) < 1e-9)
+        other -> assertFailure ("probability: " ++ show other)
+  ]
+
+-- | The corpus programs the chart warning fires on, pinned: a new one is either
+-- a new lower-dimensional curve (add it) or a false positive (fix the
+-- analysis). It names corpus members, so it reads the whole corpus, @slow@
+-- programs included; it runs only the front end, so it costs a tenth of a
+-- second and stays in the default run.
+chartWarningCorpusTests :: Corpus -> IO TestTree
+chartWarningCorpusTests corpus = corpusSweepAll corpus SweepSpec
+  { sweepName = "chart-dependent density warning fires on exactly the pinned corpus programs"
+  , sweepTier = Default, sweepSlow = IgnoreSlow, sweepSelect = const True
+  , sweepNote = "program warnings only: the front end and chain naming, no compile" } $ \es ->
+  return $ testCase "chart-dependent density warning fires on exactly the pinned corpus programs" $ do
+    let warned = sort [ ceName e | e <- es
+                      , any isChart (programWarnings defaultCompilerConfig (ceProgram e)) ]
+    assertEqual "corpus programs with a chart-dependent density" chartWarnedCorpus warned
+  where
+    isChart ChartDependentDensity{} = True
+    isChart _                       = False
+
+chartWarnedCorpus :: [String]
+chartWarnedCorpus =
+  [ "aliasReadTwice"              -- (y, y + 1.0), y an alias of x
+  , "degenerateSameLatentSum"     -- (x, x+x)
+  , "letWitnessedEitherFpUlp"     -- left (x+y, (x, y)): two draws, three slots
+  , "letWitnessedTupleFpUlp"      -- (x+y, (x, y))
+  , "maskComplementSlot"          -- (x, 1.0 - x)
+  , "maskSummedSlot"              -- (x+y, (x, y))
+  , "maskSwappedWrapper"          -- f = (x, 1.0 - x); main reads f, a drawing function, and is skipped
+  , "overDeterminedSharedLatent"  -- (x, (x+y+3.0, x+y+2.0))
+  ]
+
+-- ---------------------------------------------------------------------------
 
 observationMaskTests :: TestTree
 observationMaskTests = testGroup "ObservationMask"
@@ -768,4 +883,5 @@ observationMaskTests = testGroup "ObservationMask"
     , pruneTests
     , variantTests
     , correlatedWarningTests
+    , chartWarningTests
     ]

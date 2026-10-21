@@ -973,11 +973,21 @@ structural env e = case e of
   -- uniform across the call, and the arm it rules out ('isclose' on a bool
   -- tensor) is illegal to evaluate eagerly.
   IRConformsTo TFloat _ -> True
-  IROp OpEq a b     -> isEmptyListConst a || isEmptyListConst b
+  IROp OpEq a b     | isEmptyListConst a || isEmptyListConst b -> True
   IROp OpAnd a b    -> structural env a && structural env b
   IROp OpOr  a b    -> structural env a && structural env b
   IRUnaryOp OpNot a -> structural env a
   IRLetIn n v b     -> structural (bindS env n v) b
+  -- Any other operator over structural operands is bucket-uniform too: its
+  -- operands are the same Python value for the whole call, so it is. The
+  -- compiler routinely builds a guard this way -- a constructor test compared
+  -- with a constant (@True == isOne(h)@), the arm weight it selects
+  -- (@if cse then 1.0 else 0.0@), and the zero test on that weight
+  -- (@isclose(w, 0.0)@) that guards the arm reading the constructor's fields.
+  -- Without this case each of them fell through to a @torch.where@, which
+  -- evaluated the sibling constructor's accessor eagerly (task
+  -- batched-ctor-test-behind-eq-evaluates-accessor).
+  IROp _ a b        -> structural env a && structural env b
   -- A conditional whose guard and both arms are themselves structural is a
   -- structural value: CSE routinely names a structural condition through
   -- exactly this idiom (`let cse_0 = (if isLeft(sample) then True else

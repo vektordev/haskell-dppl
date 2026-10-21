@@ -19,7 +19,7 @@ import Control.Monad.Random.Lazy (evalRandIO)
 import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests, slowInternalsTests)
-import TestObservationMask (observationMaskTests, slowVariantCorpusTests)
+import TestObservationMask (observationMaskTests, slowVariantCorpusTests, chartWarningCorpusTests)
 import TestPerValue (perValueTests)
 import TestMonomorphize (monomorphizeTests)
 import TestIRTypeCheck (irTypeCheckTests)
@@ -540,6 +540,9 @@ main = do
   showcase <- showcaseTests
   writeLogitsRoundtrip <- writeLogitsRoundtripTests corpus
   knownIssues <- knownIssuesTests manifest
+  -- Names corpus members, but reads only the front end (0.1 s for the whole
+  -- corpus), so it runs by default rather than in Slow.
+  chartWarnings <- chartWarningCorpusTests corpus
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
   -- regressions outside the code they pin. They're skipped unless
@@ -600,6 +603,7 @@ main = do
     , parserTests
     , internals
     , observationMaskTests
+    , chartWarnings
     , perValueTests
     , shrinkerTests
     , neuralGeneratorTests
