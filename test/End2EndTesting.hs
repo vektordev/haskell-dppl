@@ -193,79 +193,56 @@ budgetZeroKnownDivergentRows =
   , ("observeContinuousEqualsLetBound", VEither (Right (VInt 0)))
   , ("observeContinuousEqualsLetBound", VEither (Right VAny)) ]
 
--- | The plan engine's world measure under 'logSpace' (task
--- worlds-measure-unification): at budget 0, wherever the linear compile of a
--- neural corpus program answers, the log-space compile must answer exp(log p)
--- = p at the same dimension. The plan engine reads raw logits, so it is
--- log-space-correct on its own; the dense neural path is not (its read-logits
--- reads stay linear), which is why this compares budget-0 compiles only and
--- why 'Corpus.LogSpaceMatchesLinear' (which runs the default budget) leaves
--- neural programs out. A program the plan engine does not answer at budget 0
--- is skipped, as in 'planEngineDifferentialTests', and so are the programs
--- listed in 'readLogitsLinearOnly'.
-planEngineLogSpaceTests :: Corpus -> Manifest -> IO TestTree
-planEngineLogSpaceTests corpus manifest = corpusSweep corpus SweepSpec
-  { sweepName = "PlanEngineLogSpaceMatchesLinear", sweepTier = Default, sweepSlow = SkipSlow
+-- | A neural corpus program's log-space answer against its linear one: wherever
+-- the linear compile answers, the log-space compile must answer exp(log p) = p
+-- at the same dimension. Two sweeps over the neural programs, one per world
+-- measure ('Corpus.LogSpaceMatchesLinear' covers the non-neural ones):
+--
+--  * 'planEngineLogSpaceTests' at budget 0 (task worlds-measure-unification):
+--    the plan engine, which reads raw logits. A program it does not answer is
+--    skipped, as in 'planEngineDifferentialTests'.
+--  * 'neuralLogSpaceTests' at the default budget (task
+--    read-logits-network-linear-under-logspace): dense enumeration, which
+--    measures a read through the network's read-logits reader @<nn>_auto@.
+--    That reader used to answer a linear probability under 'logSpace' too, so
+--    budget 0 was the only budget a neural program could be compared at, and
+--    even there 18 programs whose measure still reached @_auto@ had to be
+--    listed out. The reader is built over the compile's semiring now.
+planEngineLogSpaceTests, neuralLogSpaceTests :: Corpus -> Manifest -> IO TestTree
+planEngineLogSpaceTests = neuralLogSpaceSweep "PlanEngineLogSpaceMatchesLinear" planLogSpaceCheckVersion
+  "the plan engine's log-space answer is exp-equal to its linear one"
+  defaultCompilerConfig{materializationCardinality = 0}
+neuralLogSpaceTests = neuralLogSpaceSweep "NeuralLogSpaceMatchesLinear" neuralLogSpaceCheckVersion
+  "a neural program's default-budget log-space answer is exp-equal to its linear one"
+  defaultCompilerConfig
+
+neuralLogSpaceSweep :: String -> String -> String -> CompilerConfig -> Corpus -> Manifest -> IO TestTree
+neuralLogSpaceSweep name version note conf corpus manifest = corpusSweep corpus SweepSpec
+  { sweepName = name, sweepTier = Default, sweepSlow = SkipSlow
   , sweepSelect = \e -> interpreterRouted e && not (null (neurals (ceProgram e)))
-                       && ceName e `notElem` readLogitsLinearOnly
-  , sweepNote = "the plan engine's log-space answer is exp-equal to its linear one" } $ \e ->
+  , sweepNote = note } $ \e ->
     -- The rows are unshaped here, as they always were for this group.
     let p = ceProgram e
-        linEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
-        logEnv = compile defaultCompilerConfig{materializationCardinality = 0, logSpace = True} p
-    in testProperty (ceName e) (once $ cachedProperty manifest "PlanEngineLogSpaceMatchesLinear" (ceName e)
-                                  (differentialKey manifest planLogSpaceCheckVersion p [linEnv, logEnv] (ceCases e))
+        linEnv = compile conf p
+        logEnv = compile conf{logSpace = True} p
+    in testProperty (ceName e) (once $ cachedProperty manifest name (ceName e)
+                                  (differentialKey manifest version p [linEnv, logEnv] (ceCases e))
                                   (conjoin (map (logMatchesLinear p linEnv logEnv) (ceCases e))))
   where
     logMatchesLinear p linEnv logEnv tc = case tc of
-      ProbTestCase  name sample params _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
-      CumulTestCase name sample params _ -> cmp (name ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
+      ProbTestCase  n sample params _ -> cmp (n ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
+      CumulTestCase n sample params _ -> cmp (n ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
       _ -> property True
       where
-        cmp name run = ioProperty $ do
+        cmp what run = ioProperty $ do
           lin <- forceResult (linEnv >>= run)
           lg  <- forceResult (logEnv >>= run)
           return $ case (lin, lg) of
             (Left _, _) -> property True
             (Right (VProbDim p1 d1), Right (VProbDim lp2 d2)) ->
-              counterexample (name ++ ": linear " ++ show (p1, d1) ++ " /= exp of log-space " ++ show (exp lp2, d2))
+              counterexample (what ++ ": linear " ++ show (p1, d1) ++ " /= exp of log-space " ++ show (exp lp2, d2))
                 (abs (p1 - exp lp2) < probTolerance && (p1 == 0 || d1 == d2))
-            _ -> counterexample (name ++ ": linear " ++ show lin ++ " vs log-space " ++ show lg) False
-
--- | Neural corpus programs whose budget-0 probability still reads the network
--- through its generated read-logits inference function (@<nn>_auto.forward@,
--- 'SPLL.AutoNeural'), which answers a linear probability under 'logSpace' too:
--- the one subsystem the log-space task's invasiveness verdict left linear-only
--- that task worlds-measure-unification did not cover. Every entry was checked
--- to call @_auto.forward@ in its emitted probability function. Determined by
--- running the property over every neural program (63 programs that failed it
--- before that task pass now; these 13 fail for this reason alone).
-readLogitsLinearOnly :: [String]
-readLogitsLinearOnly =
-  [ "observeDiscretePoE", "eitherMarginalNeural", "planOverBudgetIntMult"
-  , "showcase_either_fromLeft", "showcase_either_marginal_discrete", "showcase_either_neural"
-  , "autoNeuralProbDiscreteSparse", "autoNeuralProbDiscrete", "autoNeuralProbMnistAdd"
-  , "agreementBareEqualityLetBound", "agreementBareEqualityInline", "mNistAdd3", "mNistAdd4"
-  -- task symbol-chosen-by-inline-coin-refused: a mixture of reads of selected
-  -- Symbols, each read through see_auto.forward.
-  , "symbolChosenByInlineCoin", "symbolChosenByDrawBoundCoin", "symbolChosenInsideReadArgument"
-  -- task binding-resolver-one-application-rule: the per-field `draw truth_xi =
-  -- xi (see img) in tells 0.9 0.2 truth_xi` is answered by the set-witness
-  -- engine through the named callee `tells`, which measures its worlds through
-  -- see_auto.forward.
-  , "drawProductReadUnderBinding", "drawProductReadPerField4"
-  -- task writelogits-dropped-for-read-passthrough-continuous-leaf: moved here
-  -- from known-issues; its per-slot enumeration measures the untouched slots
-  -- through readScene_auto.forward.
-  , "planCrossSlotConditionalAllAny"
-  -- task batched-enum-comprehension-exceeds-parser-nesting: moved here from
-  -- known-issues; reads both experts through lmA_auto/lmB_auto.forward.
-  , "batchedMaskVariantNeuralReadChain"
-  -- task neural-read-query-outside-domain-unchecked: moved here from
-  -- known-issues; a bare read (or its point inversion) answered by
-  -- readD_auto.forward / readS_auto.forward.
-  , "neuralReadQueriedOutsideDomain", "neuralReadOutsideDomainThroughInversion"
-  , "neuralReadOutsideSparseDomain" ]
+            _ -> counterexample (what ++ ": linear " ++ show lin ++ " vs log-space " ++ show lg) False
 
 -- | The corpus programs whose default compile took the plan engine until every
 -- read was tagged, and which now enumerate densely by default. They were
@@ -3882,11 +3859,12 @@ normalizationCheckVersion = "normalization-v1"
 pythonCheckVersion        = "python-v1"
 juliaCheckVersion         = "julia-v1"
 
-selectPassCheckVersion, planEngineCheckVersion, budgetZeroCheckVersion, planLogSpaceCheckVersion :: String
+selectPassCheckVersion, planEngineCheckVersion, budgetZeroCheckVersion, planLogSpaceCheckVersion, neuralLogSpaceCheckVersion :: String
 selectPassCheckVersion    = "select-pass-v1"
 planEngineCheckVersion    = "plan-engine-v1"
 budgetZeroCheckVersion    = "budget-zero-v1"
 planLogSpaceCheckVersion  = "plan-log-space-v1"
+neuralLogSpaceCheckVersion = "neural-log-space-v1"
 
 pythonWriteLogitsCheckVersion, juliaWriteLogitsCheckVersion, batchedCheckVersion :: String
 pythonWriteLogitsCheckVersion = "python-writelogits-v1"

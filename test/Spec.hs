@@ -30,7 +30,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, branchCountBackendTests, topKRuntimeCutoffTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, branchCountBackendTests, topKRuntimeCutoffTests)
 import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
 import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rewriteIntegrationTests, ofToggleCorpusTests)
@@ -534,6 +534,7 @@ main = do
   planDiff <- planEngineDifferentialTests corpus manifest
   budgetZeroDiff <- budgetZeroDifferentialTests corpus manifest
   planLog <- planEngineLogSpaceTests corpus manifest
+  neuralLog <- neuralLogSpaceTests corpus manifest
   batchedPy <- batchedPythonTests corpus manifest
   branchCountBackends <- branchCountBackendTests
   detTests <- determinismTests corpus
@@ -634,6 +635,7 @@ main = do
     , planDiff
     , budgetZeroDiff
     , planLog
+    , neuralLog
     , batchedPy
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests

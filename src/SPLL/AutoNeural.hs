@@ -31,6 +31,7 @@ import SPLL.Typing.RType
 import SPLL.Lang.Lang
 import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName)
 import StandardLibrary
+import SPLL.Semiring (Semiring (..), mkSemiring, fromLinearSR, scaledNormalDensity, sumAllSR)
 
 import Data.List (find, elemIndex, intercalate, isPrefixOf)
 import Utils
@@ -303,16 +304,30 @@ symbol = "l_x_neural_in"
 -- a vanishing density is just a small density -- so the flag is derived from
 -- the value only on the dim-0 side. Both dim and the probability are let-bound
 -- (dim is a constant for every non-mixed plan and folds away).
+--
+-- The probability is built over the compile's 'Semiring' (task
+-- read-logits-network-linear-under-logspace): a slot is a linear softmax value,
+-- carried in with 'fromLinearSR'; a Gaussian slot pair reads the native log-pdf
+-- leaf ('scaledNormalDensity'); factors combine with 'srTimes', the Either
+-- right flag is 'srComplement' of the left one, and constructor alternatives
+-- with 'sumAllSR'. Under the linear semiring every one of these is the
+-- arithmetic this function always emitted, so a default compile is unchanged;
+-- under --logSpace the reader answers a log-probability like every other
+-- PResult producer. The branch count stays linear in both (it is a count).
 makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> IRExpr
-makeProb adtDecls _conf plan = IRLambda vector (IRLambda queryParamName
+makeProb adtDecls conf plan = IRLambda vector (IRLambda queryParamName
   (IRLetIn probVar m (IRLetIn dimVar dim
     (IRConstruct TgTuple [IRVar probVar, IRConstruct TgTuple [IRVar dimVar, IRConstruct TgTuple [bc, imposs]]]))))
   where
-    (m, dim, bc) = makeProbRec adtDecls plan 0 (IRVar queryParamName)
+    -- Only the arithmetic domain matters here: the reader has no alternatives
+    -- to maximize over (its constructor sum has one live term), so the
+    -- sum-product family stands for every family.
+    sr = mkSemiring SRSumProduct (logSpace conf)
+    (m, dim, bc) = makeProbRec sr adtDecls plan 0 (IRVar queryParamName)
     probVar = "l_dec_p"
     dimVar  = "l_dec_dim"
     imposs  = IRIf (IROp OpEq (IRVar dimVar) (IRConst (VInt 0)))
-                   (IROp OpEq (IRVar probVar) (IRConst (VFloat 0)))
+                   (IROp OpEq (IRVar probVar) (srZero sr))
                    (IRConst (VBool False))
 
 -- Takes a Tag from a Discretes type and a sample, and builds code that returns the index of the sample in the tag.
@@ -323,76 +338,81 @@ indexOf (MultiDiscretes vals) sample = invokeStandardFunction stdIndexOf [sample
 indexOf tag _ = error ("indexOf: expected an explicit enumeration, got " ++ show tag)
 
 
-makeProbRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
-makeProbRec _adtDecls (Discretes _rty tag) ix sample = (noAny sample guarded, IRConst (VInt 0), IRConst (VFloat 0))
+-- | (probability in @sr@, dim, linear branch count) of @sample@ under @plan@,
+-- whose logit region starts at slot @ix@.
+makeProbRec :: Semiring -> [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
+makeProbRec sr _adtDecls (Discretes _rty tag) ix sample = (noAny sr sample guarded, IRConst (VInt 0), IRConst (VFloat 0))
   where
     -- 'indexOf' is total only on members of the declared `of` domain (it folds
     -- to a fall-through select chain or to the sample itself), so a query at
     -- any other value would read another slot or index out of bounds. Such a
-    -- sample is impossible: the guard answers 0, from which 'makeProb' derives
-    -- the impossibility flag (task neural-read-query-outside-domain-unchecked).
-    guarded = IRIf (IRIsPossible tag sample) p (IRConst (VFloat 0))
-    p = IRBuiltin BListIndex [IRVar vector, IROp OpPlus (indexOf tag sample) (IRConst (VInt ix))]
-makeProbRec _adtDecls Continuous ix sample = (noAny sample p, noAnyDim0 sample (IRConst (VInt 1)), IRConst (VFloat 0))
+    -- sample is impossible: the guard answers the semiring zero, from which
+    -- 'makeProb' derives the impossibility flag (task
+    -- neural-read-query-outside-domain-unchecked).
+    guarded = IRIf (IRIsPossible tag sample) p (srZero sr)
+    p = fromLinearSR sr (IRBuiltin BListIndex [IRVar vector, IROp OpPlus (indexOf tag sample) (IRConst (VInt ix))])
+makeProbRec sr _adtDecls Continuous ix sample = (noAny sr sample p, noAnyDim0 sample (IRConst (VInt 1)), IRConst (VFloat 0))
   where
     -- density of μ + σ·z at x: φ((x − μ)/σ)/σ, with μ = vec[ix], σ = vec[ix+1]
     sigma = IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]
     mu = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
-    p = IROp OpDiv
-          (IRDensity IRNormal Linear (IROp OpDiv (IROp OpSub sample mu) sigma))
-          sigma
+    p = scaledNormalDensity sr (IROp OpDiv (IROp OpSub sample mu) sigma) [sigma]
 --Not entirely sure how to combine elements in the next case. For now:
 --  probabilities of the two tuple elements are multiplied.
 --  dims should be added.
 --  branch counts of both sides should be added.
-makeProbRec adtDecls (TuplePlan a b) ix sample = (noAny sample (IROp OpMult pa pb), noAnyDim0 sample (IROp OpPlus dima dimb), noAny0 sample (IROp OpPlus bca bcb))
+makeProbRec sr adtDecls (TuplePlan a b) ix sample = (noAny sr sample (srTimes sr pa pb), noAnyDim0 sample (IROp OpPlus dima dimb), noAny0 sample (IROp OpPlus bca bcb))
   where
-    (pa, dima, bca) = makeProbRec adtDecls a ix (IRDestruct AcFst sample)
-    (pb, dimb, bcb) = makeProbRec adtDecls b (ix + getSize a) (IRDestruct AcSnd sample)
-makeProbRec adtDecls (EitherPlan a b) ix sample = (noAny sample
+    (pa, dima, bca) = makeProbRec sr adtDecls a ix (IRDestruct AcFst sample)
+    (pb, dimb, bcb) = makeProbRec sr adtDecls b (ix + getSize a) (IRDestruct AcSnd sample)
+makeProbRec sr adtDecls (EitherPlan a b) ix sample = (noAny sr sample
   (IRIf (IRDestruct AcIsLeft sample)
-    (IROp OpMult pIsLeft aP)
-    (IROp OpMult pIsRight bP)),
+    (srTimes sr pIsLeft aP)
+    (srTimes sr pIsRight bP)),
   -- Is choosing the bc here correct, or should they be added?
   noAnyDim0 sample (IRIf (IRDestruct AcIsLeft sample) aDim bDim), noAny0 sample (IRIf (IRDestruct AcIsLeft sample) aBc bBc))
   where
-    (aP, aDim, aBc) = makeProbRec adtDecls a (ix + 1) (IRDestruct AcFromLeft sample)
-    (bP, bDim, bBc) = makeProbRec adtDecls b (ix + 1 + getSize a) (IRDestruct AcFromRight sample)
-    pIsLeft = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
-    pIsRight = IROp OpSub (IRConst $ VFloat 1) pIsLeft
-makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAnyDim0 sample dim, noAny0 sample bc)
+    (aP, aDim, aBc) = makeProbRec sr adtDecls a (ix + 1) (IRDestruct AcFromLeft sample)
+    (bP, bDim, bBc) = makeProbRec sr adtDecls b (ix + 1 + getSize a) (IRDestruct AcFromRight sample)
+    pIsLeft = fromLinearSR sr (IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)])
+    pIsRight = srComplement sr pIsLeft
+makeProbRec sr adtDecls (ADTPlan adtName plans) ix sample = (noAny sr sample p, noAnyDim0 sample dim, noAny0 sample bc)
   where
     adt = lookupADTDecl adtName adtDecls
     constrsInPlan = filter ((`elem` map fst plans) . fst) (constructors adt)
     constrsWithPlan = mapToTup (fromJust . (`lookup` plans) . fst) constrsInPlan
     constrsWithPlanAndIx = mapAppendTup constrsWithPlan constrIx
-    constrsWithPlanAndIxAndFlag = mapAppendTup3 constrsWithPlanAndIx flagProbs
+    constrsWithPlanAndIxAndFlag = mapAppendTup3 constrsWithPlanAndIx flagSlots
     constrIx = scanl (+) (ix + adtFlagSlots plans) (map totalSize plans)
+    isConstr constr = IRApply (IRVar ("is" ++ fst constr)) sample
     -- A lone constructor has no flag slot: its flag is statically 1, so the
     -- factor is dropped rather than multiplied in (see 'adtFlagSlots').
-    constrGuard constr constrFlag v = IRIf (IRApply (IRVar ("is" ++ fst constr)) sample) (maybe v (\f -> IROp OpMult f v) constrFlag) (IRConst $ VFloat 0)
+    constrGuard constr constrFlag v = IRIf (isConstr constr) (maybe v (\f -> srTimes sr (fromLinearSR sr f) v) constrFlag) (srZero sr)
+    -- The branch count is linear in every semiring, so its guard is too.
+    constrBcGuard constr constrFlag v = IRIf (isConstr constr) (maybe v (\f -> IROp OpMult f v) constrFlag) (IRConst $ VFloat 0)
     -- The dim is a count, not a weight: it is selected by the constructor test
     -- but never scaled by the constructor's flag probability (which, applied to
     -- a continuous field's dim 1, used to report a fractional dimension).
+    constrDimGuard constr d = IRIf (isConstr constr) d (IRConst (VInt 0))
     constrProbFields constr cPlan cIx constrFlag =
-      let (cp, cd, cbc) = makeProbADTConstr adtDecls cPlan constr cIx sample
-      in (constrGuard constr constrFlag cp, constrDimGuard constr cd, constrGuard constr constrFlag cbc)
-    constrDimGuard constr d = IRIf (IRApply (IRVar ("is" ++ fst constr)) sample) d (IRConst (VInt 0))
+      let (cp, cd, cbc) = makeProbADTConstr sr adtDecls cPlan constr cIx sample
+      in (constrGuard constr constrFlag cp, constrDimGuard constr cd, constrBcGuard constr constrFlag cbc)
     constrProbsFields = map (uncurry4 constrProbFields) constrsWithPlanAndIxAndFlag
-    opPlus3 (a1, b1, c1) (a2, b2, c2) = (IROp OpPlus a1 a2, IROp OpPlus b1 b2, IROp OpPlus c1 c2)
-    (p, dim, bc) = foldr opPlus3 (IRConst $ VFloat 0, IRConst (VInt 0), IRConst $ VFloat 0) constrProbsFields
-    flagProbs
+    -- Exactly one constructor test holds, so the semiring sum has one live term.
+    p = sumAllSR sr [cp | (cp, _, _) <- constrProbsFields]
+    (dim, bc) = foldr (\(_, d1, b1) (d2, b2) -> (IROp OpPlus d1 d2, IROp OpPlus b1 b2)) (IRConst (VInt 0), IRConst $ VFloat 0) constrProbsFields
+    flagSlots
       | adtFlagSlots plans == 0 = repeat Nothing
       | otherwise = map (\fIx -> Just (IRBuiltin BListIndex [IRVar vector, IRConst (VInt fIx)])) [ix ..]
 
 
-makeProbADTConstr :: [ADTDecl] -> [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
-makeProbADTConstr adtDecls plans (_cName, fields) ix sample = foldr multProbs prob1 fieldsProb
+makeProbADTConstr :: Semiring -> [ADTDecl] -> [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
+makeProbADTConstr sr adtDecls plans (_cName, fields) ix sample = foldr multProbs prob1 fieldsProb
   where
-    prob1 = (IRConst (VFloat 1), IRConst (VInt 0), IRConst (VFloat 0))
-    multProbs (p0, d0, bc0) (p1, d1, bc1) = (IROp OpMult p0 p1, IROp OpPlus d0 d1, IROp OpPlus bc0 bc1)
+    prob1 = (srOne sr, IRConst (VInt 0), IRConst (VFloat 0))
+    multProbs (p0, d0, bc0) (p1, d1, bc1) = (srTimes sr p0 p1, IROp OpPlus d0 d1, IROp OpPlus bc0 bc1)
     fieldIx = scanl (+) ix (map getSize plans)
-    fieldsProb = map (\(plan, pIx, fName) -> makeProbRec adtDecls plan pIx (IRApply (IRVar fName) sample)) (zip3 plans fieldIx (map fst fields))
+    fieldsProb = map (\(plan, pIx, fName) -> makeProbRec sr adtDecls plan pIx (IRApply (IRVar fName) sample)) (zip3 plans fieldIx (map fst fields))
 
 
 makeGen :: [ADTDecl] -> PartitionPlan -> String ->  IRExpr
@@ -772,8 +792,8 @@ planIndexOfMaybe (EitherPlan a _) (VEither (Left v))  = (1 +)             <$> pl
 planIndexOfMaybe (EitherPlan a b) (VEither (Right v)) = (1 + getSize a +) <$> planIndexOfMaybe b v
 planIndexOfMaybe _ _ = Nothing
 
-noAny :: IRExpr -> IRExpr -> IRExpr
-noAny sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 1)
+noAny :: Semiring -> IRExpr -> IRExpr -> IRExpr
+noAny sr sample = IRIf (IRUnaryOp OpIsAny sample) (srOne sr)
 
 noAny0 :: IRExpr -> IRExpr -> IRExpr
 noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)

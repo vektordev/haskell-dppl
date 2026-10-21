@@ -207,13 +207,12 @@ anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) dim0 dim1
 -- hard-coding the linear ones, so the log-space toggle is a swap of this one
 -- value rather than a second code path threaded through every case.
 --
--- NOT semiring-aware (see the log-space task's written invasiveness
--- verdict): the ReadNN/AutoNeural read-logits network's own inference
--- function (@<nn>_auto@), which answers a linear probability under 'logSpace'
--- too. The set-witness and plan-guided world measures in IRCompiler.hs were
--- the other linear-only subsystem until task worlds-measure-unification,
--- which moved them onto this vocabulary ('fromLinearSR', 'measureDiffSR',
--- 'sumAllSR' are the pieces they needed).
+-- The set-witness and plan-guided world measures in IRCompiler.hs (task
+-- worlds-measure-unification) and the AutoNeural read-logits network's own
+-- inference function (@<nn>_auto@, task
+-- read-logits-network-linear-under-logspace) were the last linear-only
+-- subsystems; both are built from this vocabulary now ('fromLinearSR',
+-- 'measureDiffSR', 'sumAllSR' are the pieces they needed).
 data Semiring = Semiring
   { srLogSpace :: Bool                        -- ^ picks the 'LogSpace' field on nodes like 'IRDensity' (@Log@ vs @Linear@), where the operator alone isn't enough
   , srReduceOp :: ReduceOp                    -- ^ picks the IR *reduction* 'enumSumP' folds an enumerated support with -- see 'srPlus' below for why this can't just read off that function
