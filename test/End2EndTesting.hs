@@ -258,6 +258,9 @@ readLogitsLinearOnly =
   -- from known-issues; its per-slot enumeration measures the untouched slots
   -- through readScene_auto.forward.
   , "planCrossSlotConditionalAllAny"
+  -- task batched-enum-comprehension-exceeds-parser-nesting: moved here from
+  -- known-issues; reads both experts through lmA_auto/lmB_auto.forward.
+  , "batchedMaskVariantNeuralReadChain"
   -- task neural-read-query-outside-domain-unchecked: moved here from
   -- known-issues; a bare read (or its point inversion) answered by
   -- readD_auto.forward / readS_auto.forward.
