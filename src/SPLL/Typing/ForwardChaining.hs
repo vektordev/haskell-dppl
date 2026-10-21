@@ -9,6 +9,7 @@ module SPLL.Typing.ForwardChaining
   , toInvExpr
   , toInvExprMaybe
   , toInvExprMaybeWith
+  , witnessPath
   , IfCond(..)
   , ifConditionVars
   , toSeededInvExpr
@@ -513,6 +514,25 @@ toInvExprMaybeWith condKnown fcData adtsDecls lambdaCN = do
                           , invReadsAny = sel invReadsAny, invCumValue = sel invCumValue
                           , invCumGuard = sel invCumGuard }
   seeded toInvCNs (conclusion paramClause)
+
+-- | The chain names the point inverse of the variable bound by the lambda at
+-- @lambdaCN@ ('toInvExprMaybe') computes its value from: the needed steps of
+-- the path to its first occurrence that has one. 'mergeExpr' keeps the first
+-- path's value and Jacobian whenever the paths carry the same information
+-- (always, for a scalar; a tuple- or constructor-valued occurrence holding a
+-- wildcard is where it combines paths, and this ignores that), so the observed slot among these names is the one
+-- whose coordinate a recovered density is measured in. An occurrence that is
+-- only reachable through another one (@x * x@ next to a plain @x@) has that
+-- other occurrence's slot on its path. Diagnostic only: read by the
+-- chart-dependent-density warning ("SPLL.CompileWarnings"). Nothing when no
+-- occurrence inverts; it does not follow 'toInvExprMaybeWith''s split through
+-- an @if@.
+witnessPath :: FCData -> ChainName -> Maybe [ChainName]
+witnessPath fcData lambdaCN = do
+  (_, occs, paramClause) <- inversionSetup fcData lambdaCN
+  let pathTo = toValuePath (hornClauses fcData) [paramClause]
+      paths  = [ p | o <- occs, Just p <- [pathTo o] ]
+  map conclusion . neededClauses <$> listToMaybe paths
 
 -- | The free variables a chain from 'toInvExprMaybeWith' may read for the
 -- conditions it split on, under an invocation tag: each paired with the

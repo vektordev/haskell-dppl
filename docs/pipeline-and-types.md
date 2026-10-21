@@ -105,7 +105,11 @@ is a refusal instead, `docs/modality-and-admission.md`). The channel is
 `renderCompileWarning`. `SPLL.Prelude` computes them:
 
 - `programWarnings conf prog`: warnings that read only the program. Today:
-  `MarginalSlotsOverBudget` (`docs/observation-masks.md`).
+  `MarginalSlotsOverBudget` (`docs/observation-masks.md`) and
+  `ChartDependentDensity`, a density reported on a lower-dimensional support
+  in one slot's chart rather than with its Hausdorff factor
+  (`docs/witness-inversion-engines.md`, the end of "Forward chaining never
+  re-derives a chain name it already has").
 - `compiledWarnings conf prog env`: warnings that depend on what the compile
   `env` emitted. Today: `CorrelatedWriteLogitsSlots` (`docs/neural.md`).
 - `compileWarnings conf prog env`: both, for library callers.
