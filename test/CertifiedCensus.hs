@@ -40,6 +40,7 @@ module CertifiedCensus
   , batchedUncertifiedConstructs
   , structureSplitLabel
   , lineSpillLabel
+  , oneHotGatherLabel
   , selectDemotionLabel
   , pureCalleeLabel
   ) where
@@ -48,6 +49,7 @@ import Data.Char (isDigit, isSpace)
 import Data.List (isPrefixOf, nub, sort, (\\))
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRGatherPass (usesOneHotGather)
 import SPLL.CodeGenPyTorchBatched (usesStructureSplit, usesSelectDemotion, usesPureCallees, generateFunctionsBatched)
 import SPLL.Lang.Types (GenericValue(..), GenericList(..))
 
@@ -264,13 +266,20 @@ batchedCertifiedConstructs =
 -- ifs), which no IR construct names and the fuzz arms' small programs never
 -- reach, so a census of constructs alone would certify a module that does not
 -- even import (task batched-enum-comprehension-exceeds-parser-nesting).
+--
+-- Likewise 'oneHotGatherLabel' when 'SPLL.IRGatherPass' turned a one-hot sum
+-- into one guarded @nn_gather@: the rewrite needs a contiguous domain of more
+-- than one value read term by term, which the fuzz arms' programs do not
+-- build, so the census names it (task
+-- batched-mask-variant-neural-read-nests-v-deep).
 batchedProgramCensus :: Either e IREnv -> [String]
 batchedProgramCensus = either (const []) census
   where census env = sort (nub (irEnvConstructs inferenceBodies env
                                 ++ [ structureSplitLabel | usesStructureSplit env ]
                                 ++ [ selectDemotionLabel | usesSelectDemotion env ]
                                 ++ [ pureCalleeLabel | usesPureCallees env ]
-                                ++ [ lineSpillLabel | spillsALine env ]))
+                                ++ [ lineSpillLabel | spillsALine env ]
+                                ++ [ oneHotGatherLabel | usesOneHotGather env ]))
         spillsALine env = either (const False) (any isSpillLine . concatMap lines)
                                  (generateFunctionsBatched True env)
         isSpillLine l = case dropWhile isSpace l of
@@ -291,6 +300,10 @@ selectDemotionLabel = "Batched:structural select"
 -- (a helper's Gaussian parameters, or a recursive deterministic helper).
 pureCalleeLabel :: String
 pureCalleeLabel = "Batched:pure callee"
+
+-- | The batched census label of a one-hot read rewritten to a gather.
+oneHotGatherLabel :: String
+oneHotGatherLabel = "Batched:one-hot gather"
 
 -- | The batched census label of a line spilled for CPython's bracket limit.
 lineSpillLabel :: String
