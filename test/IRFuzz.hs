@@ -1708,11 +1708,6 @@ knownDisagreements =
   , KnownFamily "batched-reduction-over-constant-and-batched-elements-fails" ["batched"]
       (ByAnswer (\_ _ a -> raisedWith "stack expects each tensor to be equal size" a))
       (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 2]) [IRUnaryOp OpLog (IRConst (VFloat 0.25)), IRVar "a0"]]) (VFloat 0.5))
-  -- A select over two tuples is one torch.where over two T's.
-  , KnownFamily "batched-guarded-select-over-tuple-result" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "got (Tensor, T, T)" a))
-      (batchedRepro (IRDestruct AcSnd (IRSelect (IROp OpLessThan (IRVar "a0") (IRConst (VFloat 0.5)))
-                                         (IRConst (VTuple (VFloat 0.1) (VFloat 0.2))) (IRConst (VTuple (VFloat 0.3) (VFloat 0.4))))) (VFloat 1))
   -- The batched categorical index reads its weights as a tensor, so a list
   -- of batched weights is indexed by a tuple.
   , KnownFamily "batched-categorical-index-over-batched-weights-fails" ["batched"]
@@ -2659,6 +2654,22 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
                              [] [ idWhy d | (d, t) <- zip ds others, maybe True (== kfTicket kf) t ]
         | kf <- knownDisagreements, b <- backends ]
       return (maybe "no julia on the PATH: the Julia arm was skipped" (const "") julia)
+  -- Formerly a knownDisagreements family: a select whose arms evaluate to
+  -- tuples without being tuple literals reached torch.where as a whole T.
+  , testCase "batched: a select over two tuple constants selects leaf by leaf (batched-guarded-select-over-tuple-result)" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched tuple select" >>= maybe (return ()) assertFailure
+        Just py -> do
+          let c = batchedRepro (IRDestruct AcSnd (IRSelect (IROp OpLessThan (IRVar "a0") (IRConst (VFloat 0.5)))
+                                  (IRConst (VTuple (VFloat 0.1) (VFloat 0.2))) (IRConst (VTuple (VFloat 0.3) (VFloat 0.4)))))
+                                (VFloat 1)
+          bc <- prepareBatchedIRCase c
+          case bc of
+            Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+            Right b -> do
+              (_, ds) <- runIRCasesBatched py [b]
+              assertEqual "batched disagreements" [] (map idWhy ds)
   , testCase "a fixed-seed sample of plans reaches every PResult combinator, in every semiring" $
       assertEqual "unreached (semiring, combinator)" []
         [ (c, l) | c <- [minBound .. maxBound], let reached = nub (concatMap planNodes (fixedPlans c))
