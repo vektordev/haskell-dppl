@@ -6920,53 +6920,49 @@ planEvalRef meta env = go
 -- wildcard at run time: a partial-@ANY@ query such as @Scene Nil ANY@ against
 -- a passed-through slice, which is what writeLogits asks for every
 -- constructor flag. Each component is therefore split on it ('planAnySplit'),
--- as a constructed value's fields are, and the components combine through
--- 'planFieldProduct', so a slice of N multi-world fields stays linear in N.
+-- as a constructed value's fields are. The components are crossed here, not
+-- collapsed ('planFieldProduct'): collapsing bakes a field's leaves into one
+-- mass, and an enclosing @if@ that tests one of them (@if isRed (color o) then
+-- .. else o@) then clashes and reruns the whole traversal unfactored. A product
+-- region's fields are kept factored one level up instead ('planRefConj').
 -- The slice's own observation is never a wildcard: a whole @ANY@ is answered
 -- before the traversal, and an enclosing component split guards it.
-planRefWorlds :: [ADTDecl] -> PlanRef -> [PLeafCon] -> PTarget -> PlanM (Either String [PlanWorld])
+planRefWorlds :: [ADTDecl] -> PlanRef -> [PLeafCon] -> PTarget -> Either String [PlanWorld]
 planRefWorlds _ (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
-  return (Right [pw1 (insertLeafCon
+  Right [pw1 (insertLeafCon
           (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
-          cons)])
+          cons)]
 planRefWorlds adtDecls' (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
   wa <- component (PlanRef a off) (IRDestruct AcFst s)
   wb <- component (PlanRef b (off + getSize a)) (IRDestruct AcSnd s)
-  case sequence [wa, wb] of
-    Left why -> return (Left why)
-    Right wss -> Right . liveIntersects [pw1 cons] <$> planFieldProduct wss
+  return [ intersectPlanW x y | x <- [pw1 cons], y <- liveIntersects wa wb ]
   where
-    component ref sub = fmap (planAnySplit sub) <$> planRefWorlds adtDecls' ref [] (PTPoint sub)
+    component ref sub = planAnySplit sub <$> planRefWorlds adtDecls' ref [] (PTPoint sub)
 planRefWorlds _ (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
   | all (null . snd) ctorPlans =
-      return (Right (adtFlagWorlds off ctorPlans [ (i, planIsCtor cn s) | (i, (cn, _)) <- zip [0..] ctorPlans ] cons))
-planRefWorlds adtDecls' (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) = do
-  perCtor <- mapM ctorWorlds (zip3 [0 ..] ctorPlans (adtCtorBases off ctorPlans))
-  return (concat <$> sequence perCtor)
+      Right (adtFlagWorlds off ctorPlans [ (i, planIsCtor cn s) | (i, (cn, _)) <- zip [0..] ctorPlans ] cons)
+planRefWorlds adtDecls' (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) =
+  concat <$> mapM ctorWorlds (zip3 [0 ..] ctorPlans (adtCtorBases off ctorPlans))
   where
-    ctorWorlds (ci, (cn, fps), cbase) = case lookupADTConstructor adtDecls' cn of
-      Nothing -> return (Left (missing cn))
-      Just fields -> do
-        -- The flag slot carries the guard, so a world for the wrong constructor
-        -- measures zero; the field reads below are individually safe anyway
-        -- ('planSafeField'), since floated bindings escape the guard.
-        let flagWorlds = adtFlagWorlds off ctorPlans [(ci, planIsCtor cn s)] cons
-        fieldWorlds <- mapM (fieldW cn cbase fps) (zip3 [0 ..] fps fields)
-        case sequence fieldWorlds of
-          Left why -> return (Left why)
-          Right wss -> Right . liveIntersects flagWorlds <$> planFieldProduct wss
-    fieldW cn cbase fps (j, fp, (fname, fty)) = case planSafeField adtDecls' cn fname fty s of
-      Left why -> return (Left why)
-      Right sub -> fmap (planAnySplit sub)
-                     <$> planRefWorlds adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] (PTPoint sub)
+    ctorWorlds (ci, (cn, fps), cbase) = do
+      fields <- maybe (Left (missing cn)) Right (lookupADTConstructor adtDecls' cn)
+      -- The flag slot carries the guard, so a world for the wrong constructor
+      -- measures zero; the field reads below are individually safe anyway
+      -- ('planSafeField'), since floated bindings escape the guard.
+      let flagWorlds = adtFlagWorlds off ctorPlans [(ci, planIsCtor cn s)] cons
+      fieldWorlds <- mapM (fieldW cn cbase fps) (zip3 [0 ..] fps fields)
+      return (foldl liveIntersects flagWorlds fieldWorlds)
+    fieldW cn cbase fps (j, fp, (fname, fty)) = do
+      sub <- planSafeField adtDecls' cn fname fty s
+      planAnySplit sub <$> planRefWorlds adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] (PTPoint sub)
     missing cn = "constructor " ++ cn ++ " of ADT " ++ adtName ++ " is in the partition plan "
                  ++ "but not among the declared constructors"
 planRefWorlds _ (PlanRef Continuous off) cons (PTPoint s) =
-  return (Right [pw1 (insertLeafCon (PLeafPt off s const1 []) cons)])
+  Right [pw1 (insertLeafCon (PLeafPt off s const1 []) cons)]
 planRefWorlds _ (PlanRef Continuous off) cons (PTUpTo s) =
-  return (Right [pw1 (insertLeafCon (PLeafIvl off WNegInf (WFinite s)) cons)])
+  Right [pw1 (insertLeafCon (PLeafIvl off WNegInf (WFinite s)) cons)]
 planRefWorlds _ (PlanRef sub _) _ _ =
-  return (Left ("this plan slice cannot be matched against the observation directly: " ++ head (words (show sub))))
+  Left ("this plan slice cannot be matched against the observation directly: " ++ head (words (show sub)))
 
 -- | One peeled step of a monotone chain over a continuous plan leaf, in the
 -- direction the observation travels: observed value -> the step's operand.
@@ -7212,14 +7208,12 @@ planInvert meta env planBody target
       (Left why, _) -> return (Left why)
       -- A point observation of a product region whose fields each split into
       -- several worlds: summed field by field, not crossed ('conjFlatten').
-      (Right (ref, cons), PTPoint y) -> do
-        ksE <- planRefConj (adtDecls meta) ref cons y
-        case ksE of
-          Left why -> return (Left why)
-          Right ks
-            | conjMultiCount ks > 1 -> Right <$> conjFlatten ks
-            | otherwise -> return (Right (foldl liveIntersects [pw1 []] ks))
-      (Right (ref, cons), _) -> planRefWorlds (adtDecls meta) ref cons target
+      (Right (ref, cons), PTPoint y) -> case planRefConj (adtDecls meta) ref cons y of
+        Left why -> return (Left why)
+        Right ks
+          | conjMultiCount ks > 1 -> Right <$> conjFlatten ks
+          | otherwise -> return (Right (foldl liveIntersects [pw1 []] ks))
+      (Right (ref, cons), _) -> return (planRefWorlds (adtDecls meta) ref cons target)
 -- A plan-dependent value shared by several children of this node is
 -- enumerated once and the node traversed per value ('planShareSplit').
 --
@@ -7632,7 +7626,7 @@ planInvertConj :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Eithe
 planInvertConj meta env e target@(PTPoint y)
   | subtreeHasOcc (planEnvOccs env) e
   , Just (Right (ref, cons)) <- planEvalRef meta env e =
-      planRefConj (adtDecls meta) ref cons y
+      return (planRefConj (adtDecls meta) ref cons y)
   | Expr _ (InjF (Named nm) args) <- e
   , subtreeHasOcc (planEnvOccs env) e
   , Nothing <- planEvalRef meta env e
@@ -7650,20 +7644,18 @@ planInvertConj meta env e target = fmap (: []) <$> planInvert meta env e target
 -- fields are independent regions, so each is its own conjunct. A field's
 -- sub-observation may be a wildcard, so each of its conjuncts is split on it
 -- ('conjAnySplit').
-planRefConj :: [ADTDecl] -> PlanRef -> [PLeafCon] -> IRExpr -> PlanM (Either String PlanConj)
+planRefConj :: [ADTDecl] -> PlanRef -> [PLeafCon] -> IRExpr -> Either String PlanConj
 planRefConj adtDecls' (PlanRef (ADTPlan adtName [(cn, fps)]) off) cons s
-  | not (null fps) = case lookupADTConstructor adtDecls' cn of
-      Nothing -> return (Left ("constructor " ++ cn ++ " of ADT " ++ adtName ++ " is in the partition plan but not among the declared constructors"))
-      Just fields -> do
-        let flagWorlds = adtFlagWorlds off [(cn, fps)] [(0, planIsCtor cn s)] cons
-            cbase = head (adtCtorBases off [(cn, fps)])
-        fieldConjs <- forM (zip3 [0 ..] fps fields) $ \(j, fp, (fname, fty)) ->
-          case planSafeField adtDecls' cn fname fty s of
-            Left why -> return (Left why)
-            Right sub -> fmap (conjAnySplit sub)
-                           <$> planRefConj adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] sub
-        return (conjAll . ([flagWorlds] :) <$> sequence fieldConjs)
-planRefConj adtDecls' ref cons s = fmap (: []) <$> planRefWorlds adtDecls' ref cons (PTPoint s)
+  | not (null fps) = do
+      fields <- maybe (Left ("constructor " ++ cn ++ " of ADT " ++ adtName ++ " is in the partition plan but not among the declared constructors")) Right
+                      (lookupADTConstructor adtDecls' cn)
+      let flagWorlds = adtFlagWorlds off [(cn, fps)] [(0, planIsCtor cn s)] cons
+          cbase = head (adtCtorBases off [(cn, fps)])
+      fieldConjs <- forM (zip3 [0 ..] fps fields) $ \(j, fp, (fname, fty)) -> do
+        sub <- planSafeField adtDecls' cn fname fty s
+        conjAnySplit sub <$> planRefConj adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] sub
+      return (conjAll ([flagWorlds] : fieldConjs))
+planRefConj adtDecls' ref cons s = (: []) <$> planRefWorlds adtDecls' ref cons (PTPoint s)
 
 -- | 'planAnySplit' over a factored conjunction, one conjunct at a time. When
 -- the sub-observation is a wildcard every conjunct takes its unconstrained
