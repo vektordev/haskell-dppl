@@ -1,0 +1,2 @@
+neural readS :: (Symbol -> Int) of [5, 7, 9]
+main a = readS a

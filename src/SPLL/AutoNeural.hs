@@ -324,8 +324,14 @@ indexOf tag _ = error ("indexOf: expected an explicit enumeration, got " ++ show
 
 
 makeProbRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
-makeProbRec _adtDecls (Discretes _rty tag) ix sample = (noAny sample p, IRConst (VInt 0), IRConst (VFloat 0))
+makeProbRec _adtDecls (Discretes _rty tag) ix sample = (noAny sample guarded, IRConst (VInt 0), IRConst (VFloat 0))
   where
+    -- 'indexOf' is total only on members of the declared `of` domain (it folds
+    -- to a fall-through select chain or to the sample itself), so a query at
+    -- any other value would read another slot or index out of bounds. Such a
+    -- sample is impossible: the guard answers 0, from which 'makeProb' derives
+    -- the impossibility flag (task neural-read-query-outside-domain-unchecked).
+    guarded = IRIf (IRIsPossible tag sample) p (IRConst (VFloat 0))
     p = IRBuiltin BListIndex [IRVar vector, IROp OpPlus (indexOf tag sample) (IRConst (VInt ix))]
 makeProbRec _adtDecls Continuous ix sample = (noAny sample p, noAnyDim0 sample (IRConst (VInt 1)), IRConst (VFloat 0))
   where
