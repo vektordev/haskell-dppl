@@ -341,8 +341,15 @@ indexOf tag _ = error ("indexOf: expected an explicit enumeration, got " ++ show
 -- | (probability in @sr@, dim, linear branch count) of @sample@ under @plan@,
 -- whose logit region starts at slot @ix@.
 makeProbRec :: Semiring -> [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
-makeProbRec sr _adtDecls (Discretes _rty tag) ix sample = (noAny sr sample p, IRConst (VInt 0), IRConst (VFloat 0))
+makeProbRec sr _adtDecls (Discretes _rty tag) ix sample = (noAny sr sample guarded, IRConst (VInt 0), IRConst (VFloat 0))
   where
+    -- 'indexOf' is total only on members of the declared `of` domain (it folds
+    -- to a fall-through select chain or to the sample itself), so a query at
+    -- any other value would read another slot or index out of bounds. Such a
+    -- sample is impossible: the guard answers the semiring zero, from which
+    -- 'makeProb' derives the impossibility flag (task
+    -- neural-read-query-outside-domain-unchecked).
+    guarded = IRIf (IRIsPossible tag sample) p (srZero sr)
     p = fromLinearSR sr (IRBuiltin BListIndex [IRVar vector, IROp OpPlus (indexOf tag sample) (IRConst (VInt ix))])
 makeProbRec sr _adtDecls Continuous ix sample = (noAny sr sample p, noAnyDim0 sample (IRConst (VInt 1)), IRConst (VFloat 0))
   where
