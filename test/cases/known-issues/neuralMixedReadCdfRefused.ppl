@@ -1,0 +1,2 @@
+neural pair :: (Symbol -> (Int, Float)) of ([0, 1], Real)
+main a = pair a

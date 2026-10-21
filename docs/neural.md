@@ -148,6 +148,18 @@ declaration and runs it. Two things are still V-deep: `main`'s own
 if-chain over an ADT's constructors, which only bites an ADT with ~100
 constructors and is left as it is.
 
+## The CDF of a read sums its point masses
+
+The network's `_auto_prob` is a point mass, so `toIRInference`'s cumulative
+`ReadNN` clause answers `cdf(x)` as `sum over v in dom of P(read = v) *
+[v <= x]` (`enumSumNode` over the read's `DiscreteValues` domain, the
+comparison by `compareValueExpr`, all in the compile's semiring). A read whose
+domain has a continuous leaf, or exceeds the materialization budget, has its
+`integrate` refused (`known-issues/neuralMixedReadCdfRefused`). A bare `Bool`
+read takes the generic Boolean CDF split and a Gaussian-headed one the
+`gaussianLeaf` clause, before this one. Pinned by
+`test/cases/neural/neuralIntReadCdf` and `neuralTupleReadCdf`.
+
 ## One network call per argument per query
 
 The compiler emits a network call `n(sym)` at every read, binding it as

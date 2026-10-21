@@ -3247,6 +3247,30 @@ toIRInference meta cumulative e@(Expr TypeInfo {rType=rt, chainName=cn} (InjF (N
           meta' = meta { zeroGuardedProducts = Set.insert cn (zeroGuardedProducts meta) }
       rest <- guardedSubInference meta [notIR isZero] (toIRInference meta' cumulative e sample)
       return (zipResult (IRIf isZero) dirac rest)
+-- The CDF of a neural read (task neural-int-read-cdf-returns-pmf). The
+-- network's _auto_prob is a point mass, so the cumulative query sums it over
+-- the read's enumerated domain, each value weighted by whether it lies at or
+-- below the sample ('compareValueExpr'):
+--
+--   P(X <= x) = sum over v in dom(X) of P(X = v) * [v <= x]
+--
+-- in the compile's semiring. The point clause below used to answer both
+-- queries, returning P(X = x). A read with a continuous leaf has no such sum
+-- and is refused; a bare Bool read never gets here (the Boolean CDF split
+-- above), nor does a Gaussian-headed one ('gaussianLeaf').
+toIRInference meta True e@(Expr TypeInfo {rType=rt, tags=tgs, chainName=cn} (ReadNN name _)) sample =
+  case enumerableDomain tgs of
+    Just dom | enumerationWithinMaterializationBudget meta tgs -> do
+      let sr = semiringOf meta
+      v <- mkVariable "nn_cdf_value"
+      (summand, binds) <- lift $ runWriterT $ do
+        pV <- (unP . rProb) <$> toIRInference meta False e (IRVar v)
+        return (srTimes sr pV (compareValueExpr sr rt (IRVar v) sample))
+      let (outerBinds, body') = hoistInvariantBindings v (buildLetIns binds summand)
+      setVariables outerBinds
+      opaqueMass sr (enumSumNode sr v dom body') const0
+    _ -> refuse cn ("cannot compute the cumulative distribution of the neural read '" ++ name
+                    ++ "': its domain is not a finite enumeration within the materialization budget")
 toIRInference meta _ (Expr _ (ReadNN name symbol)) sample = do
   nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
