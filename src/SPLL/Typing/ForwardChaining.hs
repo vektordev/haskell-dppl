@@ -606,9 +606,13 @@ toValueExprWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [HornCl
 -- shared by every start it is then asked about ('toValuePath').
 toValueExprWith pointStep clauses paramClauses adtsDecls = let pathTo = toValuePath clauses paramClauses in \startCN -> do
   relevantSortedClauses <- pathTo startCN
-  -- Calculate the symbolic derivative
-  let deriv = derivativeOfPath adtsDecls relevantSortedClauses
-  let cumStep = cumulativeStep adtsDecls relevantSortedClauses
+  -- The change of variables is the derivative along the spine alone: a
+  -- side computation recovering another latent (the divisor of a @mult@
+  -- inverse, the subtrahend of a @plus@ one) supplies its value, not its
+  -- derivative ('jacobianClauses').
+  let jac = jacobianClauses clauses (map conclusion paramClauses) relevantSortedClauses startCN
+  let deriv = derivativeOfPath adtsDecls jac
+  let cumStep = cumulativeStep adtsDecls relevantSortedClauses jac
   -- A wildcard a step of the chain itself introduces is passed on, not read
   -- ('injectedWildcards').
   let wild = injectedWildcards adtsDecls relevantSortedClauses
@@ -848,13 +852,18 @@ passWildApp wild c app = case injectedWildcardTest wild c of
 -- refers only to names bound earlier in the chain, so the prefix is in scope
 -- where the step is bound. The witnessed variable's bound then points the way
 -- the whole product does, which is the sign the caller's CDF flip reads.
-cumulativeStep :: [ADTDecl] -> [HornClause] -> HornClause -> Maybe (IRExpr, IRExpr)
-cumulativeStep adtsDecls path c = do
+cumulativeStep :: [ADTDecl] -> [HornClause] -> [HornClause] -> HornClause -> Maybe (IRExpr, IRExpr)
+cumulativeStep adtsDecls path jac c = do
   (floorB, ceilB, app) <- roundedClause
   sign <- lookup (conclusion c) running
   return (IRIf (IROp OpGreaterThan sign (IRConst (VFloat 0))) floorB ceilB, app)
   where
-    running = zip (map conclusion path) (scanl1 (IROp OpMult) (map (derivativeOfHornClause adtsDecls) path))
+    -- Only spine steps ('jacobianClauses') carry the bound; the others
+    -- compute side operands and contribute no direction.
+    stepDeriv cl
+      | cl `elem` jac = derivativeOfHornClause adtsDecls cl
+      | otherwise = IRConst (VFloat 1.0)
+    running = zip (map conclusion path) (scanl1 (IROp OpMult) (map stepDeriv path))
     roundedClause = case c of
       ExprHornClause preVars _ (InjFInfo name) inv | inv > 0 ->
         let FPair _ invInjF = lookupFPair adtsDecls name
@@ -1029,7 +1038,7 @@ toSeededMonotoneInvExpr fcData adtsDecls seedCN occCN = do
   let clampInput c e
         | c `elem` spine
         , ExprHornClause _ _ (InjFInfo name) inv <- c, inv > 0
-        , Just parent <- spineParent fcData c
+        , Just parent <- spineParent (hornClauses fcData) c
         = substVar parent (clampToImage (injFImage name) (IRVar parent)) e
         | otherwise = e
   return (toLetInBlockWith clampInput clauses adtsDecls path, dir)
@@ -1100,15 +1109,22 @@ imageGuards (Image lo hi) b =
 -- and cannot affect monotonicity. Nothing when a spine step's parent cannot be
 -- identified.
 chainSpine :: FCData -> [HornClause] -> ChainName -> ChainName -> Maybe [HornClause]
-chainSpine fcData path seedCN = go
+chainSpine fcData path seedCN = spineFrom (hornClauses fcData) path [seedCN]
+
+-- | 'chainSpine' over a bare clause set, stopping at any of the given seeds
+-- (or at a self-sufficient start: a parameter, an anchor, a premise-free
+-- clause such as a constant).
+spineFrom :: [[HornClause]] -> [HornClause] -> [ChainName] -> ChainName -> Maybe [HornClause]
+spineFrom groups path seeds = go
   where
     go cn
-      | cn == seedCN = Just []
+      | cn `elem` seeds = Just []
       | otherwise = case findConcludingHornClause path cn of
           Nothing -> Just []  -- reached a self-sufficient start (parameter/anchor)
           Just (ParameterHornClause _) -> Just []
+          Just c | null (premises c) -> Just []
           Just c  -> do
-            parent <- spineParent fcData c
+            parent <- spineParent groups c
             rest <- go parent
             return (c : rest)
 
@@ -1117,11 +1133,11 @@ chainSpine fcData path seedCN = go
 -- clause group's forward sibling (the node the inverted function computed) —
 -- premise ORDER is not a reliable indicator, the forward output sits at
 -- different positions in different inverse FDecls.
-spineParent :: FCData -> HornClause -> Maybe ChainName
+spineParent :: [[HornClause]] -> HornClause -> Maybe ChainName
 spineParent _ (EquivalenceHornClause [p] _ _ _) = Just p
 spineParent _ (ExprHornClause [p] _ _ _) = Just p
-spineParent fcData c@(ExprHornClause pres _ (InjFInfo _) inv) | inv > 0 = do
-  grp <- find (c `elem`) (hornClauses fcData)
+spineParent groups c@(ExprHornClause pres _ (InjFInfo _) inv) | inv > 0 = do
+  grp <- find (c `elem`) groups
   fwd <- find (\cl -> isExprHornClause cl && inversion cl == 0) grp
   let parent = conclusion fwd
   if parent `elem` pres then Just parent else Nothing
@@ -1141,7 +1157,7 @@ stepMonotonicity fcData c@(ExprHornClause pres _ (InjFInfo name) inv) | inv > 0 
     "mult"   -> do
       -- divide by the other operand: direction is the sign of that operand,
       -- known statically only when it is a literal constant.
-      parent <- spineParent fcData c
+      parent <- spineParent (hornClauses fcData) c
       case filter (/= parent) pres of
         [other] -> case lookup (untag other) (chainNameInfo fcData) of
           Just (ConstantInfo (VFloat f))
@@ -1325,15 +1341,31 @@ findConcludingHornClause hcs cn =
     [] -> Nothing
     res -> Just $ head res
 
--- An FC inversion path is a linear chain of single-input invertible steps, and
--- the witnessed variable flows through it exactly once (a step with two
--- un-witnessed random inputs has no inversion clause and never enters a path).
--- So this product of per-step inverse derivatives IS the chain rule
--- d/dx g(h(x)) = g'(h(x))·h'(x), i.e. the full path Jacobian — proven sound under
--- that structural constraint by investigation forward-chaining-math-correctness.
+-- The witnessed variable flows from the seed to the occurrence along the
+-- path's spine ('chainSpine'), a linear chain of single-input invertible
+-- steps, exactly once (a step with two un-witnessed random inputs has no
+-- inversion clause and never enters a path). So the product of the spine's
+-- per-step inverse derivatives IS the chain rule d/dx g(h(x)) = g'(h(x))·h'(x)
+-- -- proven sound under that structural constraint by investigation
+-- forward-chaining-math-correctness. The callers pass the spine
+-- ('jacobianClauses'), not the whole path: the path also holds the side
+-- computations recovering OTHER latents, and their derivatives are those
+-- latents' own diagonal entries of the triangular Jacobian, which their own
+-- witnesses already carry (task
+-- forwardchaining-path-derivative-includes-other-latents-jacobian).
 derivativeOfPath :: [ADTDecl] -> [HornClause] -> IRExpr
+derivativeOfPath _ [] = IRConst (VFloat 1.0)
 derivativeOfPath adtsDecls clauses = foldr1 (IROp OpMult) derivs
   where derivs = map (derivativeOfHornClause adtsDecls) clauses
+
+-- | The clauses of a path whose derivatives make up its change of variables:
+-- the spine from the start back to a seed, in path order. Where the spine
+-- cannot be traced (a step whose value-carrying premise is not identifiable),
+-- every clause the start needs, the conservative superset.
+jacobianClauses :: [[HornClause]] -> [ChainName] -> [HornClause] -> ChainName -> [HornClause]
+jacobianClauses groups seeds path startCN = case spineFrom groups path seeds startCN of
+  Just spine -> filter (`elem` spine) path
+  Nothing -> neededClauses path
 
 derivativeOfHornClause :: [ADTDecl] -> HornClause -> IRExpr
 derivativeOfHornClause adtsDecls (ExprHornClause pre _ (InjFInfo name) inv) | inv > 0 = do

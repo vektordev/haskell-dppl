@@ -594,3 +594,30 @@ from above, so it misses a rank-deficient map with as many draws as slots
 skipped. Dependence through a comparison, an integer or an `if` condition does
 not count, which keeps the piecewise-isometric `(x, if x > 0.5 then 1.0 else
 2.0)` quiet.
+
+## A point inversion's change of variables is its spine's
+
+`toValuePath` hands back every solved clause up to the one concluding the
+witnessed occurrence, in topological order: the value-carrying **spine** from
+the observed slot (`chainSpine`), plus side computations that recover the
+other operands of each inverse step, often other latents (the divisor of a
+`mult` inverse, the subtrahend of a `plus` one), plus whatever unrelated
+clauses happen to sort earlier. The change of variables (`invCoV`) is the
+product of the inverse derivatives along the spine alone
+(`ForwardChaining.jacobianClauses`). The joint Jacobian of a point inversion
+is triangular, and its determinant is the product of the diagonal entries,
+one per latent; a side computation's derivative is another latent's own
+diagonal entry, which that latent's witness already carries. A side operand
+supplies its value, never its derivative. The cumulative step direction
+(`cumulativeStep`) reads the same spine.
+
+Multiplying over the whole path applied a sibling's scaling twice whenever
+its recovery sorted ahead of the witness's own: `(a + 3.0*b, 3.0*b)`, a
+comparison slot ahead of the slot recovering its operand, and above all an
+alias (`draw x0 = z`), which adds a binding level and so reorders the sort.
+Where a spine step's value-carrying premise cannot be identified,
+`jacobianClauses` falls back to every clause the start needs; no corpus
+program reaches that fallback. Corpus: `crossLatentSideOperandJacobian`,
+`comparisonSiblingJacobian`, `aliasedDrawScaledSibling`,
+`aliasedDrawScaledChain`, `aliasedDrawThroughScalingHelper`,
+`doubleAliasedDrawParameterScaledSibling`.

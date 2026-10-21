@@ -125,24 +125,14 @@ knownDivergences =
   , Known "maskSwappedWrapper" DrawIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" AliasIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" HelperExtract "" variantsSilenceReread
-  -- `draw z = Normal in draw x0 = z in (x0, 0.5 * Normal)`: re-binding the
-  -- witnessed draw through an alias applies a scaled sibling draw's Jacobian
-  -- twice (p((0, 0)) = 4 phi(0)^2, not 2 phi(0)^2). Pre-existing; exposed when
-  -- ouChainUnrolled joined the corpus.
-  , Known "ouChainUnrolled" DrawIntro "draw-intro Normal" aliasDoubleJacobian
-  , Known "ouChainUnrolled" AliasIntro "" aliasDoubleJacobian
-  -- The same through a helper's parameter, `rwh0 x0 x1 = draw x2 = 0.9 * x1 +
-  -- 0.5 * Normal in [x0, x1, x2]`: refused until task
-  -- binding-resolver-one-application-rule let forward chaining copy the
-  -- helper's `draw` into the call's per-invocation clauses.
-  , Known "ouChainUnrolled" HelperExtract "draw x2" aliasDoubleJacobian
-  -- `draw y = Normal in draw s1 = y in draw s2 = s1 + 0.5 * Normal in draw s3 =
-  -- s2 + 0.5 * Normal in (s1, (s2, s3))`: an aliased first step doubles the
-  -- third step's Jacobian (25x at four steps), and an aliased third step
-  -- answers the (_, _, _, ANY) marginal as impossible. Pre-existing (identical
-  -- at abc449c); exposed when gaussianTrajectory4 joined the corpus.
-  , Known "gaussianTrajectory4" DrawIntro "" aliasChainJacobian
-  , Known "gaussianTrajectory4" AliasIntro "" aliasChainJacobian
+  -- An aliased third step of the trajectory (`draw s3 = .. in draw y = s3 in
+  -- draw s4 = y + .. in (s1, (s2, (y, s4)))`) answers the (_, _, _, ANY)
+  -- marginal as impossible. Pre-existing; exposed when gaussianTrajectory4
+  -- joined the corpus. (The same entries used to cover a doubled Jacobian
+  -- on an aliased first step, fixed with task
+  -- aliased-draw-scaled-sibling-double-jacobian.)
+  , Known "gaussianTrajectory4" DrawIntro "" aliasChainMarginalTail
+  , Known "gaussianTrajectory4" AliasIntro "" aliasChainMarginalTail
   -- The M3 families (task transformation-differential-testing-m3-catalog-expansion).
   -- A structured draw read twice, one read through `fst (e, 0.0)`: a field's
   -- constraint or dimension is lost (`draw e = (Normal, Uniform) in (fst (fst
@@ -171,8 +161,7 @@ knownDivergences =
     diracLawLost = "dirac-law-point-lost-under-plus-or-helper"
     nanComparison = "nan-operand-comparison-measured-through-cdf"
     nullSetNegation = "null-set-conventions-not-preserved-under-negation"
-    aliasDoubleJacobian = "aliased-draw-scaled-sibling-double-jacobian"
-    aliasChainJacobian = "aliased-draw-chain-scaled-step-double-jacobian"
+    aliasChainMarginalTail = "aliased-chain-step-marginal-tail-impossible"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
 
@@ -185,21 +174,10 @@ data KnownSeq = KnownSeq { ksProg :: String, ksFams :: [Family], ksDoc :: String
 
 knownSequenceDivergences :: [KnownSeq]
 knownSequenceDivergences =
-  -- `h y = (y, y * Normal)`, `main = draw x = Uniform in draw y = x in h y`:
-  -- the scaled draw's Jacobian twice (2x the density). The alias alone and
-  -- the helper alone are right. Found by the sequence property's first run.
-  [ KnownSeq "rewriteProbeHelperScaledNoise" [AliasIntro, HelperExtract] "aliased-draw-through-helper-scaled-by-parameter-double-jacobian"
-  -- Probe row 5, `draw x = Uniform in (x, x * Normal)`, with the Uniform drawn
-  -- into a binding and `x` aliased: two alias levels, and the outer witness
-  -- carries the `|1/y|` Jacobian of `y * Normal` a second time (2x at (0.5,
-  -- 0.2)). One alias alone is right. Pinned by
-  -- known-issues/doubleAliasedDrawParameterScaledSibling. Found by seed
-  -- 20261017.
-  , KnownSeq "probe5" [DrawIntro, AliasIntro] "double-aliased-draw-parameter-scaled-sibling-double-jacobian"
   -- Probe row 10, `0.0 * Normal`, with the Normal drawn into a binding and
   -- the product wrapped in `0 - (0 - .)`: knownDivergences' diracLawLost on
   -- drawBoundRandomTimesLiteralZero, which the sweep skips as slow.
-  , KnownSeq "probe10" [DrawIntro, InjFIdentity] "dirac-law-point-lost-under-plus-or-helper"
+  [ KnownSeq "probe10" [DrawIntro, InjFIdentity] "dirac-law-point-lost-under-plus-or-helper"
   -- `draw x = Normal in if x == 0.0 then 0 else 2`, inlined to
   -- `if Normal == 0.0 ...` and then if-flipped to `if not (Normal == 0.0)`:
   -- the negation drops the equality's density convention (p(0) = 0, not the
