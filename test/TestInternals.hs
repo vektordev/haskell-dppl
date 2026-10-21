@@ -28,6 +28,7 @@ import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlo
 import MockNN (flattenMockInput, mockInputFor, shapedMockLogits)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
+import SPLL.IRGatherPass (gatherPassExpr)
 import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, prepBatchedBody, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
@@ -6033,6 +6034,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , testGroup "tensor builtins" tensorBuiltinTests
   , shapedNeuralInputTests
   , categoricalIndexTests
+  , gatherPassTests
   , untaggedShortCircuit
   , annotationSpellingTests
   , structuralPropagation
@@ -6216,6 +6218,62 @@ categoricalIndexTests = testGroup "categorical index (neural-categorical-sampler
     weightList ws = IRConst (VList (foldr (ListCont . VFloat) EmptyList ws))
     idx :: Double -> IRExpr -> Either String IRValue
     idx u w = evalClosedIR (IRBuiltin (BCategoricalIndex 1 4) [IRConst (VFloat u), w])
+
+-- ===========================================================================
+-- One-hot point read as one gather (batched-mask-variant-neural-read-nests-v-deep)
+-- ===========================================================================
+
+-- | 'SPLL.IRGatherPass': a sum of @if k == x then raw[k + c] else 0.0@ over a
+-- contiguous key range becomes one range-guarded indexed read, and nothing
+-- else changes. The interpreter checks the rewrite is exact on keys inside,
+-- at the edges of and outside the range.
+gatherPassTests :: TestTree
+gatherPassTests = testGroup "one-hot read as a gather (batched-mask-variant-neural-read-nests-v-deep)"
+  [ testCase "a contiguous one-hot sum at a slot offset becomes one guarded read" $
+      gatherPassExpr (chain [(k, k - 3) | k <- [3 .. 6]]) @?=
+        IRIf (IROp OpAnd (IROp OpLessThan (IRConst (VInt 2)) x) (IROp OpLessThan x (IRConst (VInt 7))))
+             (IRBuiltin BListIndex [raw, IROp OpPlus x (IRConst (VInt (-3)))])
+             (IRConst (VFloat 0.0))
+  , testCase "the rewrite agrees with the sum on keys inside, at the edge of and outside the range" $
+      forM_ [-1, 0, 2, 3, 4, 6, 7, 100] $ \s ->
+        let at e = evalClosedIR (IRLetIn "x" (IRConst (VInt s)) (IRLetIn "raw" rawList e))
+            orig = chain [(k, k - 3) | k <- [3 .. 6]]
+        in assertEqual ("x = " ++ show s) (at orig) (at (gatherPassExpr orig))
+  , testCase "terms in any order and any + tree shape still match" $
+      assertBool "not rewritten" (isGather (gatherPassExpr
+        (IROp OpPlus (IROp OpPlus (term 2 2) (term 0 0)) (IROp OpPlus (term 1 1) (term 3 3)))))
+  , testCase "non-contiguous keys, mixed offsets, two tensors or a non-zero default are left alone" $
+      forM_ [ chain [(0, 0), (1, 1), (3, 3)]
+            , chain [(0, 0), (1, 2), (2, 2)]
+            , IROp OpPlus (term 0 0) (IRIf (IROp OpEq (IRConst (VInt 1)) x)
+                                          (IRBuiltin BListIndex [IRVar "other", IRConst (VInt 1)]) (IRConst (VFloat 0.0)))
+            , IROp OpPlus (term 0 0) (IRIf (IROp OpEq (IRConst (VInt 1)) x)
+                                          (IRBuiltin BListIndex [raw, IRConst (VInt 1)]) (IRConst (VFloat 1.0)))
+            ] $ \e -> gatherPassExpr e @?= e
+  , testCase "the pin's (_, ANY) variant reads its network once, without a per-value chain" $
+      case tryParseProgram "" pinSrc of
+        Left err -> assertFailure (show err)
+        Right p -> case compile defaultCompilerConfig{batched = True} p >>= generateFunctionsBatched True of
+          Left err -> assertFailure err
+          Right ls -> do
+            let m01 = takeWhile (not . ("class Main__m11" `isPrefixOf`)) (dropWhile (not . ("class Main__m01" `isPrefixOf`)) ls)
+            assertBool "Main__m01 missing" (not (null m01))
+            assertBool "no nn_gather in Main__m01" (any ("nn_gather(l_0_nn_raw, (sample)[0])" `isInfixOf`) m01)
+            assertBool ("Main__m01 still reads constant slots:\n" ++ unlines m01) (not (any ("[..., " `isInfixOf`) m01))
+  ]
+  where
+    x = IRVar "x"
+    raw = IRVar "raw"
+    rawList = IRConst (VList (foldr (ListCont . VFloat) EmptyList [0.1, 0.2, 0.3, 0.4]))
+    term k j = IRIf (IROp OpEq (IRConst (VInt k)) x) (IRBuiltin BListIndex [raw, IRConst (VInt j)]) (IRConst (VFloat 0.0))
+    chain kjs = foldr1 (IROp OpPlus) [term k j | (k, j) <- kjs]
+    isGather (IRIf _ (IRBuiltin BListIndex [_, IRVar "x"]) _) = True
+    isGather _ = False
+    dom = "[" ++ intercalate ", " (map show [0 .. 249 :: Int]) ++ "]"
+    pinSrc = unlines
+      [ "neural lmA :: (Symbol -> Int) of " ++ dom
+      , "neural lmB :: (Symbol -> Int) of " ++ dom
+      , "main ctxA ctxB =", "  draw a = lmA ctxA in", "  draw b = lmB ctxB in", "  (a, a == b)" ]
 
 -- ===========================================================================
 -- Partial destructors out of their domain (fuzz-structured-type-bugs, item 1)

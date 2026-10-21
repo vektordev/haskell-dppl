@@ -16,6 +16,17 @@ calls the kernel once per bucket). `OpLog`/`OpDiv` route through
 select; a refused `IRError` arm emits as a NaN `poison()` constant the
 select masks away.
 
+After the optimizer, `SPLL.IRGatherPass` rewrites a one-hot point read --
+a `+`-tree of `if k == s then raw[k + c] else 0.0` over a contiguous key
+range, e.g. a per-mask variant's `P(a = sample[0])` over a neural Int
+domain -- into one range-guarded `nn_gather(raw, s + c)`. Every arm of the
+sum was an eager `torch.where`, so the read cost O(V) tensor ops and O(V)
+source; at V = 1000 the variant went from ~17-26 ms to ~0.06-0.09 ms per
+call and the module from 107 KB to 37 KB (task
+`batched-mask-variant-neural-read-nests-v-deep`, corpus
+`neural/batchedMaskVariantNeuralReadChain`). Only a whole matching tree in
+the linear spelling is rewritten; all other IR passes through unchanged.
+
 `IRSelectPass` retags by syntax, so it also retags a conditional whose guard
 is a shape probe the fragment admits: `sample == []`, a constructor-test
 predicate, or a CSE name bound to one (`let cse_0 = sample == [] in let
