@@ -685,11 +685,17 @@ typed fuzzer's and the IR generator's, `docs/fuzz-testing.md`). That list is
 held exact by `Slow.BackendAgreementCoverage`. The check stays keyed with the
 torch fingerprint, and a stderr line says how many programs it certified and
 which constructs keep the rest (today `AcTheta` and `AcSubtree`, the theta
-trees, `Batched:structure split` and `Batched:deep line spill`). `Batched:structure split` is not an IR
+trees, `Batched:structure split`, `Batched:structural select` and `Batched:deep line spill`). `Batched:structure split` is not an IR
 construct: the census adds it when the batched backend splits a body at a
 structure select (`usesStructureSplit`, `docs/batched-mode-pytorch-tensorizer.md`),
 runtime code the fuzz arms' construct count cannot see. It is never in the
-certified list, so a program that splits always runs its rows. Neither is
+certified list, so a program that splits always runs its rows. Nor is
+`Batched:structural select`, which the census adds when the batched backend
+demotes a select over a structural condition back to a Python `if`
+(`usesSelectDemotion`): the IR still says `IRSelect`, which the arms certify as
+an eager `torch.where`, and a select over `sample == []` emitted eagerly read
+the head of an empty tail (task
+`batched-draw-bound-list-element-reads-empty-tail`). Neither is
 `Batched:deep line spill`, which the census adds when the emitted module spilled
 a line past CPython's 200-bracket limit (`SPLL.PythonNesting`): how deep a line
 gets depends on the program's scale (a 250-value domain, two dozen nested

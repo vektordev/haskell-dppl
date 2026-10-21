@@ -40,6 +40,7 @@ module SPLL.CodeGenPyTorchBatched
   , batchedGuard
   , prepBatchedBody
   , usesStructureSplit
+  , usesSelectDemotion
   , structural
   , hoistStructural
   , SEnv(..)
@@ -690,9 +691,42 @@ prepGenBody = prepBody False
 prepBody :: Bool -> SEnv -> IRExpr -> IRExpr
 prepBody split env (IRLambda n b) = IRLambda n (prepBody split env b)
 prepBody split env e =
-  hoistStructural env (distributeSelects env (splitIf (foldConst (stripRootGuard e))))
+  hoistStructural env (distributeSelects env (splitIf (foldConst (demoteStructuralSelects env (stripRootGuard e)))))
   where splitIf | split     = splitStructureSelects env
                 | otherwise = id
+
+-- | Turn back into an 'IRIf' every 'IRSelect' whose condition is 'structural'.
+--
+-- 'SPLL.IRSelectPass' retags a conditional by syntax alone (its tensor
+-- fragment), so it cannot see that a condition is shape-directed when the
+-- shape probe is one 'structural' recognises but the fragment admits: the
+-- emptiness test @sample == []@, a constructor-test predicate, or a name
+-- 'let'-bound to either. A select over such a condition is lowered to an eager
+-- @torch.where@, and so is every select over a name bound to it, so the arm
+-- the probe exists to rule out runs on the bucket it rules out. The draw
+-- binding of a list element compiles its witness guard to exactly this
+-- (@let cse_0 = sample == [] in let cse_1 = select (not cse_0) True False in
+-- ... select cse_1 (... head sample ...) 0.0@), and the eager arm read the
+-- head of the empty tail (task
+-- batched-draw-bound-list-element-reads-empty-tail).
+--
+-- Bottom-up within a condition, so a select nested in it is demoted before
+-- the condition is judged; 'let' scopes are threaded, so a name bound to a
+-- demoted (now structural) value makes the selects it guards structural too.
+demoteStructuralSelects :: SEnv -> IRExpr -> IRExpr
+demoteStructuralSelects env e = case e of
+  IRLambda n b  -> IRLambda n (demoteStructuralSelects env b)
+  IRLetIn n v b ->
+    let v' = demoteStructuralSelects env v
+    in IRLetIn n v' (demoteStructuralSelects (bindS env n v') b)
+  IRBuiltin BMap [IRLambda n b, t] ->
+    IRBuiltin BMap [ IRLambda n (demoteStructuralSelects (bindMap env n t) b)
+                   , demoteStructuralSelects env t ]
+  IRSelect c t f
+    | let c' = demoteStructuralSelects env c
+    , structural env c' ->
+        IRIf c' (demoteStructuralSelects env t) (demoteStructuralSelects env f)
+  _ -> irDescend (demoteStructuralSelects env) e
 
 -- ---------------------------------------------------------------------------
 -- Per-structure split at a select (task batched-value-dependent-structure-
@@ -737,9 +771,22 @@ splitKernelName = "_split_kernel"
 -- unsplit (its blamed condition), and the uncollapsed retry makes that
 -- condition structural, so neither emits a split there.
 usesStructureSplit :: IREnv -> Bool
-usesStructureSplit env0 =
-  or [ usesSplit (prepBatchedBody senv body)
-     | g <- funcs, Just (body, _) <- [probFun g, integFun g] ]
+usesStructureSplit = anyInferenceBody (\senv body -> usesSplit (prepBatchedBody senv body))
+
+-- | Does the batched backend demote any select of a prob/integ body of this
+-- environment back to a structural @if@ ('demoteStructuralSelects')? The
+-- impact census ('CertifiedCensus') keys on it, like 'usesStructureSplit':
+-- the IR carries an 'IRSelect' there, which the fuzz arms certify as an eager
+-- @torch.where@, while the module emits a Python @if@ the arms never compared
+-- (task batched-draw-bound-list-element-reads-empty-tail).
+usesSelectDemotion :: IREnv -> Bool
+usesSelectDemotion = anyInferenceBody (\senv body -> demoteStructuralSelects senv body /= body)
+
+-- | Does a predicate hold of any prob/integ body of this environment, as the
+-- batched backend names it?
+anyInferenceBody :: (SEnv -> IRExpr -> Bool) -> IREnv -> Bool
+anyInferenceBody p env0 =
+  or [ p senv body | g <- funcs, Just (body, _) <- [probFun g, integFun g] ]
   where
     IREnv funcs adts _ = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (retireUnrenderableVariants "batched Python" env0))
     senv = adtEnv adts
