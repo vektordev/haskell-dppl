@@ -1569,6 +1569,10 @@ batchedGuardBlamed env0 groupNameStr methodName body =
                         -- (design ir-tensor-values).
                         IRBuiltin BMap [IRLambda n b, t] ->
                           offenders (bindMap env n t) b ++ offenders env t
+                        -- A list map's binder is likewise a per-element leaf
+                        -- of the spine (never a compile-time constant).
+                        IRBuiltin BMapList [IRLambda n b, t] ->
+                          offenders (bindMap env n t) b ++ offenders env t
                         _             -> concatMap (offenders env) (getIRSubExprs e)
     -- The dichotomy guard (design heterogeneous-batch-inference): a per-element
     -- branch may not choose between two *structures*. Bucketing removes the
@@ -1589,6 +1593,11 @@ batchedGuardBlamed env0 groupNameStr methodName body =
       ++ "torch.where cannot select between structures -- only shape-directed "
       ++ "branching is bucketable (design heterogeneous-batch-inference)"
 
+-- | The binder names of a (possibly curried) lambda and its innermost body.
+unwrapLambdaNames :: IRExpr -> ([String], IRExpr)
+unwrapLambdaNames (IRLambda n b) = let (ns, r) = unwrapLambdaNames b in (n : ns, r)
+unwrapLambdaNames e              = ([], e)
+
 -- | Is this node one the batched expression emitter handles?
 emittable :: IRExpr -> Bool
 emittable e = case e of
@@ -1603,6 +1612,10 @@ emittable e = case e of
   IRConst v      -> isJust (batchedVal v)   -- scalar/tuple leaves only; see 'batchedVal'
   IRVar{}        -> True
   IRLetIn{}      -> True
+  -- An inner lambda is a Python closure over [B] leaves, uniform within a bucket
+  -- (task batched-refuses-list-map: a list map's integrate keeps its let-bound
+  -- derivative lambdas). Rendered by 'batchedExpr' as @(lambda a, b: ...)@.
+  IRLambda{}     -> True
   -- Linear only: batched mode has never had a log-space density/cumulative
   -- lowering (the former 'IRLogDensity'/'IRLogCumulative' had no arm here
   -- either, and fell to the catch-all 'False' below); preserved exactly by
@@ -1611,11 +1624,13 @@ emittable e = case e of
   IRCumulative _ Linear _ -> True
   IRApply{}      -> True   -- network call / cross-function read-logits call (M2b)
   IRBuiltin BListIndex _ -> True   -- logit-vector slice or per-element gather (M2b)
-  -- List map (design ir-reengineering, slice S2 -- formerly IRMap) has no
-  -- batched form: an arbitrary-length cons list has no fixed tensor shape to
-  -- bucket. Refused explicitly, ahead of the blanket 'IRBuiltin{} -> True'
-  -- below, which admits the shape-carrying tensor ops but must not admit this.
-  IRBuiltin BMapList _   -> False
+  -- List map (design ir-reengineering, slice S2 -- formerly IRMap). Within a
+  -- shape bucket the cons spine is uniform Python structure over [B] leaves
+  -- (the reason 'IRHead'/'IRTail'/'IRCons' are admitted), so a map is a Python
+  -- walk ('mapList') whose function runs on [B] leaves. The function is a
+  -- literal lambda or a name bound to one (the probability and integrate
+  -- variants map their let-bound inverse lambdas), both Python closures.
+  IRBuiltin BMapList [_, _] -> True
   -- Enumerated sums used to have three arms here, gating the enum axis on
   -- 'scalarDiscreteMulti' and refusing the log-space one outright. Task
   -- retire-irenumsum removed the constructors: an enumerated sum is now a
@@ -1790,9 +1805,7 @@ scalarDiscreteMulti _ = False
 -- list/Either constructs heterogeneous M1/M2 admitted.
 reason :: IRExpr -> String
 reason e = case e of
-  IRBuiltin BMapList _ -> "list map (IRMap)"
   IRApply{}       -> "function application (IRApply); a call did not inline"
-  IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
   -- 'VAny'/'VList AnyList' are admitted by 'batchedVal' (M4); 'VAnyExcept' is
@@ -2071,6 +2084,18 @@ batchedExpr env (IRBuiltin (BTensor sh) elems)
 batchedExpr env (IRBuiltin BMap [IRLambda name body, t]) =
   bindIterable ("_it_" ++ name) (batchedExpr env t)
     (\it -> "[" ++ batchedExpr (bindMap env name t) body ++ " for " ++ name ++ " in " ++ it ++ "]")
+-- List map over a bucketed cons spine: the runtime's 'mapList' with the lambda
+-- rendered as a Python @lambda@. The binder is per-element ('bindMap' on a
+-- non-literal), so a structural test on it is not mistaken for shape.
+batchedExpr env e@(IRLambda _ _) =
+  let (names, rest) = unwrapLambdaNames e
+      env' = env { sBound = filter (`notElem` names) (sBound env) }
+  in "(lambda " ++ intercalate ", " names ++ ": " ++ batchedExpr env' rest ++ ")"
+batchedExpr env (IRBuiltin BMapList [IRLambda name body, t]) =
+  "mapList(lambda " ++ name ++ ": " ++ batchedExpr (bindMap env name t) body
+    ++ ", " ++ batchedExpr env t ++ ")"
+batchedExpr env (IRBuiltin BMapList [f, t]) =
+  "mapList(" ++ batchedExpr env f ++ ", " ++ batchedExpr env t ++ ")"
 batchedExpr env (IRBuiltin BMap [f, t]) =
   "list(map(" ++ batchedExpr env f ++ ", " ++ batchedExpr env t ++ "))"
 batchedExpr env (IRBuiltin (BReduce op 0) [t]) =

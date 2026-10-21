@@ -82,6 +82,14 @@ enum-index lookup `indexOf(x, [..])` survives unfolded and resolves to
 `batched-refuses-list-constants-with-data` and
 `batched-refuses-any-list-constant-in-mask-variant`.
 
+A list `map` (`BMapList`) is `pythonLibBatched.mapList(f, xs)`: within a
+bucket the spine is uniform Python structure, so it is a Python walk applying
+`f` to each `[B]` leaf, and the result is rebuilt with `toList`. Inner lambdas
+are admitted as Python closures (`(lambda a, b: ...)`, binders shadowing the
+structural-binder set); the probability and integrate variants bind their
+inverse as a `let`-bound lambda and map that name. Docs-repo tasks
+`batched-refuses-list-map` and `batched-refuses-inner-lambda`.
+
 Combining two neural ADT reads (`match (readAttrs s1) ++ match (readAttrs
 s2)`) makes the compiler enumerate each read's domain as ADT *constants*
 (`Nil()`, `Obj(Red())`, ...), the `BTensor` an enumerated sum maps over.

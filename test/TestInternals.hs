@@ -3312,8 +3312,8 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       [ ("IRIsPossible", \mv -> IRIsPossible mv (IRVar "sample")) ]
   ] ++
   -- Further 'reason' rows with no corpus trigger.
-  [ testCase "IRMap is refused" $
-      assertRefusal "list map (IRMap)"
+  [ testCase "a list map is accepted (a Python walk over the bucketed spine)" $
+      assertAccepted
         (IRBuiltin BMapList [IRLambda "x" (IRVar "x"), IRVar "xs"])
   , testCase "the VAnyExcept marginal sentinel is refused" $
       assertRefusal "marginal ANY-except sentinel (IRConst VAnyExcept)"
@@ -3337,8 +3337,8 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- an ANY wildcard is structural, exactly like a list length or an Either
       -- tag, so 'OpIsAny' compiles rather than being refused or pruned.
       assertAccepted (IRUnaryOp OpIsAny (IRVar "sample"))
-  , testCase "an inner lambda is refused" $
-      assertRefusal "inner lambda (IRLambda)"
+  , testCase "an inner lambda is accepted (a Python closure)" $
+      assertAccepted
         (IROp OpPlus (IRVar "x") (IRApply (IRLambda "y" (IRVar "y")) (IRVar "x")))
   , testCase "Either dispatch is accepted (the tag is part of the signature)" $
       -- Heterogeneous M2: within a bucket the constructor tag is uniform, so
@@ -3375,9 +3375,9 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
         (prepBatchedBody (adtEnv []) (mapOverDomain (IROp OpGreaterThan (IRVar "x") (IRVar "d"))))
   , testCase "an offender nested deep in a let-spine is still found" $
       -- 'batchedGuard' walks the whole tree, not just the root.
-      assertRefusal "list map (IRMap)"
+      assertRefusal "type-conformance check (IRConformsTo)"
         (IRLetIn "a" (IRConst (VFloat 1.0))
-          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRBuiltin BMapList [IRLambda "x" (IRVar "x"), IRVar "xs"])) (IRVar "b")))
+          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRConformsTo TBool (IRVar "sample"))) (IRVar "b")))
   -- Heterogeneous batching, M1: the list *spine* operations are in the fragment
   -- (within a shape bucket they are uniform Python structure over [B] leaves),
   -- but the branch that would have to *choose* between two structures is not --
