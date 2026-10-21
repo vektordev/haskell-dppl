@@ -1,4 +1,5 @@
 slow
+batched
 p([True, False, True])=(0.05879999999999999, 0.0)
 p([False, True, False])=(0.22619999999999998, 0.0)
 p([ANY, True, True])=(0.063, 0.0)

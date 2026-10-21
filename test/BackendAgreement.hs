@@ -117,7 +117,7 @@ import qualified SPLL.CodeGenJulia as Jl
 import PrettyPrint (pPrintProg)
 import TestTolerances (probTolerance)
 import CertifiedCensus (irConstructs, irEnvConstructs, inferenceBodies, deterministicBodies, allBodies)
-import End2EndTesting (qualifyConstructors, juliaTestFlags, SampleBatch(..), batchSamples,
+import End2EndTesting (qualifyConstructors, juliaTestFlags, SampleBatch(..), batchSamples, noEnumCtors,
                        batchSymColumn, networkMocks, batchedMockExpr, netMockName)
 
 -- ---------------------------------------------------------------------------
@@ -835,7 +835,7 @@ prepareBatchedCase interpArgs c = do
         Right (Right src) -> do
           let kinds = [ (cumul, qs) | cumul <- [False, True], let qs = inference cumul, not (null qs) ]
           if null kinds then return (Left "no non-NaN inference answer") else
-            case mapM (\(cumul, qs) -> (,,) cumul qs <$> batchSamples (map (queryPoint . fst) qs)) kinds of
+            case mapM (\(cumul, qs) -> (,,) cumul qs <$> batchSamples noEnumCtors (map (queryPoint . fst) qs)) kinds of
               Nothing -> return (Left "query points not batchable")
               Just gs -> do
                 groups <- mapM (\(cumul, qs, sb) -> BatchedGroup cumul sb <$> mapM (withRounded sb) qs) gs

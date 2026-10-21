@@ -269,12 +269,16 @@ class InferenceList:
       else:
         raise IndexError("Slices may only be used for tail lists")
     if index < 0:
+      # Only a negative index needs the length; a non-negative one walks
+      # `index` nodes and fails if the list ends first (O(index), not O(n)).
       index += len(self)
-    if index < 0 or index >= len(self):
-      raise IndexError("LinkedList index out of range")
+      if index < 0:
+        raise IndexError("LinkedList index out of range")
     current = self
     for _ in range(index):
       current = current.next
+      if current is None:
+        raise IndexError("LinkedList index out of range")
     return current.value
   
   def __eq__(self, other):

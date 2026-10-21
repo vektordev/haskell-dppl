@@ -115,18 +115,50 @@ A line whose depth is *inside* a comprehension body -- an enumerated `draw`'s
 `sum([body for b in xs])`, where nested ifs over the latent render as a
 walrus/tuple let chain ~10 brackets per `if` -- has nothing strict outside the
 body to cut. There, a `BMap` over a lambda whose body and list are both pure
-(`loopable`) is spilled whole as a loop (`generateSpillStatement`):
+(`spillable` admits one, though not a bare lambda) is spilled whole as a loop
+(`generateSpillStatement`):
 `_sN = []`, `for _vM in xs:`, the body as statements into `_eM`,
 `_sN.append(_eM)`. Same list, same order, so `sum(_sN)` adds the same floats.
 The loop variable is renamed to a fresh `_vM` because a `for` target, unlike a
 comprehension's, lands in the function scope. Docs-repo task
 `python-emitted-expression-exceeds-parser-nesting`.
 
-The statement form trades bracket depth for **indentation** depth, one level
-per nested conditional, and CPython also caps that at 100 (`IndentationError:
-too many levels of indentation`). That ceiling is backend-wide rather than
-spill-specific: ~95 nested ifs load and 100 do not, with or without an
-enumerated `draw` around them.
+Purity is checked recursively, so a comprehension whose body holds another
+pure comprehension moves too, and the inner one is spilled from its own line
+in the loop body. That is the shape of nested enumerated `draw`s (an
+enumerated latent, readings gated on it, answers over pairs of readings):
+before, the inner comprehension counted as a lambda, the outer one was not
+pure, and the line stayed at 200+ brackets. Pinned by the `deep expression
+spill` group (a hand-built nested pair, and the 11-answer chain through the
+pipeline). Docs-repo task `chained-answers-exceed-python-paren-depth`.
+
+## Python methods indented past 99 levels hoist their deep blocks
+
+Statement emission trades bracket depth for **indentation** depth, one level
+per conditional nested in an arm (and one per spilled loop), and CPython caps
+that too: a line indented 100 levels is an `IndentationError` (`MAXINDENT`).
+That ceiling was backend-wide: ~97 nested ifs in a method body did not load,
+with or without an enumerated `draw` around them.
+
+The fix has the same shape as the bracket spill. `generateMethodBody` renders
+a class method as before and measures its deepest line (`blockIndent`); only
+past `pythonMaxIndent` (99, counting the class and `def` levels) is the method
+regenerated with hoisting on, so every module that loaded before is
+byte-identical. While hoisting, `hoistDeepBlock` turns any `if` arm or spilled
+loop body nested deeper than `hoistIndentThreshold` (32) into a local function
+`_hN` defined at the top of the method body, and the block into one call
+(`name = _hN(a, b)`, or `return _hN(a, b)`), so it runs exactly where and when
+the block ran. A 100-deep chain costs about three functions.
+
+The functions are **flat** -- all at the method's top level -- because a `def`
+body is an indentation level of its own: nesting them would give back one
+level per hoist. Being flat, a hoisted block cannot see variables bound in the
+block it was cut from, so it is **closure-converted**: each free IR variable
+(`irFreeVars`) is a parameter, passed at the call. Dotted method references
+and `stCallables` stay globals. Pinned by `End2End`'s `deep indentation hoist`
+group (hand-built 150-deep chains in return, let and loop-body position, a
+60-deep chain that must not hoist, and the 100-if program through the
+pipeline). Docs-repo task `python-nested-conditionals-exceed-indentation-limit`.
 
 ## Unary math must not raise where the interpreter answers
 

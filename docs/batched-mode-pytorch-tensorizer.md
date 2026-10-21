@@ -49,6 +49,19 @@ CLEVR-shaped scenes (enumerated attributes, Gaussian positions) bucket by
 object count alone — `End2EndTesting.batchedEnumBucketingTests`,
 `test/cases/data-structures/clevrSceneEnumAttrs`.
 
+A non-empty list constant (`[1.0, 2.0]`, or the `[ANY]` a per-mask variant
+puts where a list built from draws is masked) is spelled as the runtime's
+cons structure over its constant leaves: its length is a compile-time fact,
+so every bucket agrees on it, and the leaves broadcast against a sample's
+`[B]` leaves. `InferenceList.__eq__` treats an `AnyInferenceList` tail as
+matching the rest of the other list, as `pythonLib` and the interpreter do
+(head's inverse compares `Cons(x, ANY)` against the constant). A per-element
+choice between two list constants stays refused (`listValued`). At `-O0` the
+enum-index lookup `indexOf(x, [..])` survives unfolded and resolves to
+`pythonLibBatched.indexOf`. Docs-repo tasks
+`batched-refuses-list-constants-with-data` and
+`batched-refuses-any-list-constant-in-mask-variant`.
+
 Combining two neural ADT reads (`match (readAttrs s1) ++ match (readAttrs
 s2)`) makes the compiler enumerate each read's domain as ADT *constants*
 (`Nil()`, `Obj(Red())`, ...), the `BTensor` an enumerated sum maps over.

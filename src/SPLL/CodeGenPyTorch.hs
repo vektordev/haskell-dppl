@@ -19,10 +19,10 @@ import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
-import Data.List (intercalate, intersperse, isPrefixOf, isSuffixOf, dropWhileEnd)
+import Data.List (intercalate, intersperse, isPrefixOf, isSuffixOf, dropWhileEnd, nub)
 import Data.Char (toUpper)
 import Data.Maybe (fromMaybe)
-import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
+import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift), gets, modify)
 import Utils (Supply, demandUniqueNumber, evalSupply)
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
@@ -33,18 +33,34 @@ import Utils (Supply, demandUniqueNumber, evalSupply)
 -- Expected format format of ThetaTrees:
 --    ThetaTree = ([Double], [ThetaTree])
 
-type GlobalStorage = StateT ([(MultiValue, String)], [String])
+-- | The state threaded through one class's code generation.
+data CodegenState = CodegenState
+  { stGlobalMultis :: [(MultiValue, String)]
+    -- ^ class-level constants, one per distinct 'MultiValue' an
+    -- 'IRIsPossible' reads
+  , stCallables :: [String]
+    -- ^ names whose bare reference is a call (nullary functions and
+    -- constructors)
+  , stHoistDeeperThan :: Maybe Int
+    -- ^ when set, a statement block nested deeper than this is hoisted into
+    -- a local function ('hoistDeepBlock'). Set only while regenerating a
+    -- method whose plain rendering is indented deeper than Python accepts.
+  , stHoisted :: [[String]]
+    -- ^ the current method's hoisted functions, most recent first
+  }
+
+type GlobalStorage = StateT CodegenState
 type VariableSupply = Supply
 type GlobalVariableSupply a = GlobalStorage VariableSupply a
 
 addOrGetFromGlobalStorage :: MultiValue -> GlobalVariableSupply String
 addOrGetFromGlobalStorage mv = do
-  (globalStorage, callables) <- get
-  case lookup mv globalStorage of
+  st <- get
+  case lookup mv (stGlobalMultis st) of
     Nothing -> do
       varID <- lift demandUniqueNumber
       let varName = "_globalMulti" ++ show varID
-      put ((mv, varName):globalStorage, callables)
+      put st { stGlobalMultis = (mv, varName) : stGlobalMultis st }
       return varName
     Just var -> return var
 
@@ -343,13 +359,13 @@ generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLog
   funcStringFromMaybe fname func = case func of
     Just a -> generateFunction True (fname, replaceCallsDecl a)
     Nothing -> return []
-  ((i, p, g, e, n), (globalVars, _)) = evalSupply $ runStateT (do
+  ((i, p, g, e, n), CodegenState { stGlobalMultis = globalVars }) = evalSupply $ runStateT (do
     i' <- funcStringFromMaybe "integrate" integ
     p' <- funcStringFromMaybe "forward" prob
     g' <- funcStringFromMaybe "generate" gen
     e' <- funcStringFromMaybe "writeLogits" writeLogits
     n' <- funcStringFromMaybe "normal_params" normal
-    return (i', p', g', e', n')) ([], callableNames)
+    return (i', p', g', e', n')) (CodegenState [] callableNames Nothing [])
   commentLines = map ("# " ++) (lines doc)
   initLine = "class " ++ clsName name ++ "(Module):"
   globalVarDecls = map (\(mv, varName)-> varName ++ " = " ++ pyMultiVal mv) globalVars
@@ -369,9 +385,105 @@ generateFunction classFunction (name, (expr, doc)) = do
   let (args, reducedExpr) = unwrapLambdas expr
   let args' = if classFunction then "self":args else args
   let l1 = "def " ++ name ++ "(" ++ intercalate ", " args' ++ "):"
-  block <- generateStatementBlock reducedExpr
+  block <- if classFunction then generateMethodBody reducedExpr
+                             else generateStatementBlock reducedExpr
   let docLines = map ("# " ++) (lines doc)
   return $ docLines ++ [l1] ++ indentOnce block
+
+-- ---------------------------------------------------------------------------
+-- Hoisting deeply nested blocks (task
+-- python-nested-conditionals-exceed-indentation-limit)
+-- ---------------------------------------------------------------------------
+--
+-- CPython refuses a line indented 100 levels deep (@MAXINDENT@, "too many
+-- levels of indentation"), a constant like the bracket limit 'liftedLine'
+-- spills around. Statement emission indents one level per conditional whose
+-- arms hold another conditional, and one per spilled loop, so ~97 nested
+-- @if@s in a method body made the module unimportable.
+--
+-- The fix mirrors the bracket spill: a method is rendered as before and
+-- measured; only one whose deepest line passes 'pythonMaxIndent' is
+-- regenerated with hoisting switched on. Every module that loaded before is
+-- byte-identical. While regenerating, a statement block (an @if@ arm or a
+-- spilled loop's body) nested deeper than 'hoistIndentThreshold' becomes a
+-- local function defined at the top of the method body, and the block itself
+-- becomes one call (@name = _hN(a, b)@, or @return _hN(a, b)@ for a block that
+-- returns). The function is called exactly where the block ran, so guards and
+-- evaluation order are unchanged.
+--
+-- The functions are flat -- all at the method's top level, never nested in
+-- one another -- since a @def@ body is an indentation level of its own and
+-- nesting them would give back one level per hoist. Being flat, a hoisted
+-- block cannot see a variable bound in the enclosing block it was cut from
+-- (which may itself be a hoisted function's local), so it is closure
+-- converted: every free IR variable of the block is a parameter, passed at
+-- the call. Only the method's own parameters and @self@ would be reachable as
+-- closures anyway; passing them is harmless. Globals (dotted method
+-- references, 'stCallables') are left to resolve as before.
+
+-- | CPython's @MAXINDENT@ less one: the deepest indentation level a line may
+-- have.
+pythonMaxIndent :: Int
+pythonMaxIndent = 99
+
+-- | The indentation of a class method's body: class, then @def@.
+methodBodyIndent :: Int
+methodBodyIndent = 2
+
+-- | How deep (in indentation levels) a block may be before 'hoistDeepBlock'
+-- cuts it out while hoisting is on. Well under 'pythonMaxIndent', so a
+-- hoisted function's body plus whatever its call site is nested in still fits;
+-- high enough that only a few levels in a hundred cost a call.
+hoistIndentThreshold :: Int
+hoistIndentThreshold = 32
+
+-- | The deepest indentation level among some emitted lines, relative to them.
+blockIndent :: [String] -> Int
+blockIndent ls = maximum (0 : map ((`div` 4) . length . takeWhile (== ' ')) ls)
+
+-- | A class method's body: as 'generateStatementBlock' renders it, unless
+-- that is too deeply indented for Python, in which case it is regenerated with
+-- deep blocks hoisted into local functions defined at its top.
+generateMethodBody :: IRExpr -> GlobalVariableSupply [String]
+generateMethodBody e = do
+  st0 <- get
+  block <- generateStatementBlock e
+  if methodBodyIndent + blockIndent block <= pythonMaxIndent
+    then return block
+    else do
+      put st0 { stHoistDeeperThan = Just hoistIndentThreshold, stHoisted = [] }
+      block' <- generateStatementBlock e
+      hoisted <- gets stHoisted
+      modify (\st -> st { stHoistDeeperThan = Nothing, stHoisted = [] })
+      return (concat (reverse hoisted) ++ block')
+
+-- | Hoist one emitted block, the rendering of the IR @src@, into a local
+-- function if hoisting is on and the block is deeper than allowed. @target@ is
+-- the variable the block assigns, or 'Nothing' for a block that returns.
+hoistDeepBlock :: IRExpr -> Maybe String -> [String] -> GlobalVariableSupply [String]
+hoistDeepBlock src target stmts = do
+  st <- get
+  case stHoistDeeperThan st of
+    Just limit | blockIndent stmts > limit -> do
+      n <- lift demandUniqueNumber
+      let fn = "_h" ++ show n
+          params = [ v | v <- irFreeVars src, '.' `notElem` v, v `notElem` stCallables st ]
+          call = fn ++ "(" ++ intercalate ", " params ++ ")"
+          body = stmts ++ maybe [] (\t -> ["return " ++ t]) target
+          def = ("def " ++ call ++ ":") : indentOnce body
+      put st { stHoisted = def : stHoisted st }
+      return [maybe ("return " ++ call) (\t -> t ++ " = " ++ call) target]
+    _ -> return stmts
+
+-- | The free variables of an IR expression, in order of first occurrence.
+irFreeVars :: IRExpr -> [String]
+irFreeVars = nub . go []
+  where
+    go bound e = case e of
+      IRVar v -> [v | v `notElem` bound]
+      IRLetIn n v b -> go bound v ++ go (n : bound) b
+      IRLambda n b -> go (n : bound) b
+      _ -> concatMap (go bound) (getIRSubExprs e)
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
@@ -578,8 +690,8 @@ generateStatementBlock (IRLetIn name x body) = do
   return (s1 ++ s2)
 generateStatementBlock (IRIf cond left right) = do
   (condStmts, cCond) <- liftedLine cond
-  cLeft  <- generateStatementBlock left
-  cRight <- generateStatementBlock right
+  cLeft  <- generateStatementBlock left >>= hoistDeepBlock left Nothing
+  cRight <- generateStatementBlock right >>= hoistDeepBlock right Nothing
   let l1 = "if " ++ cCond ++ ":"
   return $ condStmts ++ [l1] ++ indentOnce cLeft ++ mergeElif cRight
 generateStatementBlock (IRConstruct TgTuple [IRConstruct TgTuple [f, s], bc]) = do
@@ -601,8 +713,8 @@ generateLetInStatement name lmd@(IRLambda _ _) =
   generateFunction False (name, (lmd, "Inner function: " ++ name))
 generateLetInStatement name (IRIf cond left right) = do
   (condStmts, c) <- liftedLine cond
-  leftStmts  <- generateLetInStatement name left
-  rightStmts <- generateLetInStatement name right
+  leftStmts  <- generateLetInStatement name left >>= hoistDeepBlock left (Just name)
+  rightStmts <- generateLetInStatement name right >>= hoistDeepBlock right (Just name)
   return $ condStmts ++ ["if " ++ c ++ ":"] ++ indentOnce leftStmts ++ mergeElif rightStmts
 generateLetInStatement name (IRConstruct TgTuple [f, s]) = do
   fStmts <- generateLetInStatement (name ++ "_0") f
@@ -644,7 +756,7 @@ generateLetInStatement name x = do
 --   short-circuiting @and@/@or@, or anything under a binder (a lambda or a
 --   comprehension body), since the guard is what protects it and the binder
 --   is not in scope before the line. (A pure comprehension can still move
---   /whole/, becoming a statement-level loop: 'loopable'.);
+--   /whole/, becoming a statement-level loop: see 'spillable'.);
 -- * one that is /pure arithmetic/ ('spillable'): no random draw, no call
 --   other than of an inference method ('inferenceMethodCall'). Any other call
 --   may be a generator or may not terminate, and moving it ahead of a sibling
@@ -680,7 +792,7 @@ liftedLine e = do
   if pythonNestingDepth rendered <= pythonMaxNesting
     then return (stmts, rendered)
     else do
-      (_, callables) <- get
+      callables <- gets stCallables
       (binds, e') <- lift (spillDeep callables e)
       if null binds
         -- Nothing strict and pure to cut out; emit as before rather than loop.
@@ -743,6 +855,22 @@ spillable callables = go
     go e@(IRApply _ _) =
       let (f, args) = collectApplyChain e
       in inferenceMethodCall f && all go args
+    -- A comprehension whose body and list are pure. A bare lambda is
+    -- refused below, which is right for one that stays a value, but a 'BMap'
+    -- applies its lambda on the spot to every element, so moving the whole
+    -- comprehension is the same move as moving any other pure subterm. It is
+    -- emitted as a statement-level loop ('generateSpillStatement').
+    --
+    -- This is what reaches a line whose depth is /inside/ a comprehension
+    -- body (task python-emitted-expression-exceeds-parser-nesting): an
+    -- enumerated 'draw' sums @[body for b in xs]@, and the body -- a chain of
+    -- CSE lets and conditionals rendered as walrus tuples -- is ~10 levels
+    -- per nested @if@, with nothing on the strict spine outside it to cut.
+    -- Purity is checked recursively, so a comprehension whose body holds
+    -- another enumerated draw's comprehension moves too (task
+    -- chained-answers-exceed-python-paren-depth); the inner one, out of
+    -- reach under the outer binder before, then sits on a line of its own.
+    go (IRBuiltin BMap [IRLambda _ body, t]) = go body && go t
     go (IRLambda _ _) = False
     go (IRVar n)      = not (n `elem` callables || isEffectfulVar n
                              || ".generate" `isSuffixOf` n)
@@ -756,24 +884,8 @@ inferenceMethodCall :: IRExpr -> Bool
 inferenceMethodCall (IRVar n) = ".forward" `isSuffixOf` n || ".integrate" `isSuffixOf` n
 inferenceMethodCall _ = False
 
--- | A comprehension that may be spilled as a whole, as a statement-level loop
--- ('generateSpillStatement'): a 'BMap' over a lambda whose body and list are
--- both pure arithmetic. 'spillable' refuses it for its lambda, which is right
--- for a lambda that stays a value, but a 'BMap' applies its lambda on the spot
--- to every element, so hoisting the whole comprehension ahead of its line is
--- the same move as hoisting any other pure subterm.
---
--- This is what reaches a line whose depth is /inside/ a comprehension body
--- (task python-emitted-expression-exceeds-parser-nesting): an enumerated
--- 'draw' sums @[body for b in xs]@, and the body -- a chain of CSE lets and
--- conditionals rendered as walrus tuples -- was ~10 levels per nested @if@,
--- with nothing on the strict spine outside it to cut.
-loopable :: [String] -> IRExpr -> Bool
-loopable callables (IRBuiltin BMap [IRLambda _ body, t]) =
-  spillable callables body && spillable callables t
-loopable _ _ = False
-
--- | Emit one spill binding. A 'loopable' comprehension becomes
+-- | Emit one spill binding. A comprehension ('spillable' admits pure ones)
+-- becomes
 --
 -- > name = []
 -- > for _vN in <list>:
@@ -799,7 +911,8 @@ generateSpillStatement name (IRBuiltin BMap [IRLambda v body, t]) = do
   n <- lift demandUniqueNumber
   let loopVar = "_v" ++ show n
       elemVar = "_e" ++ show n
-  bodyStmts <- generateLetInStatement elemVar (renameFree v loopVar body)
+  let body' = renameFree v loopVar body
+  bodyStmts <- generateLetInStatement elemVar body' >>= hoistDeepBlock body' (Just elemVar)
   return (tStmts ++ [name ++ " = []", "for " ++ loopVar ++ " in " ++ tt ++ ":"]
           ++ indentOnce (bodyStmts ++ [name ++ ".append(" ++ elemVar ++ ")"]))
 generateSpillStatement name e = generateLetInStatement name e
@@ -884,7 +997,7 @@ spillDeep callables e0 = do
                 kids' = [k | (_, k, _) <- cut]
             return (binds, rebuild kids', 1 + maximum (lazyDepth : [d | (_, _, d) <- cut]))
     spillOne (b, k, d)
-      | compound k && (spillable callables k || loopable callables k) = do
+      | compound k && spillable callables k = do
           n <- demandUniqueNumber
           let tmp = "_s" ++ show n
           return (b ++ [(tmp, k)], IRVar tmp, 0)
@@ -993,7 +1106,7 @@ generateExpression (IRSample IRNormal) =
 generateExpression (IRSample IRUniform) =
   return "rand()"
 generateExpression (IRVar name) = do
-  (_, callables) <- get
+  callables <- gets stCallables
   return $ if name `elem` callables then "(" ++ name ++ ")()" else name
 generateExpression expr@(IRLambda _ _) =
   generateLambdaExpression expr

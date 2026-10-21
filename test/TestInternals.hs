@@ -3301,11 +3301,21 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
         , IRDestruct AcTail (IRVar "xs")
         , IRConstruct TgCons [IRVar "x", IRConst (VList EmptyList)]
         , IROp OpEq (IRVar "xs") (IRConst (VList EmptyList)) ]
-  , testCase "a non-empty list constant is still refused" $
-      -- It carries per-element data, not structure: the batched runtime has no
-      -- reader for it (task batched-bool-enum-index).
+  , testCase "a non-empty list constant is accepted, a value-dependent select between two is not" $ do
+      -- Task batched-refuses-list-constants-with-data: spelled as the
+      -- runtime's cons structure, its length uniform across every bucket and
+      -- its leaves broadcast constants -- data leaves and the `[ANY]` a
+      -- per-mask variant introduces alike. It is still structure, so
+      -- torch.where may not choose between two of them.
+      assertAccepted (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont (VBool True) EmptyList))))
+      assertAccepted (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont VAny (ListCont (VFloat 2.5) EmptyList)))))
+      assertRefusal "arms have different structure"
+        (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
+                  (IRConst (VList (ListCont (VInt 1) EmptyList)))
+                  (IRConst (VList (ListCont (VInt 2) EmptyList))))
+      -- A leaf with no batched form still refuses the whole list.
       assertRefusal "constant with no batched representation (VList"
-        (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont (VBool True) EmptyList))))
+        (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont VUnit EmptyList))))
   , testCase "an ADT constant is accepted, a value-dependent select between two is not" $ do
       -- Task batched-backend-refuses-neural-adt-constants: its runtime
       -- counterpart is a class the backend emits itself, so the constant is

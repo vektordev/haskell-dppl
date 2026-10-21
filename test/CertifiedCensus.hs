@@ -64,6 +64,13 @@ irConstructs e = nub (go e)
       IRSample d -> ["Sample:" ++ show d]
       IRConstruct t _ -> ["ConTag:" ++ show t]
       IRDestruct a _ -> ["Accessor:" ++ ctor (show a)]
+      -- A non-empty list constant is its own axis: the batched backend spells
+      -- it as a cons structure over broadcast leaves (task
+      -- batched-refuses-list-constants-with-data), and its equality against a
+      -- batched list (an ANY tail included) is runtime code no other
+      -- 'IRExpr:IRConst' exercises. Without the label a program holding one
+      -- counted as certified whether or not a fuzzer ever compared one.
+      IRConst (VList (ListCont _ _)) -> ["Const:VList ListCont"]
       _ -> []
     -- A closure or a lambda-valued constant carries IR of its own.
     inValues (IRConst v) = concatMap go (valueExprs v)
@@ -135,7 +142,8 @@ samplingConstructs =
 certifiedConstructs :: [String]
 certifiedConstructs =
   -- Measured 2026-10-13 (IRFuzz's fixed-seed sample of 600 cases, after M4):
-  -- 81 constructs.
+  -- 81 constructs; "Const:VList ListCont" labelled separately since
+  -- 2026-10-21 (task batched-refuses-list-constants-with-data).
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcSubtree",
     "Accessor:AcTail", "Accessor:AcTheta",
@@ -146,6 +154,7 @@ certifiedConstructs =
     "Builtin:BZip OpMax", "Builtin:BZip OpMult", "Builtin:BZip OpOr", "Builtin:BZip OpPlus",
     "Builtin:BZip OpSub",
     "ConTag:TgCons", "ConTag:TgLeft", "ConTag:TgRight", "ConTag:TgTuple",
+    "Const:VList ListCont",
     "Cumulative:IRNormal Linear", "Cumulative:IRNormal Log", "Cumulative:IRUniform Linear",
     "Cumulative:IRUniform Log",
     "Density:IRNormal Linear", "Density:IRNormal Log", "Density:IRUniform Linear",
@@ -195,12 +204,15 @@ batchedCertifiedConstructs :: [String]
 batchedCertifiedConstructs =
   -- Measured 2026-10-13: the typed fuzzer's sample (1000 draws, 344
   -- batched-compared) reaches 54 constructs, the IR generator's (600 cases,
-  -- 28 batched-compared) 49; together 58.
+  -- 28 batched-compared) 49; together 58. "Const:VList ListCont" since
+  -- 2026-10-21, when batched mode admitted non-empty list constants (task
+  -- batched-refuses-list-constants-with-data).
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcTail",
     "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BReduce ROpAdd",
     "Builtin:BReduce ROpLogSumExp", "Builtin:BTensor",
     "ConTag:TgCons", "ConTag:TgLeft", "ConTag:TgRight", "ConTag:TgTuple",
+    "Const:VList ListCont",
     "Cumulative:IRNormal Linear", "Cumulative:IRNormal Log", "Cumulative:IRUniform Linear",
     "Density:IRNormal Linear", "Density:IRUniform Linear",
     "IRExpr:IRApply", "IRExpr:IRBuiltin", "IRExpr:IRConformsTo", "IRExpr:IRConst",
