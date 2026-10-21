@@ -6542,12 +6542,22 @@ data PlanState = PlanState
     -- | The semiring the worlds are measured in ('semiringOf' the compile):
     -- the value grouping measures collapsed groups mid-traversal.
   , psSemiring :: Semiring
+    -- | Whether a constructed value's fields may each be collapsed to one
+    -- measured world before they are intersected ('planFieldProduct'), so an
+    -- N-field construction costs a sum of the fields' world counts rather
+    -- than their product. Like 'psMerge' it bakes leaves ('pwBaked'), and a
+    -- clash reruns the traversal with it off (then with 'psMerge' off too).
+    -- Off whenever 'psMerge' is.
+  , psFactor   :: Bool
+    -- | Set once 'planFieldProduct' has collapsed some field: a clashing run
+    -- that never factored gains nothing from a rerun with factoring off.
+  , psFactored :: Bool
   }
 
 -- | The state a traversal starts from: one read, bound at @nnRaw@, whose plan
 -- occupies the first @size@ offsets.
-emptyPlanState :: Semiring -> String -> Int -> Bool -> PlanState
-emptyPlanState sr nnRaw size merge = PlanState Map.empty Map.empty [] [(0, nnRaw)] size merge [] sr
+emptyPlanState :: Semiring -> String -> Int -> Bool -> Bool -> PlanState
+emptyPlanState sr nnRaw size merge factor = PlanState Map.empty Map.empty [] [(0, nnRaw)] size merge [] sr (merge && factor) False
 
 -- | The raw logit vectors a traversal reads, as (first flat offset, variable)
 -- per neural read, ascending. Plan leaves are keyed by a flat offset
@@ -7277,12 +7287,7 @@ planInvertNode meta env planBody target = case planBody of
             fieldsE <- zipWithM (\a s -> planInvert meta env a (PTPoint s)) args subTargets
             case sequence fieldsE of
               Left why -> return (Left why)
-              -- several fields each splitting into several worlds: summed
-              -- field by field rather than crossed ('conjFlatten')
-              Right wss
-                | let ks = conjAll ([[planAddGuard (planIsCtor nm y) (pw1 [])]] : map (: []) wss)
-                , conjMultiCount ks > 1 -> Right <$> conjFlatten ks
-                | otherwise -> return (Right (map (planAddGuard (planIsCtor nm y)) (foldl liveIntersects [pw1 []] wss)))
+              Right wss -> Right . map (planAddGuard (planIsCtor nm y)) <$> planFieldProduct wss
   _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName planBody))
   where
     occs = planEnvOccs env
@@ -7297,10 +7302,11 @@ planInvertNode meta env planBody target = case planBody of
       PTUpTo _ -> return (Left ("cumulative target on the constructed " ++ what ++ " value"))
       PTPoint y -> do
         fieldsE <- mapM (\(e, sub) -> fmap (planAnySplit (sub y)) <$> planInvert meta env e (PTPoint (sub y))) comps
-        return $ do
-          wss <- sequence fieldsE
-          let ws = foldl liveIntersects [pw1 []] wss
-          return (maybe ws (\g -> map (planAddGuard (g y)) ws) guardY)
+        case sequence fieldsE of
+          Left why -> return (Left why)
+          Right wss -> do
+            ws <- planFieldProduct wss
+            return (Right (maybe ws (\g -> map (planAddGuard (g y)) ws) guardY))
     planDep = subtreeHasOcc occs
     isDetSide  x = not (subtreeHasOcc occs x) && pType (getTypeInfo x) == Deterministic
     ctorTestName nm
@@ -7481,25 +7487,12 @@ conjMultiCount = length . filter ((> 1) . length)
 conjAll :: [PlanConj] -> PlanConj
 conjAll = foldl (foldr conjAdd) []
 
--- | The flat world list of a factored conjunction. When at most one conjunct
--- has several worlds the cross product does not multiply and is taken as is.
--- Otherwise every multi-world conjunct but the largest is first collapsed to
--- one world carrying its summed mass, through the value grouping
--- ('planGroupValues' on a single value): its leaves are baked, so a later
--- constraint on them is caught as a clash and the traversal reruns ungrouped,
--- exactly as for any other group. The largest stays live, which keeps the
--- leaves an enclosing node is most likely to meet visible.
+-- | The flat world list of a factored conjunction: the conjuncts, being
+-- leaf-disjoint, are exactly the independent "fields" 'planFieldProduct'
+-- collapses one by one before crossing (when two or more split), under its
+-- 'psFactor' gate and clash retry.
 conjFlatten :: PlanConj -> PlanM [PlanWorld]
-conjFlatten ks = do
-  let multi = [ i | (i, k) <- zip [0 :: Int ..] ks, length k > 1 ]
-      -- the largest multi-world conjunct (the first among equals) stays live
-      biggest = maximum (0 : map (length . (ks !!)) multi)
-      keep = listToMaybe [ i | i <- multi, length (ks !! i) == biggest ]
-  ks' <- forM (zip [0 :: Int ..] ks) $ \(i, k) ->
-    if length k > 1 && length multi > 1 && Just i /= keep
-      then map snd <$> planGroupValues [ (constTrueIR, w) | w <- k ]
-      else return k
-  return (foldl liveIntersects [pw1 []] ks')
+conjFlatten = planFieldProduct
 
 -- | Does the observation of this node factor over the plan? A slice of a
 -- single-constructor (product) ADT region with several fields, or a
@@ -7580,10 +7573,10 @@ inRanges rs b = any (\(lo, hi) -> lo <= b && b < hi) rs
 planUngroupedLocally :: PlanM a -> PlanM a
 planUngroupedLocally act = do
   st0 <- get
-  put st0 { psMerge = False, psBoolMemo = Map.empty, psEnumMemo = Map.empty }
+  put st0 { psMerge = False, psFactor = False, psBoolMemo = Map.empty, psEnumMemo = Map.empty }
   r <- act
   st1 <- get
-  put st1 { psMerge = psMerge st0, psBoolMemo = psBoolMemo st0, psEnumMemo = psEnumMemo st0 }
+  put st1 { psMerge = psMerge st0, psFactor = psFactor st0, psBoolMemo = psBoolMemo st0, psEnumMemo = psEnumMemo st0 }
   return r
 
 -- | Run a traversal for its result only: its variable bindings are dropped and
@@ -8135,8 +8128,8 @@ planGroupValues pairs = do
     -- residual (the internal randomness that varies across the group, disjoint
     -- from anything constrained outside) is baked into the summed mass factor.
     mergeGroup sr raws (v, ws) = do
-      let common = commonDiscreteCons ws
-          residual w = w { pwCons = filter (\c -> not (any (conEq c) common)) (pwCons w) }
+      let common = planCommonDiscreteCons ws
+          residual w = w { pwCons = filter (\c -> not (any (planConEq c) common)) (pwCons w) }
       let groupMass = sumAllSR sr (map (planWorldMass sr raws . residual) ws)
       mv <- lift (mkVariable "cnt_mass")
       lift (setVariables [(mv, groupMass)])
@@ -8145,12 +8138,74 @@ planGroupValues pairs = do
       -- of them is caught as a double count ('pwBaked')
       let baked = nub (concatMap (\w -> map plcBase (pwCons (residual w)) ++ pwBaked w) ws)
       return (IRConst v, PlanWorld [] common [] [WMass (IRVar mv)] baked (any pwClash ws))
-    -- discrete leaf constraints present (identically) in every world's cons
-    commonDiscreteCons (w:ws') =
-      [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (conEq c) (pwCons w')) ws' ]
-    commonDiscreteCons [] = []
-    conEq (PLeafCon b1 s1) (PLeafCon b2 s2) = b1 == b2 && s1 == s2
-    conEq _ _ = False
+
+-- | Discrete leaf constraints present (identically) in every world's cons:
+-- what a collapsed group keeps live ('planGroupValues', 'planFieldProduct').
+planCommonDiscreteCons :: [PlanWorld] -> [PLeafCon]
+planCommonDiscreteCons (w:ws') =
+  [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (planConEq c) (pwCons w')) ws' ]
+planCommonDiscreteCons [] = []
+
+planConEq :: PLeafCon -> PLeafCon -> Bool
+planConEq (PLeafCon b1 s1) (PLeafCon b2 s2) = b1 == b2 && s1 == s2
+planConEq _ _ = False
+
+-- | The worlds of a constructed value, from its fields' worlds: their
+-- cross-intersection. Each field's worlds partition that field's ways of
+-- meeting its sub-observation, so the cross product is a partition of the
+-- whole -- but its size is the PRODUCT of the fields' world counts, which for
+-- a per-slot edit over an N-slot scene (@Scene (f (o1 sc)) .. (f (oN sc))@,
+-- task scene-float-passthrough-edit-exponential) is c^N.
+--
+-- When two or more fields have several worlds, each such field is instead
+-- collapsed to ONE world before intersecting: a field's mass is the sum of
+-- its worlds' masses, and since the sum over the cross product of products is
+-- the product of the per-field sums (distributivity, which the dimension-
+-- aware 'mixP' / 'prodP' pair also satisfies), the measure is unchanged.
+-- What a field's worlds share identically ('planCommonDiscreteCons', e.g. the
+-- scene's own constructor flag) stays live; the residual is measured once
+-- and carried as a factor -- a 'WMass' when every world is dim 0 and
+-- uncoupled (so an enclosing value DP can still merge it), else a whole
+-- measured 'PResult' ('measurePlanWorlds', which handles point densities and
+-- couplings). That is sound exactly when nothing else constrains the residual
+-- leaves: they are recorded in 'pwBaked', and meeting one again is a clash on
+-- which 'planWitnessApply' reruns with 'psFactor' off -- the cross product
+-- as before. A field holding an over-coupled world is never collapsed, so
+-- 'pwOverCoupled' still sees it at the end.
+planFieldProduct :: [[PlanWorld]] -> PlanM [PlanWorld]
+planFieldProduct wss = do
+  factor <- gets psFactor
+  let wss' = map (filter (not . pwUnsat)) wss
+      multi = length (filter ((> 1) . length) wss')
+  if not factor || multi < 2
+    then return (foldl liveIntersects [pw1 []] wss)
+    else do
+      collapsed <- mapM collapseField wss'
+      return (foldl liveIntersects [pw1 []] collapsed)
+  where
+    collapseField :: [PlanWorld] -> PlanM [PlanWorld]
+    collapseField ws
+      | length ws <= 1 || any (isJust . pwOverCoupled) ws = return ws
+      | otherwise = do
+          sr <- gets psSemiring
+          raws <- gets psRaws
+          modify (\st -> st { psFactored = True })
+          let common = planCommonDiscreteCons ws
+              residual w = w { pwCons = filter (\c -> not (any (planConEq c) common)) (pwCons w) }
+              rs = map residual ws
+              baked = nub (concatMap pwLeaves rs)
+              clash = any pwClash ws
+          if all mergeable rs
+            then do
+              mv <- lift (mkVariable "field_mass")
+              lift (setVariables [(mv, sumAllSR sr (map (planWorldMass sr raws) rs))])
+              return [PlanWorld [] common [] [WMass (IRVar mv)] baked clash]
+            else do
+              r <- lift (measurePlanWorlds sr raws rs)
+              return [PlanWorld [] common [] [WFactor [] r] baked clash]
+    mergeable w = null (pwPairs w) && null (pwSubFactors w) && not (any isPt (pwCons w))
+    isPt PLeafPt{} = True
+    isPt _         = False
 
 -- | Enumerate the possible values of a plan-dependent expression as
 -- (value, world) pairs -- the milestone-2 mechanism behind counting folds.
@@ -8701,15 +8756,25 @@ planWitnessApply meta0 cumulative rt binding sample
       -- clashes emits exactly what the ungrouped traversal alone would.
       -- The traversal may open further neural reads ('planOpenBinding'); the
       -- final state says where each one's logits live.
-      let runPlan merge = do
-            (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState (semiringOf meta) nnRaw (getSize plan) merge)
-            return (filter (not . pwUnsat) <$> ws, psRaws st)
-      supply0 <- get
-      (grouped, clashed) <- pass $ do
-        r <- runPlan True
-        let c = either (const False) (any pwClash) (fst r)
-        return ((r, c), if c then const [] else id)
-      (worldsE, raws) <- if clashed then put supply0 >> runPlan False else return grouped
+      -- Field factoring ('planFieldProduct', 'psFactor') bakes leaves the same
+      -- way, so it is tried first and dropped on a clash -- before grouping
+      -- is: the second attempt is exactly the traversal that ran before field
+      -- factoring existed. An attempt that never factored is not repeated.
+      let runPlan merge factor = do
+            (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState (semiringOf meta) nnRaw (getSize plan) merge factor)
+            return ((filter (not . pwUnsat) <$> ws, psRaws st), psFactored st)
+          attempt merge factor = do
+            supply <- get
+            pass $ do
+              (r, factored) <- runPlan merge factor
+              let c = either (const False) (any pwClash) (fst r)
+              return ((r, c, factored, supply), if c then const [] else id)
+      (factoredR, clashed1, didFactor, supply0) <- attempt True True
+      (groupedR, clashed2, supply1) <-
+        if clashed1 && didFactor
+          then put supply0 >> attempt True False >>= \(r, c, _, sp) -> return (r, c, sp)
+          else return (factoredR, clashed1, supply0)
+      (worldsE, raws) <- if clashed2 then put supply1 >> (fst <$> runPlan False False) else return groupedR
       case worldsE of
         Left why -> return (Left (Just why))
         Right worlds -> do
@@ -8795,6 +8860,43 @@ setWitnessApplicable meta binding =
   worldsShape (WorldsCtx (fcData meta) (adtDecls meta) (functions (compilingProgram meta)) permissiveDet)
               (bindOccs binding) (bindBody binding)
 
+-- | Bind the conditions a point inverse split on ('toInvExprMaybeWith') to
+-- their values at this binding: each condition is compiled where the body is
+-- made meaningful here ('enterBindingScope'), so a condition reading a
+-- leading parameter of the callee (@t < 0.5@ in @step t x@) reads that
+-- parameter's argument. 'Nothing' (the engine declines) where the body cannot
+-- be entered here, a condition is not in the body this binding compiles, or
+-- it reads a parameter of a function-valued body, which is not bound where
+-- the inverse is applied.
+bindIfConditions :: CompilerMetadata -> Binding -> InvChain -> CompilerMonad (Maybe InvChain)
+bindIfConditions meta binding chain = case used of
+  [] -> return (Just chain)
+  _ -> do
+    -- In its own writer scope: the leading parameters' bindings are folded
+    -- into each condition, so a declining binding leaves nothing behind.
+    (entered, scopeBinds) <- lift (runWriterT (enterBindingScope meta binding))
+    case entered of
+      Nothing -> return Nothing
+      Just (scopeMeta, scopedBody) -> do
+        let conds = [ (v, findCond cn scopedBody) | (v, cn) <- used ]
+        if any (maybe True readsOuter . snd) conds
+          then return Nothing
+          else do
+            binds <- forM conds $ \(v, c) -> do
+              (cIR, cBinds) <- lift (runWriterT (toIRGenerate scopeMeta (fromJust c)))
+              return (v, generateLetInExpr (scopeBinds ++ cBinds) cIR)
+            let wrap e = foldr (\(v, cIR) acc -> if freeInIR v acc then IRLetIn v cIR acc else acc) e binds
+            return (Just chain { invValue = wrap (invValue chain), invCoV = wrap (invCoV chain)
+                               , invGuard = wrap (invGuard chain), invReadsAny = wrap (invReadsAny chain)
+                               , invCumValue = wrap (invCumValue chain), invCumGuard = wrap (invCumGuard chain) })
+  where
+    fields = [invValue chain, invCoV chain, invGuard chain, invReadsAny chain, invCumValue chain, invCumGuard chain]
+    used = [ vc | vc@(v, _) <- ifConditionVars (fcData meta) (bindTag binding), any (freeInIR v) fields ]
+    findCond cn e
+      | chainName (getTypeInfo e) == cn = Just e
+      | otherwise = listToMaybe (mapMaybe (findCond cn) (getSubExprs e))
+    readsOuter c = any (`Set.member` freeVarsExpr c) (bindOuterVars binding)
+
 -- | The probabilistic 'Apply' arm's engines, over one resolved application
 -- ('Binding'): plan-guided enumeration, point inversion with its body factor,
 -- set-valued witnesses and affine marginalisation, in that order.
@@ -8846,8 +8948,14 @@ applyBinding meta cumulative rt binding sample = do
    -- lambda in place: a CDF of a structured value is not a product of
    -- per-field factors anyway.
    let fieldWitnessUnfolded = underField && not cumulative && not inlineBody && isNothing namedCall
+   -- An if-then-else on the way is split when its condition is deterministic
+   -- here ('toInvExprMaybeWith'; the condition is bound in 'bindIfConditions').
+   -- Not for a cumulative query: the point path refuses a variable read more
+   -- than once (its occurrences in both arms count), where the set-witness
+   -- engine splits the same if and answers it.
+   let condKnown cn = not cumulative && pType (getTypeInfo (reinferRecovered meta (recoveredVars meta) (exprWithCN meta cn))) == Deterministic
    let pointInversion = if fieldWitnessUnfolded then Nothing
-                        else toInvExprMaybe clauses localAdts lChainName
+                        else toInvExprMaybeWith condKnown clauses localAdts lChainName
    -- A binding whose certificate is an affine Gaussian form, all of whose
    -- uses flow affinely into one density leaf, needs no witness at all: it is
    -- integrated out analytically inside that leaf (task
@@ -9187,7 +9295,11 @@ applyBinding meta cumulative rt binding sample = do
    let engines =
          [ ("plan-guided enumeration", planApplicable meta rt binding <&> \_ _ ->
               planWitnessApply meta cumulative rt binding sample)
-         , ("point inversion", pointInversion <&> \chain _ -> Right <$> pointInvert chain)
+         , ("point inversion", pointInversion <&> \chain diag -> do
+              bound <- bindIfConditions meta binding chain
+              case bound of
+                Just chain' -> Right <$> pointInvert chain'
+                Nothing -> return (Left diag))
          , ("affine marginalisation", affineMarginalisable meta rt binding <&> \(x, lamBody) _ ->
               Right <$> affineCollapse x lamBody)
          , ("set-valued witnesses", setWitnessApplicable meta binding <&> \_ diag ->

@@ -1,0 +1,33 @@
+data Shape = Cube | Sphere | Cylinder
+data Size = Small | Large
+data Color = Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple
+data Material = Rubber | Metal
+data Object = Nil | Obj shape::Shape, size::Size, color::Color, material::Material
+data Scene = Scene ob1::Object, ob2::Object, ob3::Object
+neural extractCLEVR :: (Symbol -> Scene)
+withColor c o = Obj (shape o) (size o) c (material o)
+isCubeObj o = if isObj o then isCube (shape o) else False
+inv c = if c == 1 then 1.0 else (if c == 2 then 0.5 else 0.3333333333333333)
+main sym = draw sc = extractCLEVR sym in
+  draw c1 = (if isCubeObj (ob1 sc) then 0 + 1 else 0) in
+  draw p1 = (if isCubeObj (ob1 sc) then (if Uniform < inv c1 then 1 else 0) else 0) in
+  draw c2 = (if isCubeObj (ob2 sc) then c1 + 1 else c1) in
+  draw p2 = (if isCubeObj (ob2 sc) then (if Uniform < inv c2 then 2 else p1) else p1) in
+  draw c3 = (if isCubeObj (ob3 sc) then c2 + 1 else c2) in
+  draw p3 = (if isCubeObj (ob3 sc) then (if Uniform < inv c3 then 3 else p2) else p2) in
+  Scene (if p3 == 1 then withColor Red (ob1 sc) else ob1 sc) (if p3 == 2 then withColor Red (ob2 sc) else ob2 sc) (if p3 == 3 then withColor Red (ob3 sc) else ob3 sc)
+-- "Recolour one uniformly random cube red" as a reservoir sample over a
+-- 3-slot CLEVR scene: a draw chain of the running cube count c_i and the pick
+-- p_i per slot, the output reading p3 and every slot. The scene read (97^3
+-- values) is over the materialization budget and the plan traversal refuses
+-- the draw-bound p_i, so only generate compiles. Given the slots the chain is
+-- a Markov chain over (c_i, p_i); nothing in the compiler eliminates it slot
+-- by slot. With a two-colour object it compiles densely up to 6 slots.
+-- Idealized: p(Scene ANY ANY ANY) = 1, and a fully specified scene's
+-- probability is the read's mass on the un-recoloured scene times the
+-- uniform pick among its cubes, summed over the pick.
+-- Found by experiments_nest symbolic-latent-scene-editing (probe d04). Split
+-- out of docs task draw-bound-scene-intermediate-loses-probability, whose
+-- draw-bound-scene case is fixed; docs task
+-- reservoir-pick-over-product-read-refused. Verified at the commit that adds
+-- this pin.

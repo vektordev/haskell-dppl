@@ -1,0 +1,16 @@
+data Color = Red | Green
+data Object = Nil | Obj color::Color
+data Scene = Scene o1::Object, o2::Object, o3::Object, o4::Object, o5::Object, o6::Object, o7::Object, o8::Object, o9::Object, o10::Object
+neural readScene :: (Symbol -> Scene)
+flip o = if isObj o then (if isRed (color o) then Obj Green else Obj Red) else o
+main sym = draw s0 = readScene sym in draw s1 = Scene (flip (o1 s0)) (flip (o2 s0)) (flip (o3 s0)) (flip (o4 s0)) (flip (o5 s0)) (flip (o6 s0)) (flip (o7 s0)) (flip (o8 s0)) (flip (o9 s0)) (flip (o10 s0)) in Scene (flip (o1 s1)) (flip (o2 s1)) (flip (o3 s1)) (flip (o4 s1)) (flip (o5 s1)) (flip (o6 s1)) (flip (o7 s1)) (flip (o8 s1)) (flip (o9 s1)) (flip (o10 s1))
+-- Two per-slot edits chained through a draw-bound intermediate scene:
+-- `draw s1 = Scene (flip (o1 s0)) ... in Scene (flip (o1 s1)) ...` over a
+-- 10-slot product read. s1 is a constructor application read only through
+-- field accessors, so DrawSinking splits it into one draw per field, as it
+-- splits the product read s0, and each slot's chain sinks into its own
+-- operand: 3*3 terms per slot. It used to be enumerated jointly over its value
+-- domain (3^10), refused past the materialization budget, and compiled
+-- generate only (the known-issues pin drawBoundSceneIntermediateNoCode).
+-- Found by experiments_nest symbolic-latent-scene-editing. Docs task
+-- draw-bound-scene-intermediate-loses-probability.

@@ -1,6 +1,0 @@
-data Color = Red | Green
-data Object = Nil | Obj color::Color
-data Scene = Scene o1::Object, o2::Object, o3::Object, o4::Object, o5::Object, o6::Object, o7::Object, o8::Object, o9::Object, o10::Object
-neural readScene :: (Symbol -> Scene)
-flip o = if isObj o then (if isRed (color o) then Obj Green else Obj Red) else o
-main sym = draw s0 = readScene sym in draw s1 = Scene (flip (o1 s0)) (flip (o2 s0)) (flip (o3 s0)) (flip (o4 s0)) (flip (o5 s0)) (flip (o6 s0)) (flip (o7 s0)) (flip (o8 s0)) (flip (o9 s0)) (flip (o10 s0)) in Scene (flip (o1 s1)) (flip (o2 s1)) (flip (o3 s1)) (flip (o4 s1)) (flip (o5 s1)) (flip (o6 s1)) (flip (o7 s1)) (flip (o8 s1)) (flip (o9 s1)) (flip (o10 s1))

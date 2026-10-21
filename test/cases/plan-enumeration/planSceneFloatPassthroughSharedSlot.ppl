@@ -1,0 +1,15 @@
+-- The clash side of 'planFieldProduct' (task
+-- scene-float-passthrough-edit-exponential): both fields of the rebuilt Scene
+-- edit the SAME read slot, so each field's collapsed worlds bake o1's leaves
+-- and the intersection meets them again. The traversal must notice the clash
+-- and fall back to the cross product, which keeps the two fields correlated
+-- through the one draw of o1 (independent fields would square the masses).
+-- Plan as in planSceneFloatPassthroughFactored; o2 is never read.
+-- p(Scene Nil Nil)                         = 0.3                (dim 0)
+-- p(Scene (Obj Green 0.5) (Obj Green 0.5)) = 0.7 phi(0.5)       (dim 1)
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+data Scene = Scene o1::Object, o2::Object
+neural readScene :: (Symbol -> Scene)
+recolor o = if isObj o then (if isRed (color o) then Obj Green (px o) else o) else o
+main sym = draw sc = readScene sym in Scene (recolor (o1 sc)) (recolor (o1 sc))

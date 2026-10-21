@@ -8,6 +8,9 @@ module SPLL.Typing.ForwardChaining
   , InvChain(..)
   , toInvExpr
   , toInvExprMaybe
+  , toInvExprMaybeWith
+  , IfCond(..)
+  , ifConditionVars
   , toSeededInvExpr
   , toSeededMonotoneInvExpr
   , Monotonicity(..)
@@ -42,6 +45,7 @@ import PredefinedFunctions
 import Data.List (nub, intercalate)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 import Data.Maybe
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
@@ -68,6 +72,22 @@ data FCData = FCData
   -- seeding can make those foreign occurrences solvable, yielding an inverse
   -- built from another function's material.
   , lambdaVarOccurrences :: [(ChainName, [ChainName])]
+  -- | Every if-then-else node, by its chain name: what the point inverse
+  -- needs to split the observation over the two arms ('toInvExprMaybeWith').
+  , fcIfConds :: Map.Map ChainName IfCond
+  }
+
+-- | An if-then-else node as the point inverse splits it: the chain names of
+-- its condition and arms, every node of each, and whether the condition draws
+-- fresh randomness itself ('hasRandomLeaf').
+data IfCond = IfCond
+  { icCond :: ChainName
+  , icThen :: ChainName
+  , icElse :: ChainName
+  , icCondNodes :: Set ChainName
+  , icThenNodes :: Set ChainName
+  , icElseNodes :: Set ChainName
+  , icCondRandom :: Bool
   }
 
 -- Information on what type of expression a HornClause originated from
@@ -189,10 +209,16 @@ isInvertibleLambda fcData adtsDecls lambdaCN = case inversionSetup fcData lambda
 -- concern (milestone 2), not this query's.
 isWitnessedLambda :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Bool
 isWitnessedLambda fcData adtsDecls obsCN lambdaCN = case inversionSetup fcData lambdaCN of
-  Just (_, toInvCNs, _) ->
+  Just (_, toInvCNs, paramClause) ->
     let (unwrappedObsCN, _) = unwrapLambdas fcData obsCN
         obsClause = ParameterHornClause unwrappedObsCN
-    in any (isJust . toValueExpr (hornClauses fcData) [obsClause] adtsDecls) toInvCNs
+        reached = isJust . toValueExpr (hornClauses fcData) [obsClause] adtsDecls
+    in any reached toInvCNs
+       -- Through an if-then-else, which has no clauses to chain through: the
+       -- observation reaches the lambda's body, and the body recovers the
+       -- variable arm by arm ('toInvExprMaybeWith').
+       || (Map.member (untag (conclusion paramClause)) (fcIfConds fcData)
+           && isJust (toInvExprMaybe fcData adtsDecls lambdaCN) && reached (conclusion paramClause))
   Nothing -> False
 
 -- ===== Engine applicability (law-carrying-modality M5) =====
@@ -446,11 +472,53 @@ toInvExpr fcData adtsDecls lambdaCN = merged
 -- 'mergeExpr'). The set-valued witness fallback in IRCompiler dispatches on
 -- this instead of the hard error.
 toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
-toInvExprMaybe fcData adtsDecls lambdaCN = do
+toInvExprMaybe = toInvExprMaybeWith (const True)
+
+-- | 'toInvExprMaybe', which also inverts through an if-then-else whose
+-- condition is known at the binding (task
+-- witness-through-deterministic-if-over-list-arms). Forward chaining has no
+-- clauses for an @if@, so a variable whose every occurrence sits in its arms
+-- had no point inverse. With the condition @c@ free of the bound variable and
+-- known where the binding is compiled, the observation is the then-arm's
+-- value when @c@ holds and the else-arm's otherwise, so each arm is inverted
+-- on its own, seeded at the arm, and the two chains are selected by @c@
+-- field by field. Nested ifs split recursively; an arm that recovers nothing
+-- (the variable is dead there) leaves the whole split without an inverse.
+--
+-- The condition enters the chain as the free variable 'ifConditionVars'
+-- names, which the caller binds to the condition's value in its scope. The
+-- predicate says which conditions (by untagged chain name) the caller can
+-- compile as known; the syntactic floor -- no occurrence of the bound
+-- variable, no fresh randomness -- is checked here.
+toInvExprMaybeWith :: (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
+toInvExprMaybeWith condKnown fcData adtsDecls lambdaCN = do
   (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
-  case informative (mapMaybe (toPointValueExpr (hornClauses fcData) [paramClause] adtsDecls) toInvCNs) of
-    []  -> Nothing
-    ves -> Just (mergeExpr toInvVarName lambdaCN toInvCNs ves)
+  let seeded occs seed =
+        case informative (mapMaybe (toPointValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
+          []  -> throughIf occs seed
+          ves -> Just (mergeExpr toInvVarName lambdaCN occs ves)
+      throughIf occs seed = do
+        ic <- Map.lookup (untag seed) (fcIfConds fcData)
+        let tag = getTag seed
+            inside nodes = filter ((`Set.member` nodes) . untag) occs
+        if icCondRandom ic || not (condKnown (icCond ic)) || not (null (inside (icCondNodes ic)))
+          then Nothing
+          else do
+            ct <- seeded (inside (icThenNodes ic)) (icThen ic ++ tag)
+            cf <- seeded (inside (icElseNodes ic)) (icElse ic ++ tag)
+            let sel field = IRIf (IRVar (icCond ic ++ tag))
+                                 (IRLetIn (icThen ic ++ tag) (IRVar seed) (field ct))
+                                 (IRLetIn (icElse ic ++ tag) (IRVar seed) (field cf))
+            Just InvChain { invValue = sel invValue, invCoV = sel invCoV, invGuard = sel invGuard
+                          , invReadsAny = sel invReadsAny, invCumValue = sel invCumValue
+                          , invCumGuard = sel invCumGuard }
+  seeded toInvCNs (conclusion paramClause)
+
+-- | The free variables a chain from 'toInvExprMaybeWith' may read for the
+-- conditions it split on, under an invocation tag: each paired with the
+-- (untagged) chain name of the condition whose value the caller binds it to.
+ifConditionVars :: FCData -> String -> [(String, ChainName)]
+ifConditionVars fcData tag = [ (icCond ic ++ tag, icCond ic) | ic <- Map.elems (fcIfConds fcData) ]
 
 -- | The occurrences' chains with those that certainly recover nothing left
 -- out, where any other remains. An occurrence reached through a hole another
@@ -514,8 +582,10 @@ toPointValueExpr = toValueExprWith refuseEqSet
     refuseEqSet _ = id
 
 toValueExprWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
-toValueExprWith pointStep clauses paramClauses adtsDecls startCN = do
-  relevantSortedClauses <- toValuePath clauses paramClauses startCN
+-- Partially applied up to the ADTs, it solves the clause set once and is
+-- shared by every start it is then asked about ('toValuePath').
+toValueExprWith pointStep clauses paramClauses adtsDecls = let pathTo = toValuePath clauses paramClauses in \startCN -> do
+  relevantSortedClauses <- pathTo startCN
   -- Calculate the symbolic derivative
   let deriv = derivativeOfPath adtsDecls relevantSortedClauses
   let cumStep = cumulativeStep adtsDecls relevantSortedClauses
@@ -887,21 +957,25 @@ clauseApplicability _ _ = IRConst (VBool True)
 -- The clause-path core of 'toValueExpr': the topologically sorted, fulfilled
 -- clauses up to (and including) the one concluding @startCN@, or Nothing when
 -- forward chaining never derives it.
+--
+-- Partially applied to the clause set and the parameters, it solves and sorts
+-- once: a caller asking about several occurrences under one seed maps the
+-- partial application over them, rather than re-solving the whole clause set
+-- per occurrence.
 toValuePath :: [[HornClause]] -> [HornClause] -> ChainName -> Maybe [HornClause]
-toValuePath clauses paramClauses startCN =
+toValuePath clauses paramClauses = \startCN ->
   case findConcludingHornClause solvedClauses startCN of
-    Just concludingClause -> do
-      -- Throw away superfluous clauses. Do this by sorting them by requirement
-      -- and throwing away clauses after the clause that inferes the bound variable
-      -- Also guarantees that the later generated letIns are in the correct order
-      -- This may still contain some superflous clauses, but they can easily be detected by an optimizer
-      let sortedClauses = topSortDAG solvedClauses
-      Just (cutList sortedClauses concludingClause)
+    -- Throw away superfluous clauses. Do this by sorting them by requirement
+    -- and throwing away clauses after the clause that inferes the bound variable
+    -- Also guarantees that the later generated letIns are in the correct order
+    -- This may still contain some superflous clauses, but they can easily be detected by an optimizer
+    Just concludingClause -> Just (cutList sortedClauses concludingClause)
     Nothing -> Nothing
   where
     augmentedClauseSet = map (:[]) paramClauses ++ clauses
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
+    sortedClauses = topSortDAG solvedClauses
 
 -- | Whether the inverse chain seed→occurrence is monotone increasing or
 -- decreasing, statically.
@@ -1262,7 +1336,8 @@ progToFCData anchors prog =
   FCData { hornClauses = anchorClauses ++ baseClauses
          , chainNameInfo = cnInfo
          , fcAnchors = anchorInstances
-         , lambdaVarOccurrences = progToLambdaVarOccurrences prog }
+         , lambdaVarOccurrences = progToLambdaVarOccurrences prog
+         , fcIfConds = Map.unions [ ifConds e | (_, e) <- functions prog ] }
   where
     cnInfo = progToChainNameInfo prog
     baseClauses = progToHornClauses prog cnInfo
@@ -1281,6 +1356,13 @@ progToFCData anchors prog =
     anchorInstances = Set.fromList
       [ cn | cn <- allClauseChainNames baseClauses, Set.member (untag cn) anchors ]
     anchorClauses = [ [ParameterHornClause cn] | cn <- Set.toList anchorInstances ]
+
+    ifConds e = Map.unions (here e : map ifConds (getSubExprs e))
+    here e@(Expr _ (IfThenElse c t f)) = Map.singleton (getChainName e) IfCond
+      { icCond = getChainName c, icThen = getChainName t, icElse = getChainName f
+      , icCondNodes = subtreeChainNames c, icThenNodes = subtreeChainNames t
+      , icElseNodes = subtreeChainNames f, icCondRandom = hasRandomLeaf c }
+    here _ = Map.empty
 
 -- Every chain name appearing as a premise or conclusion anywhere in a clause set.
 allClauseChainNames :: [[HornClause]] -> [ChainName]
@@ -1386,7 +1468,7 @@ constructTopLevelEquivalenceClauses' :: [[HornClause]] -> [Expr] -> FnDecl -> [[
 constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (getTypeInfo expr) of
   TArrow _ _ -> concat $ evalSupply $ mapM (\otherExpr -> do
     let (_, bodyExpr) = asLambda "constructTopLevelEquivalenceClauses'" expr
-    let dependent = getDependentGroups (subtreeChainNames bodyExpr) clauses (getChainName bodyExpr)
+    let dependent = bodyDependentGroups clauses bodyExpr
     (varClauses, applyCnt) <- associateFunctionVariable name (getChainName expr) "" otherExpr
     let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
     return $ varClauses ++ taggedDependents) exprs
@@ -1428,7 +1510,7 @@ constructEquivalenceClauses clauses exprs (Expr TypeInfo{chainName=exCn} (Apply 
           Just vLambdaCn -> do
             let (_, vBody) = asLambda "constructEquivalenceClauses" (findExprWithCN exprs vLambdaCn)
             -- Get all horn clauses, which corresspond to expressions in the sub-AST of the lambda
-            let dependent = getDependentGroups (subtreeChainNames vBody) clauses (getChainName vBody)
+            let dependent = bodyDependentGroups clauses vBody
             -- Supply each invokation with a unique tag and create the corresponding clauses
             let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable lVar vLambdaCn lTag lBody
             -- Create a tagged copy of the dependent Hron clauses
@@ -1445,7 +1527,7 @@ constructEquivalenceClauses clauses exprs (Expr TypeInfo{chainName=exCn} (Apply 
       -- Easy if the applied value is no function, because it is constant across the program.
       _ ->
         -- We still need to create a tagged group if our original lambda was tagged
-        let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (getDependentGroups (subtreeChainNames lBody) clauses (getChainName lBody)) in
+        let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (bodyDependentGroups clauses lBody) in
         appliedGroup:taggedGroups ++ associateVariable lVar (getChainName v) lTag lBody
   where
     isLambdaExpr (Expr _ Lambda{}) = True
@@ -1511,8 +1593,32 @@ tagHornClause tag (EquivalenceHornClause pre conc info inv) = EquivalenceHornCla
 tagHornClause tag (ParameterHornClause conc) = ParameterHornClause (conc ++ tag)
 
 
-getDependentGroups :: Set ChainName -> [[HornClause]] -> ChainName -> [[HornClause]]
-getDependentGroups scope clauses cn0 = fst (go Set.empty cn0)
+-- | The clause groups of a function body that a per-invocation copy takes
+-- ('getDependentGroups'), from the body's root.
+bodyDependentGroups :: [[HornClause]] -> Expr -> [[HornClause]]
+bodyDependentGroups clauses fnBody =
+  getDependentGroups (subtreeChainNames fnBody) (ifChildren fnBody) clauses (getChainName fnBody)
+
+-- | The arms of every if-then-else node of an expression whose condition
+-- draws no fresh randomness, by the node's chain name. An @if@ emits no
+-- clauses of its own, so the copy steps into those arms structurally: without
+-- them, a parameter whose occurrences all sit in the arms of an @if@ had no
+-- clauses in the copy at all, and the point inverse through a deterministic
+-- condition ('toInvExprMaybeWith') had nothing to chain through (task
+-- witness-through-deterministic-if-over-list-arms). Only what that inverse
+-- can use is copied: the condition itself is bound by its caller, not
+-- chained, and an @if@ on fresh randomness is never split by it. Copying
+-- every arm of every @if@ made a recursive body's per-call copies whole, 5x
+-- the compile time of known-issues/markovBranchRandomRateCompileGrowth.
+ifChildren :: Expr -> Map.Map ChainName [ChainName]
+ifChildren e = Map.unions (here : map ifChildren (getSubExprs e))
+  where
+    here = case e of
+      Expr _ (IfThenElse c t f) | not (hasRandomLeaf c) -> Map.singleton (getChainName e) (map getChainName [t, f])
+      _ -> Map.empty
+
+getDependentGroups :: Set ChainName -> Map.Map ChainName [ChainName] -> [[HornClause]] -> ChainName -> [[HornClause]]
+getDependentGroups scope ifKids clauses cn0 = fst (go Set.empty cn0)
   where
     go seen c
       | c `Set.member` seen = ([], seen)
@@ -1528,6 +1634,7 @@ getDependentGroups scope clauses cn0 = fst (go Set.empty cn0)
               local = [ (g, other) | c `Set.member` scope, g <- equivalenceGroups
                                    , Just other <- [equivalencePartner c g], other `Set.member` scope ]
               nexts = concatMap forwardPremises direct ++ map snd local
+                      ++ Map.findWithDefault [] c ifKids
               step (acc, sn) n = let (gs, sn') = go sn n in (acc ++ gs, sn')
               (rest, seen') = foldl step ([], Set.insert c seen) nexts
           in (direct ++ map fst local ++ rest, seen')

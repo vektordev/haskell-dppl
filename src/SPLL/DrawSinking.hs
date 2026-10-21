@@ -136,7 +136,9 @@ sinkDraw x v letTi b = case b of
     bindAt p =
       let pTy = rType (getTypeInfo p)
           lamTi = makeTypeInfo { rType = TArrow (rType (getTypeInfo v)) pTy }
-          appTi = makeTypeInfo { rType = pTy, srcPos = srcPos letTi }
+          -- the binding's value is the operand's, so it keeps the operand's
+          -- tags: a later split or sink asks whether it is enumerable
+          appTi = makeTypeInfo { rType = pTy, tags = tags (getTypeInfo p), srcPos = srcPos letTi }
       in Expr appTi (Apply (Expr lamTi (Lambda x p)) v)
 
 -- | Every name an expression mentions, bound or free.
@@ -191,10 +193,8 @@ namesIn e = Set.unions (map namesIn (getSubExprs e))
 -- @draw@); one such field anywhere leaves the whole binding alone.
 splitProductDraw :: [ADTDecl] -> Set.Set String -> String -> Expr -> TypeInfo -> Expr -> Maybe Expr
 splitProductDraw adtDecls taken x v letTi b = do
-  Expr readTi (ReadNN net arg) <- Just v
-  TADT tyName <- Just (rType readTi)
-  [ADTDecl { constructors = [(_, fieldDecls)] }] <- Just [d | d <- adtDecls, dataName d == tyName]
-  let fieldNames = map fst fieldDecls
+  source <- productSource adtDecls v
+  let fieldNames = map fst (sourceFields source)
   uses <- accessorReads fieldNames x b
   let fieldsRead = [ f | f <- fieldNames, f `elem` map fst uses ]
   if null fieldsRead || not (all (hasEnumerableTag . snd) uses) then Nothing else do
@@ -206,21 +206,74 @@ splitProductDraw adtDecls taken x v letTi b = do
                                                    in (acc ++ [(f, n)], Set.insert n used))
                                ([], taken) fieldsRead
         argName = fresh used' (x ++ "_arg")
-        argIsAtomic = case arg of
-          Expr _ (Var _) -> True
-          Expr _ (Constant _) -> True
-          _ -> False
-        argRef = if argIsAtomic then arg else Expr (getTypeInfo arg) (Var argName)
-        readOf f = let ti = head [ ati | (g, ati) <- uses, g == f ]
-                   in Expr ti (InjF (Named f) [Expr readTi (ReadNN net argRef)])
+        accessorTi f = head [ ati | (g, ati) <- uses, g == f ]
+        (fieldValue, wrapArg) = case source of
+          ProductRead readTi net arg _ ->
+            let argIsAtomic = case arg of
+                  Expr _ (Var _) -> True
+                  Expr _ (Constant _) -> True
+                  _ -> False
+                argRef = if argIsAtomic then arg else Expr (getTypeInfo arg) (Var argName)
+            in ( \f -> Expr (accessorTi f) (InjF (Named f) [Expr readTi (ReadNN net argRef)])
+               , if argIsAtomic then id else bindAs letTi argName arg )
+          ProductCtor fieldArgs _ ->
+            (\f -> head [ a | (g, a) <- fieldArgs, g == f ], id)
         body' = substAccessors x names b
-        bindings = [ (n, readOf f) | (f, n) <- names ]
+        bindings = [ (n, fieldValue f) | (f, n) <- names ]
         withFields = foldr (\(n, rhs) inner -> bindAs letTi n rhs inner) body' bindings
-        sinks (n, rhs) = isJust (sinkDraw n rhs letTi body')
+        sinks (n, rhs) = sourceSinksAny source rhs && isJust (sinkDraw n rhs letTi body')
     if not (any sinks bindings) then Nothing else
-      return (if argIsAtomic then withFields else bindAs letTi argName arg withFields)
+      return (wrapArg withFields)
   where
     hasEnumerableTag ti = isJust (enumerableDomain (tags ti))
+
+-- | Where the fields of a split draw come from.
+data ProductSource
+  = -- | A neural read of a single-constructor ADT: its type, network, argument
+    -- and fields.
+    ProductRead TypeInfo String Expr [(String, RType)]
+    -- | A constructor application, @C a1 .. an@ (task
+    -- @draw-bound-scene-intermediate-loses-probability@): each field paired
+    -- with its argument, plus the declaration's fields.
+  | ProductCtor [(String, Expr)] [(String, RType)]
+
+sourceFields :: ProductSource -> [(String, RType)]
+sourceFields (ProductRead _ _ _ fs) = fs
+sourceFields (ProductCtor _ fs) = fs
+
+-- | Is moving this per-field draw worth a split? For a read, every field is a
+-- random enumerable draw. For a constructor application, only a field whose
+-- argument 'mayBeRandom', as 'sinkIn' asks of any draw it moves (the field's
+-- enumerability is its accessor's tag, checked by the caller): a literal argument (@C 1 x@) is not drawn, and splitting it out could
+-- only move a program off the path it exercises.
+sourceSinksAny :: ProductSource -> Expr -> Bool
+sourceSinksAny ProductRead {} _ = True
+sourceSinksAny ProductCtor {} rhs = mayBeRandom rhs
+
+-- | A drawn value whose law is the product of its fields' laws, given the
+-- values its parts read.
+--
+-- * A neural read of a single-constructor ADT (see 'splitProductDraw').
+-- * An application of a constructor to all its fields, @C a1 .. an@, of any
+--   ADT. The constructor is fixed, so the fields do not couple through it; each
+--   @a_i@ is evaluated once, in the original and as its own draw alike, and the
+--   fields' joint law is whatever the @a_i@ share through the variables they
+--   read, which the per-field draws read too. That is the edit-chain shape,
+--   @draw s1 = Scene (edit (o1 s0)) .. (edit (oN s0)) in .. (o1 s1) ..@, which
+--   otherwise enumerates @s1@ over its joint domain (@3^N@ values for a
+--   two-colour object) and is refused past the materialization budget.
+productSource :: [ADTDecl] -> Expr -> Maybe ProductSource
+productSource adtDecls v = case v of
+  Expr readTi (ReadNN net arg) -> do
+    TADT tyName <- Just (rType readTi)
+    [ADTDecl { constructors = [(_, fieldDecls)] }] <- Just [d | d <- adtDecls, dataName d == tyName]
+    return (ProductRead readTi net arg fieldDecls)
+  Expr ti (InjF (Named c) args) -> do
+    TADT tyName <- Just (rType ti)
+    [fieldDecls] <- Just [ fs | d <- adtDecls, dataName d == tyName, (c', fs) <- constructors d, c' == c ]
+    if null fieldDecls || length fieldDecls /= length args then Nothing else
+      return (ProductCtor (zip (map fst fieldDecls) args) fieldDecls)
+  _ -> Nothing
 
 -- | @draw n = rhs in body@, built with the same span as the binding it came
 -- from and the arrow type the later stages expect of a binding's lambda.
@@ -228,7 +281,7 @@ bindAs :: TypeInfo -> String -> Expr -> Expr -> Expr
 bindAs letTi n rhs body =
   let bodyTy = rType (getTypeInfo body)
       lamTi = makeTypeInfo { rType = TArrow (rType (getTypeInfo rhs)) bodyTy }
-      appTi = makeTypeInfo { rType = bodyTy, srcPos = srcPos letTi }
+      appTi = makeTypeInfo { rType = bodyTy, tags = tags (getTypeInfo body), srcPos = srcPos letTi }
   in Expr appTi (Apply (Expr lamTi (Lambda n body)) rhs)
 
 -- | Every free use of @x@ in an expression, as the field it reads and the

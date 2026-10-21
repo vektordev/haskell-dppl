@@ -1,0 +1,2 @@
+f t x = if t < 0.5 then [x] else if t < 1.5 then [x, x + 1.0] else x : [Normal]
+main = f 2.0 Normal
