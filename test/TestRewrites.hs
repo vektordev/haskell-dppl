@@ -934,15 +934,19 @@ data KnownConfig = KnownConfig { kcProg :: String, kcFam :: Family, kcSite :: St
 
 knownConfigDivergences :: [KnownConfig]
 knownConfigDivergences =
-  -- Drawing the tuple mixture leaves the -O0 compile reading the draw's name
-  -- where nothing binds it ("Variable rwv0 not declared"); -O2 folds the
-  -- reference away.
-  [ KnownConfig "helperDiscardsComparedMixture" DrawIntro "draw-intro (if False" "-O0" "drawn-tuple-mixture-field-read-dangles-at-o0"
-  -- The mask's VAny reaches the identity's inverse (minus / divide) at -O0
-  -- only, the -O0 face of the family M3 filed.
-  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "plus-zero (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition"
-  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "one-times (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition"
-  , KnownConfig "helperDiscardsComparedMixture" InjFIdentity "double-negate (snd (if False" "-O0" "any-slot-through-injf-inverse-reaches-condition" ]
+  -- A set-witness residue factor fixes the bound variable at a wildcard
+  -- witness, and where the spine reaches it through a draw or a call the
+  -- factor evaluates the variable's arithmetic (x + 0.0, log x) on the
+  -- wildcard at -O0; -O2 folds the comparison against the ANY slot first.
+  [ KnownConfig "anySlotThroughPlusInverse" DrawIntro "draw-intro (plus x 0.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughPlusInverse" DrawIntro "draw-intro 1.0" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughPlusInverse" HelperExtract "extract (TCons (plus x 0.0) 1.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughPlusInverseTupleSplit" DrawIntro "draw-intro (plus h 0.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro (log x)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro 2.0" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
+  -- Drawing the isRight test leaves the -O0 compile applying fromRight to a
+  -- Left ("fromRight of a Left"); -O2 agrees with the original.
+  , KnownConfig "enumeratedEitherSelectOnDomainConstant" DrawIntro "draw-intro (isRight m)" "-O0" "drawn-isright-test-reads-fromright-of-left-at-o0" ]
 
 knownConfigDivergence :: String -> Family -> String -> String -> Maybe KnownConfig
 knownConfigDivergence prog fam site cfg =
