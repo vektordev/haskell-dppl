@@ -16,10 +16,10 @@
 -- kernel nests one split loop per slot and did not finish in 20 minutes at
 -- ten slots; that runtime is task batched-count-chain-enumeration-factorial,
 -- which should add the token when it lands. The token also enrols the program
--- in Slow.BatchedPython's topK differentials (End2EndTesting.topKEntries), and
--- the scalar topK query is exponential in the slot count on the interpreter
--- (p(0) at k=0.3: 0.8 s at 5 slots, 4.7 s at 6, 34 s at 7, against 0.1 s
--- topK-off), so at ten slots their shared input list never finished. The
+-- in Slow.BatchedPython's topK differentials (End2EndTesting.topKEntries); the
+-- scalar topK query used to be exponential in the slot count there (34 s at 7
+-- slots; task topk-compiled-scene-count-query-exponential-in-slots, fixed and
+-- pinned by TestInternals.wideProductSceneTopKQueryPolynomial). The
 -- mass declaration of declare-batched-on-eligible-corpus-programs (fbfdc8e)
 -- added it anyway; TestInternals.wideProductSceneCountNotBatched keeps it out.
 slow

@@ -36,7 +36,9 @@ import SPLL.Typing.PType (PType(Integrate, Deterministic, Bottom))
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate, isPrefixOf, isSuffixOf, sort, nub)
 import Data.Maybe (fromMaybe, mapMaybe)
-import Control.Exception (try, evaluate, ErrorCall(..))
+import Control.Exception (AllocationLimitExceeded(..), try, evaluate, finally, ErrorCall(..))
+import System.Mem (disableAllocationLimit, enableAllocationLimit, getAllocationCounter, setAllocationCounter)
+import ScalingCheck (Point(..), Verdict(..), climb)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
@@ -2304,25 +2306,91 @@ test_wideProductSceneBatchedCompilesFast = testCase "wideProductSceneBatchedComp
         (not (any (\l -> "DOMAIN = [" `isInfixOf` l && "Scene(" `isInfixOf` l) (concatMap lines ls)))
 
 -- | The corpus copy of the ten-slot scene, wideProductSceneCount, declares no
--- @batched@. Every @batched@-declaring program feeds Slow.BatchedPython's topK
--- differentials ('End2EndTesting.topKEntries'), which query it on the
--- interpreter compiled at a topK cutoff, and that query is exponential in the
--- slot count (p(0) at k=0.3: 0.8 s at 5 slots, 4.7 s at 6, 34 s at 7, 0.1 s
--- topK-off at any width). At ten slots the list both differentials share never
--- finished, so the whole Slow group hung. The running batched kernel is
--- itself past 20 minutes (task batched-count-chain-enumeration-factorial).
--- The token came in with the mass declaration of task
--- declare-batched-on-eligible-corpus-programs, against the @.tst@'s own note.
+-- @batched@. The running batched kernel nests one split loop per slot and is
+-- past 20 minutes at ten slots (task batched-count-chain-enumeration-factorial);
+-- the token would also enrol the program in Slow.BatchedPython's topK
+-- differentials ('End2EndTesting.topKEntries'). Those used to hang on the
+-- scalar side too: the topK interpreter query was exponential in the slot
+-- count until task topk-compiled-scene-count-query-exponential-in-slots
+-- ('test_wideProductSceneTopKQueryPolynomial' pins the fix), so the batched
+-- kernel is now the only blocker. The token came in with the mass declaration
+-- of task declare-batched-on-eligible-corpus-programs, against the @.tst@'s
+-- own note. Drop or invert this test when the kernel is affordable.
 test_wideProductSceneCountNotBatched :: TestTree
 test_wideProductSceneCountNotBatched = testCase "wideProductSceneCountNotBatched" $ do
   tst <- corpusTstPath "wideProductSceneCount"
   t <- readFile tst >>= either assertFailure' return . parseTstFileFromString tst
-  assertBool ("wideProductSceneCount declares batched: its topK interpreter query is exponential in \
-              \the slot count, which hangs Slow.BatchedPython's topK differentials (docs-repo task \
-              \batched-topk-differentials-scale-with-declared-programs)")
+  assertBool ("wideProductSceneCount declares batched: its batched kernel nests one split loop per \
+              \slot and does not finish at ten slots (docs-repo task \
+              \batched-count-chain-enumeration-factorial)")
              (Batched `notElem` tstBackends t)
   where
     assertFailure' e = assertFailure e >> error "unreachable"
+
+-- | A topK compile of the n-slot scene count answers p(0) with polynomial
+-- growth in n, and the ten-slot program answers it exactly at a cutoff that
+-- prunes nothing (task topk-compiled-scene-count-query-exponential-in-slots).
+-- The enumerable-InjF loop read pLeft twice under topK (the cutoff test and the
+-- product), so its bindings stayed in front of the @isPossible@ guard and every
+-- split descended into the left operand, possible or not; on the left-nested
+-- count that compounded into a product of the split domains. p(0) at k=0.3
+-- took 0.8 s at 5 slots, 4.7 s at 6 and 34 s at 7, where topK-off stays near
+-- 0.1 s; the ten-slot query never finished. The metric is the bytes the query
+-- allocates on this thread (compile excluded), which parallel tests do not
+-- disturb: about 7x per slot before the fix, a local log-log slope near 1
+-- after. A point past the allocation cap counts as the wall being back.
+test_wideProductSceneTopKQueryPolynomial :: TestTree
+test_wideProductSceneTopKQueryPolynomial = testCase "wideProductSceneTopKQueryPolynomial" $ do
+  verdict <- climb 2.5 [2, 3, 4, 5, 6, 7] (\n -> queryAlloc n 0.3)
+  case verdict of
+    WithinBound _ -> return ()
+    Exceeds why -> assertFailure ("the topK p(0) query on the n-slot scene count grows faster than n^2.5 \
+                                  \in the bytes it allocates (task \
+                                  \topk-compiled-scene-count-query-exponential-in-slots): " ++ why)
+    Unmeasurable why -> assertFailure why
+  exact <- answer 10 Nothing
+  pruned <- answer 10 (Just 1e-9)
+  assertBool ("ten-slot p(0) at cutoff 1e-9 is " ++ show pruned ++ ", topK-off " ++ show exact)
+    (abs (fst pruned - fst exact) < 1e-12 && snd pruned == snd exact)
+  where
+    cap = 4 * 10 ^ (9 :: Int) :: Integer
+    compiled n thr = do
+      prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+                (tryParseProgram "wideProductSceneTopKQueryPolynomial" (wideProductSceneSrc n))
+      env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+               (compile defaultCompilerConfig { topKThreshold = thr } prog)
+      _ <- evaluate (length (show env))
+      return (prog, env)
+    query prog env n = either (\e -> error ("prob query error: " ++ show e)) probDimOf
+                         (runProbC prog env [wideSceneLogits n] (VInt 0))
+    queryAlloc n thr = do
+      (prog, env) <- compiled n (Just thr)
+      r <- try $ flip finally disableAllocationLimit $ do
+        setAllocationCounter (fromInteger cap)
+        enableAllocationLimit
+        (p, d) <- evaluate (query prog env n)
+        _ <- evaluate (p + fromIntegral d)
+        remaining <- getAllocationCounter
+        return (cap - toInteger remaining)
+      return $ case r of
+        Left AllocationLimitExceeded -> Capped (show cap ++ " bytes allocated")
+        Right bytes -> Measured (fromInteger bytes)
+    answer n thr = do
+      (prog, env) <- compiled n thr
+      res <- timeout (20 * 1000000) (evaluate (query prog env n))
+      maybe (assertFailure ("the ten-slot p(0) query did not answer within 20 s (topK " ++ show thr ++ ")")
+               >> error "unreachable")
+            (\(p, d) -> p `seq` d `seq` return (p, d)) res
+
+-- | Network logits for 'wideProductSceneSrc' @n@: the per-slot layout and
+-- probabilities of 'test_wideProductSceneAccessorCompilesFast', as one
+-- envelope for the scene network.
+wideSceneLogits :: Int -> IRValue
+wideSceneLogits n = VTuple (VInt 2) (VList (foldr (ListCont . VFloat) EmptyList (concat (take n perSlot))))
+  where
+    perSlot = zipWith objLogits [0.8, 0.5, 0.9, 0.3, 0.6, 0.7, 0.4, 1.0, 0.2, 0.55]
+                                [0.25, 0.6, 0.1, 0.5, 0.4, 0.3, 0.75, 0.2, 0.9, 0.45]
+    objLogits po pr = [1 - po, po, 0.2, 0.3, 0.5, pr] ++ replicate 7 ((1 - pr) / 7)
 
 test_wideTupleCompilesFast :: TestTree
 test_wideTupleCompilesFast = testCase "wideTupleCompilesFast" $ do
@@ -5858,6 +5926,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_wideProductSceneAccessorCompilesFast
   , test_wideProductSceneBatchedCompilesFast
   , test_wideProductSceneCountNotBatched
+  , test_wideProductSceneTopKQueryPolynomial
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
   , test_sceneCountConditionalEditPolynomial
