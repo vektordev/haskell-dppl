@@ -5693,11 +5693,27 @@ measureSet meta v (WExcept s p) = do
 -- measure under its guards. It matters here: the point side evaluates a
 -- density at the witness value, which is precisely the 'VAny' this choice
 -- exists to avoid touching.
+--
+-- Where a side's bindings are read by more than one field, the choice is bound
+-- once as a packed result instead of folding them into every field: a side
+-- that is itself a set-witness compile (the x-free factor of
+-- @draw x = Normal in if x < 0.0 then (draw y = ...) else 2.0@ measures the
+-- inner draw on its point side) was copied four times per nesting level, and
+-- the -O0 IR grew ~9x per level (task slow-fuzz-seed-findings-2026-10-06,
+-- SharedDrawInvariants seed 825059). The binding still selects with the same
+-- 'IRIf', so only the taken side is evaluated; it lands in the caller's
+-- writer scope, which every caller keeps under its own guards.
 measureSet meta v (WChoice c a b) = do
-  ra <- scopedMeasure a
-  rb <- scopedMeasure b
-  return (zipResult (IRIf c) ra rb)
-  where scopedMeasure = scopedMeasureSet meta v
+  (ra, ba) <- lift (runWriterT (measureSet meta v a))
+  (rb, bb) <- lift (runWriterT (measureSet meta v b))
+  let readers binds r = length (filter (mentionsAny (map fst binds)) (resultFields r))
+  if readers ba ra <= 1 && readers bb rb <= 1
+    then return (zipResult (IRIf c) (mapResult (wrapBlockIfRead ba) ra) (mapResult (wrapBlockIfRead bb) rb))
+    else do
+      w <- mkVariable "choice"
+      setVariables [(w, IRIf c (generateLetInExpr ba (packResult ra)) (generateLetInExpr bb (packResult rb)))]
+      return (unpackResult (IRVar w))
+  where resultFields r = [unP (rProb r), rDim r, rBranches r, rImposs r]
 
 -- | 'measureSet' in its own writer scope, its bindings folded into the result.
 scopedMeasureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
@@ -6250,7 +6266,14 @@ worldFactorFree meta sub target
 -- target requires True, False-worlds when it requires False -- exactly
 -- 'comparisonWorlds's original inline construction, now shared with the
 -- boolean-connective cases of 'invertToWorlds'.
+--
+-- A literal polarity target -- the canonical targets 'invertBoolToWorlds'
+-- inverts an @if@'s condition at -- selects its side statically. The other
+-- side's worlds used to be kept behind a guard that is always False, and
+-- they were still compiled: every arm factor of an @if@ nested under a draw
+-- was built twice per level (task slow-fuzz-seed-findings-2026-10-06).
 boolWorlds :: WSet -> [WWorld] -> [WWorld] -> [WWorld]
+boolWorlds (WPoint (IRConst (VBool b)) _) ts fs = if b then ts else fs
 boolWorlds target ts fs =
      map (addGuard (memberGuard TBool constTrueIR target)) ts
   ++ map (addGuard (memberGuard TBool (IRConst (VBool False)) target)) fs
