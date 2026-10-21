@@ -1,0 +1,14 @@
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+data Scene = Scene o1::Object, o2::Object
+neural readScene :: (Symbol -> Scene)
+recolor o = if isObj o then (if isRed (color o) then Obj Green (px o) else o) else o
+main sym = draw sc = readScene sym in Scene (recolor (o1 sc)) (recolor (o1 sc))
+-- Both fields edit the SAME read slot, so both outputs carry o1's px. A query
+-- whose two px values differ is impossible, but it answers 0.7 phi(0.5) =
+-- 0.246, the mass of the first field alone. When both fields pin the same
+-- continuous leaf, the point-point case of 'intersectLeafCon' keeps the first
+-- point ("both compute the same value from the same observation") and adds no
+-- guard that the second point agrees with it. Queries whose points agree
+-- answer right (plan-enumeration/planSceneFloatPassthroughSharedSlot). Docs
+-- task plan-point-point-intersection-ignores-mismatch.
