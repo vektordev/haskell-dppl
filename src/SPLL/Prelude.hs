@@ -64,6 +64,7 @@ module SPLL.Prelude
   , StageValue(..)
   , admissionTyped
   , rtypedProgram
+  , normalizeAndInfer
   , chainNamedProgram
   , batchedRefusal
   , CodeGenTarget(..)
@@ -955,6 +956,14 @@ rtypedProgram :: Program -> Either CompilerError Program
 rtypedProgram p0 = do
   validateProgram p0
   p <- resolveNeuralDecls p0
+  normalizeAndInfer p
+
+-- | Callee normalisation, RInfer, and the arrow-result eta expansion with its
+-- re-normalisation and re-inference: 'frontEnd''s rewriting core without the
+-- validation, neural resolution and stage records, for a caller that has a
+-- parsed program and needs it typed exactly as 'compile' types it.
+normalizeAndInfer :: Program -> Either CompilerError Program
+normalizeAndInfer p = do
   let normalized = fromMaybe p (normalizeCallees p)
   rtyped <- addRTypeInfo normalized
   case etaExpandArrowResults rtyped normalized of
