@@ -20,6 +20,7 @@ module SPLL.AutoNeural(
 , stripDeadSlotFills
 , planReadOf
 , continuousSlots
+, continuousSlotPaths
 ) where
 
 import SPLL.Lang.Types
@@ -839,14 +840,20 @@ requiredNormalFns _  (Discretes _ _)   = []
 -- offsets are 'makeProbRec''s.  This is how a network read's own Gaussian fields get their
 -- component normal functions (task writelogits-continuous-leaf-under-sum-type).
 continuousSlots :: PartitionPlan -> [(String, Int)]
-continuousSlots = go "" 0
+continuousSlots plan = [ (concat path, k) | (path, k) <- continuousSlotPaths plan ]
+
+-- | 'continuousSlots' with each suffix kept as its list of path components
+-- (@["_Scene_0", "_Obj_1"]@), so a caller can match a prefix component-wise:
+-- @"_Scene_1"@ is a string prefix of @"_Scene_10"@ but not a component of it.
+continuousSlotPaths :: PartitionPlan -> [([String], Int)]
+continuousSlotPaths = go [] 0
   where
     go p ix Continuous      = [(p, ix)]
     go _ _  (Discretes _ _) = []
-    go p ix (TuplePlan a b)  = go (p ++ "_fst") ix a ++ go (p ++ "_snd") (ix + getSize a) b
-    go p ix (EitherPlan a b) = go (p ++ "_left") (ix + 1) a ++ go (p ++ "_right") (ix + 1 + getSize a) b
+    go p ix (TuplePlan a b)  = go (p ++ ["_fst"]) ix a ++ go (p ++ ["_snd"]) (ix + getSize a) b
+    go p ix (EitherPlan a b) = go (p ++ ["_left"]) (ix + 1) a ++ go (p ++ ["_right"]) (ix + 1 + getSize a) b
     go p ix (ADTPlan _ ctors) =
-      concat [ go (p ++ "_" ++ cName ++ "_" ++ show j) fIx fp
+      concat [ go (p ++ ["_" ++ cName ++ "_" ++ show j]) fIx fp
              | ((cName, fps), cIx) <- zip ctors (scanl (+) (ix + adtFlagSlots ctors) (map (sum . map getSize . snd) ctors))
              , (j, fp, fIx) <- zip3 [0 :: Int ..] fps (scanl (+) cIx (map getSize fps)) ]
 

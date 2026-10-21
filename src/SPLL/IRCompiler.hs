@@ -777,36 +777,82 @@ isNormalExtractable _                            = True
 -- out). The leaf must still be one Normal by its own modality
 -- ('generateComponentNormalFunction'). A dead arm needs nothing here: writeLogits
 -- guards it ('SPLL.AutoNeural.deadSlotFill').
+--
+-- A network read's own slots (task writelogits-dropped-for-read-passthrough-continuous-leaf).
+-- A read with a plan is Gaussian in every Continuous slot, each conditional on its
+-- constructor, so a stopped-at leaf that *is* a read, or a constructor-guarded
+-- projection of one -- field accessors and @fst@/@snd@ over a read, or over a
+-- variable a @draw@ bound to one -- holds the read's slots below the projected
+-- position, and gets a normal function per slot reading its (mu, sigma)
+-- ('readNNSlotNormal'). So the walk enters a @draw@ (an applied lambda) whose
+-- argument is such a read projection, and then must not let the read's
+-- variable condition the leaf: an @if@ whose condition reads it is opaque (a
+-- stopped-at expression), unless the condition reads it only through
+-- constructor tests (@isObj (ob1 sc)@), which condition no Continuous slot
+-- beyond the constructor its law is already given. A leaf that transforms a
+-- read (@px (ob1 sc) - 1.0@) is not a projection and stays refused, as does a
+-- position two arms produce.
 -- Functions are registered via the _component_ prefix mechanism in reduceIREnv.
 generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [IRFunGroup]
 generateTupleComponentNormalFunctions meta baseName expr =
   catMaybes
     [ generateComponentNormalFunction meta (baseName ++ "_normal" ++ concat path) (wrap leaf) (getTypeInfo leaf)
-    | (path, leaf) <- occurrences, not (null path), soleProducer path, isNothing (planReadOf meta leaf) ]
+    | (env, path, leaf) <- occurrences, not (null path), soleProducer path
+    , isNothing (readProjection env leaf)
+    , Set.null (freeVarsExpr leaf `Set.intersection` Set.fromList (map fst env)) ]
   -- A network read's fields are Gaussian by the read-logits plan itself (each field
-  -- conditional on its constructor), so every Continuous slot of its plan is one.
+  -- conditional on its constructor), so every Continuous slot of its plan below the
+  -- projected position is one.
   ++ [ componentNormalGroup fullName
-         (compileNormalWith (\m e -> readNNSlotNormal m k e) meta (wrap leaf))
-     | (path, leaf) <- occurrences, soleProducer path
-     , Just (_, plan, _) <- [planReadOf meta leaf]
-     , (suffix, k) <- continuousSlots plan
-     , not (null path && null suffix)
-     , let fullName = baseName ++ "_normal" ++ concat path ++ suffix ]
+         (compileNormalWith (\m e -> readNNSlotNormal m k e) meta (wrap readE))
+     | (env, path, leaf) <- occurrences, soleProducer path
+     , Just (readE, plan, acc) <- [readProjection env leaf]
+     , (slotSteps, k) <- continuousSlotPaths plan
+     , Just below <- [stripPrefix acc slotSteps]
+     , not (null path && null below)
+     , let fullName = baseName ++ "_normal" ++ concat path ++ concat below ]
   where
     (wrap, outBody) = stripOuter expr id
     stripOuter (Expr ti (Lambda name lambdaBody)) w = stripOuter lambdaBody (\e -> w (Expr ti (Lambda name e)))
     stripOuter e w = (w, e)
+    outerParams = lambdaParams expr
+    lambdaParams (Expr _ (Lambda name lambdaBody)) = Set.insert name (lambdaParams lambdaBody)
+    lambdaParams _ = Set.empty
     ctorNames = [ c | decl <- adtDecls meta, (c, _) <- constructors decl ]
-    occurrences = walk [] outBody
-    walk path e@(Expr _ f) = case f of
-      InjF (Named "TCons") [a, b] -> walk (path ++ ["_fst"]) a ++ walk (path ++ ["_snd"]) b
-      InjF (Named "left") [a]     -> walk (path ++ ["_left"]) a
-      InjF (Named "right") [a]    -> walk (path ++ ["_right"]) a
+    ctorTests = [ "is" ++ c | c <- ctorNames ]
+    fieldPaths = [ (field, "_" ++ c ++ "_" ++ show j)
+                 | decl <- adtDecls meta, (c, fields) <- constructors decl
+                 , (j, (field, _)) <- zip [0 :: Int ..] fields ]
+    occurrences = walk [] [] outBody
+    -- env: draw-bound variables whose value is a read projection, resolved.
+    walk env path e@(Expr _ f) = case f of
+      InjF (Named "TCons") [a, b] -> walk env (path ++ ["_fst"]) a ++ walk env (path ++ ["_snd"]) b
+      InjF (Named "left") [a]     -> walk env (path ++ ["_left"]) a
+      InjF (Named "right") [a]    -> walk env (path ++ ["_right"]) a
       InjF (Named c) args | c `elem` ctorNames ->
-        concat [ walk (path ++ ["_" ++ c ++ "_" ++ show j]) a | (j, a) <- zip [0 :: Int ..] args ]
-      IfThenElse _ a b -> walk path a ++ walk path b
-      _ -> [(path, e)]
-    soleProducer path = length [ () | (q, _) <- occurrences, q `isPrefixOf` path ] == 1
+        concat [ walk env (path ++ ["_" ++ c ++ "_" ++ show j]) a | (j, a) <- zip [0 :: Int ..] args ]
+      IfThenElse c a b | conditionOk env c -> walk env path a ++ walk env path b
+      Apply (Expr _ (Lambda x drawBody)) arg
+        | Just r <- readProjection env arg -> walk ((x, r) : env) path drawBody
+      _ -> [(env, path, e)]
+    soleProducer path = length [ () | (_, q, _) <- occurrences, q `isPrefixOf` path ] == 1
+    -- The network read a projection chain ends in, its plan, and the chain's path
+    -- in the plan's slot naming scheme.
+    readProjection env e@(Expr _ f) = case f of
+      ReadNN _ _
+        | Just (_, plan, _) <- planReadOf meta e
+        , freeVarsExpr e `Set.isSubsetOf` outerParams -> Just (e, plan, [])
+      Var x | Just r <- lookup x env -> Just r
+      InjF (Named "fst") [a] -> extend "_fst" <$> readProjection env a
+      InjF (Named "snd") [a] -> extend "_snd" <$> readProjection env a
+      InjF (Named n) [a] | Just step <- lookup n fieldPaths -> extend step <$> readProjection env a
+      _ -> Nothing
+      where extend step (r, plan, acc) = (r, plan, acc ++ [step])
+    -- A condition may read a draw-bound read only through constructor tests.
+    conditionOk env c = Set.null (freeVarsExpr (stripTests env c) `Set.intersection` Set.fromList (map fst env))
+    stripTests env (Expr ti f) = case f of
+      InjF (Named t) [a] | t `elem` ctorTests, isJust (readProjection env a) -> Expr ti (Constant (VBool True))
+      _ -> Expr ti (fmap (stripTests env) f)
 
 -- | Generate a single per-component normal function if the expression is extractable and PNormal/PLogNormal.
 -- Stored in normalFun field and registered via _component_ prefix in reduceIREnv (bare name, no suffix).
@@ -6737,9 +6783,20 @@ lookupADTConstructor :: [ADTDecl] -> String -> Maybe [(String, RType)]
 lookupADTConstructor adtDecls' name = listToMaybe
   [ fields | adt <- adtDecls', (cName, fields) <- constructors adt, cName == name ]
 
--- | Runtime test that @y@ carries constructor @nm@.
+-- | Runtime test that @y@ carries constructor @nm@; False on a wildcard.
+--
+-- A world guard is no evaluation fence: the optimizer's CSE binds a guard's
+-- subterms ahead of the conjunction that short-circuits them, so the
+-- not-@ANY@ guard 'planAnySplit' puts first does not keep @is<Ctor>@ off a
+-- wildcard sub-observation (task
+-- writelogits-dropped-for-read-passthrough-continuous-leaf). The test is
+-- total instead.
 planIsCtor :: String -> IRExpr -> IRExpr
-planIsCtor nm y = IRApply (IRVar ("is" ++ nm)) y
+planIsCtor nm y = IRIf (IRUnaryOp OpIsAny y) (IRConst (VBool False)) (planIsCtorRaw nm y)
+
+-- | @is<Ctor>@ itself, for a @y@ already known not to be a wildcard.
+planIsCtorRaw :: String -> IRExpr -> IRExpr
+planIsCtorRaw nm y = IRApply (IRVar ("is" ++ nm)) y
 
 -- | Read field @f@ (of type @fty@) off an observation that only carries
 -- constructor @nm@ on the branch the enclosing world guards.
@@ -6758,11 +6815,19 @@ planIsCtor nm y = IRApply (IRVar ("is" ++ nm)) y
 -- reader) -- 'isImpl' errors on a wildcard rather than answering it. A
 -- well-formed dummy answers False cleanly and the chain stays total. Which
 -- dummy is irrelevant: the enclosing guard discards the whole world.
+--
+-- A wildcard observation reads as a wildcard field (task
+-- writelogits-dropped-for-read-passthrough-continuous-leaf): a partial-@ANY@
+-- query puts @ANY@ where a field's sub-observation is read, and the read,
+-- floated out of the world that 'planAnySplit' guards, must not reach
+-- @is<Ctor>@ on it. Answering @ANY@ keeps the wildcard visible to the next
+-- level's split.
 planSafeField :: [ADTDecl] -> String -> String -> RType -> IRExpr -> Either String IRExpr
 planSafeField adtDecls' nm f fty y = do
   dummy <- maybe (Left ("no canonical value for field type " ++ show fty ++ " of constructor " ++ nm)) Right
                  (planCanonicalValue adtDecls' [] fty)
-  return (IRIf (planIsCtor nm y) (IRApply (IRVar f) y) (IRConst dummy))
+  return (IRIf (IRUnaryOp OpIsAny y) (IRConst VAny)
+                 (IRIf (planIsCtorRaw nm y) (IRApply (IRVar f) y) (IRConst dummy)))
 
 -- | Some well-formed value of an RType, used only as a discarded placeholder
 -- (see 'planSafeField'). For an ADT it prefers a nullary constructor, which is
@@ -6850,40 +6915,58 @@ planEvalRef meta env = go
 -- a recursive ADT is c^depth worlds, the scaling rule recorded for plan leaves
 -- in general. Marginalising the untaken constructors' field regions into one
 -- world instead would remove the exponent; it is not attempted here.
-planRefWorlds :: [ADTDecl] -> PlanRef -> [PLeafCon] -> PTarget -> Either String [PlanWorld]
+--
+-- A component's sub-observation (a tuple component, an ADT field) may be a
+-- wildcard at run time: a partial-@ANY@ query such as @Scene Nil ANY@ against
+-- a passed-through slice, which is what writeLogits asks for every
+-- constructor flag. Each component is therefore split on it ('planAnySplit'),
+-- as a constructed value's fields are, and the components combine through
+-- 'planFieldProduct', so a slice of N multi-world fields stays linear in N.
+-- The slice's own observation is never a wildcard: a whole @ANY@ is answered
+-- before the traversal, and an enclosing component split guards it.
+planRefWorlds :: [ADTDecl] -> PlanRef -> [PLeafCon] -> PTarget -> PlanM (Either String [PlanWorld])
 planRefWorlds _ (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
-  Right [pw1 (insertLeafCon
+  return (Right [pw1 (insertLeafCon
           (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
-          cons)]
+          cons)])
 planRefWorlds adtDecls' (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
-  wa <- planRefWorlds adtDecls' (PlanRef a off) cons (PTPoint (IRDestruct AcFst s))
-  wb <- planRefWorlds adtDecls' (PlanRef b (off + getSize a)) [] (PTPoint (IRDestruct AcSnd s))
-  return [ intersectPlanW x y | x <- wa, y <- wb ]
+  wa <- component (PlanRef a off) (IRDestruct AcFst s)
+  wb <- component (PlanRef b (off + getSize a)) (IRDestruct AcSnd s)
+  case sequence [wa, wb] of
+    Left why -> return (Left why)
+    Right wss -> Right . liveIntersects [pw1 cons] <$> planFieldProduct wss
+  where
+    component ref sub = fmap (planAnySplit sub) <$> planRefWorlds adtDecls' ref [] (PTPoint sub)
 planRefWorlds _ (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
   | all (null . snd) ctorPlans =
-      Right (adtFlagWorlds off ctorPlans [ (i, planIsCtor cn s) | (i, (cn, _)) <- zip [0..] ctorPlans ] cons)
-planRefWorlds adtDecls' (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) =
-  concat <$> mapM ctorWorlds (zip3 [0 ..] ctorPlans (adtCtorBases off ctorPlans))
+      return (Right (adtFlagWorlds off ctorPlans [ (i, planIsCtor cn s) | (i, (cn, _)) <- zip [0..] ctorPlans ] cons))
+planRefWorlds adtDecls' (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) = do
+  perCtor <- mapM ctorWorlds (zip3 [0 ..] ctorPlans (adtCtorBases off ctorPlans))
+  return (concat <$> sequence perCtor)
   where
-    ctorWorlds (ci, (cn, fps), cbase) = do
-      fields <- maybe (Left (missing cn)) Right (lookupADTConstructor adtDecls' cn)
-      -- The flag slot carries the guard, so a world for the wrong constructor
-      -- measures zero; the field reads below are individually safe anyway
-      -- ('planSafeField'), since floated bindings escape the guard.
-      let flagWorlds = adtFlagWorlds off ctorPlans [(ci, planIsCtor cn s)] cons
-      fieldWorlds <- mapM (fieldW cn cbase fps) (zip3 [0 ..] fps fields)
-      return (foldl (\acc ws -> [ intersectPlanW x y | x <- acc, y <- ws ]) flagWorlds fieldWorlds)
-    fieldW cn cbase fps (j, fp, (fname, fty)) = do
-      sub <- planSafeField adtDecls' cn fname fty s
-      planRefWorlds adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] (PTPoint sub)
+    ctorWorlds (ci, (cn, fps), cbase) = case lookupADTConstructor adtDecls' cn of
+      Nothing -> return (Left (missing cn))
+      Just fields -> do
+        -- The flag slot carries the guard, so a world for the wrong constructor
+        -- measures zero; the field reads below are individually safe anyway
+        -- ('planSafeField'), since floated bindings escape the guard.
+        let flagWorlds = adtFlagWorlds off ctorPlans [(ci, planIsCtor cn s)] cons
+        fieldWorlds <- mapM (fieldW cn cbase fps) (zip3 [0 ..] fps fields)
+        case sequence fieldWorlds of
+          Left why -> return (Left why)
+          Right wss -> Right . liveIntersects flagWorlds <$> planFieldProduct wss
+    fieldW cn cbase fps (j, fp, (fname, fty)) = case planSafeField adtDecls' cn fname fty s of
+      Left why -> return (Left why)
+      Right sub -> fmap (planAnySplit sub)
+                     <$> planRefWorlds adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] (PTPoint sub)
     missing cn = "constructor " ++ cn ++ " of ADT " ++ adtName ++ " is in the partition plan "
                  ++ "but not among the declared constructors"
 planRefWorlds _ (PlanRef Continuous off) cons (PTPoint s) =
-  Right [pw1 (insertLeafCon (PLeafPt off s const1 []) cons)]
+  return (Right [pw1 (insertLeafCon (PLeafPt off s const1 []) cons)])
 planRefWorlds _ (PlanRef Continuous off) cons (PTUpTo s) =
-  Right [pw1 (insertLeafCon (PLeafIvl off WNegInf (WFinite s)) cons)]
+  return (Right [pw1 (insertLeafCon (PLeafIvl off WNegInf (WFinite s)) cons)])
 planRefWorlds _ (PlanRef sub _) _ _ =
-  Left ("this plan slice cannot be matched against the observation directly: " ++ head (words (show sub)))
+  return (Left ("this plan slice cannot be matched against the observation directly: " ++ head (words (show sub))))
 
 -- | One peeled step of a monotone chain over a continuous plan leaf, in the
 -- direction the observation travels: observed value -> the step's operand.
@@ -7126,7 +7209,7 @@ planInvert meta env planBody target
         else planFactorFree meta env planBody target
 planInvert meta env planBody target
   | Just refE <- planEvalRef meta env planBody =
-      return (refE >>= \(ref, cons) -> planRefWorlds (adtDecls meta) ref cons target)
+      either (return . Left) (\(ref, cons) -> planRefWorlds (adtDecls meta) ref cons target) refE
 -- A plan-dependent value shared by several children of this node is
 -- enumerated once and the node traversed per value ('planShareSplit').
 --
@@ -7276,7 +7359,7 @@ planInvertNode meta env planBody target = case planBody of
         PTPoint y -> case mapM (\(f, fty) -> planSafeField (adtDecls meta) nm f fty y) fields of
           Left why -> return (Left why)
           Right subTargets -> do
-            fieldsE <- zipWithM (\a s -> planInvert meta env a (PTPoint s)) args subTargets
+            fieldsE <- zipWithM (\a s -> fmap (planAnySplit s) <$> planInvert meta env a (PTPoint s)) args subTargets
             case sequence fieldsE of
               Left why -> return (Left why)
               Right wss -> Right . map (planAddGuard (planIsCtor nm y)) <$> planFieldProduct wss

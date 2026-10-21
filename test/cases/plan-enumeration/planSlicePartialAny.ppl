@@ -1,0 +1,15 @@
+-- A draw-bound plan read passed through whole, queried with a wildcard in a
+-- field (task writelogits-dropped-for-read-passthrough-continuous-leaf). The
+-- plan traversal matches the slice against the observation field by field
+-- (planRefWorlds); a wildcard field is unconstrained and contributes its full
+-- marginal of 1. It used to reach `isNil` on the wildcard and raise, so every
+-- partial-ANY query of this program crashed, and so did its writeLogits.
+-- Plan per Object: [P(Nil), P(Obj), P(Red|Obj), P(Green|Obj), mu|px, sigma|px],
+-- fed ob1 = [0.3, 0.7, 0.4, 0.6, 1.5, 0.5], ob2 = [0.2, 0.8, 0.9, 0.1, -2.0, 3.0]:
+-- p(Scene (Obj ANY 1.5) ANY)       = 0.7 * phi(0) / 0.5             = 0.558519 (dim 1)
+-- p(Scene (Obj ANY ANY) (Obj Red -2.0)) = 0.7 * 0.8 * 0.9 * phi(0) / 3.0 = 0.067022 (dim 1)
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+data Scene = Scene ob1::Object, ob2::Object
+neural readScene :: (Symbol -> Scene)
+main sym = draw sc = readScene sym in sc

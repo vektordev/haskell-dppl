@@ -855,6 +855,7 @@ writeLogitsTests = testGroup "WriteLogits"
   , writeLogitsInvariant_probIndicesInBounds
   , deadArmTests
   , continuousUnderSumTests
+  , readPassthroughTests
   ]
 
 ------------------------------------------------------------------------
@@ -913,6 +914,58 @@ continuousUnderSumTests = testGroup "continuousUnderSum"
         Left err -> assertBool ("expected the missing-writeLogits refusal, got: " ++ err)
                                ("has no writeLogits function" `isInfixOf` err)
         Right v  -> assertFailure ("expected no writeLogits for a non-Gaussian payload, got " ++ show v)
+
+------------------------------------------------------------------------
+-- A network read's Gaussian slot reaching the output through a draw or a field
+-- accessor (task writelogits-dropped-for-read-passthrough-continuous-leaf). The
+-- position's (mu, sigma) given its constructor is the read slot's own, so the
+-- written vector copies it from the network's. A transformed slot, one an `if`
+-- conditions on, or one two arms produce stays refused.
+--
+-- The network is fed ob1 = [P(Nil)=0.3, P(Obj)=0.7, Red 0.4, Green 0.6, mu 1.5, sigma 0.5]
+-- and ob2 = [0.2, 0.8, 0.9, 0.1, -2.0, 3.0].
+
+readPassthroughTests :: TestTree
+readPassthroughTests = testGroup "readPassthrough"
+  [ wrote "drawIdentity" "draw sc = readScene sym in sc" (ob1 ++ ob2)
+  , wrote "accessorRebuild" "Scene (ob1 (readScene sym)) (ob2 (readScene sym))" (ob1 ++ ob2)
+  , wrote "drawSwap" "draw sc = readScene sym in Scene (ob2 sc) (ob1 sc)" (ob2 ++ ob1)
+  -- px of Nil has no law, so this program's own mass is P(ob1 = Obj); the written
+  -- vector is its law normalised, with ob1 certainly an Obj.
+  , wrote "recolourKeepsPosition" "draw sc = readScene sym in Scene (Obj Red (px (ob1 sc))) (ob2 sc)"
+      ([0.0, 1.0, 1.0, 0.0, 1.5, 0.5] ++ ob2)
+  , wrote "constructorTestGuard"
+      "draw sc = readScene sym in Scene (if isObj (ob1 sc) then Obj Green (px (ob1 sc)) else Nil) (ob2 sc)"
+      ([0.3, 0.7, 0.0, 1.0, 1.5, 0.5] ++ ob2)
+  , wrote "drawOfAccessor" "draw sc = readScene sym in draw o = ob2 sc in Scene o (Obj Red (px o))"
+      (ob2 ++ [0.0, 1.0, 1.0, 0.0, -2.0, 3.0])
+  , testCase "tupleProjections" $ do
+      prog  <- parseOrFail (unlines [ "neural readP :: (Symbol -> (Float, Float))"
+                                    , "main sym = draw p = readP sym in (snd p, fst p)" ])
+      slots <- writeLogitsSlots prog [mockLiteral [1.0, 2.0, 3.0, 4.0]]
+      checkVector "tupleProjections" [3.0, 4.0, 1.0, 2.0] slots
+  , refused "transformedLeaf" "draw sc = readScene sym in Scene (Obj Red (px (ob1 sc) - 1.0)) (ob2 sc)"
+  , refused "conditionOnTheSlot"
+      "draw sc = readScene sym in Scene (if px (ob1 sc) > 0.0 then Obj Red (px (ob1 sc)) else Nil) (ob2 sc)"
+  , refused "slotMixedAcrossArms"
+      "draw sc = readScene sym in Scene (if Uniform < 0.5 then Obj Red (px (ob1 sc)) else Obj Red (px (ob2 sc))) (ob2 sc)"
+  ]
+  where
+    ob1 = [0.3, 0.7, 0.4, 0.6, 1.5, 0.5]
+    ob2 = [0.2, 0.8, 0.9, 0.1, -2.0, 3.0]
+    header = [ "data Color = Red | Green"
+             , "data Object = Nil | Obj color::Color, px::Float"
+             , "data Scene = Scene ob1::Object, ob2::Object"
+             , "neural readScene :: (Symbol -> Scene)" ]
+    source body = unlines (header ++ ["main sym = " ++ body])
+    wrote label body expected = testCase label $ do
+      prog  <- parseOrFail (source body)
+      slots <- writeLogitsSlots prog [mockLiteral (ob1 ++ ob2)]
+      checkVector label expected slots
+    refused label body = testCase ("refuses." ++ label) $ do
+      prog <- parseOrFail (source body)
+      assertBool "expected no writeLogits for a slot that is not the read's own Gaussian"
+                 (not (writeLogitsGenerated prog mainTarget))
 
 ------------------------------------------------------------------------
 -- Corpus roundtrip invariants: writeLogits and the read-logits readers must be two

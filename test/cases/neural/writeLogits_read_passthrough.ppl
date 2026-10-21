@@ -1,0 +1,18 @@
+-- A network read's Gaussian slot passed through to the output by a draw or a
+-- field accessor (task writelogits-dropped-for-read-passthrough-continuous-leaf):
+-- each output position holding a projection of the read gets the read's own
+-- (mu, sigma) from a component normal function. Exact vectors are pinned in
+-- TestWriteLogitsProperties' readPassthrough group; here the endpoints feed
+-- WriteLogitsRoundtrip's DensityAgreement.
+-- Layout per Object: [P(Nil), P(Obj), P(Red|Obj), P(Green|Obj), mu|px, sigma|px].
+-- An unguarded `Obj Red (px (ob1 sc))` is left to the unit tests: its own law
+-- has mass P(ob1 = Obj) only (px of Nil has none), so density agreement with
+-- the normalised written vector does not apply to it.
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+data Scene = Scene ob1::Object, ob2::Object
+neural readScene :: (Symbol -> Scene)
+main sym = draw sc = readScene sym in sc
+rebuild sym = Scene (ob1 (readScene sym)) (ob2 (readScene sym))
+swap sym = draw sc = readScene sym in Scene (ob2 sc) (ob1 sc)
+guarded sym = draw sc = readScene sym in Scene (if isObj (ob1 sc) then Obj Green (px (ob1 sc)) else Nil) (ob2 sc)
