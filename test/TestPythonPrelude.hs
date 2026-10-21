@@ -17,6 +17,7 @@
 -- with a visible note without one.
 module TestPythonPrelude (pythonPreludeTests) where
 
+import Data.List (intercalate)
 import System.Directory (getCurrentDirectory)
 import System.Exit (ExitCode(..))
 import System.IO (hPutStr, hClose)
@@ -41,6 +42,8 @@ pythonPreludeTests = testGroup "PythonPrelude (python-codegen-silent-precision-t
       withTorch "batched dtype" $ \py -> probe py "batched-dtype"
   , testCase "a folded batched tail constant keeps all its digits" $
       withTorch "batched tail constant" batchedTailConstant
+  , testCase "a batched ANY list tail matches a longer constant list" $
+      withTorch "batched ANY list tail" batchedAnyTailList
   ]
 
 withTorch :: String -> (FilePath -> IO ()) -> IO ()
@@ -87,3 +90,41 @@ batchedTailConstant py = do
   case code of
     ExitSuccess -> return ()
     ExitFailure _ -> assertFailure (out ++ err)
+
+-- | head's inverse compares @Cons(sample, ANY)@ against each arm's list, and
+-- the batched runtime's list equality used to require equal lengths, so the
+-- arm whose constant list was longer than one element lost all its mass
+-- (docs-repo tasks batched-head-of-arm-dependent-list-drops-arm and
+-- batched-refuses-list-constants-with-data). Exercised here directly rather
+-- than through the corpus: @batched-vs-expected@ skips a program the batched
+-- fuzz arms certify, and this bug lived in a construct those arms did reach.
+-- One ADT-element and one Either-element repro (the two shrunk seeds), each
+-- checked against the interpreter's value.
+batchedAnyTailList :: FilePath -> IO ()
+batchedAnyTailList py = mapM_ check
+  [ ( "data Pt = MkPt x::Float, b::Bool\n\
+      \main = head (if Uniform > 0.88 then [MkPt 0.05 True, MkPt 6.2 False] else [MkPt 1.0 (Uniform < 0.86)])"
+    , [("MkPt(0.05, True)", 0.12), ("MkPt('ANY', True)", 0.8768), ("MkPt(1.0, True)", 0.7568)] )
+  , ( "main = head (if Uniform < 0.5 then [left True, right False] else [left (Uniform < 0.5)])"
+    , [("Left(True)", 0.75), ("Left(False)", 0.25)] ) ]
+  where
+    check :: (String, [(String, Double)]) -> IO ()
+    check (src, pts) = do
+      p <- either (assertFailure . ("parse: " ++) . show) return (tryParseProgram "" src)
+      env <- either (assertFailure . ("compile: " ++) . show) return (compile defaultCompilerConfig{batched = True} p)
+      srcLines <- either (assertFailure . ("batched codegen: " ++) . show) return (generateFunctionsBatched True env)
+      cwd <- getCurrentDirectory
+      let script = unlines $
+            [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")" ] ++ srcLines ++
+            [ "r = bucketed(main.forward, [" ++ intercalate ", " (map fst pts) ++ "])[0].tolist()"
+            , "want = " ++ show (map snd pts)
+            , "if any(abs(g - w) > 1e-9 for g, w in zip(r, want)):"
+            , "    raise SystemExit('forward answered %r, want %r' % (r, want))"
+            ]
+      (code, out, err) <- withSystemTempFile "batched_any_tail_list.py" $ \path h -> do
+        hPutStr h script
+        hClose h
+        readProcessWithExitCode py [path] ""
+      case code of
+        ExitSuccess -> return ()
+        ExitFailure _ -> assertFailure (src ++ ":\n" ++ out ++ err)

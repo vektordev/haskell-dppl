@@ -1,4 +1,5 @@
 slow
+batched
 p(((False, True), [1]))=(0.104, 0.0)
 p(((True, True), [1]))=(0.546, 0.0)
 p(((True, False), [1]))=(0.294, 0.0)
