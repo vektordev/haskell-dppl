@@ -310,6 +310,42 @@ the operand's own inverse steps run. Task
 `any-slot-through-injf-inverse-reaches-condition`; corpus
 `test/cases/set-witness/anySlotThrough*`.
 
+### One step around a subtree that does not transport
+
+`transportDirect` carries a whole subtree onto the variable's *one*
+occurrence in it. A step wrapped around a subtree with several occurrences
+-- an `if`-mixture, `(if x < 0.0 then 0.0 - x else x) + 0.0` -- has no such
+inverse, and a projection of a literal pair has no interval step (`fst (x,
+0.0) > 0.5`). Both used to be refused, and they were most of the
+rewrite-invariance net's logged frontier for its injf-identity and
+tuple-law families. The walk now has two more structural cases, mirrored in
+`worldsShape`:
+
+- **`fst (a, b)`, `snd (a, b)`** is inverted as `a` (resp. `b`) against the
+  same target. The other field's value is discarded, so its randomness
+  marginalises to one and its reads of the variable constrain nothing
+  (`fst (x, x > 0.5) > 0.5` is `P(x > 0.5)`).
+- **An InjF step `f (.., a, ..)`** whose operand `a` alone reads the variable,
+  the others deterministic, is the binding `let y = a in f (.., y, ..)`
+  without the `let` (`invertThroughStep`): the observation is transported
+  through the step alone, by `transportDirect` with `a`'s node in the
+  variable's role (a point picks up the step's change of variables, an
+  interval its direction, a wildcard target makes the set `WFull`), and each
+  resulting set is the target for inverting `a` onto the variable -- the
+  nested `let`'s stage 2 (`invertOntoValue`), so steps compose. The
+  structural InjFs (`==`, comparisons, connectives, `TCons`) keep their own
+  cases, and a field constructor is not a step here: its inverse consults no
+  sibling, which the residue factor makes up for only at a bare occurrence.
+  A step over two operands that both read the variable (`m * m`) stays
+  refused. The step trusts forward chaining's inverse, as `transportDirect`
+  does, so `sq`'s missing negative root (task
+  `sq-inverse-drops-nonpositive-preimages`) reaches it too.
+
+Both cases come after `transportDirect`, so a subtree that transported keeps
+its emitted code. Task `set-witness-walk-stops-at-identity-injf-wrapper`;
+corpus `test/cases/set-witness/setWitnessThroughStep*`, refusal pinned in
+`TestRejection`'s `SetWitnessNestedLet` group.
+
 ## Plan engine: entry points, several reads, case splits
 
 The plan engine is entered from a `draw` of a neural read **and from a call of
