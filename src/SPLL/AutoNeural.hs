@@ -370,7 +370,9 @@ makeProbRec sr adtDecls (EitherPlan a b) ix sample = (noAny sr sample
   (IRIf (IRDestruct AcIsLeft sample)
     (srTimes sr pIsLeft aP)
     (srTimes sr pIsRight bP)),
-  -- Is choosing the bc here correct, or should they be added?
+  -- Dim and branch count are both selected by the flag, never added or
+  -- weighted: exactly one arm is live, and a count is not a probability
+  -- (same rule as the ADTPlan case below).
   noAnyDim0 sample (IRIf (IRDestruct AcIsLeft sample) aDim bDim), noAny0 sample (IRIf (IRDestruct AcIsLeft sample) aBc bBc))
   where
     (aP, aDim, aBc) = makeProbRec sr adtDecls a (ix + 1) (IRDestruct AcFromLeft sample)
@@ -389,15 +391,14 @@ makeProbRec sr adtDecls (ADTPlan adtName plans) ix sample = (noAny sr sample p, 
     -- A lone constructor has no flag slot: its flag is statically 1, so the
     -- factor is dropped rather than multiplied in (see 'adtFlagSlots').
     constrGuard constr constrFlag v = IRIf (isConstr constr) (maybe v (\f -> srTimes sr (fromLinearSR sr f) v) constrFlag) (srZero sr)
-    -- The branch count is linear in every semiring, so its guard is too.
-    constrBcGuard constr constrFlag v = IRIf (isConstr constr) (maybe v (\f -> IROp OpMult f v) constrFlag) (IRConst $ VFloat 0)
-    -- The dim is a count, not a weight: it is selected by the constructor test
+    -- The dim and the branch count are counts, not weights: they are selected by the constructor test
     -- but never scaled by the constructor's flag probability (which, applied to
     -- a continuous field's dim 1, used to report a fractional dimension).
     constrDimGuard constr d = IRIf (isConstr constr) d (IRConst (VInt 0))
+    constrBcGuard constr bc' = IRIf (isConstr constr) bc' (IRConst (VFloat 0))
     constrProbFields constr cPlan cIx constrFlag =
       let (cp, cd, cbc) = makeProbADTConstr sr adtDecls cPlan constr cIx sample
-      in (constrGuard constr constrFlag cp, constrDimGuard constr cd, constrBcGuard constr constrFlag cbc)
+      in (constrGuard constr constrFlag cp, constrDimGuard constr cd, constrBcGuard constr cbc)
     constrProbsFields = map (uncurry4 constrProbFields) constrsWithPlanAndIxAndFlag
     -- Exactly one constructor test holds, so the semiring sum has one live term.
     p = sumAllSR sr [cp | (cp, _, _) <- constrProbsFields]
