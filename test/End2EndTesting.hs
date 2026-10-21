@@ -1601,12 +1601,13 @@ batchedRefusalTable =
   -- Either. Since heterogeneous M2 the tag is *structure*: it is part of the
   -- bucket signature, so the constructors, destructors and predicates are all
   -- in the fragment (`either`, `either_const`, `eitherDeconstruction`,
-  -- `nestedDeconstruction`, `either_both_cont` are eligible programs now). What
-  -- is refused is the dichotomy's other half -- `either_isleft` chooses which
-  -- *arm* to build from a coin flip (`if Uniform < 0.4 then left .. else
-  -- right ..`), so the sample's structure is per element and there is no bucket
-  -- to run it in.
-  , ("either_isleft",             "arms have different structure")
+  -- `nestedDeconstruction`, `either_both_cont` are eligible programs now). The
+  -- dichotomy's other half -- a value-dependent select between two arms, as
+  -- isLeft's inverse in `either_isleft` -- left this table with task
+  -- batched-value-dependent-structure-select: the batch is split at the
+  -- select ('pythonLibBatched.split_retry'). What the split does not cover (a
+  -- per-element structure select inside a tensor map's body) has no corpus
+  -- trigger; its refusal is a synthetic-IR row in "TestInternals".
   -- `eitherNeural`'s read-logits network (Either Int Bool) used to be refused here too --
   -- not for the Either shape itself (M2 handles that), but because its Bool
   -- arm's enum-index lookup built an `indexOf(x, [True, False])` call that

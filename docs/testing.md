@@ -685,7 +685,11 @@ typed fuzzer's and the IR generator's, `docs/fuzz-testing.md`). That list is
 held exact by `Slow.BackendAgreementCoverage`. The check stays keyed with the
 torch fingerprint, and a stderr line says how many programs it certified and
 which constructs keep the rest (today `AcTheta` and `AcSubtree`, the theta
-trees). The rest of the batched groups run regardless: the `batched` token's
+trees, and `Batched:structure split`). That last label is not an IR
+construct: the census adds it when the batched backend splits a body at a
+structure select (`usesStructureSplit`, `docs/batched-mode-pytorch-tensorizer.md`),
+runtime code the fuzz arms' construct count cannot see. It is never in the
+certified list, so a program that splits always runs its rows. The rest of the batched groups run regardless: the `batched` token's
 eligibility assertion, `gradients-nan-free` and
 `generate-density-matches-expected` (no arm compares gradients or batched
 generate), and the dense and topK checks in `BatchedPython (slow)`. `dense`
