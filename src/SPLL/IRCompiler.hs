@@ -3680,6 +3680,22 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
   paramRes <- guardedSubInference metaOp [appTest] (probF metaOp cumulative a finalInvExpr)
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   return (mapResult renVar (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDerivExpr paramRes)))
+-- A function value computed by an InjF with no probabilistic operand --
+-- @head ((\v3 -> [\v4 -> Uniform]) 1.0)@, @left (\r1 -> ..)@ -- would be
+-- answered by the two leaf equations below, which generate the value and
+-- compare it against the sample. A function is not a value a sample can be
+-- compared with: the CDF has no order to integrate along (it reached
+-- 'compareValueExpr''s internal-invariant 'error'), and an arrow-typed result
+-- is consumed as a probability CLOSURE (the arrow-lifted @if@ mixture, the
+-- arrow-typed probabilistic-argument 'Apply' arm), which an equality indicator
+-- is not -- and one whose body draws trips the central generate-backed guard,
+-- refusing the whole program, generate included. Refused here instead, as an
+-- absent variant (task function-value-compared-in-probability-mode).
+toIRInference _ _ (Expr TypeInfo {rType=rt, chainName=cn} (InjF (Named name) params)) _
+  | containsArrow rt, countProbParams params == 0, allParamsMeasurable params =
+  refuse cn ("'" ++ name ++ "' here yields a value containing a function (" ++ show rt ++ "), selected some"
+             ++ " other way than by a lambda, an if, or a call the compiler can see through; a function value"
+             ++ " is not compared against a query sample, so no probability or cumulative closure can be built for it")
 toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
   | countProbParams params == 0 && allParamsMeasurable params = do
   -- There is no probabilistic parameter
@@ -4406,9 +4422,45 @@ compareValueExpr _ (TADT n) _ _ = IRError (adtCdfMessage n)
 -- called. The callers' own CDFs, over ordered types, don't call it (task
 -- symbol-selected-by-helper-crashes-cdf-compile).
 compareValueExpr _ TSymbol _ _ = IRError symbolCdfMessage
+-- A function is unordered as well. The leaf sites that would compare a whole
+-- function value refuse statically (see the arrow-typed InjF equation of
+-- 'toIRInference'); what still gets here is a function in a component of a
+-- tuple or Either reached some other way, whose sample slot may be a wildcard
+-- an inverse put there -- then it bounds nothing, as for a scalar -- or a
+-- concrete closure, which no CDF is defined over (task
+-- function-value-compared-in-probability-mode).
+compareValueExpr sr (TArrow _ _) _ sample = anyBoundsNothing sr sample (IRError functionCdfMessage)
 
--- Invariant, not a refusal (task static-refusals-become-absent-variants): a CDF comparison is only built for first-order result types (an arrow reaching it is filed: fuzz-admission-oracle-bugs item 3).
+-- Invariant, not a refusal (task static-refusals-become-absent-variants): a CDF comparison is only built for first-order result types.
 compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
+
+-- | The runtime diagnostic for a cdf() query that reaches a function-valued component.
+functionCdfMessage :: String
+functionCdfMessage =
+  "cdf(): no cumulative distribution is defined over a function value -- functions "
+  ++ "carry no order to integrate along."
+
+-- | Whether a value of this type has a function anywhere inside it.
+containsArrow :: RType -> Bool
+containsArrow (TArrow _ _)      = True
+containsArrow (ListOf t)        = containsArrow t
+containsArrow (Tuple a b)       = containsArrow a || containsArrow b
+containsArrow (TEither a b)     = containsArrow a || containsArrow b
+containsArrow (TTensor _ t)     = containsArrow t
+containsArrow (GreaterType a b) = containsArrow a || containsArrow b
+-- Spelled out rather than a catch-all, so a new 'RType' constructor is a
+-- compile error here instead of a silent False.
+containsArrow TBool       = False
+containsArrow TInt        = False
+containsArrow TSymbol     = False
+containsArrow TFloat      = False
+containsArrow TUnit       = False
+containsArrow TThetaTree  = False
+containsArrow (TADT _)    = False
+containsArrow NullList    = False
+containsArrow BottomTuple = False
+containsArrow (TVarR _)   = False
+containsArrow SPLL.Typing.RType.NotSetYet = False
 
 -- | The runtime diagnostic for a cdf() query that reaches a Symbol-valued node.
 symbolCdfMessage :: String

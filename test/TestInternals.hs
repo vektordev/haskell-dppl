@@ -5380,6 +5380,67 @@ test_valueDependentRecursionSplits = testGroup "value-dependent recursion (batch
                    , sampleDomain = Nothing, maskVariantOf = Nothing }
       | (n, b) <- groups ] [] []
 
+-- | A prob/integ path may call a /pure callee/: a recursive deterministic
+-- helper's forward evaluator (task batched-prob-path-calls-recursive-helper-gen)
+-- or a helper's Gaussian parameters (task
+-- batched-prob-path-calls-helper-normal-params). A random recursive generator
+-- is still refused, and a pure callee no prob/integ path reaches is not
+-- emitted (so its body cannot cost the program its eligibility).
+test_batchedPureCallees :: TestTree
+test_batchedPureCallees = testGroup "pure callees of a prob path (batched)"
+  [ testCase "a recursive deterministic helper is called through its forward evaluator" $
+      expectSource (env [main_ (callOf "fact_gen"), genOnly "fact" factBody]) $ \src -> do
+        assertHas src "def evaluate(self, x):"
+        assertHas src "fact.evaluate(x)"
+        -- The evaluator is pure, so its value-dependent recursion is split
+        -- like a recursive forward's, not eagerly selected.
+        assertHas src "return split_retry(_split_kernel, x)"
+        assertHas src "fact.evaluate((x + -1.0))"
+  , testCase "a random recursive generator stays refused" $
+      case generateFunctionsBatched False (env [main_ (callOf "geo_gen"), genOnly "geo" geoBody]) of
+        Left msg -> assertBool ("unexpected refusal: " ++ msg)
+                      ("calls geo_gen, which is not a forward/integrate method" `isInfixOf` msg)
+        Right ls -> assertFailure ("batched mode admitted a prob path drawing from a random generator:\n" ++ unlines ls)
+  , testCase "an unreached evaluator is not emitted" $
+      -- Only the generate of `user` calls `fact`: no prob path reads it.
+      expectSource (env [ main_ (IRConst (VFloat 1.0)), genOnly "fact" factBody
+                        , genOnly "user" (IRLambda "x" (IRApply (IRVar "fact_gen") (IRVar "x"))) ]) $ \src ->
+        assertBool ("an evaluator nothing calls was emitted:\n" ++ src) (not ("def evaluate" `isInfixOf` src))
+  , testCase "a helper's Gaussian parameters are emitted and called" $
+      expectSource (env [main_ (IRDestruct AcFst (IRApply (IRVar "sh_normal") (IRVar "x"))), normalOnly "sh" shBody]) $ \src -> do
+        assertHas src "def normal_params(self, mu):"
+        assertHas src "sh.normal_params(x)"
+  , testCase "a nullary helper's Gaussian parameters are called, not referenced" $
+      expectSource (env [main_ (IRDestruct AcFst (IRVar "sh_normal")), normalOnly "sh" (IRConstruct TgTuple [IRConst (VFloat 0.0), IRConst (VFloat 1.0)])]) $ \src ->
+        assertHas src "(sh.normal_params)()"
+  ]
+  where
+    expectSource e k = case generateFunctionsBatched False e of
+      Left msg -> assertFailure ("batched mode refused: " ++ msg)
+      Right ls -> k (unlines ls)
+    assertHas src needle = assertBool ("no `" ++ needle ++ "` in:\n" ++ src) (needle `isInfixOf` src)
+    -- main sample x = sample == <rhs>
+    callOf g = IRApply (IRVar g) (IRVar "x")
+    main_ rhs = (group "main") { probFun = Just (IRLambda "sample" (IRLambda "x"
+                  (IRSelect (IROp OpEq (IRVar "sample") rhs) (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0)))), "") }
+    genOnly n b = (group n) { genFun = Just (b, "") }
+    normalOnly n b = (group n) { normalFun = Just (b, "") }
+    -- fact x = if x < 1.5 then 1.0 else fact (x - 1) * x
+    factBody = IRLambda "x" (IRIf (IROp OpLessThan (IRVar "x") (IRConst (VFloat 1.5)))
+                 (IRConst (VFloat 1.0))
+                 (IROp OpMult (IRApply (IRVar "fact_gen") (IROp OpPlus (IRVar "x") (IRConst (VFloat (-1.0))))) (IRVar "x")))
+    -- geo x = if Uniform < 0.5 then x else geo (x + 1)
+    geoBody = IRLambda "x" (IRIf (IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.5)))
+                 (IRVar "x")
+                 (IRApply (IRVar "geo_gen") (IROp OpPlus (IRVar "x") (IRConst (VFloat 1.0)))))
+    -- sh mu = (mu, 2.0)
+    shBody = IRLambda "mu" (IRConstruct TgTuple [IRVar "mu", IRConst (VFloat 2.0)])
+    group n = IRFunGroup { groupName = n, refusedVariants = []
+                         , probFun = Nothing, genFun = Nothing, integFun = Nothing
+                         , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
+                         , sampleDomain = Nothing, maskVariantOf = Nothing }
+    env groups = IREnv groups [] []
+
 -- ======== Utils.splitByString ========
 
 -- These two properties are deliberately *not* @prop_@-prefixed. This module's
@@ -6051,6 +6112,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_irConstructDestructInterpreterDispatch
   , test_hasTailDescentRecognisesNewShape
   , test_valueDependentRecursionSplits
+  , test_batchedPureCallees
   , reservedNameTests
   ]
 
