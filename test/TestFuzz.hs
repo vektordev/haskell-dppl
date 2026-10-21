@@ -2092,8 +2092,7 @@ argGen adtDecls depth rt = case rt of
 -- its ticket is fixed.
 knownBatchedFamilies :: [(String, String)]
 knownBatchedFamilies =
-  [ ("No match in field accessor", "batched-ctor-test-behind-eq-evaluates-accessor")
-  , ("'<' not supported between instances of 'str' and", "cdf-fst-of-nested-tuple-indexes-any")
+  [ ("'<' not supported between instances of 'str' and", "cdf-fst-of-nested-tuple-indexes-any")
   ]
 
 knownBatchedFamily :: Disagreement -> Maybe String
