@@ -553,6 +553,26 @@ def toList(xs):
     back = ConsInferenceList(x, back)
   return back
 
+def mapList(f, lst):
+  # List map over a bucket-uniform spine: the length is structure (the same for
+  # every row of the bucket), so this is a plain Python walk applying f to each
+  # [B]-leaf element. Iterative, like toList, so a long spine cannot hit the
+  # recursion limit. An ANY list has no elements to map over.
+  if isinstance(lst, AnyInferenceList):
+    raise Exception("Cannot map AnyLists")
+  vals = [f(x) for x in lst]
+  return toList(vals)
+
+def listProd(lst):
+  # Product of a bucket-uniform list's [B] leaves (the probability variant of a
+  # list map multiplies the per-element Jacobians). The empty product is 1.
+  if isinstance(lst, AnyInferenceList):
+    raise ValueError("Element not found in list")
+  acc = 1
+  for x in lst:
+    acc = acc * x
+  return acc
+
 def indexOf(sample, lst):
   # The enumeration-index lookup SPLL.AutoNeural.indexOf builds over a constant
   # list (task batched-refuses-list-constants-with-data). The optimizer folds

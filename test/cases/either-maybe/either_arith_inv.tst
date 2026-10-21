@@ -1,4 +1,5 @@
 slow
+batched
 p(Left 2.0, Left 1.0)=(1.0, 0.0)
 p(Left 3.0, Left 1.0)=(0.0, 0.0)
 p(Right 0.0, Right 0.0)=(1.0, 0.0)

@@ -1605,7 +1605,11 @@ batchedRefusalTable =
   -- the runtime's cons structure over constant leaves), so
   -- `listLiteralDeconstruction` and `andInsideListOverDraws` (the `[ANY]` a
   -- per-mask variant introduces) left this table and declare `batched`.
-  [ ("map",                       "list map (IRMap)")
+  -- `map`, `mapMultList`, `partialInjFMapPlus` and `wrappedHoAdt` left this
+  -- table with task batched-refuses-list-map, and `either_arith_inv`, `injApply`
+  -- and `twiceApplication` with task batched-refuses-inner-lambda: a list map is a
+  -- Python walk over the bucketed spine and an inner lambda a Python closure.
+  -- They declare `batched`.
   -- Either. Since heterogeneous M2 the tag is *structure*: it is part of the
   -- bucket signature, so the constructors, destructors and predicates are all
   -- in the fragment (`either`, `either_const`, `eitherDeconstruction`,
@@ -1645,7 +1649,7 @@ batchedRefusalTable =
   -- which is the *other* reason 'recOffenders' still finds for it: the call
   -- does not descend into the tail of a list argument, since dice's recursion
   -- is genuinely value-dependent (a coin flip), not structure-directed.
-  , ("dice",                      "calls dice_prob recursively without descending into the tail of a list argument")
+  [ ("dice",                      "calls dice_prob recursively without descending into the tail of a list argument")
   -- a prob/integ path reaching a method batched mode does not emit: a
   -- *recursive* generator, which 'inlineDetGenCalls' cannot beta-reduce away
   , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
@@ -1653,9 +1657,6 @@ batchedRefusalTable =
   -- bodies (twiceApplication's forward/integrate *do* reduce; only its
   -- generate body keeps the literal lambda -- the accepted cost of generate's
   -- hard refusal rule, see 'generateFunctionsBatched')
-  , ("either_arith_inv",          "main's forward uses a construct outside the tensor fragment: inner lambda (IRLambda)")
-  , ("injApply",                  "main's integrate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
-  , ("twiceApplication",          "main's generate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
   -- Refusals pinned as open bugs under universal batched admission (task
   -- batched-admission-universal), one row per refusal class without a row
   -- above. Each fails, as every row here does, the day batched mode accepts
