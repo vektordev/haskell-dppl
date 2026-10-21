@@ -1488,10 +1488,6 @@ knownDisagreements =
       (AsIf (\b -> irMap (backendLogSumExp b)))
       (repro [("a0", ITFloat)] ITFloat
          (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat (-1 / 0))]]) [VFloat (1 / 0)])
-  , KnownFamily "logsumexp-reduction-nan-and-infinity-differ-across-engines" ["python"]
-      (AsIf (\b -> irMap (backendLogSumExp b)))
-      (repro [("a0", ITFloat)] ITFloat
-         (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRConst (VFloat (-1 / 0)), IRVar "a0"]]) [VFloat (0 / 0)])
   , KnownFamily "opsign-nan-negative-zero-and-int-results-differ-across-engines" ["python", "julia"]
       (AsIf (\b -> irMap (backendSign b)))
       (repro [("a0", ITFloat), ("a1", ITFloat)] (ITTuple ITBool ITFloat)
@@ -1996,25 +1992,18 @@ countWhere test t = gtE (IRBuiltin (BReduce ROpAdd 0)
 -- | Log-sum-exp as each text backend reduces it: around its @max@ of the
 -- terms, so a +inf term makes @exp(inf - inf)@ and the sum NaN (where the
 -- interpreter, folding pairwise, answers +inf when no other term is finite).
--- Python's @max@ also skips a NaN that is not in front, so terms that are
--- all -inf or NaN, the first not NaN, give -inf (the interpreter, and
--- Julia, answer NaN).
+-- (A NaN term gives NaN on every engine, pinned by its own test.)
 backendLogSumExp :: String -> IRExpr -> IRExpr
-backendLogSumExp backend e = case e of
+backendLogSumExp _ e = case e of
   IRBuiltin (BReduce ROpLogSumExp 0) [t] ->
     IRLetIn "lse_t" t $ IRLetIn "lse_r" (IRBuiltin (BReduce ROpLogSumExp 0) [IRVar "lse_t"]) $
-      (if backend == "python" then IRIf pythonMaxIsNegInf negInf else id) $
-        IRIf (countWhere (\x -> IROp OpEq x posInf) (IRVar "lse_t")) (IRConst (VFloat (0 / 0)))
+      IRIf (countWhere (\x -> IROp OpEq x posInf) (IRVar "lse_t")) (IRConst (VFloat (0 / 0)))
              -- @m + log(...)@ is never a negative zero; the interpreter's
              -- fold answers a lone -0 term as itself.
              (IROp OpPlus (IRVar "lse_r") (IRConst (VFloat 0)))
   _ -> e
   where
     posInf = IRConst (VFloat (1 / 0))
-    negInf = IRConst (VFloat (-1 / 0))
-    pythonMaxIsNegInf =
-      IROp OpAnd (IRUnaryOp OpNot (isNaNE (IRBuiltin (BIndex 0) [IRVar "lse_t", IRConst (VInt 0)])))
-                 (IRUnaryOp OpNot (countWhere (\x -> IROp OpAnd (IROp OpEq x x) (IRUnaryOp OpNot (IROp OpEq x negInf))) (IRVar "lse_t")))
 
 -- | The family a disagreement belongs to, if any: each family alone, then
 -- every alternative semantics of its backend at once (a case can hit two).
@@ -2659,6 +2648,23 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
       julia <- findExecutable "julia"
       jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, [([], o)])]) julia
       assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- julia-logspace-enumerated-sum-off-by-log2-with-nan: a NaN term in a
+  -- log-sum-exp reduction makes the whole reduction NaN on every engine,
+  -- whatever the other terms are (finite, equal, -inf, NaN too).
+  , testCase "a NaN term makes a log-sum-exp reduction NaN on the interpreter, scalar Python and Julia" $ do
+      julia <- findExecutable "julia"
+      let nan = IRVar "a0"
+          lit x = IRConst (VFloat x)
+          lse ts = IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed (length ts)]) ts]
+          terms = [ [nan, lit 0.5], [lit 0.5, nan], [nan, nan], [lit (-1 / 0), nan], [nan, lit (-1 / 0)]
+                  , [lit 0.5, lit 0.5, nan], [nan, lit 0.5, lit 0.5], [lit 0.5, nan, lit 0.5], [lit 1, lit 1, lit (-1 / 0), nan] ]
+      mapM_ (\ts -> do
+        let c = repro [("a0", ITFloat)] ITFloat (lse ts) [VFloat (0 / 0)]
+        o <- interpretIRCase c [VFloat (0 / 0)]
+        (_, pyD) <- runIRCasesPython [(c, [([VFloat (0 / 0)], o)])]
+        assertEqual ("python disagreements on " ++ show ts) [] (map idWhy pyD)
+        jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, [([VFloat (0 / 0)], o)])]) julia
+        assertEqual ("julia disagreements on " ++ show ts) [] (map idWhy jlD)) terms
   -- Formerly a knownDisagreements family: a select whose arms evaluate to
   -- tuples without being tuple literals reached torch.where as a whole T.
   , testCase "batched: a select over two tuple constants selects leaf by leaf (batched-guarded-select-over-tuple-result)" $ do
