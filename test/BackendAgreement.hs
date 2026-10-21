@@ -49,6 +49,7 @@ module BackendAgreement
   , AgreementCase(..)
   , decodeSample
   , supportCheck
+  , interpreterGenerateFails
   , runPythonBatchWith
   , runJuliaBatchWith
   , Disagreement(..)
@@ -102,11 +103,12 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
-import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC, compile)
+import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC, runGenC, compile)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.ReservedNames (componentNormalName)
 import IRInterpreter (generateDet)
 import SPLL.Typing.RType (RType(..))
+import Control.Monad (replicateM)
 import Control.Monad.Random (evalRand)
 import System.Random (mkStdGen)
 import qualified SPLL.CodeGenPyTorch as Py
@@ -597,10 +599,52 @@ runBatch backend mangle emit ext driver runDriver cases =
     judgeSample c q ia ba = case (q, ba) of
       (QGen _ rt iargs, Sampled toks) -> do
         verdict <- supportCheck mangle c rt iargs toks
-        return $ case verdict of
-          Left why -> (Just (Disagreement backend (acProgram c) q ia (BadSample why)), takeWhile (/= ':') why)
-          Right outcome -> (Nothing, outcome)
+        case verdict of
+          Left why
+            | "undecodable sample" `isPrefixOf` why -> excusedIfPartial c iargs (BadSample why) (takeWhile (/= ':') why)
+            | otherwise -> return (Just (Disagreement backend (acProgram c) q ia (BadSample why)), takeWhile (/= ':') why)
+          Right outcome -> return (Nothing, outcome)
+      (QGen _ _ iargs, Raised _) -> excusedIfPartial c iargs ba "backend raised"
       _ -> return (Just (Disagreement backend (acProgram c) q ia ba), "backend raised")
+      where
+        -- 'genQueries' only asks where the interpreter's reference draws
+        -- all succeeded, but a partial destructor on a rarely taken path
+        -- (@head (tail [[0]])@ in a 12% arm) slips past ten draws, and the
+        -- backend's own seed then takes it: Julia raises, Python returns
+        -- @None@ (an undecodable sample). That is the program failing, on
+        -- both engines, not a disagreement (task
+        -- slow-fuzz-seed-findings-2026-10-06, seed 194375). An off-support
+        -- sample that decodes is still judged.
+        excusedIfPartial c' iargs a label = do
+          alsoFails <- interpreterGenerateFails c' iargs
+          return $ if alsoFails
+            then (Nothing, "backend failed where the interpreter's generate also fails")
+            else (Just (Disagreement backend (acProgram c') q ia a), label)
+
+-- | Does the interpreter's generate fail (raise, or answer a runtime 'VError'
+-- such as @head []@) on some draw of 'generateFailureDraws' at @iargs@? Asked
+-- only once a backend has raised at a 'QGen', to tell a rarely taken failing
+-- path the reference draws missed from a backend bug. A timeout counts as no
+-- failure found, so the disagreement stands.
+interpreterGenerateFails :: AgreementCase -> [IRValue] -> IO Bool
+interpreterGenerateFails c iargs = do
+  r <- try (timeout generateFailureMicros (evaluate (forced
+         (evalRand (replicateM generateFailureDraws (runGenC (acProgram c) (acEnv c) iargs)) (mkStdGen 1)))))
+  case r of
+    Left (e :: SomeException) | Just (SomeAsyncException _) <- fromException e -> throwIO e
+                              | otherwise -> return True
+    Right Nothing -> return False
+    Right (Just vs) -> return (any isFailure vs)
+  where
+    forced a = length (show a) `seq` a
+    isFailure (VError _) = True
+    isFailure _ = False
+
+-- | Draws and wall clock for 'interpreterGenerateFails': a path taken with
+-- probability 1% is missed by all 1000 draws with probability 4e-5.
+generateFailureDraws, generateFailureMicros :: Int
+generateFailureDraws = 1000
+generateFailureMicros = 5 * 1000 * 1000
 
 -- | Decode a backend's sample (the drivers' @_ser@ tokens) as a value of the
 -- given type, or 'Nothing' where the tokens do not spell one: a @?@ token (a
