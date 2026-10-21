@@ -9,7 +9,8 @@ module SPLL.CodeGenPyTorch (
   pyMangle,
   groupClassName,
   pyDouble,
-  pythonKeywords
+  pythonKeywords,
+  irFreeVars
 ) where
 
 import SPLL.IntermediateRepresentation

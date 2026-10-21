@@ -1,0 +1,7 @@
+-- A recursion whose depth each element decides: h recurses floor(k / 0.25)
+-- times, and k is the drawn first component, so on the probability path the
+-- recursion guard k < 0.25 reads the queried sample, and in generate it reads
+-- a per-element draw. Batched mode splits the batch at that guard in both
+-- (task batched-value-dependent-recursion).
+h k = if k < 0.25 then Normal else 1.0 + h (k - 0.25)
+main = draw k = Uniform in (k, h k)

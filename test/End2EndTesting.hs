@@ -1641,26 +1641,25 @@ batchedRefusalTable =
   -- prob/integ recursion. Structure-directed recursion is admitted since M1
   -- (its depth is uniform within a shape bucket, so it runs unchanged over [B]
   -- leaves -- `gaussList` is an eligible program now, checked in
-  -- 'batchedPythonTests'); what stays refused is *value*-dependent recursion,
-  -- where eager both-arm select semantics would not terminate.
-  -- M4 (ANY-ness is a structural marker) makes one of dice's recursive call
-  -- sites newly recognised as guarded (it sits under an isAny check, which is
-  -- now correctly structural) -- true and unrelated to why it stays refused,
-  -- which is the *other* reason 'recOffenders' still finds for it: the call
-  -- does not descend into the tail of a list argument, since dice's recursion
-  -- is genuinely value-dependent (a coin flip), not structure-directed.
-  [ ("dice",                      "calls dice_prob recursively without descending into the tail of a list argument")
+  -- 'batchedPythonTests'). Value-dependent recursion left this table with task
+  -- batched-value-dependent-recursion: the batch is split at every
+  -- value-dependent branch guarding the recursion ('splitStructureSelects',
+  -- and 'splitGenRecursion' for generate), so each element recurses as deep as
+  -- on the scalar backend -- `dice` (bounded by its batch-uniform parameter)
+  -- and `recursionDepthFromSample` (whose guard reads the sample) batch. An
+  -- entry call from outside the recursion (`nestedIfEmptyListIntCdf`'s
+  -- `main = rec`) is no longer judged as recursion. What the split does not
+  -- reach (a recursive call under a select inside a tensor map's body) has no
+  -- corpus trigger; its refusal is a synthetic row in "TestInternals".
   -- a prob/integ path reaching a method batched mode does not emit: a
   -- *recursive* generator, which 'inlineDetGenCalls' cannot beta-reduce away
-  , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
+  [ ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
   -- Refusals pinned as open bugs under universal batched admission (task
   -- batched-admission-universal), one row per refusal class without a row
   -- above. Each fails, as every row here does, the day batched mode accepts
   -- the program; the row then leaves the table with its ticket.
   -- task batched-prob-path-calls-helper-normal-params
   , ("normalThroughFunctionNested", "a prob/integ path calls shifted_normal, which is not a forward/integrate method")
-  -- task batched-recursion-entry-call-needs-descent
-  , ("nestedIfEmptyListIntCdf",   "main_prob calls rec_prob recursively without descending into the tail of a list argument")
   ]
 
 -- ===========================================================================

@@ -3431,15 +3431,17 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
         (IRIf (IROp OpEq (IRVar "xs") (IRConst (VList EmptyList)))
               (IRConst (VList EmptyList))
               (IRConstruct TgCons [IRVar "x", IRConst (VList EmptyList)]))
-  -- Generate-only recursion ('hasGenCycle'): unreachable from the corpus,
-  -- because a recursive program's *prob* path trips 'checkCallGraph' first
-  -- (e.g. dice). Driven through 'generateFunctionsBatched' on a group that has
-  -- only a generate method, so there is no prob/integ root to check at all.
-  , testCase "a self-recursive generate body is refused" $
-      case generateFunctionsBatched False (recGenEnv (IRVar "rec_gen")) of
-        Right _  -> assertFailure "batched mode accepted a self-recursive generate body"
-        Left msg -> assertBool ("wrong diagnostic for recursive generate: " ++ msg)
-                      ("generate function recurses" `isInfixOf` msg)
+  -- Generate-only recursion ('hasGenCycle'), driven through
+  -- 'generateFunctionsBatched' on a group that has only a generate method, so
+  -- there is no prob/integ root to check at all. Task
+  -- batched-value-dependent-recursion: a recursion guarded by a per-element
+  -- draw is split ('splitGenRecursion'), each half of the batch running only
+  -- the arm it takes, rather than refused.
+  , testCase "a recursive generate body under a per-element branch is split, not refused" $
+      case generateFunctionsBatched False (recGenEnv (IRSelect coin (IRSample IRNormal) (IRVar "rec_gen"))) of
+        Left msg -> assertFailure ("batched mode refused a split-able recursive generate: " ++ msg)
+        Right ls -> assertBool ("no gen_branch in the emitted generate: " ++ unlines ls)
+                      (any ("gen_branch(_gm0, _batchN, (lambda _batchN: randn(_batchN))" `isInfixOf`) ls)
   , testCase "a non-recursive generate body of the same shape is accepted" $
       case generateFunctionsBatched False (recGenEnv (IRSample IRNormal)) of
         Right _  -> return ()
@@ -3805,6 +3807,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       Right () -> return ()
       Left msg -> assertFailure ("batchedGuard refused a node inside the fragment: " ++ msg)
     universeIR x = x : concatMap universeIR (getIRSubExprs x)
+    coin = IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.5))
     isSplitVar (IRVar "split_uniform") = True
     isSplitVar _ = False
     -- A tensor map over a constant domain whose body chooses between two
@@ -5304,27 +5307,72 @@ test_irConstructDestructInterpreterDispatch = testCase
 test_hasTailDescentRecognisesNewShape :: TestTree
 test_hasTailDescentRecognisesNewShape = testCase
   "a recursive call descending via IRDestruct AcTail is accepted" $ do
-    -- The behaviour under test: a tail descent must be recognised.
+    -- The behaviour under test: a tail descent must be recognised. The call
+    -- sits under a per-element select inside a tensor map's body, which the
+    -- split pass does not reach, so only the descent admits it.
     case generateFunctionsBatched False (recEnv (IRDestruct AcTail (IRVar "sample"))) of
       Left msg -> assertFailure ("batched mode refused a legitimate IRDestruct AcTail descent: " ++ msg)
       Right _  -> return ()
     -- Negative control: an undescended recursive argument is still refused, so
-    -- the two acceptances above are not merely a guard that has gone slack.
+    -- the acceptance above is not merely a guard that has gone slack.
     case generateFunctionsBatched False (recEnv (IRVar "sample")) of
       Left msg -> assertBool ("wrong diagnostic for an undescended recursive call: " ++ msg)
-                    ("without descending into the tail" `isInfixOf` msg)
-      Right _  -> assertFailure "batched mode accepted a non-descending recursive call"
+                    ("under a value-dependent branch the batch is not split at" `isInfixOf` msg)
+      Right _  -> assertFailure "batched mode accepted a non-descending recursive call under an unsplit select"
   where
     recEnv tailArg = IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IROp OpEq (IRVar "sample") (IRConst (VList EmptyList)))
                             (IRConst (VFloat 1.0))
-                            (IRApply (IRVar "main_prob") tailArg)), "")
+                            (IRBuiltin (BReduce ROpAdd 0)
+                              [IRBuiltin BMap
+                                [ IRLambda "d" (IRSelect (IROp OpGreaterThan (IRVar "d") (IRDestruct AcHead (IRVar "sample")))
+                                                        (IRConst (VFloat 0.0))
+                                                        (IRApply (IRVar "main_prob") tailArg))
+                                , IRBuiltin (BTensor [EFixed 2]) [IRConst (VFloat 1.0), IRConst (VFloat 2.0)] ]])), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
       [] []
+
+-- | Task batched-value-dependent-recursion: a recursive prob call under a
+-- per-element select is split there ('splitStructureSelects'), so it runs
+-- only for the elements that take its arm and terminates as the scalar
+-- recursion does; and an entry call into a recursion from outside it is not
+-- judged as recursion at all (task batched-recursion-entry-call-needs-descent).
+test_valueDependentRecursionSplits :: TestTree
+test_valueDependentRecursionSplits = testGroup "value-dependent recursion (batched)"
+  [ testCase "a recursive prob call under a per-element select is split" $
+      case generateFunctionsBatched False (env [("main", recBody)]) of
+        Left msg -> assertFailure ("batched mode refused a split-able value-dependent recursion: " ++ msg)
+        Right ls -> do
+          let src = unlines ls
+          assertBool ("no split_uniform guard in: " ++ src) ("split_uniform(" `isInfixOf` src)
+          assertBool ("the method does not run under split_retry: " ++ src) ("return split_retry(" `isInfixOf` src)
+  , testCase "an entry call into a recursion is not judged as recursion" $
+      -- `entry` calls the recursive `main` unconditionally and without any
+      -- descent; only calls inside main's own cycle are recursion.
+      case generateFunctionsBatched False
+             (env [("main", recBody), ("entry", IRLambda "sample" (IRApply (IRApply (IRVar "main_prob") (IRVar "sample")) (IRConst (VFloat 3.0))))]) of
+        Left msg -> assertFailure ("batched mode refused an entry call into a recursion: " ++ msg)
+        Right _  -> return ()
+  ]
+  where
+    -- main sample x = if x < sample then 0.5 else main sample (x + 1): the
+    -- guard reads the per-element sample, the recursion argument descends
+    -- into no list.
+    recBody = IRLambda "sample" (IRLambda "x"
+      (IRSelect (IROp OpLessThan (IRVar "x") (IRVar "sample"))
+                (IRConst (VFloat 0.5))
+                (IRApply (IRApply (IRVar "main_prob") (IRVar "sample"))
+                         (IROp OpPlus (IRVar "x") (IRConst (VFloat 1.0))))))
+    env groups = IREnv
+      [ IRFunGroup { groupName = n, refusedVariants = []
+                   , probFun = Just (b, ""), genFun = Nothing, integFun = Nothing
+                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
+                   , sampleDomain = Nothing, maskVariantOf = Nothing }
+      | (n, b) <- groups ] [] []
 
 -- ======== Utils.splitByString ========
 
@@ -5996,6 +6044,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_headHashDistinguishesConTagsAndAccessors
   , test_irConstructDestructInterpreterDispatch
   , test_hasTailDescentRecognisesNewShape
+  , test_valueDependentRecursionSplits
   , reservedNameTests
   ]
 

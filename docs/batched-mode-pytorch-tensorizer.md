@@ -57,8 +57,8 @@ answer per-element masks through `torch.where`. The emitted constructor
 classes carry `_enum`/`_enum_tag` only when collapsed: the compiler emits
 every enumeration collapsed first, and the fallback is per ADT. A refusal
 caused by a collapsed enumeration's test (e.g. one choosing between two list
-shapes, which has no `torch.where` form, or leaving a recursive call without
-a structural guard) carries the ADTs whose tests the offending condition
+shapes, which has no `torch.where` form, or leaving a recursive call under
+an unsplit select) carries the ADTs whose tests the offending condition
 reads, directly or through a `let` (`Refusal`'s `refusalBlame`, from
 `enumBlame`); those are keyed back into the signature and the program
 re-emitted, so the other enumerations stay collapsed. A refusal no collapsed
@@ -156,13 +156,38 @@ labels a program that splits (`CertifiedCensus.structureSplitLabel`), so its
 rows always run on the batched backend. Docs-repo task
 `batched-value-dependent-structure-select`.
 
+**Recursion.** Within a bucket a structural `if` is Python control flow, so a
+recursion it guards runs only for the elements that take its arm. Under an
+eager `torch.where` arm a recursive call runs for every element, and unless
+it descends into a list tail (the bucket's uniform length then bounds it) it
+never stops. So the split also covers every value-dependent branch above a
+call into the method's own recursive component (`sRecCallees`, read off
+`methodSCCs` by `enterMethod`) that does not descend into a list tail:
+`splitStructureSelects` splits it as above. A batch-uniform guard (`dice`'s
+`x == 1.0`, `x` a shared parameter) never mixes, and a per-element one
+(`conditionals/recursionDepthFromSample`, `k < 0.25` with `k` the sample)
+splits until each half agrees, so every element recurses exactly as deep as
+on the scalar backend. `recOffenders` judges only calls inside the caller's
+own strongly connected component (an entry call `main = rec` is not
+recursion) and refuses what is left: a call under a value-dependent branch
+the split does not reach (a select inside a tensor map's body), with no
+tail descent. A generate body cannot be re-run, since its condition is a
+draw. `splitGenRecursion` evaluates the condition once and emits the two
+arms as closures `\_batchN v.. -> arm` over their free locals;
+`gen_branch` runs each closure on its half of the batch, with the free
+values sliced and `_batchN` set to the half's size, and never runs an empty
+half. A recursive generate that builds a list keeps its
+`heterogeneousGenStub`. An inner lambda's body renders as an expression, so
+`hoistStructural` does not hoist out of it. Docs-repo task
+`batched-value-dependent-recursion`.
+
 A per-mask variant that still carries a `VAnyExcept` placeholder is retired
 to a runtime refusal of that one mask (`retireUnrenderableVariants`,
 rendered by `retiredMethod` as a `throw` of the shared message), as on the
 scalar text backends, instead of refusing the whole program (corpus
 `tupleCtorTestOfSharedDraw`).
 
-A call-graph guard refuses value-dependent recursion (e.g. `dice`); other
+A call-graph guard refuses a recursion the split does not reach; other
 non-fragment constructs (marginal `VAny`, composite enumeration, a
 structure select the split does not reach) are refused with a diagnostic
 naming the construct rather than compiling to something silently wrong.
