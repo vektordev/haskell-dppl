@@ -986,7 +986,7 @@ pyConformsAt :: Int -> RType -> String -> String
 pyConformsAt d t e = "(isAny(" ++ e ++ ") or " ++ pyConformsShape d t e ++ ")"
 
 pyConformsShape :: Int -> RType -> String -> String
-pyConformsShape _ TFloat  e = "isinstance(" ++ e ++ ", float)"
+pyConformsShape _ TFloat  e = "isFloat(" ++ e ++ ")"
 pyConformsShape _ TBool   e = "isinstance(" ++ e ++ ", bool)"
 pyConformsShape _ TInt    e = "(isinstance(" ++ e ++ ", int) and not isinstance(" ++ e ++ ", bool))"
 pyConformsShape d (Tuple a b) e =

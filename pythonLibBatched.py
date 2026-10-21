@@ -151,14 +151,41 @@ def _has_nan(x):
   # int/bool/ADT instances/etc. carry no float to be NaN.
   return False
 
+def _nan_message(ctx):
+  return (ctx + ": result is NaN. This is either a malformed floating-point "
+    "operation, or an unmasked poison() -- a refused computation (most "
+    "commonly cdf() on an ADT-valued program, which has no order to "
+    "integrate along; use p() instead) reaching the output because nothing "
+    "selected it away.")
+
+# Under torch.export / torch.compile the eager test above is a data-dependent
+# branch (`bool(tensor)`), which export refuses outright
+# (GuardOnDataDependentSymNode; task emitted-runtime-differentiability-gaps).
+# While tracing, the same check is therefore recorded as a graph assertion
+# instead: torch._assert_async(no NaN, message) traces to aten._assert_async,
+# and the exported or compiled module raises a RuntimeError carrying the same
+# message when a NaN reaches the return. Eagerly the ValueError path stays:
+# on an accelerator _assert_async is a device-side assert, which would take
+# down the context rather than raise a catchable error.
+def _tracing():
+  is_compiling = getattr(getattr(torch, "compiler", None), "is_compiling", None)
+  return is_compiling is not None and bool(is_compiling())
+
+def _assert_no_nan_traced(x, msg):
+  if torch.is_tensor(x):
+    torch._assert_async(torch.logical_not(torch.isnan(x).any()), msg)
+  elif isinstance(x, T):
+    _assert_no_nan_traced(x.t1, msg)
+    _assert_no_nan_traced(x.t2, msg)
+  elif isinstance(x, float) and math.isnan(x):
+    # A python float is a trace-time constant, so this is no data-dependent guard.
+    raise ValueError(msg)
+
 def check_result(x, ctx):
-  if _has_nan(x):
-    raise ValueError(
-      ctx + ": result is NaN. This is either a malformed floating-point "
-      "operation, or an unmasked poison() -- a refused computation (most "
-      "commonly cdf() on an ADT-valued program, which has no order to "
-      "integrate along; use p() instead) reaching the output because nothing "
-      "selected it away.")
+  if _tracing():
+    _assert_no_nan_traced(x, _nan_message(ctx))
+  elif _has_nan(x):
+    raise ValueError(_nan_message(ctx))
   return x
 
 # --- elementwise predicates --------------------------------------------------

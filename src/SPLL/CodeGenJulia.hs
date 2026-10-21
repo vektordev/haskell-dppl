@@ -471,7 +471,11 @@ jlConformsAt :: Int -> RType -> String -> String
 jlConformsAt d t e = "(isAny(" ++ e ++ ") || " ++ jlConformsShape d t e ++ ")"
 
 jlConformsShape :: Int -> RType -> String -> String
-jlConformsShape _ TFloat  e = "(" ++ e ++ " isa AbstractFloat)"
+-- Real and not Integer rather than AbstractFloat: an AD number (ForwardDiff's
+-- Dual is a Real, not an AbstractFloat) is a float sample whose derivative the
+-- caller wants, the twin of the Python guard's 0-d tensor (task
+-- emitted-runtime-differentiability-gaps). Bool <: Integer, so a Bool stays out.
+jlConformsShape _ TFloat  e = "((" ++ e ++ " isa Real) && !(" ++ e ++ " isa Integer))"
 jlConformsShape _ TBool   e = "(" ++ e ++ " isa Bool)"
 jlConformsShape _ TInt    e = "((" ++ e ++ " isa Integer) && !(" ++ e ++ " isa Bool))"
 jlConformsShape d (Tuple a b) e =

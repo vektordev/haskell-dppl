@@ -407,7 +407,7 @@ pythonRuntimeValueNames =
   , "denskey", "dist", "e", "eq", "erf", "erfc", "exp", "exp2", "expm1"
   , "fabs", "factorial", "floor", "fma", "fmod", "frexp", "fromLeft"
   , "fromRight", "fsum", "functools", "gamma", "gather_dense", "gauss", "gen_branch"
-  , "gcd", "hypot", "indexOf", "inf", "isAny", "isPossible", "is_ctor"
+  , "gcd", "hypot", "indexOf", "inf", "isAny", "isFloat", "isPossible", "is_ctor"
   , "is_member", "isclose", "isfinite", "isinf", "isnan", "isqrt"
   , "itertools", "lcm", "ldexp", "lgamma", "listConcat", "listProd", "log", "log10"
   , "log1p", "log2", "log_cumulative_normal", "log_cumulative_uniform"
@@ -556,7 +556,7 @@ juliaBaseNames :: [String]
 juliaBaseNames =
   [ "exp", "abs", "sign", "sum", "maximum", "max", "map", "all", "rand"
   , "randn", "throw", "string", "typeof", "Inf", "NaN", "nothing"
-  , "AbstractFloat", "Bool", "Integer"
+  , "AbstractFloat", "Bool", "Integer", "Real"
     -- The module names every Julia module has in scope. Emitted code never
     -- refers to them, but a constructor @Base@ emitted @struct Base@, which
     -- Julia refuses as "invalid redefinition of constant Base" (at top level

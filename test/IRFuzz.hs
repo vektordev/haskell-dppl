@@ -1635,7 +1635,7 @@ knownDisagreements =
   -- M4 (generate bodies, judged by replaying the backend's draws).
   --
   -- Both text backends lower a type-tag check by repeating its operand
-  -- (@isAny(x) or isinstance(x, float)@), so an operand that draws draws
+  -- (@isAny(x) or isFloat(x)@), so an operand that draws draws
   -- again. Recognised by the construct: a generate body whose check has an
   -- operand with an effect ('isPure'), answering a sample.
   , KnownFamily "text-backends-conformsto-reevaluates-its-operand" ["python", "julia"]

@@ -176,6 +176,18 @@ def isAny(x):
     return True
   return False
 
+# The query-type guard's test for a TFloat value (SPLL.CodeGenPyTorch.pyConforms).
+# A 0-d floating tensor is a float here: it is what a caller passes to take the
+# gradient of a density with respect to its sample (a score function), and every
+# float-path function below is tensor-transparent (task
+# emitted-runtime-differentiability-gaps). Any other tensor -- a batch, or an
+# integer/bool dtype -- is not one TFloat value and is still rejected.
+def isFloat(x):
+  if isinstance(x, float):
+    return True
+  t = _torch_for(x)
+  return t is not None and x.dim() == 0 and x.is_floating_point()
+
 def eq(o1, o2):
   if isAny(o1) or isAny(o2):
     return True
