@@ -1,0 +1,16 @@
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+data Scene = Scene o1::Object, o2::Object
+neural readScene :: (Symbol -> Scene)
+recolor o = if isObj o then (if isRed (color o) then Obj Green (px o) else o) else o
+main sym = draw sc = readScene sym in Scene (recolor (o1 sc)) (recolor (o2 sc))
+-- A per-slot recolour over a product read with a Float leaf, compiled by the
+-- plan engine. Point queries are right (plan-enumeration/
+-- planSceneFloatPassthroughFactored), but a query with a wildcard field raises
+--   isObj: constructor test on an unobserved value (ANY); the enclosing
+--   inference must marginalise or refuse before testing a hole
+-- in Python and in the IR interpreter. The user-ADT constructor case of
+-- planInvertNode does not split a wildcard field ('planAnySplit') the way the
+-- tuple case does, so the callee's worlds test the ANY sub-observation.
+-- Field factoring does not cause it: the query fails the same way with
+-- factoring off. Docs task plan-ctor-field-partial-any-crashes.
