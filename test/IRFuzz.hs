@@ -2654,6 +2654,16 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
                              [] [ idWhy d | (d, t) <- zip ds others, maybe True (== kfTicket kf) t ]
         | kf <- knownDisagreements, b <- backends ]
       return (maybe "no julia on the PATH: the Julia arm was skipped" (const "") julia)
+  -- python-max-of-empty-tensor-in-recursive-helper: max over a zero-extent
+  -- tensor is the identity -inf on every engine (Python raised ValueError).
+  , testCase "max of an empty tensor is -inf on scalar Python and Julia, as in the interpreter" $ do
+      let c = repro [] ITFloat (IRBuiltin (BReduce ROpMax 0) [IRBuiltin (BTensor [EFixed 0]) []]) []
+      o <- interpretIRCase c []
+      (_, pyD) <- runIRCasesPython [(c, [([], o)])]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      julia <- findExecutable "julia"
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, [([], o)])]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
   -- Formerly a knownDisagreements family: a select whose arms evaluate to
   -- tuples without being tuple literals reached torch.where as a whole T.
   , testCase "batched: a select over two tuple constants selects leaf by leaf (batched-guarded-select-over-tuple-result)" $ do

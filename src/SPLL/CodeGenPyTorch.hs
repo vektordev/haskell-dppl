@@ -667,10 +667,8 @@ axisUnsupported what ax =
 -- | The Python runtime function reducing a tensor axis with each operator.
 -- sum/max are Python's own builtins (both take an iterable, same as
 -- logsumexp's own signature below), logsumexp is pythonLib.py's. max on an
--- empty iterable raises in real Python,
--- same as every other reduction here has no defined empty-domain behaviour
--- (an enumerable domain from Analysis.materializationDomain is never empty --
--- see the "empty propagated domain" refusal in Analysis).
+-- empty iterable raises in real Python, so the call site passes
+-- @default=-inf@, the interpreter's 'reduceIdentity'.
 pyReduceOp :: ReduceOp -> String
 pyReduceOp ROpAdd = "sum"
 pyReduceOp ROpLogSumExp = "logsumexp"
@@ -1158,7 +1156,10 @@ generateExpression (IRBuiltin BMap [f, t]) = do
 generateExpression (IRBuiltin (BReduce op ax) [t])
   | ax == 0 = do
       tt <- generateExpression t
-      return (pyReduceOp op ++ "(" ++ tt ++ ")")
+      -- max of an empty tensor is the identity -inf (interpreter, Julia's
+      -- init=-Inf), not Python's ValueError.
+      let dflt = if op == ROpMax then ", default=" ++ pyDouble (-1 / 0) else ""
+      return (pyReduceOp op ++ "(" ++ tt ++ dflt ++ ")")
   | otherwise = error (axisUnsupported "BReduce" ax)
 generateExpression (IRBuiltin (BIndex ax) [t, k])
   | ax == 0 = do
