@@ -5,6 +5,7 @@ module SPLL.CodeGenPyTorch (
   generateFunctions,
   pyVal,
   envToLUT,
+  normalRefName,
   replaceCalls,
   pyMangle,
   groupClassName,

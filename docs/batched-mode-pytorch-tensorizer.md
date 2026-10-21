@@ -118,13 +118,49 @@ every CLEVR comparison/`exist` program has that shape. `inlineDetGenCalls`
 therefore beta-reduces each complete call to a generator that
 `IROptimizer.deterministicGens` proves draws nothing and `hasGenCycle` proves
 non-recursive into the caller before the call-graph guard runs, renaming every
-binder of the inlined body; a call to a random or recursive generator (e.g.
-`factorial`) is still refused. Task `batched-prob-path-calls-helper-generate`;
+binder of the inlined body. Task `batched-prob-path-calls-helper-generate`;
 corpus `test/cases/neural/neuralHelperArgUsedTwice`, `neuralHelperDrawSelect`.
 It made 15 more corpus programs batched-eligible (`flip`, `adt`,
 `sharedLatent*`, `clevrEqualLargeMetalSphere*`, ...). The corpus differential
 also now routes ADT-valued query samples through the bucketing wrapper, which
 it previously refused as unbatchable.
+
+**Pure callees.** Two more kinds of method are deterministic functions of
+their arguments, so a prob/integ path may call them; the backend emits them
+as ordinary batched methods next to `forward`/`integrate`, but only when a
+prob/integ path reaches them (`pureCallees`), so a body nothing reads cannot
+cost a program its eligibility:
+
+- a helper's Gaussian parameters, `f_normal` (`normal_params`): the caller's
+  density of `shifted 1.0 2.0 * 3.0` reads `shifted`'s `(mu, sigma)` (corpus
+  `distributions/normalThroughFunction{Nested,Param}`,
+  `logNormalThroughFunction`; docs-repo task
+  `batched-prob-path-calls-helper-normal-params`);
+- the *forward evaluator* of a recursive deterministic generator, which
+  `inlineDetGenCalls` cannot inline: `f_gen` is renamed `f_eval` in every
+  prob/integ/normal body and emitted as `evaluate` (not `eval`, which is
+  `Module.eval`) from the generate body, without a batch size. `factorial`,
+  and the plan-enumeration folds over a neural read's ADT fields
+  (`numRed (rest s)`, `existsRed`, `checksumSum`, ...), batch this way (corpus
+  `conditionals/factorial`, `recursiveHelperOnlyWhereGuarded`, `plan-enumeration/planEnumRecThreaded`;
+  docs-repo task `batched-prob-path-calls-recursive-helper-gen`).
+
+An evaluator is pure, so it gets the prob/integ treatment in full, including
+the per-structure split below: a recursion on a per-element value
+(`factorial x` with `x` per element) splits until each half agrees, one on a
+batch-uniform value never mixes, and one through an ADT field is a structural
+`if`. The per-element case has no corpus row (the differential passes
+parameters batch-shared, and modality inference refuses the helper on a drawn
+value), so `End2EndTesting.batchedPerElementEvaluatorTests` runs `factorial`
+on a `[B]` argument. A call to a recursive evaluator is split above at *every*
+call site, not only inside its own cycle: an eager `torch.where` arm would run
+it on elements the scalar backend never passes it, and `cnt n = if n == 0 then
+0 else cnt (n - 1) + 1` does not return on `-1` (corpus
+`recursiveHelperOnlyWhereGuarded`). A nullary pure callee is referenced by a bare name and emitted as a call
+(`sNullaryCalls`). A call to a *random* recursive generator is still refused.
+The impact census labels a program that calls a pure callee
+(`CertifiedCensus.pureCalleeLabel`), since the fuzz arms compare prob/integ
+bodies only.
 
 **Per-structure split.** Shape-signature bucketing fixes every structure
 the *input* carries. A value-dependent select between two structures picks

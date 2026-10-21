@@ -19,7 +19,7 @@ import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..
 import ImpactManifest
 import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
                         batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs, lineSpillLabel,
-                        selectDemotionLabel)
+                        selectDemotionLabel, pureCalleeLabel)
 import End2EndTesting (interpreterKey, pythonKey, juliaKey, loadCorpusPair, networkMocks)
 import TestCaseParser (corpusPplPath, isProbTestCase, isCumulTestCase)
 
@@ -84,6 +84,14 @@ batchedCensusRouting = do
   demoted <- census <$> load "drawBoundListElementGuardsEmptyTail"
   assertEqual "a demoted structural select is not certified" [selectDemotionLabel] (batchedUncertifiedConstructs demoted)
   assertBool "a module without one carries no demotion label" (selectDemotionLabel `notElem` plain)
+  -- A prob path calling a recursive deterministic helper's evaluator, and
+  -- one reading a helper's Gaussian parameters: the callee's method body is
+  -- emitted code the fuzz arms (prob/integ bodies only) never ran.
+  forM_ ["recursiveHelperOnlyWhereGuarded", "normalThroughFunctionParam"] $ \n -> do
+    c <- census <$> load n
+    assertBool (n ++ " calls a pure callee, so it is not certified: " ++ show c)
+      (pureCalleeLabel `elem` batchedUncertifiedConstructs c)
+  assertBool "a module without one carries no pure-callee label" (pureCalleeLabel `notElem` plain)
   assertEqual "a refused compile contributes nothing" [] (batchedProgramCensus (Left "refused" :: Either String IREnv))
   assertEqual "the batched certified list certifies itself" [] (batchedUncertifiedConstructs batchedCertifiedConstructs)
 
