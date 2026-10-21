@@ -19,6 +19,7 @@ module SPLL.AutoNeural(
 , deadSlotFill
 , stripDeadSlotFills
 , planReadOf
+, planProjectedReadOf
 , continuousSlots
 ) where
 
@@ -932,3 +933,18 @@ planReadOf prog v
   , isJust resolved || isRight (autoDeriveMultiValue (adts prog) targetTy)
   = Just (nnName, makePartitionPlan (adts prog) targetTy resolved, symArg)
   | otherwise = Nothing
+
+-- | A plan read seen through a chain of field accessors (@fst@, @snd@, an
+-- ADT field accessor): @draw a = ob1 (readScene sym) in ...@ binds a slice of
+-- the read rather than the whole of it (task
+-- scene-rebuild-with-float-leaf-loses-probability). Answers 'planReadOf' of
+-- the read at the bottom of the chain, and the read node itself, whose chain
+-- name the plan traversal binds so the chain evaluates to the slice. The
+-- empty chain is 'planReadOf' itself.
+planProjectedReadOf :: Program -> Expr -> Maybe (String, PartitionPlan, Expr, Expr)
+planProjectedReadOf prog v = case v of
+  Expr _ (InjF (Named nm) [e]) | isAccessor nm -> planProjectedReadOf prog e
+  _ -> (\(n, plan, sym) -> (n, plan, sym, v)) <$> planReadOf prog v
+  where
+    isAccessor nm = nm `elem` ["fst", "snd"]
+      || any (\(_, fields) -> nm `elem` map fst fields) (concatMap constructors (adts prog))
