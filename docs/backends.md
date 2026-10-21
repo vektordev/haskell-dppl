@@ -177,6 +177,24 @@ group (hand-built 150-deep chains in return, let and loop-body position, a
 60-deep chain that must not hoist, and the 100-if program through the
 pipeline). Docs-repo task `python-nested-conditionals-exceed-indentation-limit`.
 
+## A walrus never sits in a comprehension's iterable
+
+Both Python backends lower an expression-position `IRLetIn` to an assignment
+expression, `((v := e), body)[1]`, and `BMap`, `BZip` and a list or tensor
+`IRConformsTo` check to comprehensions. CPython refuses `:=` anywhere inside
+a comprehension's iterable, even under a lambda or a nested comprehension
+there, and the optimizer's CSE does put lets there (a cumulative's
+materialized cell list, `[T(((l := ...), ...)[1]), ...]`), so such a module
+did not load. `PythonNesting.bindIterable` binds an iterable whose rendered
+text contains `:=` to a temporary first, `((_itN := it), [b for v in
+_itN])[1]`. That is the same evaluation (a comprehension evaluates its first
+iterable once, eagerly, in the enclosing scope), and an iterable without a
+walrus is emitted as before, so every module that loaded before is
+byte-identical. Pinned by the corpus program
+`arithmetic/intProductLetInComprehensionIterable` and the IR fuzz group's "a
+let in a comprehension's operand" cases (scalar, Julia, batched). Docs-repo
+task `backends-agree-python-walrus-in-comprehension-iterable`.
+
 ## Unary math must not raise where the interpreter answers
 
 The interpreter is the reference semantics, so a backend's unary math has to be

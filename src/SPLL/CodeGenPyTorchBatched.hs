@@ -66,7 +66,7 @@ import Control.Monad (foldM)
 import Control.Monad.State (State, evalState, get, put)
 import qualified Data.Set as Set
 import SPLL.IROptimizer (deterministicGens, allNamesIR)
-import SPLL.PythonNesting (tooDeepForPython, spillDeep, renameFree)
+import SPLL.PythonNesting (tooDeepForPython, spillDeep, renameFree, bindIterable)
 import Utils (Supply, demandUniqueNumber, evalSupply)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
@@ -2022,7 +2022,8 @@ batchedExpr env (IRBuiltin (BTensor sh) elems)
   | shapeRank sh == 1 = "[" ++ intercalate ", " (map (batchedExpr env) elems) ++ "]"
   | otherwise = error (batchedRankUnsupported "BTensor" (shapeRank sh))
 batchedExpr env (IRBuiltin BMap [IRLambda name body, t]) =
-  "[" ++ batchedExpr (bindMap env name t) body ++ " for " ++ name ++ " in " ++ batchedExpr env t ++ "]"
+  bindIterable ("_it_" ++ name) (batchedExpr env t)
+    (\it -> "[" ++ batchedExpr (bindMap env name t) body ++ " for " ++ name ++ " in " ++ it ++ "]")
 batchedExpr env (IRBuiltin BMap [f, t]) =
   "list(map(" ++ batchedExpr env f ++ ", " ++ batchedExpr env t ++ "))"
 batchedExpr env (IRBuiltin (BReduce op 0) [t]) =
@@ -2046,8 +2047,8 @@ batchedExpr env (IRBuiltin (BIndex 0) [t, k]) =
 -- bug those exist to prevent.
 batchedExpr env (IRBuiltin (BZip op) [a, b])
   | op `elem` [OpPlus, OpMult, OpSub] =
-      "[(_za " ++ batchedOp op ++ " _zb) for _za, _zb in zip("
-        ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")]"
+      bindIterable "_itz" ("zip(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")")
+        (\it -> "[(_za " ++ batchedOp op ++ " _zb) for _za, _zb in " ++ it ++ "]")
   | otherwise = error ("batched PyTorch codegen: BZip " ++ show op ++ " is not supported; "
                        ++ "only the arithmetic operands (OpPlus, OpMult, OpSub) have a "
                        ++ "gradient-safe elementwise lowering.")
