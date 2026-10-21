@@ -1,3 +1,4 @@
+batched
 slow
 p((True, Face True False))=(0.56, 0.0)
 p((True, Face False False))=(0.24, 0.0)

@@ -205,6 +205,30 @@ def batched_dtype():
     # ... and a live tensor arm is never promoted: the net's dtype is its own.
     if B.where_anchored(True, torch.tensor([1.0], dtype=torch.float32), 0.5).dtype != torch.float32:
       fail("pythonLibBatched.where_anchored promoted a float32 tensor arm")
+  # A reduction whose elements mix a 0-d constant and a [B] batch broadcasts
+  # the constant (task batched-reduction-over-constant-and-batched-elements-fails).
+  t = B.tensor_sum([torch.tensor(0.25, dtype=torch.float64), torch.tensor([1.0, 2.0], dtype=torch.float64)])
+  if t.tolist() != [1.25, 2.25]:
+    fail("pythonLibBatched.tensor_sum([t(0.25), t([1, 2])]) = " + repr(t))
+  if hasattr(B, "split_retry"):
+    # The per-structure split (task batched-value-dependent-structure-select):
+    # a mixed condition re-runs the kernel per half, every leaf of every
+    # argument sliced, and scatters the halves back into input order, keeping
+    # the autograd graph.
+    calls = []
+    def kernel(s, w):
+      calls.append(len(s.t1))
+      if B.split_uniform(s.t1):
+        return B.T(s.t2 * w, 1)
+      return B.T(s.t2 * 0.0 - w, 0)
+    w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+    s = B.T(torch.tensor([True, False, True]), torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64))
+    r = B.split_retry(kernel, s, w)
+    if r.t1.tolist() != [2.0, -2.0, 6.0] or r.t2.tolist() != [1, 0, 1] or sorted(calls) != [1, 2, 3]:
+      fail("pythonLibBatched.split_retry gave " + repr((r.t1, r.t2, calls)))
+    r.t1.sum().backward()
+    if w.grad is None or float(w.grad) != 3.0:
+      fail("pythonLibBatched.split_retry lost the gradient: " + repr(w.grad))
   if hasattr(B, "table_select"):
     # The flat form of a constant select chain answers in the kind of its
     # values exactly as the chain's where_anchored would.

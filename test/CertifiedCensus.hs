@@ -38,12 +38,14 @@ module CertifiedCensus
   , batchedCertifiedConstructs
   , batchedProgramCensus
   , batchedUncertifiedConstructs
+  , structureSplitLabel
   ) where
 
 import Data.Char (isSpace)
 import Data.List (nub, sort, (\\))
 
 import SPLL.IntermediateRepresentation
+import SPLL.CodeGenPyTorchBatched (usesStructureSplit)
 import SPLL.Lang.Types (GenericValue(..), GenericList(..))
 
 -- | Every IR construct a body uses, as a label naming its kind:
@@ -229,8 +231,23 @@ batchedCertifiedConstructs =
 -- | A program's batched census: the constructs of the probability and
 -- integrate bodies of its batched compile (after the select pass), which is
 -- what @batched-vs-expected@ calls. A refused compile contributes nothing.
+--
+-- Plus 'structureSplitLabel' when the batched backend splits a body at a
+-- structure select ('SPLL.CodeGenPyTorchBatched.usesStructureSplit'): the
+-- split is runtime code (@split_retry@) that no IR construct names, so the
+-- census has to name it itself. The fuzz arms' reach is counted from IR
+-- constructs alone, so the label is never in 'batchedCertifiedConstructs',
+-- and a program that splits always has its batched-vs-expected check.
 batchedProgramCensus :: Either e IREnv -> [String]
-batchedProgramCensus = either (const []) (irEnvConstructs inferenceBodies)
+batchedProgramCensus = either (const []) census
+  where census env = sort (nub (irEnvConstructs inferenceBodies env
+                                ++ [ structureSplitLabel | usesStructureSplit env ]))
+
+-- | The batched census label of a per-structure split (task
+-- batched-value-dependent-structure-select).
+structureSplitLabel :: String
+structureSplitLabel = "Batched:structure split"
+
 
 -- | The constructs of a batched census the batched arm does not certify.
 batchedUncertifiedConstructs :: [String] -> [String]
