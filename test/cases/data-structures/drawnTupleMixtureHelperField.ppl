@@ -1,0 +1,2 @@
+h y = fst (0, y)
+main = draw z = (if Uniform < 0.5 then (1.0, Normal) else (1.0, 0.0)) in h (snd z)

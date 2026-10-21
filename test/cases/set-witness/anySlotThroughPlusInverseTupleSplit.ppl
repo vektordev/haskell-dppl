@@ -1,0 +1,1 @@
+main = draw h = Uniform in if h < 0.5 then (h + 0.0, exp Uniform) else (1.0, Uniform)
