@@ -1,0 +1,5 @@
+-- The discrete side of setWitnessNegatedComparisonBoundary's closure: for an
+-- Int the removed point 1 is an atom, not a null set, so `not (n < 1 || n ==
+-- 1)` is `n > 1` and p(Right 1) stays impossible (task
+-- null-set-conventions-not-preserved-under-negation).
+main = draw n = (if Uniform < 0.5 then 1 else 2) in if not ((n < 1) || (n == 1)) then right n else left ()

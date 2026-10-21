@@ -2943,6 +2943,17 @@ toIRInference meta True (Expr _ (ThetaI a i)) sample = do
 toIRInference meta False (Expr _ (ThetaI a i)) sample = do
   a' <- toIRGenerate meta a
   return (indicatorP (semiringOf meta) (IROp OpApprox sample (IRDestruct (AcTheta i) a')))
+-- A negated condition is the un-negated one with the arms swapped. The
+-- equation below derives the False weight as the complement of the True
+-- weight, and that complement cannot carry a null-set convention: the True
+-- weight of @not (Normal == 0.5)@ is the mass 1, whose complement is the mass
+-- 0, so the density convention of the equality's True outcome (task
+-- sampling-matches-pdf-continuous-equality-density) was lost and the if-flip
+-- of @if Normal == 0.5 then 1 else 2@ answered p(1) impossible. Swapping
+-- measures the condition at the polarity that carries the density directly
+-- (task null-set-conventions-not-preserved-under-negation).
+toIRInference meta cumulative (Expr ti (IfThenElse (Expr _ (InjF (Named "not") [cond])) left right)) sample =
+  toIRInference meta cumulative (Expr ti (IfThenElse cond right left)) sample
 toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
@@ -3247,6 +3258,30 @@ toIRInference meta cumulative e@(Expr TypeInfo {rType=rt, chainName=cn} (InjF (N
           meta' = meta { zeroGuardedProducts = Set.insert cn (zeroGuardedProducts meta) }
       rest <- guardedSubInference meta [notIR isZero] (toIRInference meta' cumulative e sample)
       return (zipResult (IRIf isZero) dirac rest)
+-- The CDF of a neural read (task neural-int-read-cdf-returns-pmf). The
+-- network's _auto_prob is a point mass, so the cumulative query sums it over
+-- the read's enumerated domain, each value weighted by whether it lies at or
+-- below the sample ('compareValueExpr'):
+--
+--   P(X <= x) = sum over v in dom(X) of P(X = v) * [v <= x]
+--
+-- in the compile's semiring. The point clause below used to answer both
+-- queries, returning P(X = x). A read with a continuous leaf has no such sum
+-- and is refused; a bare Bool read never gets here (the Boolean CDF split
+-- above), nor does a Gaussian-headed one ('gaussianLeaf').
+toIRInference meta True e@(Expr TypeInfo {rType=rt, tags=tgs, chainName=cn} (ReadNN name _)) sample =
+  case enumerableDomain tgs of
+    Just dom | enumerationWithinMaterializationBudget meta tgs -> do
+      let sr = semiringOf meta
+      v <- mkVariable "nn_cdf_value"
+      (summand, binds) <- lift $ runWriterT $ do
+        pV <- (unP . rProb) <$> toIRInference meta False e (IRVar v)
+        return (srTimes sr pV (compareValueExpr sr rt (IRVar v) sample))
+      let (outerBinds, body') = hoistInvariantBindings v (buildLetIns binds summand)
+      setVariables outerBinds
+      opaqueMass sr (enumSumNode sr v dom body') const0
+    _ -> refuse cn ("cannot compute the cumulative distribution of the neural read '" ++ name
+                    ++ "': its domain is not a finite enumeration within the materialization budget")
 toIRInference meta _ (Expr _ (ReadNN name symbol)) sample = do
   nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
@@ -5760,6 +5795,11 @@ measureSet meta v (WExcept s p) = do
 -- SharedDrawInvariants seed 825059). The binding still selects with the same
 -- 'IRIf', so only the taken side is evaluated; it lands in the caller's
 -- writer scope, which every caller keeps under its own guards.
+-- The bound closure ('closeNullExcept') decides only whether a point query at
+-- the bound is a member; the set's measure is the interval minus the point's,
+-- which is the interval's own for a continuous point. Measuring it once, from
+-- the excepted side, keeps one CDF difference rather than two.
+measureSet meta v s@(WChoice _ _ b) | isBoundClosure s = measureSet meta v b
 measureSet meta v (WChoice c a b) = do
   (ra, ba) <- lift (runWriterT (measureSet meta v a))
   (rb, bb) <- lift (runWriterT (measureSet meta v b))
@@ -5836,8 +5876,81 @@ measureIntInterval meta v lo hi = do
 -- | Invert the observation @body ∈ target@ into constraint worlds on the bound
 -- variable (occurrences @occs@). Nothing when some node on the way is not
 -- supported — the caller refuses with a diagnostic.
+--
+-- Every world it returns is closed under the null-set convention of a
+-- continuous variable ('closeNullExcept').
 invertToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
-invertToWorlds meta occs exprBody target
+invertToWorlds meta occs exprBody target = do
+  ws <- invertToWorldsStep meta occs exprBody target
+  return (case occurrenceType occs exprBody of
+    Just TFloat -> map closeWorld <$> ws
+    _           -> ws)
+  where closeWorld (WWorld gs s fs) = WWorld gs (closeNullExcept s) fs
+
+-- | The type of the bound variable, read off one of its occurrences.
+occurrenceType :: [ChainName] -> Expr -> Maybe RType
+occurrenceType occs e = case e of
+  Expr ti (Var _) | chainName ti `elem` occs -> Just (rType ti)
+  _ -> listToMaybe (mapMaybe (occurrenceType occs) (getSubExprs e))
+
+-- | The null-set convention of a continuous (Float) variable, applied to a
+-- constraint set: an interval with one of its own bounds taken out is the
+-- interval. Every interval is closed at its bounds ('boundGuards') so that a
+-- boundary query answers the density, and removing the bound point is only
+-- another spelling of the strict side of the same comparison: @v > 1.0@ is
+-- @[1, inf]@ and answers the density at 1, but its negated spelling
+-- @not ((v < 1.0) || (v == 1.0))@ came out as @[1, inf]@ minus the point 1
+-- and answered impossible there (task
+-- null-set-conventions-not-preserved-under-negation). The convention only
+-- decides a point query's membership: 'measureSet' measures the closed shape
+-- from its excepted side, which for a continuous point is the interval's
+-- mass ('mixSubP'). Whether the point is a bound is decided at run time, as a
+-- 'WChoice': a bound may be a transported or intersected expression. Like
+-- 'boundGuards' it does not ask whether the bound is an atom of a mixed
+-- Float variable (@if flip then 1.0 else Normal@), where a closed bound is
+-- not a null set (task set-witness-null-set-boundary-conventions).
+--
+-- A point removed from the inside of an interval, or from the whole domain,
+-- stays removed: there it is an event of its own, and @x == 0.0@ meeting the
+-- complement of @x == 0.0@ is empty (set-witness/setWitnessContinuousEqualsTwice).
+-- Float only: a removed point of a discrete variable is an atom, and a
+-- removed point of a composite one may be a whole constructor
+-- ('exceptPoint').
+--
+-- Idempotent: 'invertToWorlds' applies it at every level, so an already
+-- closed set is recognised and left alone.
+closeNullExcept :: WSet -> WSet
+closeNullExcept s | isBoundClosure s = s
+closeNullExcept (WExcept s p) = case closeNullExcept s of
+  WChoice c a b -> WChoice c (closeNullExcept (WExcept a p)) (closeNullExcept (WExcept b p))
+  ivl@(WInterval lo hi) | Just c <- boundTest p lo hi -> WChoice c ivl (WExcept ivl p)
+  s' -> WExcept s' p
+closeNullExcept (WChoice c a b) = WChoice c (closeNullExcept a) (closeNullExcept b)
+closeNullExcept s = s
+
+-- | The shape 'closeNullExcept' builds: an interval, or that interval minus
+-- the point @p@ unless @p@ is one of its bounds.
+isBoundClosure :: WSet -> Bool
+isBoundClosure (WChoice c ivl@(WInterval lo hi) (WExcept ivl' p)) =
+  ivl `sameIntervalAs` ivl' && Just c == boundTest p lo hi
+isBoundClosure _ = False
+
+-- | Is @p@ one of the interval's finite bounds? Nothing when it has none.
+boundTest :: IRExpr -> WBound -> WBound -> Maybe IRExpr
+boundTest p lo hi = case [IROp OpEq p e | WFinite e <- [lo, hi]] of
+  [] -> Nothing
+  ts -> Just (foldr1 (IROp OpOr) ts)
+
+sameIntervalAs :: WSet -> WSet -> Bool
+sameIntervalAs (WInterval lo1 hi1) (WInterval lo2 hi2) = sameBound lo1 lo2 && sameBound hi1 hi2
+  where sameBound WNegInf WNegInf = True
+        sameBound WPosInf WPosInf = True
+        sameBound (WFinite a) (WFinite b) = a == b
+        sameBound _ _ = False
+sameIntervalAs _ _ = False
+
+invertToWorldsStep :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+invertToWorldsStep meta occs exprBody target
   -- x-free subtree: deterministic given scope reduces to a membership test of
   -- its value against the target; anything else draws fresh randomness, which
   -- is independent of the bound draw and so becomes a factor of the world
@@ -5859,7 +5972,7 @@ invertToWorlds meta occs exprBody target
 -- the interpreter (task set-witness-exp-equality-guard-vanyexcept-crash).
 -- The bare @x == c@ shape needs no inverse step below the sentinel, so it is
 -- left on the path it already answers correctly.
-invertToWorlds meta occs (Expr _ (InjF (Named "eq") [lop, rop])) target@(WPoint _ _)
+invertToWorldsStep meta occs (Expr _ (InjF (Named "eq") [lop, rop])) target@(WPoint _ _)
   | Just (side, other) <- eqOperands
   , not (isBareOcc side) = equalityWorlds meta occs side other target
   where
@@ -5869,7 +5982,7 @@ invertToWorlds meta occs (Expr _ (InjF (Named "eq") [lop, rop])) target@(WPoint 
       | otherwise = Nothing
     isBareOcc (Expr ti (Var _)) = chainName ti `elem` occs
     isBareOcc _ = False
-invertToWorlds meta occs exprBody target = do
+invertToWorldsStep meta occs exprBody target = do
   direct <- transportDirect meta occs exprBody target
   case direct of
     Just ws -> return (Just ws)

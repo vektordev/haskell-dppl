@@ -1,0 +1,9 @@
+-- `v > 1.0` spelled `not (v < 1.0 || v == 1.0)` (the language has no <=).
+-- Every interval of a continuous variable is closed at its bounds, so `v >
+-- 1.0` answers the density at the boundary point; the negated spelling came
+-- out as `[1, inf]` minus the point 1 and answered impossible there. An
+-- interval minus one of its own bounds is the interval again
+-- ('closeNullExcept'; task null-set-conventions-not-preserved-under-negation).
+-- The measure of the interval is unchanged (p(Right ANY), p(Left ())), and a
+-- point outside it is still impossible.
+main = draw v = Normal in if not ((v < 1.0) || (v == 1.0)) then right v else left ()

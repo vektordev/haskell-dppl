@@ -1,0 +1,9 @@
+main = draw v = (if Uniform < 0.5 then 1.0 else Normal) in if v > 1.0 then right v else left ()
+-- v is a Float with an atom of mass 0.5 at 1.0. `v > 1.0` is closed at its
+-- bound, the convention that makes a boundary query of a continuous variable
+-- answer the density; at an atom the bound is not a null set, so the atom
+-- lands in the True world as well: p(Right 1.0) answers the mass 0.5 where
+-- the program can never return Right 1.0 (p(Left ()) = 0.5 + 0.5 Phi(1)
+-- already holds the atom, and is right). Verified on dev at the fix of
+-- null-set-conventions-not-preserved-under-negation, interpreter. Docs task
+-- set-witness-null-set-boundary-conventions.
