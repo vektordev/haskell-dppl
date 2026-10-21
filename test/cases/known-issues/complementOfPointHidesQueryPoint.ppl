@@ -1,0 +1,12 @@
+main = draw v = Normal in if v == 1.0 then left () else right v
+-- Every sample with v /= 1 returns Right v, so the payload's density at 1.0
+-- is the Normal's (0.2420, dim 1) -- the value on every neighbourhood of 1.
+-- The set-witness engine removes the point 1 from the whole line for the
+-- False arm, and the query point 1.0 meets that removal as a disequality:
+-- impossible. A point removed from an interval's bound already closes back
+-- (set-witness/setWitnessNegatedComparisonBoundary); a point removed from the
+-- whole line or an interval's inside stays removed, because the engine cannot
+-- tell a query point from the event point of a second `v == 1.0`
+-- (set-witness/setWitnessContinuousEqualsTwice pins that one as empty).
+-- Verified on dev at the fix of null-set-conventions-not-preserved-under-negation,
+-- interpreter. Docs task set-witness-null-set-boundary-conventions.

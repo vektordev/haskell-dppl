@@ -3969,6 +3969,12 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
                      [ (rightI 1, Answered 0.3520653267642995 1 False)
                      , (rightI 2, impossibleA)
                      , (leftU,    Answered 1.0 0 False) ])
+                 -- its if-flip answers the same (task
+                 -- null-set-conventions-not-preserved-under-negation)
+                 , ("observeNegatedContinuousEqualsLetfree",
+                     [ (rightI 1, Answered 0.3520653267642995 1 False)
+                     , (rightI 2, impossibleA)
+                     , (leftU,    Answered 1.0 0 False) ])
                  , ("observeContinuousEqualsLetBound",
                      [ (rightI 0, Answered 0.3989422804014327 1 False)
                      , (rightI 2, impossibleA)

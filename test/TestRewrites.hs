@@ -151,16 +151,10 @@ knownDivergences =
   , Known "drawBoundRandomTimesLiteralZero" InjFIdentity "double-negate (mult 0.0 z)" diracLawLost
   -- `1.0 > NaN` answers p(True) = 1 (the mirrored `NaN < 1.0` is right).
   , Known "nanConstantMixture" CompareFlip "compare-swap" nanComparison
-  -- Null-set conventions do not survive negation: `not (Normal == 0.5)` drops
-  -- the equality's density convention, and `not (v < b || v == b)` the
-  -- set-witness interval's closed boundary.
-  , Known "observeContinuousEqualsLetfree" IfFlip "if-flip" nullSetNegation
-  , Known "observeDisjointTails" CompareFlip "compare-negate" nullSetNegation
   ]
   where
     diracLawLost = "dirac-law-point-lost-under-plus-or-helper"
     nanComparison = "nan-operand-comparison-measured-through-cdf"
-    nullSetNegation = "null-set-conventions-not-preserved-under-negation"
     aliasChainMarginalTail = "aliased-chain-step-marginal-tail-impossible"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
@@ -178,13 +172,6 @@ knownSequenceDivergences =
   -- the product wrapped in `0 - (0 - .)`: knownDivergences' diracLawLost on
   -- drawBoundRandomTimesLiteralZero, which the sweep skips as slow.
   [ KnownSeq "probe10" [DrawIntro, InjFIdentity] "dirac-law-point-lost-under-plus-or-helper"
-  -- `draw x = Normal in if x == 0.0 then 0 else 2`, inlined to
-  -- `if Normal == 0.0 ...` and then if-flipped to `if not (Normal == 0.0)`:
-  -- the negation drops the equality's density convention (p(0) = 0, not the
-  -- density), as knownDivergences' nullSetNegation on the let-free spelling.
-  -- Pinned by known-issues/negatedContinuousEqualityDropsDensity. Reached once
-  -- d3dd60a's corpus addition moved what seeds 20261015/20261016 draw.
-  , KnownSeq "observeContinuousEqualsLetBound" [LinearInline, IfFlip] "null-set-conventions-not-preserved-under-negation"
   -- `v < 2` swapped to `2 > v` and bound by `draw z = ..` as the if
   -- condition: p(Right 2) is 1.0 and p(Left ()) impossible. Pinned by
   -- known-issues/drawBoundLiteralLeftComparisonCondition. Reached once the

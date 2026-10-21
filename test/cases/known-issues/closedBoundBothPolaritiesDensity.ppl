@@ -1,0 +1,8 @@
+main = draw v = Normal in if v < 1.0 then right v else right v
+-- Both arms are `right v`, so the program is `right v` and p(Right 1.0) is the
+-- Normal's density at 1 (0.2420, dim 1). The set-witness engine closes every
+-- continuous interval at its bound, both polarities included: `v < 1.0` True
+-- is [-inf, 1] and False is [1, inf], so the boundary point is a member of
+-- both worlds and its density is counted twice (0.4839). Verified on dev at
+-- the fix of null-set-conventions-not-preserved-under-negation, interpreter.
+-- Docs task set-witness-null-set-boundary-conventions.

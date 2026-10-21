@@ -1,0 +1,9 @@
+-- The if-flip of observeContinuousEqualsLetfree: `if Normal == 0.5 then 1
+-- else 2` spelled with its condition negated and its arms swapped. The
+-- IfThenElse rule derives the False weight as the complement of the True
+-- weight, and the complement of `not (Normal == 0.5)`'s mass 1 is the mass 0:
+-- the equality's density convention was lost and p(Right 1) answered
+-- impossible. A negated condition now swaps the arms instead (task
+-- null-set-conventions-not-preserved-under-negation), so every row matches
+-- the un-negated spelling's.
+main = observe (if not (Normal == 0.5) then 2 else 1) (\v -> v < 2)

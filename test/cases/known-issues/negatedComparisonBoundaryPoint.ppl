@@ -1,1 +1,0 @@
-main = draw v = Normal in if not ((v < 1.0) || (v == 1.0)) then right v else left ()
