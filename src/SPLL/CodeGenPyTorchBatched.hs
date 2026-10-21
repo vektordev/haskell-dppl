@@ -43,6 +43,7 @@ module SPLL.CodeGenPyTorchBatched
   , prepBatchedBody
   , usesStructureSplit
   , usesSelectDemotion
+  , usesPureCallees
   , structural
   , hoistStructural
   , SEnv(..)
@@ -59,7 +60,7 @@ import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
-import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble, groupClassName, irFreeVars)
+import SPLL.CodeGenPyTorch (envToLUT, normalRefName, replaceCalls, pyMangle, pyDouble, groupClassName, irFreeVars)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
@@ -118,8 +119,8 @@ emitBatched genBoil env0 = do
       -- retired to a runtime refusal of that one mask, as on the scalar
       -- backends ('retireUnrenderableVariants', rendered by 'retiredMethod'),
       -- rather than refusing the whole program.
-      let env@(IREnv funcs adts consts) = inlineDetGenCalls (mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (retireUnrenderableVariants "batched Python" env0)))
-      let lut = envToLUT env
+      let BatchedProgram env@(IREnv funcs adts consts) evals pureNames methods = batchedProgram env0
+      let lut = envToLUT env ++ [ (n ++ evalSuffix, n ++ "." ++ evalMethodName) | (n, _) <- evals ]
           -- Every group's generate method, raw (pre-rename) name and body: the
           -- self-contained recursion check ('hasGenCycle') walks these
           -- directly, mirroring 'checkCallGraph's raw-name convention.
@@ -128,6 +129,9 @@ emitBatched genBoil env0 = do
           -- thread the batch-size parameter through cross-function generate
           -- calls ('attachBatchCalls'), which runs after the same renaming.
           genArities = [ (fromMaybe raw (lookup raw lut), length (fst (unwrapLambdas e))) | (raw, e) <- genRaw ]
+          -- A nullary pure callee is referenced by a bare name, emitted as a call.
+          nullaryCalls = [ fromMaybe n (lookup n lut) | (n, e) <- methods, n `elem` pureNames
+                                                      , null (fst (unwrapLambdas e)) ]
       -- The ADT-derived name sets every pass below shares: constructor names
       -- (the dichotomy guard's notion of *structure*, M2), the nullary ones
       -- (emitted as instantiations, the same rule and reason as
@@ -149,9 +153,10 @@ emitBatched genBoil env0 = do
       -- fallback is never worse than the uncollapsed backend.
       let attempt enums = do
             let env' = (adtEnvWith enums adts) { sGenNames = map fst genArities
-                                               , sMethodSCCs = methodSCCs lut funcs }
-            () <- checkCallGraph env' funcs
-            classes <- mapM (generateClass (groupClassName env) env' lut genArities genRaw) funcs
+                                               , sMethodSCCs = methodSCCs lut pureNames methods
+                                               , sNullaryCalls = nullaryCalls }
+            () <- checkCallGraph env' pureNames methods
+            classes <- mapM (generateClass (groupClassName env) env' lut genArities genRaw pureNames evals) funcs
             return (enums, classes)
           settle enums = case attempt enums of
             Right ok -> Right ok
@@ -320,13 +325,18 @@ renderConst (n, v) = case batchedVal v of
 -- (task neural-generate-parity: generate's ineligibility used to degrade to a
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
-generateClass :: (String -> String) -> SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either Refusal [String]
-generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc _ dom variantOf) = do
-  let method m suffix d
+generateClass :: (String -> String) -> SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> [String] -> [(String, IRFunDecl)] -> IRFunGroup -> Either Refusal [String]
+generateClass clsName env lut genArities genMethods pureNames evals (IRFunGroup name gen prob integ _ normal doc _ dom variantOf) = do
+  let method m raw d
         | Just ls <- retiredMethod variantOf m d = Right ls
-        | otherwise = generateMethod (enterMethod (name ++ suffix) env) lut m name d
-  p <- maybe (Right []) (method "forward" "_prob") prob
-  i <- maybe (Right []) (method "integrate" "_integ") integ
+        | otherwise = generateMethod (enterMethod raw env) lut m name d
+      -- A pure callee is emitted only where a prob/integ path reaches it
+      -- ('pureCallees').
+      reached raw = if raw `elem` pureNames then id else const Nothing
+  p <- maybe (Right []) (method "forward" (name ++ "_prob")) prob
+  i <- maybe (Right []) (method "integrate" (name ++ "_integ")) integ
+  nm <- maybe (Right []) (method "normal_params" (normalRefName name)) (reached (normalRefName name) normal)
+  ev <- maybe (Right []) (method evalMethodName (name ++ evalSuffix)) (reached (name ++ evalSuffix) (lookup name evals))
   g <- maybe (Right []) (renderGen env lut genArities genMethods name) gen
   let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ clsName name ++ "(Module):"
@@ -340,12 +350,11 @@ generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob in
       -- a group whose methods all take extra per-point arguments is real, but
       -- has no dense entry point to justify the constant.
       domSection = if null pDense && null iDense then [] else domLines
-      -- A group with none of forward/integrate/generate (e.g. a tuple
-      -- 'component' group carrying only a normal function, which batched mode
-      -- does not emit) would otherwise produce a syntactically empty class
-      -- body. It is never called (checkCallGraph admits only forward/integrate
-      -- callees), so a `pass` body keeps the instantiation valid.
-      sections = filter (not . null) [domSection, i, iDense, p, pDense, g]
+      -- A group with no emitted method (e.g. a tuple 'component' group
+      -- carrying only a normal function no prob/integ path reads) would
+      -- otherwise produce a syntactically empty class body. Nothing calls it
+      -- ('checkCallGraph'), so a `pass` body keeps the instantiation valid.
+      sections = filter (not . null) [domSection, i, iDense, p, pDense, nm, ev, g]
       methodBody = if null sections then ["pass"] else intercalate [""] sections
   return $ commentLines ++ [initLine] ++ indentOnce methodBody
 
@@ -810,15 +819,41 @@ usesStructureSplit = anyInferenceBody (\senv body -> usesSplit (prepBatchedBody 
 usesSelectDemotion :: IREnv -> Bool
 usesSelectDemotion = anyInferenceBody (\senv body -> demoteStructuralSelects senv body /= body)
 
--- | Does a predicate hold of any prob/integ body of this environment, as the
--- batched backend names it?
+-- | Does a prob/integ path of this environment call a pure callee
+-- ('pureCallees': a helper's @normal_params@, or a recursive deterministic
+-- helper's forward evaluator)? The impact census ('CertifiedCensus') keys on
+-- it: the fuzz arms compare prob/integ bodies only, so a method body reached
+-- from one is code they never certified.
+usesPureCallees :: IREnv -> Bool
+usesPureCallees env0 = not (null pureNames)
+  where BatchedProgram _ _ pureNames _ = batchedProgram env0
+
+-- | Does a predicate hold of any prob/integ body of this environment, or of a
+-- pure callee one reaches ('pureCallees'), as the batched backend names it?
 anyInferenceBody :: (SEnv -> IRExpr -> Bool) -> IREnv -> Bool
 anyInferenceBody p env0 =
-  or [ p (enterMethod (groupName g ++ suffix) senv) body
-     | g <- funcs, (suffix, Just (body, _)) <- [("_prob", probFun g), ("_integ", integFun g)] ]
+  or [ p (enterMethod n senv) body | (n, body) <- methods, isEmittedMethod n || n `elem` pureNames ]
   where
-    IREnv funcs adts _ = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (retireUnrenderableVariants "batched Python" env0))
-    senv = (adtEnv adts) { sMethodSCCs = methodSCCs [] funcs }
+    BatchedProgram (IREnv _ adts _) _ pureNames methods = batchedProgram env0
+    senv = (adtEnv adts) { sMethodSCCs = methodSCCs [] pureNames methods }
+
+-- | A program as the batched backend sees it: identifiers mangled, per-mask
+-- variants that cannot render retired, deterministic generators inlined or
+-- turned into forward evaluators ('inlineDetGenCalls'), and the pure callees
+-- its prob/integ paths reach ('pureCallees'), over the whole method universe
+-- ('programMethods').
+--
+-- Fields: the environment, the reached forward evaluators by group name, the
+-- reached pure callees by raw name, and every method by raw name.
+data BatchedProgram = BatchedProgram IREnv [(String, IRFunDecl)] [String] [(String, IRExpr)]
+
+batchedProgram :: IREnv -> BatchedProgram
+batchedProgram env0 = BatchedProgram env evals pureNames (programMethods funcs evals)
+  where
+    (env@(IREnv funcs _ _), allEvals) =
+      inlineDetGenCalls (mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (retireUnrenderableVariants "batched Python" env0)))
+    pureNames  = pureCallees funcs allEvals
+    evals = [ e | e@(n, _) <- allEvals, (n ++ evalSuffix) `elem` pureNames ]
 
 -- | Does this prepared body contain a split point?
 usesSplit :: IRExpr -> Bool
@@ -1158,6 +1193,10 @@ data SEnv = SEnv
     -- value-dependent branch guarding a call to one of them, which does not
     -- descend into a list tail, is split ('splitStructureSelects').
   , sRecCallees   :: [String]
+    -- | The post-rename names of the nullary pure callees ('pureCallees'): a
+    -- prob/integ path references one by a bare 'IRVar' (there is no nullary
+    -- 'IRApply'), which 'batchedExpr' emits as a call.
+  , sNullaryCalls :: [String]
   }
 
 -- | The environment for one program: nothing bound yet, and the three name sets
@@ -1191,6 +1230,7 @@ adtEnvWith enums decls = SEnv
   , sGenNames     = []
   , sMethodSCCs   = []
   , sRecCallees   = []
+  , sNullaryCalls = []
   }
 
 -- | The collapsed enumerations whose @is\<Ctor\>@ tests this expression reads,
@@ -1451,13 +1491,13 @@ hasStructuralIf env e = case e of
 -- A call to a generator that draws nothing and does not recurse never reaches
 -- this check: 'inlineDetGenCalls' has already beta-reduced it into the caller
 -- (that is what admits @flip@, whose prob path evaluates @flip_gen@ forward).
-checkCallGraph :: SEnv -> [IRFunGroup] -> Either Refusal ()
-checkCallGraph env funcs = do
+checkCallGraph :: SEnv -> [String] -> [(String, IRExpr)] -> Either Refusal ()
+checkCallGraph env pureNames methods = do
     () <$ foldM (walk []) [] roots
     mapM_ checkRecursion [ (n, env', prepBatchedBody env' b)
-                         | (n, b) <- methods, isEmittedMethod n, let env' = enterMethod n env ]
+                         | (n, b) <- methods, admitted n, let env' = enterMethod n env ]
   where
-    methods  = concatMap groupMethods funcs
+    admitted n = isEmittedMethod n || n `elem` pureNames
     roots    = [n | (n, _) <- methods, isEmittedMethod n]
     callees  = graphCallees methods
     -- Only a call into the caller's own strongly connected component is
@@ -1476,11 +1516,12 @@ checkCallGraph env funcs = do
     walk grey black name
       | name `elem` grey  = Right black   -- a cycle: admissibility is 'checkRecursion's call
       | name `elem` black = Right black
-      | not (isEmittedMethod name) =
+      | not (admitted name) =
           Left $ unblamed $ "batched mode: a prob/integ path calls " ++ name
               ++ ", which is not a forward/integrate method (a prob/integ path may only "
-              ++ "call other forward/integrate methods; generate and normal_params are "
-              ++ "compiled separately -- see design pytorch-tensorizer)."
+              ++ "call forward/integrate methods, Gaussian parameters and deterministic "
+              ++ "helpers; a random generator is compiled separately -- see design "
+              ++ "pytorch-tensorizer)."
       | otherwise = do
           black' <- foldM (walk (name : grey)) black (callees name)
           Right (name : black')
@@ -1510,17 +1551,39 @@ checkCallGraph env funcs = do
 -- Every binder in the inlined body, parameters included, gets a fresh
 -- @_inlN_@-prefixed name, so an inlined copy can neither capture nor shadow a
 -- caller's name, nor collide with a second copy of itself in the same scope.
-inlineDetGenCalls :: IREnv -> IREnv
-inlineDetGenCalls (IREnv funcs adts consts) = IREnv (evalState (mapM goGroup funcs) 0) adts consts
+--
+-- A deterministic generator that /is/ recursive (@factorial@, or a fold over a
+-- neural read's ADT fields such as @numRed (rest s)@) cannot be inlined. It
+-- becomes a forward evaluator instead (task
+-- batched-prob-path-calls-recursive-helper-gen): its generate body, emitted
+-- as an ordinary forward-style method (@evaluate@, 'evalSuffix') that takes no
+-- batch size, and every prob/integ/normal reference to @f_gen@ is renamed to
+-- @f_eval@. Being a pure function of its arguments, the evaluator gets the
+-- prob/integ treatment in full -- including the per-structure split, whose
+-- re-run is exact for a pure body -- so its recursion is admitted by the same
+-- rule as a recursive @_prob@ ('recOffenders'). The second component is every
+-- such evaluator, by group name; 'pureCallees' keeps the ones a prob/integ
+-- path reaches.
+inlineDetGenCalls :: IREnv -> (IREnv, [(String, IRFunDecl)])
+inlineDetGenCalls (IREnv funcs adts consts) = (IREnv funcs' adts consts, evals)
   where
+    (funcs', evals) = evalState ((,) <$> mapM goGroup funcs <*> mapM goEval evalGroups) 0
     genRaw = [ (n ++ "_gen", e) | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs ]
     det    = deterministicGens funcs
     inlinable = [ (n, e) | (n, e) <- genRaw, n `Set.member` det, not (hasGenCycle genRaw n) ]
+    evalGroups = [ (n, d) | IRFunGroup{groupName=n, genFun=Just d} <- funcs
+                          , let raw = n ++ "_gen", raw `Set.member` det, hasGenCycle genRaw raw ]
+    toEval = irMap (\x -> case x of
+                       IRVar v | Just n <- lookup v [ (n ++ "_gen", n) | (n, _) <- evalGroups ]
+                               -> IRVar (n ++ evalSuffix)
+                       _ -> x)
     goGroup g = do
       p <- traverse goDecl (probFun g)
       i <- traverse goDecl (integFun g)
-      return g{probFun = p, integFun = i}
-    goDecl (e, doc) = (\e' -> (e', doc)) <$> inl e
+      nm <- traverse goDecl (normalFun g)
+      return g{probFun = p, integFun = i, normalFun = nm}
+    goEval (n, d) = (\d' -> (n, d')) <$> goDecl d
+    goDecl (e, doc) = (\e' -> (toEval e', doc)) <$> inl e
     -- Top-down: a call site is replaced by its (renamed) body, which is then
     -- itself traversed, so a helper calling another deterministic helper is
     -- inlined transitively. Terminates because every inlined name is acyclic.
@@ -1606,13 +1669,26 @@ recOffenders scc env guarded e = case e of
       ++ recOffenders scc env arms f
 
 -- | Does this expression call a member of the current method's recursive
--- component ('sRecCallees') without descending into a list tail -- a call
+-- component ('sRecCallees'), or a recursive forward evaluator
+-- ('recursiveEvaluators'), without descending into a list tail -- a call
 -- whose termination needs every value-dependent branch above it split?
+--
+-- An evaluator is judged at every call site, not only inside its own cycle:
+-- an eager @torch.where@ arm would run it on elements the scalar backend
+-- never passes it, and a value recursion like @cnt n = if n == 0 then 0 else
+-- cnt (n - 1) + 1@ does not terminate on those (@main x = if x < 0 then
+-- Normal else Normal + cnt x@ at @x = -1@).
 undescendingRecCall :: SEnv -> IRExpr -> Bool
 undescendingRecCall env e = case collectApplyChain e of
-  (IRVar n, args) | n `elem` sRecCallees env ->
+  (IRVar n, args) | n `elem` sRecCallees env || n `elem` recursiveEvaluators env ->
     not (any hasTailDescent args) || any (undescendingRecCall env) args
   _ -> any (undescendingRecCall env) (getIRSubExprs e)
+
+-- | The recursive forward evaluators ('inlineDetGenCalls'), by raw and by
+-- post-rename name: every member of an evaluator's non-empty recursive
+-- component ('sMethodSCCs').
+recursiveEvaluators :: SEnv -> [String]
+recursiveEvaluators env = concat [ scc | (m, scc) <- sMethodSCCs env, evalSuffix `isSuffixOf` m ]
 
 -- | Does this argument expression take the tail of a list anywhere?
 hasTailDescent :: IRExpr -> Bool
@@ -1625,15 +1701,49 @@ groupMethods (IRFunGroup n gen prob integ enc normal _ _ _ _) =
   ++ [(n ++ "_prob",   b) | Just (b, _) <- [prob]]
   ++ [(n ++ "_integ",  b) | Just (b, _) <- [integ]]
   ++ [(n ++ "_writeLogits", b) | Just (b, _) <- [enc]]
-  ++ [(n ++ "_normal", b) | Just (b, _) <- [normal]]
+  ++ [(normalRefName n, b) | Just (b, _) <- [normal]]
 
--- | Every prob/integ method's recursive strongly connected component: the
--- methods it reaches that reach it back (itself included when it is directly
--- or mutually recursive), by raw name and, through @lut@, by the name an
--- emitted body calls it by. A method on no cycle has an empty component.
-methodSCCs :: [(String, String)] -> [IRFunGroup] -> [(String, [String])]
-methodSCCs lut funcs = [ (m, sccIn lut methods m) | (m, _) <- methods, isEmittedMethod m ]
-  where methods = concatMap groupMethods funcs
+-- | Every method of a program by raw name, the forward evaluators
+-- ('inlineDetGenCalls') included: the universe the call-graph guard walks.
+programMethods :: [IRFunGroup] -> [(String, IRFunDecl)] -> [(String, IRExpr)]
+programMethods funcs evals =
+  concatMap groupMethods funcs ++ [ (n ++ evalSuffix, b) | (n, (b, _)) <- evals ]
+
+-- | The raw name a group's forward evaluator ('inlineDetGenCalls') is
+-- referenced by, as a suffix of the group name, and the Python method it is
+-- emitted as. Not @eval@: that is 'torch.nn.Module.eval'.
+evalSuffix, evalMethodName :: String
+evalSuffix     = "_eval"
+evalMethodName = "evaluate"
+
+-- | The /pure callees/ a prob/integ path reaches, by raw name: the Gaussian
+-- parameters of a helper (@f_normal@, emitted as @normal_params@; task
+-- batched-prob-path-calls-helper-normal-params) and the forward evaluators of
+-- recursive deterministic generators (@f_eval@, 'inlineDetGenCalls'). Each is
+-- a deterministic function of its arguments, so it is an ordinary batched
+-- method a kernel may call. Only reachable ones are emitted: a normal or
+-- evaluator body nothing in prob/integ reads is never judged, so it cannot
+-- cost a program its eligibility.
+pureCallees :: [IRFunGroup] -> [(String, IRFunDecl)] -> [String]
+pureCallees funcs evals = filter (`elem` candidates) (reach [] roots)
+  where
+    methods    = programMethods funcs evals
+    candidates = [ normalRefName n | IRFunGroup{groupName=n, normalFun=Just _} <- funcs ]
+              ++ [ n ++ evalSuffix | (n, _) <- evals ]
+    roots      = [ n | (n, _) <- methods, isEmittedMethod n ]
+    reach seen []     = seen
+    reach seen (n:ns)
+      | n `elem` seen = reach seen ns
+      | otherwise     = reach (n : seen) (graphCallees methods n ++ ns)
+
+-- | Every prob/integ method's, and every pure callee's, recursive strongly
+-- connected component: the methods it reaches that reach it back (itself
+-- included when it is directly or mutually recursive), by raw name and,
+-- through @lut@, by the name an emitted body calls it by. A method on no
+-- cycle has an empty component.
+methodSCCs :: [(String, String)] -> [String] -> [(String, IRExpr)] -> [(String, [String])]
+methodSCCs lut pureNames methods =
+  [ (m, sccIn lut methods m) | (m, _) <- methods, isEmittedMethod m || m `elem` pureNames ]
 
 -- | The recursive strongly connected component of @m@ in the call graph of
 -- @methods@ ('graphCallees'), by raw name and by its @lut@ rename.
@@ -1653,8 +1763,10 @@ sccIn lut methods m = scc ++ [r | Just r <- map (`lookup` lut) scc]
 enterMethod :: String -> SEnv -> SEnv
 enterMethod raw env = env { sRecCallees = fromMaybe [] (lookup raw (sMethodSCCs env)) }
 
--- | The only call targets a prob/integ path may reach ('checkCallGraph').
--- Generate has its own, separate admission rule ('renderGen'/'hasGenCycle').
+-- | The roots of the call-graph guard ('checkCallGraph'): the forward and
+-- integrate methods. The other targets a prob/integ path may reach are its
+-- 'pureCallees'. Generate has its own, separate admission rule
+-- ('renderGen'/'hasGenCycle').
 isEmittedMethod :: String -> Bool
 isEmittedMethod n = ("_prob" `isSuffixOf` n) || ("_integ" `isSuffixOf` n)
 
@@ -2052,7 +2164,7 @@ batchedLine :: SEnv -> IRExpr -> Supply ([String], String)
 batchedLine env e
   | not (tooDeepForPython rendered) = return ([], rendered)
   | otherwise = do
-      (binds, e') <- spillDeep (sNullaryCtors env ++ sGenNames env) e
+      (binds, e') <- spillDeep (sNullaryCtors env ++ sNullaryCalls env ++ sGenNames env) e
       if null binds
         -- Nothing strict and pure to cut out; emit as before.
         then return ([], rendered)
@@ -2119,6 +2231,7 @@ batchedExpr _env (IRConst v)   = batchedValOrDie v
 -- callableNames does.
 batchedExpr env (IRVar name)
   | name `elem` sNullaryCtors env = "(" ++ name ++ ")()"
+  | name `elem` sNullaryCalls env = "(" ++ name ++ ")()"
   | otherwise                     = name
 batchedExpr env (IROp OpApprox l r) = "isclose(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
 batchedExpr env (IROp OpAnd l r)    = "(" ++ batchedExpr env l ++ " & " ++ batchedExpr env r ++ ")"

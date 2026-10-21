@@ -1628,16 +1628,21 @@ batchedRefusalTable =
   -- `main = rec`) is no longer judged as recursion. What the split does not
   -- reach (a recursive call under a select inside a tensor map's body) has no
   -- corpus trigger; its refusal is a synthetic row in "TestInternals".
-  -- a prob/integ path reaching a method batched mode does not emit: a
-  -- *recursive* generator, which 'inlineDetGenCalls' cannot beta-reduce away
-  [ ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
+  -- A prob/integ path reaching a recursive deterministic generator
+  -- (`factorial`, the plan-enumeration folds) or a helper's Gaussian
+  -- parameters (`normalThroughFunctionNested`) left this table with tasks
+  -- batched-prob-path-calls-recursive-helper-gen and
+  -- batched-prob-path-calls-helper-normal-params: both are pure callees,
+  -- emitted as ordinary batched methods. A call to a *random* recursive
+  -- generator is still refused; its only corpus trigger is a known-issues
+  -- miscompile (`namedHofRandomFunctionArg`), so it is a synthetic row in
+  -- "TestInternals" ('test_batchedPureCallees').
+  --
   -- Refusals pinned as open bugs under universal batched admission (task
   -- batched-admission-universal), one row per refusal class without a row
   -- above. Each fails, as every row here does, the day batched mode accepts
   -- the program; the row then leaves the table with its ticket.
-  -- task batched-prob-path-calls-helper-normal-params
-  , ("normalThroughFunctionNested", "a prob/integ path calls shifted_normal, which is not a forward/integrate method")
-  ]
+  []
 
 -- ===========================================================================
 -- Batched ADT-cdf NaN guard (task batched-adt-cdf-refusal-becomes-nan)
@@ -2579,6 +2584,64 @@ batchedEnumBucketingTests = testGroup "batched enum bucketing"
                   ExitSuccess   -> counterexample (out ++ err) True
                   ExitFailure _ -> counterexample ("enum bucketing check failed:\n" ++ out ++ err) False
   ]
+
+-- | A recursive deterministic helper's forward evaluator, run on a
+-- per-element argument (task batched-prob-path-calls-recursive-helper-gen).
+-- The corpus differential passes a program's parameters batch-shared, so
+-- @factorial@'s rows never mix its guard @x < 1.5@ across a batch, and
+-- modality inference refuses the same helper on a drawn value, which is
+-- what would put a per-element value in its argument. This passes @x@ as a
+-- @[B]@ tensor of different depths instead: the evaluator's guard mixes, so
+-- the batch is split until each half agrees, and every element must still
+-- get its own factorial. A @slow@ program, so no tier checks it otherwise.
+batchedPerElementEvaluatorTests :: TestTree
+batchedPerElementEvaluatorTests = testGroup "batched forward evaluator on a per-element argument"
+  [ testProperty "factorial's prob path evaluates factorial per element" $
+      once $ ioProperty $ do
+        mpy <- findTorchPython
+        case mpy of
+          Nothing -> noTorchProperty "batched forward evaluator"
+          Just py -> do
+            prog <- corpusPplPath "factorial" >>= parseProgram
+            case compile defaultCompilerConfig{batched = True} prog >>= generateFunctionsBatched True of
+              Left err -> return (counterexample ("factorial is not batched-eligible: " ++ err) False)
+              Right srcLines -> do
+                cwd <- getCurrentDirectory
+                let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n"
+                             ++ unlines srcLines ++ driver
+                (code, out, err) <- withSystemTempFile "per_element_evaluator.py" $ \tmpPath tmpHandle -> do
+                  hPutStr tmpHandle script
+                  hClose tmpHandle
+                  readProcessWithExitCode py [tmpPath] ""
+                return $ case code of
+                  ExitSuccess   -> counterexample (out ++ err) True
+                  ExitFailure _ -> counterexample ("per-element evaluator check failed:\n" ++ out ++ err) False
+  ]
+  where
+    driver = unlines
+      [ "def fact(n):"
+      , "    return 1.0 if n < 1.5 else fact(n - 1.0) * n"
+      , "xs = [5.0, 1.0, 3.0, 4.0, 0.5, 6.0, 2.0, 5.0]"
+      , "hits = [fact(x) for x in xs]"
+      , "misses = [fact(x) + 1.0 for x in xs]"
+      , "x = torch.tensor(xs, dtype=torch.float64)"
+      , "fails = []"
+      , "for name, samples, want in [('hit', hits, 1.0), ('miss', misses, 0.0)]:"
+      , "    p = main.forward(torch.tensor(samples, dtype=torch.float64), x)[0]"
+      , "    for i, v in enumerate(p.tolist()):"
+      , "        if abs(v - want) > 1e-9:"
+      , "            fails.append('%s at x = %r: p = %r, expected %r' % (name, xs[i], v, want))"
+      , "c = main.integrate(torch.tensor([h - 0.5 for h in hits] + [h + 0.5 for h in hits], dtype=torch.float64),"
+      , "                   torch.cat([x, x]))[0]"
+      , "for i, v in enumerate(c.tolist()):"
+      , "    want = 0.0 if i < len(xs) else 1.0"
+      , "    if abs(v - want) > 1e-9:"
+      , "        fails.append('cdf row %d: %r, expected %r' % (i, v, want))"
+      , "if fails:"
+      , "    print('\\n'.join(fails))"
+      , "    sys.exit(1)"
+      , "print('per-element evaluator OK')"
+      ]
 
 -- | Appended to the emitted module (so the constructor classes are in scope).
 -- The probabilities mirror @clevrSceneEnumAttrs.ppl@.
