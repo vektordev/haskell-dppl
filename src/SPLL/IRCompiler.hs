@@ -3902,7 +3902,41 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
-    (pLeft, leftBinds) <- listen (operandProb meta mTblL left (IRVar x2))
+    -- The inversion's own applicability (task mult-enumerable-zero-divisor-crash):
+    -- 'invExpr' (e.g. mult's c/e) is undefined at some enumerated values (e.g.
+    -- e=0), and it sits as an argument to 'IRIsPossible', so it must be
+    -- evaluated before any membership test can run. Gating via 'IRIf' rather
+    -- than 'OpAnd' matters here: both operands of an IR boolean op are
+    -- evaluated, so an 'OpAnd' would still divide by zero.
+    let possibleExpr = IRIf appTest (IRIsPossible enumListR invExpr) (IRConst (VBool False))
+    -- Without topK, pLeft is read once, inside the 'possible' arm below, and the
+    -- optimizer's let-inlining moves its bindings there: a cell whose inverted
+    -- value lies outside the right-hand domain never descends into @left@.
+    -- Under topK the cutoff test reads pLeft a second time, so its bindings
+    -- stayed in front of the guard and every cell descended into @left@
+    -- whether or not it was possible. On a left-nested chain that eager
+    -- descent compounds per level into a product of the domain sizes, where
+    -- the guarded one only walks the possible splits (task
+    -- topk-compiled-scene-count-query-exponential-in-slots: p(0) on a 7-slot
+    -- scene count took 34 s against 0.1 s topK-off). So under topK pLeft is
+    -- bound once, behind 'possible', and reads as zero elsewhere -- a value
+    -- nothing consumes there, since the cutoff test is conjoined with
+    -- 'possible'. Its pure loop-invariant bindings (a network call) are
+    -- released into the writer first, as pRight's are below, so hoisting
+    -- still lifts them out of the loop.
+    (pLeft, leftNames, possible) <- case topKThreshold (compilerConfig meta) of
+      Nothing -> do
+        (pL, lBinds) <- listen (operandProb meta mTblL left (IRVar x2))
+        return (pL, map fst lBinds, possibleExpr)
+      Just _ -> do
+        (pL, lBinds) <- lift (runWriterT (operandProb meta mTblL left (IRVar x2)))
+        let (lFree, lGuarded) = splitHoistable [x2, x3] lBinds
+        setVariables lFree
+        possibleV <- mkVariable "possible"
+        pLeftV <- mkVariable "pLeft"
+        setVariables [ (possibleV, possibleExpr)
+                     , (pLeftV, IRIf (IRVar possibleV) (generateLetInExpr lGuarded pL) (srZero sr)) ]
+        return (IRVar pLeftV, map fst lGuarded ++ [possibleV, pLeftV], IRVar possibleV)
     -- pRight is computed in a nested writer so its bindings can be guarded by the topK check,
     -- avoiding the inner right-side inference work whenever acc_prob * pLeft is already below cutoff.
     -- The right-hand key is the INVERTED value, an expression rather than an
@@ -3925,16 +3959,9 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     -- MNIST sum). Pure bindings that read no loop variable and nothing bound
     -- per iteration are released into this writer instead, so they are
     -- hoisted exactly like pLeft's; everything else stays guarded.
-    let (rFree, rGuarded) = splitHoistable (x2 : x3 : map fst leftBinds) pRightBinds
+    let (rFree, rGuarded) = splitHoistable (x2 : x3 : leftNames) pRightBinds
     setVariables rFree
     let wrapR e = generateLetInExpr rGuarded e
-    -- The inversion's own applicability (task mult-enumerable-zero-divisor-crash):
-    -- 'invExpr' (e.g. mult's c/e) is undefined at some enumerated values (e.g.
-    -- e=0), and it sits as an argument to 'IRIsPossible', so it must be
-    -- evaluated before any membership test can run. Gating via 'IRIf' rather
-    -- than 'OpAnd' matters here: both operands of an IR boolean op are
-    -- evaluated, so an 'OpAnd' would still divide by zero.
-    let possible = IRIf appTest (IRIsPossible enumListR invExpr) (IRConst (VBool False))
     -- accProb * pLeft is a semiring product (srTimes): under logSpace both
     -- operands are log-probabilities, so a hardcoded OpMult here silently
     -- pruned every branch (task topk-logspace-unsound). The comparison against

@@ -257,7 +257,12 @@ readLogitsLinearOnly =
   -- task writelogits-dropped-for-read-passthrough-continuous-leaf: moved here
   -- from known-issues; its per-slot enumeration measures the untouched slots
   -- through readScene_auto.forward.
-  , "planCrossSlotConditionalAllAny" ]
+  , "planCrossSlotConditionalAllAny"
+  -- task neural-read-query-outside-domain-unchecked: moved here from
+  -- known-issues; a bare read (or its point inversion) answered by
+  -- readD_auto.forward / readS_auto.forward.
+  , "neuralReadQueriedOutsideDomain", "neuralReadOutsideDomainThroughInversion"
+  , "neuralReadOutsideSparseDomain" ]
 
 -- | The corpus programs whose default compile took the plan engine until every
 -- read was tagged, and which now enumerate densely by default. They were

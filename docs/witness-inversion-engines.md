@@ -575,3 +575,22 @@ observation's manifold constraint is carried by the deterministic-slot
 consistency check IRCompiler emits for the query as a whole, a dim-0 indicator
 factor, so `p((a,(b,c)))` above is `p(a)·p(b−a−3)·[c−b == −1]` at dim 2.
 Corpus: `overDeterminedSharedLatent`, `degenerateSameLatentSum`.
+
+That indicator contributes no dimension, but the density it multiplies was
+taken in the witness slot's coordinate alone: the support's speed in the
+other coordinates is never accounted for. The number is the density in that
+slot's chart, not the density with respect to the support's Hausdorff measure,
+and the same distribution written with its slots swapped or rescaled reports a
+different one (`(x, x*2.0)` gives 1.0, `(x*2.0, x)` gives 0.5, the ℋ¹ value
+is 1/√5). Which convention is right is design
+`compositional-gramian-hausdorff-measures`' call. Until then the compiler warns
+(`ChartDependentDensity`, `docs/pipeline-and-types.md` "Compile-time
+warnings"): `CompileWarnings.chartDependentClasses` reports each group of
+`Float` slots that depends, continuously, on fewer primitive draws than it has
+slots, naming the draws and the slot each is recovered through
+(`ForwardChaining.witnessPath`). Counting draws bounds the support's dimension
+from above, so it misses a rank-deficient map with as many draws as slots
+(`(x+y, x+y)`). A group reading a neural output or a drawing function is
+skipped. Dependence through a comparison, an integer or an `if` condition does
+not count, which keeps the piecewise-isometric `(x, if x > 0.5 then 1.0 else
+2.0)` quiet.
