@@ -1,0 +1,2 @@
+f x = draw rwv0 = x in draw rwv1 = rwv0 in (rwv1, rwv1 * Normal)
+main = f Uniform
