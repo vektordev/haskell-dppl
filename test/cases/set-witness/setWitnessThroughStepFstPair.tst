@@ -3,7 +3,6 @@
 -- comparison used to be refused; a projection of a literal pair is now
 -- inverted as that field. Must agree with setWitnessSiblingConst row for
 -- row. Task set-witness-walk-stops-at-identity-injf-wrapper.
-batched
 p((0.3, 1.0)) is impossible
 p((0.7, 0.0)) is impossible
 p((0.7, 1.0))=(1.0, 1.0)

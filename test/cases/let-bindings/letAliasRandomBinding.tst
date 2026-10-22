@@ -1,5 +1,4 @@
 slow
-batched
 p((0.5, 1.1))=(0.13975322833741527, 2.0, False)
 -- Task let-alias-of-random-binding-crashes-toirnormalparams, fixed by task
 -- reinfer-body-under-recovered-bindings (law-carrying-modality M1). `p1` is a

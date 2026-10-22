@@ -64,7 +64,7 @@ import SPLL.Validator (validateProgram)
 import SPLL.ReservedNames (queryParamName, distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
-import End2EndTesting (findTorchPython, noTorch)
+import End2EndTesting (findTorchPython, noTorch, batchedTopKExceptions)
 import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
                          runPythonBatchWith, runJuliaBatchWith, Disagreement(..), interpreterGenerateFails,
                          prepareBatchedCase, runBatchedPythonBatch)
@@ -1013,7 +1013,8 @@ test_tstDimIsInt = testCase "tstDimIsInt" $ do
 
 -- .tst files may carry an optional `backends:` header that routes the file's
 -- cases to a subset of the End2End backends; no header means the three scalar
--- backends (`defaultBackends`) -- notably NOT the opt-in `batched` token.
+-- backends (`defaultBackends`) -- notably NOT `batched`, which only a
+-- known-issues pin names.
 -- They may also carry an optional `slow` header (in either order relative to
 -- `backends:`) that moves the file into the opt-in Slow test group, and an
 -- optional `expect-failure:` header (design testcases-corpus-restructure)
@@ -1043,7 +1044,7 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
       assertEqual "slow header is recognized" True slow
   case parse "backends: python, batched\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, _, _, _) -> assertEqual "batched is an explicit opt-in token" [Python, Batched] bs
+    Right (bs, _, _, _) -> assertEqual "a known-issues pin names the batched backend in its backends list" [Python, Batched] bs
   case parse "backends: interpreter\nslow\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right (bs, slow, _, _) -> do
@@ -1054,23 +1055,29 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
     Right (bs, slow, _, _) -> do
       assertEqual "slow-then-backends routing" [Interpreter] bs
       assertEqual "slow-then-backends is recognized" True slow
-  -- Impact analysis M2: `batched`, `dense` and `no-normalization` are
-  -- standalone lines, in any order with the others.
-  case parseTstFileFromString "header.tst" "batched\nslow\ndense\np(0.5)=(1.0, 1.0)\n" of
+  -- Impact analysis M2: `dense` and `no-normalization` are standalone
+  -- lines, in any order with the others.
+  case parseTstFileFromString "header.tst" "slow\ndense\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right t -> do
-      assertEqual "standalone batched and dense join the scalar default" (defaultBackends ++ [Batched, Dense]) (tstBackends t)
+      assertEqual "standalone dense joins the scalar default" (defaultBackends ++ [Dense]) (tstBackends t)
       assertEqual "slow among standalone tokens" True (tstSlow t)
       assertEqual "no no-normalization line" False (tstNoNormalization t)
       assertEqual "rows after the standalone tokens" 1 (length (tstCases t))
-  case parseTstFileFromString "header.tst" "no-normalization\nbatched\nbackends: python\np(0.5)=(1.0, 1.0)\n" of
+  case parseTstFileFromString "header.tst" "no-normalization\ndense\nbackends: python\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right t -> do
-      assertEqual "a backends line keeps an earlier standalone token" [Python, Batched] (tstBackends t)
+      assertEqual "a backends line keeps an earlier standalone token" [Python, Dense] (tstBackends t)
       assertEqual "no-normalization is recognized" True (tstNoNormalization t)
-  case parseTstFileFromString "header.tst" "batchedx\np(0.5)=(1.0, 1.0)\n" of
+  case parseTstFileFromString "header.tst" "densex\np(0.5)=(1.0, 1.0)\n" of
     Left _ -> return ()
     Right t -> assertFailure ("a word merely starting with a token is not that token: " ++ show (tstBackends t))
+  -- Batched admission is universal (docs-repo task batched-admission-universal):
+  -- the standalone `batched` declaration is gone, and a file still carrying it
+  -- does not parse.
+  case parseTstFileFromString "header.tst" "batched\np(0.5)=(1.0, 1.0)\n" of
+    Left _ -> return ()
+    Right t -> assertFailure ("a standalone batched line is no header any more: " ++ show (tstBackends t))
 
 -- The four `expect-failure:` shapes (design testcases-corpus-restructure),
 -- order-independent with `backends:`/`slow` like the other two headers.
@@ -2327,27 +2334,24 @@ test_wideProductSceneBatchedCompilesFast = testCase "wideProductSceneBatchedComp
       assertBool "an emitted DOMAIN constant lists the Scene domain"
         (not (any (\l -> "DOMAIN = [" `isInfixOf` l && "Scene(" `isInfixOf` l) (concatMap lines ls)))
 
--- | The corpus copy of the ten-slot scene, wideProductSceneCount, declares no
--- @batched@. The running batched kernel nests one split loop per slot and is
--- past 20 minutes at ten slots (task batched-count-chain-enumeration-factorial);
--- the token would also enrol the program in Slow.BatchedPython's topK
--- differentials ('End2EndTesting.topKEntries'). Those used to hang on the
--- scalar side too: the topK interpreter query was exponential in the slot
--- count until task topk-compiled-scene-count-query-exponential-in-slots
+-- | The corpus copy of the ten-slot scene, wideProductSceneCount, stays out of
+-- Slow.BatchedPython's topK differentials ('End2EndTesting.topKEntries'): its
+-- running batched kernel nests one split loop per slot and is past 20 minutes
+-- at ten slots (task batched-count-chain-enumeration-factorial; the shape is
+-- task scene-count-query-binomial-in-count's). The scalar topK query used to be
+-- exponential in the slot count too, until task
+-- topk-compiled-scene-count-query-exponential-in-slots
 -- ('test_wideProductSceneTopKQueryPolynomial' pins the fix), so the batched
--- kernel is now the only blocker. The token came in with the mass declaration
--- of task declare-batched-on-eligible-corpus-programs, against the @.tst@'s
--- own note. Drop or invert this test when the kernel is affordable.
+-- kernel is the only blocker. Batched admission is universal (task
+-- batched-admission-universal), so the exclusion is a row of
+-- 'End2EndTesting.batchedTopKExceptions'. Drop the row and this test when the
+-- kernel is affordable.
 test_wideProductSceneCountNotBatched :: TestTree
-test_wideProductSceneCountNotBatched = testCase "wideProductSceneCountNotBatched" $ do
-  tst <- corpusTstPath "wideProductSceneCount"
-  t <- readFile tst >>= either assertFailure' return . parseTstFileFromString tst
-  assertBool ("wideProductSceneCount declares batched: its batched kernel nests one split loop per \
-              \slot and does not finish at ten slots (docs-repo task \
-              \batched-count-chain-enumeration-factorial)")
-             (Batched `notElem` tstBackends t)
-  where
-    assertFailure' e = assertFailure e >> error "unreachable"
+test_wideProductSceneCountNotBatched = testCase "wideProductSceneCountNotBatched" $
+  assertBool ("wideProductSceneCount left End2EndTesting.batchedTopKExceptions: its batched kernel \
+              \nests one split loop per slot and does not finish at ten slots (docs-repo task \
+              \nscene-count-query-binomial-in-count)")
+             ("wideProductSceneCount" `elem` map fst batchedTopKExceptions)
 
 -- | A topK compile of the n-slot scene count answers p(0) with polynomial
 -- growth in n, and the ten-slot program answers it exactly at a cutoff that

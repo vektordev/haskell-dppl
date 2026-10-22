@@ -1,4 +1,3 @@
-batched
 slow
 p(None)=(0.3, 0.0, False)
 p(None_)=(0.35, 0.0, False)

@@ -6,7 +6,6 @@
 -- Regression for task multi-path-recovery-unmaterialized-crash: this used to
 -- die at run time with "Variable ast14 not declared".
 slow
-batched
 p((0.3, (3.7, 2.7)))=(1.0, 2.0, False)
 p((0.8, (4.0, 3.0)))=(1.0, 2.0, False)
 p((0.3, (3.7, 2.6))) is impossible

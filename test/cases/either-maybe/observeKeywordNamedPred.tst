@@ -1,4 +1,3 @@
-batched
 p(Right 1)=(0.3, 0.0)
 p(Left ())=(0.7, 0.0)
 p(Right ANY)=(0.3, 0.0)

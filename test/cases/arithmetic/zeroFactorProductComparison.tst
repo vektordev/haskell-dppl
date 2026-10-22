@@ -1,4 +1,3 @@
 slow
-batched
 p(True)=(0.25, 0.0)
 p(False)=(0.75, 0.0)

@@ -1,4 +1,3 @@
-batched
 p(Right 1.0)=(0.24197072451914337, 1.0)
 p(Right 2.0)=(0.05399096651318806, 1.0)
 p(Right 0.5) is impossible

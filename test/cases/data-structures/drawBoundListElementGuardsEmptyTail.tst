@@ -1,4 +1,3 @@
-batched
 p([(0.1, True), (0.2, False)])=(0.004850793548307211, 2.0)
 p([(0.3, False), (0.4, True)])=(0.004389179509675788, 2.0)
 -- A list of draw-bound tuple elements under --batched. The emptiness test of

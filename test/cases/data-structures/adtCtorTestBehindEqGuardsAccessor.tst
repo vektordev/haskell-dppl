@@ -1,4 +1,3 @@
-batched
 p(0.5)=(1.0, 1.0)
 p(0.2)=(1.0, 1.0)
 -- The batched module used to raise "No match in field accessor 'mu'" at every

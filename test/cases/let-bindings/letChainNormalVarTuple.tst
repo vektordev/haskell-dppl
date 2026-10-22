@@ -11,7 +11,6 @@
 -- (`draw x = Uniform in draw y = x + 1.0 in (y > 1.5, y)`) changed with it
 -- and still answers identically.
 slow
-batched
 p((True, 0.5))=(0.3520653, 1.0, False)
 p((True, 1.0))=(0.3989423, 1.0, False)
 p((False, -1.0))=(0.05399097, 1.0, False)

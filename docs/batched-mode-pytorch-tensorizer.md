@@ -251,8 +251,9 @@ scene's 25^10 values is what made the batched compile run out of memory. `topK` 
 always evaluated, so pruning only picks which value survives), which
 covers the dense `[V]` axis for free too.
 
-Tested by the `BatchedPython` group, gated on the `.tst` `batched`/`dense`
-header tokens and a torch-enabled Python (`NEST_TORCH_PYTHON` → a venv
+Tested by the `BatchedPython` group over every corpus program (batched
+admission is universal; `dense` is the one `.tst` header token) and a
+torch-enabled Python (`NEST_TORCH_PYTHON` → a venv
 path → `python3`; repo convention: `~/.local/share/nest/torchvenv`, not under `~/.cache`, which cleaners may wipe) — **fails** if none is found,
 naming why (`End2EndTesting.noTorch`), unless `NEST_SKIP_TORCH=1` opts out
 explicitly. Refusal behaviour has separate

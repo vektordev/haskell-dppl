@@ -7,7 +7,6 @@
 -- so head's inverse Cons(x, ANY) never matched the two-element arm. Fixed
 -- with task batched-refuses-list-constants-with-data; the batched value is
 -- also checked directly in PythonPrelude ("a batched ANY list tail ...").
-batched
 p(MkPt 0.05 True)=(0.12, 0.0)
 p(MkPt ANY True)=(0.8768, 0.0)
 p(MkPt 1.0 True)=(0.7568, 0.0)

@@ -4,7 +4,6 @@
 -- call then carries the same residue factor a syntactic tuple does, so h's
 -- constant field is still checked against the sample.
 slow
-batched
 p((0.7, 1.0))=(1.0, 1.0)
 p((0.3, 0.0))=(1.0, 1.0)
 p((0.7, 0.0)) is impossible

@@ -6,5 +6,4 @@
 -- mode raised a TypeError from torch.where(Tensor, T, T). where_anchored now
 -- selects two tuples leaf by leaf (task
 -- batched-guarded-select-over-tuple-result).
-batched
 p(4.0)=(1.0, 0.0)

@@ -926,7 +926,7 @@ rather than compared, so the fuzz side drops it (`maskedConstruct`) and the
 exception list names it.
 
 The batched arm has its own census, the second case of
-`BackendAgreementCoverage`: over the corpus programs declaring `batched`,
+`BackendAgreementCoverage`: over the (non-slow) corpus programs,
 compiled with `batched = True` (so after the select pass), the constructs of
 their probability and integrate bodies, against the batched-compiled bodies of
 the sample's batch-eligible draws (`batchedComparedBodies`). The difference

@@ -7,7 +7,6 @@
 -- compares field by field so x + 0.0 at the wildcard witness is never
 -- evaluated. Must agree with setWitnessSiblingConst row for row. Task
 -- any-slot-through-injf-inverse-reaches-condition.
-batched
 p((0.3, 1.0)) is impossible
 p((0.7, 0.0)) is impossible
 p((0.7, 1.0))=(1.0, 1.0)

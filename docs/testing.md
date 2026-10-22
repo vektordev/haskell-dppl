@@ -159,12 +159,9 @@ all.
 ## The `.tst` format
 
 A `.tst` file may start with optional header lines, in any order: a
-standalone `slow` line; two opt-in tokens, `batched` (declares batched-mode
-eligibility, asserted by the `BatchedPython` group rather than filtered, and
-checks the rows on the batched backend when the batched fuzz arms do not
-certify the program, see "Impact analysis" below) and `dense` (declares a
-finite query domain, presupposes `batched`, and always checks the rows on the
-dense entry points), each a line of its own; `no-normalization`
+standalone `slow` line; `dense` (declares a finite query domain, and always
+checks the rows on the dense entry points), a line of its own;
+`no-normalization`
 (keeps a program out of `End2End.Normalization`, which samples the output and
 cannot cover a wide support; the file's leading comment says why); and, for a
 `test/cases/known-issues/` file only, `expect-failure: <shape>` (design
@@ -185,6 +182,21 @@ interpreter cannot serve, which must be listed in
 the backends the line names, and the known-issues pins, where it says on which
 backends the bug lives. `End2End."a .tst names backends only for a program
 the interpreter cannot serve"` holds the corpus to that.
+
+**Batched admission is universal** (docs-repo task
+`batched-admission-universal`). No header selects batched mode: every corpus
+program with `p()`/`cdf()` rows is asserted batched eligible (a batched
+compile, a `generateFunctionsBatched` emission, and batchable query points),
+the non-slow ones by `BatchedPython.batched-eligible` and the `slow` ones by
+`BatchedPython (slow).batched-eligible` (bar `slowForCompileCost`). A refusal
+is a bug. The exceptions are the exact list
+`End2EndTesting.batchedAdmissionExceptions`, one ticket per row, empty when
+the list was introduced; a row whose program becomes eligible fails as stale.
+`End2EndTesting.batchedTopKExceptions` keeps an eligible program whose batched
+kernel is too slow to run out of the topK differentials, also with a ticket per
+row. `batched` survives only as a backend a known-issues pin's `backends:` line
+names; `loadCorpus` refuses it on an ordinary program, and a standalone
+`batched` line no longer parses.
 Comments are only allowed as a leading/trailing block, not interleaved
 between test cases; an unparseable line is a hard parse failure naming
 the file and line. Beware CRLF files when adding a token by script —
@@ -566,7 +578,8 @@ whole corpus, so it is a `Slow` sweep with `IgnoreSlow`: the three
 300 masked queries, 30 slot marginals), `Julia free names are escaped` (more
 than 100 Julia-routed programs), `PlanEngineMatchesDense (slow)` (every
 `planEngineCorpus` name present, and the differential on the `slow`
-programs), and `BatchedPython (slow)`'s `declared-dense-eligible` and
+programs), and `BatchedPython (slow)`'s `batched-eligible` (the `slow`
+programs' half of universal batched admission), `declared-dense-eligible` and
 `dense-matches-expected` (every `dense`-declaring program is `slow`). The
 default suite does not run them. They leave out the 13 programs that are
 `slow` for their own compile cost (`CorpusSweep.slowForCompileCost`; a name
@@ -676,7 +689,7 @@ Two checks stay on the text backends regardless:
 
 **Batched reference compliance** (docs-repo task
 `batched-backend-reference-compliance`). The same argument, for the batched
-backend: `BatchedPython.batched-vs-expected` runs a `batched` program's rows on
+backend: `BatchedPython.batched-vs-expected` runs an eligible program's rows on
 the batched backend only when its batched census
 (`CertifiedCensus.batchedProgramCensus`: the probability and integrate bodies
 of its `batched = True` compile, after the select pass) leaves
@@ -706,7 +719,7 @@ so without it a module that did not even import was certified (task
 sum over a contiguous domain into one guarded `nn_gather`
 (`usesOneHotGather`), a rewrite the fuzz arms' programs never trigger (task
 `batched-mask-variant-neural-read-nests-v-deep`). The scalar Python
-routing has no such label yet. The rest of the batched groups run regardless: the `batched` token's
+routing has no such label yet. The rest of the batched groups run regardless: the batched
 eligibility assertion, `gradients-nan-free` and
 `generate-density-matches-expected` (no arm compares gradients or batched
 generate), and the dense and topK checks in `BatchedPython (slow)`. `dense`

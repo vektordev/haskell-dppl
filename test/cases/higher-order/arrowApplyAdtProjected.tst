@@ -6,7 +6,6 @@
 -- lambda it denotes before annotation removes the shape before that path is
 -- reached. Deterministic: (\x -> x + 1.0) 3.0 = 4.0.
 slow
-batched
 p(4.0)=(1.0, 0.0, False)
 p(5.0) is impossible
 cdf(3.0)=(0.0, 0.0)

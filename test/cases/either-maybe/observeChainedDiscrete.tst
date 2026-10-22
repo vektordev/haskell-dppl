@@ -1,5 +1,4 @@
 slow
-batched
 p(Right 1)=(0.3, 0.0)
 p(Right 2) is impossible
 p(Right 0) is impossible

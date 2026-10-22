@@ -2239,6 +2239,11 @@ batchedExpr env (IROp OpOr l r)     = "(" ++ batchedExpr env l ++ " | " ++ batch
 -- OpDiv is gradient-unsafe (division by zero in a masked-away arm yields NaN
 -- gradients); route it through the double-where 'safe_div' (design M3).
 batchedExpr env (IROp OpDiv l r)    = "safe_div(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
+-- The prefix forms of pythonLibBatched (task batched-int-mult-inverse-no-intdiv):
+-- multI's inverse divides under a guard every torch.where arm evaluates.
+batchedExpr env (IROp OpIntDiv l r) = "safe_intdiv(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
+batchedExpr env (IROp OpMod l r)    = "safe_mod(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
+batchedExpr env (IROp OpMax l r)    = "elem_max(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
 batchedExpr env (IROp op l r)       = "(" ++ batchedExpr env l ++ " " ++ batchedOp op ++ " " ++ batchedExpr env r ++ ")"
 batchedExpr env (IRUnaryOp OpNot e) = "torch.logical_not(asmask(" ++ batchedExpr env e ++ "))"
 batchedExpr env (IRUnaryOp OpNeg e) = "(-(" ++ batchedExpr env e ++ "))"

@@ -55,7 +55,7 @@ import Test.Tasty.Runners (TestTree(..))
 import Text.Printf (printf)
 
 import SPLL.Lang.Types (Program)
-import TestCaseParser (Backend, ExpectFailure, TestCase, TstFile(..), parseProgram, parseTstFile, listCorpusPplFiles)
+import TestCaseParser (Backend(Batched), ExpectFailure, TestCase, TstFile(..), parseProgram, parseTstFile, listCorpusPplFiles)
 
 -- | Which run a sweep belongs to (docs/testing.md, "Slow and Aspirational
 -- tests"). 'Default' always builds; 'Slow' needs @NEST_SLOW_TESTS@ and
@@ -161,6 +161,13 @@ loadCorpus = do
   let stale = [ n | n <- slowForCompileCost, n `notElem` [ ceName e | e <- entries, ceSlow e ] ]
   when (not (null stale)) $
     error ("CorpusSweep.slowForCompileCost names no slow corpus program: " ++ intercalate ", " stale)
+  -- Batched admission is universal (docs-repo task batched-admission-universal):
+  -- every corpus program is asserted batched eligible, so a `batched` routing
+  -- token on one says nothing. Only known-issues pins name that backend.
+  let routedBatched = [ ceName e | e <- entries, Batched `elem` ceBackends e ]
+  when (not (null routedBatched)) $
+    error ("corpus programs name `batched` in their backends: line, which only a known-issues pin may: "
+           ++ intercalate ", " routedBatched)
   reg <- newIORef []
   total <- newIORef (0, 0)
   return (Corpus entries reg total)

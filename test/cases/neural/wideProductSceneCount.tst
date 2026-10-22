@@ -10,18 +10,14 @@
 -- Poisson-binomial in pObj_i * pRed_i. Only the tail counts are queried: a
 -- middle count costs ~C(10,k) on the scalar engine (task
 -- scene-count-query-binomial-in-count), seconds per row.
--- No `batched` token: the batched compile is checked (the eligibility probe
--- compiles every corpus program, and Internals'
--- wideProductSceneBatchedCompilesFast pins it), but running the emitted
--- kernel nests one split loop per slot and did not finish in 20 minutes at
--- ten slots; that runtime is task batched-count-chain-enumeration-factorial,
--- which should add the token when it lands. The token also enrols the program
--- in Slow.BatchedPython's topK differentials (End2EndTesting.topKEntries); the
--- scalar topK query used to be exponential in the slot count there (34 s at 7
--- slots; task topk-compiled-scene-count-query-exponential-in-slots, fixed and
--- pinned by TestInternals.wideProductSceneTopKQueryPolynomial). The
--- mass declaration of declare-batched-on-eligible-corpus-programs (fbfdc8e)
--- added it anyway; TestInternals.wideProductSceneCountNotBatched keeps it out.
+-- The batched compile is checked (the eligibility probe compiles every corpus
+-- program, and Internals' wideProductSceneBatchedCompilesFast pins it), but
+-- running the emitted kernel nests one split loop per slot and did not finish
+-- in 20 minutes at ten slots (task batched-count-chain-enumeration-factorial;
+-- the shape is task scene-count-query-binomial-in-count's). So the program is
+-- on End2EndTesting.batchedTopKExceptions, out of Slow.BatchedPython's topK
+-- differentials (End2EndTesting.topKEntries), and
+-- TestInternals.wideProductSceneCountNotBatched keeps it there.
 slow
 p(0, (2, [0.2, 0.8, 0.2, 0.3, 0.5, 0.25, 0.107142857143, 0.107142857143, 0.107142857143, 0.107142857143, 0.107142857143, 0.107142857143, 0.107142857143, 0.5, 0.5, 0.2, 0.3, 0.5, 0.6, 0.057142857143, 0.057142857143, 0.057142857143, 0.057142857143, 0.057142857143, 0.057142857143, 0.057142857143, 0.1, 0.9, 0.2, 0.3, 0.5, 0.1, 0.128571428571, 0.128571428571, 0.128571428571, 0.128571428571, 0.128571428571, 0.128571428571, 0.128571428571, 0.7, 0.3, 0.2, 0.3, 0.5, 0.5, 0.071428571429, 0.071428571429, 0.071428571429, 0.071428571429, 0.071428571429, 0.071428571429, 0.071428571429, 0.4, 0.6, 0.2, 0.3, 0.5, 0.4, 0.085714285714, 0.085714285714, 0.085714285714, 0.085714285714, 0.085714285714, 0.085714285714, 0.085714285714, 0.3, 0.7, 0.2, 0.3, 0.5, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.6, 0.4, 0.2, 0.3, 0.5, 0.75, 0.035714285714, 0.035714285714, 0.035714285714, 0.035714285714, 0.035714285714, 0.035714285714, 0.035714285714, 0.0, 1.0, 0.2, 0.3, 0.5, 0.2, 0.114285714286, 0.114285714286, 0.114285714286, 0.114285714286, 0.114285714286, 0.114285714286, 0.114285714286, 0.8, 0.2, 0.2, 0.3, 0.5, 0.9, 0.014285714286, 0.014285714286, 0.014285714286, 0.014285714286, 0.014285714286, 0.014285714286, 0.014285714286, 0.45, 0.55, 0.2, 0.3, 0.5, 0.45, 0.078571428571, 0.078571428571, 0.078571428571, 0.078571428571, 0.078571428571, 0.078571428571, 0.078571428571]))=(0.08986641404, 0.0)
 p(1, (2, [0.2, 0.8, 0.2, 0.3, 0.5, 0.25, 0.107142857143, 0.107142857143, 0.107142857143, 0.107142857143, 0.107142857143, 0.107142857143, 0.107142857143, 0.5, 0.5, 0.2, 0.3, 0.5, 0.6, 0.057142857143, 0.057142857143, 0.057142857143, 0.057142857143, 0.057142857143, 0.057142857143, 0.057142857143, 0.1, 0.9, 0.2, 0.3, 0.5, 0.1, 0.128571428571, 0.128571428571, 0.128571428571, 0.128571428571, 0.128571428571, 0.128571428571, 0.128571428571, 0.7, 0.3, 0.2, 0.3, 0.5, 0.5, 0.071428571429, 0.071428571429, 0.071428571429, 0.071428571429, 0.071428571429, 0.071428571429, 0.071428571429, 0.4, 0.6, 0.2, 0.3, 0.5, 0.4, 0.085714285714, 0.085714285714, 0.085714285714, 0.085714285714, 0.085714285714, 0.085714285714, 0.085714285714, 0.3, 0.7, 0.2, 0.3, 0.5, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.6, 0.4, 0.2, 0.3, 0.5, 0.75, 0.035714285714, 0.035714285714, 0.035714285714, 0.035714285714, 0.035714285714, 0.035714285714, 0.035714285714, 0.0, 1.0, 0.2, 0.3, 0.5, 0.2, 0.114285714286, 0.114285714286, 0.114285714286, 0.114285714286, 0.114285714286, 0.114285714286, 0.114285714286, 0.8, 0.2, 0.2, 0.3, 0.5, 0.9, 0.014285714286, 0.014285714286, 0.014285714286, 0.014285714286, 0.014285714286, 0.014285714286, 0.014285714286, 0.45, 0.55, 0.2, 0.3, 0.5, 0.45, 0.078571428571, 0.078571428571, 0.078571428571, 0.078571428571, 0.078571428571, 0.078571428571, 0.078571428571]))=(0.2482598018, 0.0)

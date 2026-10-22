@@ -795,6 +795,27 @@ resolveNeuralTestCase p (ProbTestCase n s ps e)  = ProbTestCase  n s (resolveNeu
 resolveNeuralTestCase p (CumulTestCase n s ps e) = CumulTestCase n s (resolveNeuralParams p ps) e
 resolveNeuralTestCase _ tc                       = tc
 
+-- | The batched driver's form of a @Symbol@ network's parameter: the batched
+-- harness stacks verbatim logit envelopes @(2, [logits])@ into a @[B, n]@
+-- column for an identity mock ('batchSymParamCols'), so a random @(0, seed)@
+-- or spiking @(1, (spike, seed))@ envelope is replaced by the literal envelope
+-- of the logits 'evaluateMockNN' computes for it, as the interpreter does at
+-- run time (task batched-harness-neural-mode0-symbol-params). Only when every
+-- network that parameter feeds answers it alike: one symbol read by networks
+-- of two different plans has no single literal envelope, and stays as it is.
+literalSymbolEnvelopes :: Program -> TestCase -> TestCase
+literalSymbolEnvelopes p tc = case tc of
+  ProbTestCase n s ps e  -> ProbTestCase n s (zipWith lit params ps) e
+  CumulTestCase n s ps e -> CumulTestCase n s (zipWith lit params ps) e
+  _                      -> tc
+  where
+    varToNet = readNNOfVar (mainBinding (functions p))
+    params = [ [ nm | (v', nm) <- varToNet, v' == v ] | v <- mainParamNames p ] ++ repeat []
+    lit nets v@(VTuple (VInt k) _)
+      | k `elem` [0, 1], not (null nets), all ((== TSymbol) . networkInput p) nets
+      , r : rs <- [ evaluateMockNN (networkPlan p nm) v | nm <- nets ], all (== r) rs = VTuple (VInt 2) r
+    lit _ v = v
+
 -- | The network a text-backend harness installs in place of a declared one. A
 -- @Symbol@ network is the identity: its parameter arrives pre-resolved to raw
 -- logits ('resolveNeuralParams'). A shaped network gets the projection mock
@@ -845,7 +866,7 @@ juliaMockDefs nets =
 -- out. A tensor input has its trailing axes flattened, row-major. A scalar or
 -- a tuple of scalars is the batched twin of 'pyMockDef': its leaves flattened
 -- left to right into @[B, k]@, padded with ones and cut to @n@ columns. Any
--- other input raises, so a @batched@ declaration on such a program fails
+-- other input raises, so such a program fails the batched differentials
 -- loudly rather than passing on the identity.
 batchedMockExpr :: NetMock -> String
 batchedMockExpr (NetMock _ TSymbol _) = "(lambda s: s)"
@@ -1294,39 +1315,95 @@ pyImpossCheck name (Just expected) =
 -- fails ('noTorch'), unless @NEST_SKIP_TORCH=1@ opts out of it. Torch import is
 -- slow, so every eligible program runs in one shared interpreter process.
 --
--- Which programs participate is a first-class @.tst@ routing declaration: the
--- @batched@ token in the @backends:@ header (see TestCaseParser). For every
--- program that lists it, eligibility is /asserted/ (`declared-batched-eligible`)
--- rather than filtered — a change that makes a program fall out of the tensor
--- fragment names it and quotes the refusal diagnostic instead of silently
--- shrinking the group. That assertion is pure Haskell (compile +
--- 'generateFunctionsBatched' + 'batchGroups') and therefore runs whether or not
--- torch is available.
+-- Which programs participate is not declared (docs-repo task
+-- batched-admission-universal): batched admission is universal, so every
+-- corpus program the scalar compiler admits is expected to be batched
+-- eligible, and its eligibility is /asserted/ (`batched-eligible`) rather than
+-- filtered. A change that makes a program fall out of the tensor fragment
+-- names it and quotes the refusal diagnostic instead of silently shrinking the
+-- group. That assertion is pure Haskell (compile + 'generateFunctionsBatched'
+-- + 'batchGroups') and therefore runs whether or not torch is available.
 --
--- The reverse direction (a program that is eligible but does not declare it)
--- is only a stderr note, not a failure: eligibility /loss/ is the regression
--- worth breaking the build over, while eligibility /gain/ happens whenever
--- someone adds an ordinary scalar program.
+-- The only programs the assertion leaves out are the ones with nothing to
+-- batch (no @p()@/@cdf()@ rows) and the exact exception list
+-- 'batchedAdmissionExceptions', where every row is a bug with its own ticket.
+-- The default group asserts the non-slow programs, the Slow group the `slow`
+-- ones (bar 'slowForCompileCost', which no batched sweep compiles).
 --
--- The same declared set feeds the M5 topK differential ('topKEntries' /
+-- The same eligible set feeds the M5 topK differential ('topKEntries' /
 -- 'runBatchedTopK'), which recompiles each program at a cutoff and checks batched
 -- topK is a per-element decision.
 --
--- (Before this became a declaration, the selection condition was
--- @Python \`elem\` bs || not (null (neurals p))@: neural programs are
--- Interpreter-routed, since their networks are undefined in the emitted scalar
--- code, but batched mode supplies a torch mock, so they were admitted
--- regardless of the Python routing header (design pytorch-tensorizer M2b). That
--- special case is gone — a neural program simply lists @batched@ itself.)
+-- (Until batched-admission-universal this was an opt-in @batched@ token in the
+-- @.tst@ header, with a stderr note for programs that were eligible without
+-- declaring it. Before that, the selection condition was
+-- @Python \`elem\` bs || not (null (neurals p))@.)
+
+-- | Corpus programs batched mode does not take yet, each with the docs-repo
+-- ticket that owns the refusal. Exact: a listed program that becomes eligible
+-- fails `batched-eligible` until its row is removed, and so does a name that
+-- is no corpus program. Universal admission makes every row a bug; there is
+-- no principled exception class.
+batchedAdmissionExceptions :: [(String, String)]
+batchedAdmissionExceptions =
+  []
+
+-- | Batched-eligible corpus programs the topK differentials ('topKEntries')
+-- leave out because running their batched kernel is unaffordable, each with
+-- the docs-repo ticket that owns the cost. Exact: a row must name a program
+-- the Slow group finds eligible.
+batchedTopKExceptions :: [(String, String)]
+batchedTopKExceptions =
+  -- The ten-slot product scene's batched kernel nests one split loop per slot
+  -- and is past 20 minutes (the scalar query's ~C(n,k) shape, which the
+  -- batched kernel shares).
+  [ ("wideProductSceneCount", "scene-count-query-binomial-in-count") ]
+
+-- | The batched admission verdict over one sweep's programs: the refusals not
+-- on 'batchedAdmissionExceptions', and the exception rows that no longer hold
+-- (the program is eligible now). @names@ is every corpus program, to catch an
+-- exception row naming none.
+admissionProp :: [String] -> [(String, Either String a)] -> Property
+admissionProp _ [] = counterexample
+  "no corpus program has p()/cdf() rows to batch; batched mode has no coverage" False
+admissionProp names verdicts = counterexample (unlines (refusedMsg ++ staleMsg ++ unknownMsg))
+                                 (null refused && null stale && null unknown)
+  where
+    excepted = map fst batchedAdmissionExceptions
+    refused = [ (n, msg) | (n, Left msg) <- verdicts, n `notElem` excepted ]
+    stale = [ n | (n, Right _) <- verdicts, n `elem` excepted ]
+    unknown = [ n | n <- excepted, n `notElem` names ]
+    refusedMsg = if null refused then [] else
+      "corpus programs batched mode refuses (batched admission is universal: fix the refusal, or list it in\n\
+      \End2EndTesting.batchedAdmissionExceptions with the ticket that owns it):"
+      : [ "  " ++ n ++ ": " ++ msg | (n, msg) <- refused ]
+    staleMsg = if null stale then [] else
+      "batchedAdmissionExceptions rows whose program is batched eligible now (remove them):"
+      : [ "  " ++ n | n <- stale ]
+    unknownMsg = if null unknown then [] else
+      "batchedAdmissionExceptions rows naming no corpus program (remove them):"
+      : [ "  " ++ n | n <- unknown ]
+
+-- | 'batchedTopKExceptions' names only programs the Slow group finds batched
+-- eligible: a refused or renamed one is a stale row.
+topKExceptionsProp :: [(String, String, [BatchGroup], [NetMock])] -> Property
+topKExceptionsProp eligible = counterexample
+  ("batchedTopKExceptions rows naming no batched-eligible corpus program (remove them):\n"
+   ++ unlines [ "  " ++ n | n <- stale ])
+  (null stale)
+  where stale = [ n | (n, _) <- batchedTopKExceptions, n `notElem` [ m | (m, _, _, _) <- eligible ] ]
+
 -- | Everything both 'batchedPythonTests' and 'slowBatchedPythonTests' need:
--- loading the corpus once, working out batched/dense eligibility, and finding
+-- working out batched/dense eligibility of the sweep's programs, and finding
 -- a torch-enabled python. Shared so the two functions agree on exactly which
--- programs are eligible, at the cost of loading the corpus twice when both
--- run (only NEST_SLOW_TESTS=1 does that, and corpus loading itself is cheap --
--- the expense here is the torch subprocess, not the Haskell side).
+-- programs are eligible.
+--
+-- Returns, in order: the eligibility verdict of every program with query
+-- rows; the eligible programs' driver entries; the dense-declaring ones; the
+-- topK-recompiled entries; their dense-declaring share; the torch python;
+-- and each eligible program's uncertified batched constructs.
 batchedPythonFixtures :: [CorpusEntry]
                       -> IO ( [(String, Either String (String, [BatchGroup], [NetMock]))]
-                             , [String]
                              , [(String, String, [BatchGroup], [NetMock])]
                              , [(String, String, [BatchGroup], [NetMock])]
                              , ([(String, String, [BatchGroup], [NetMock])], [String], [String])
@@ -1334,14 +1411,12 @@ batchedPythonFixtures :: [CorpusEntry]
                              , Maybe FilePath
                              , [(String, [String])] )
 batchedPythonFixtures corpusEntries' = do
-  -- `slow`-headered programs stay out of batched coverage by construction, the
-  -- same way they stay out of the Interpreter groups (both sweeps' 'SkipSlow').
-  let entries = [ (ceName e, ceProgram e, ceBackends e, shapedCases e) | e <- corpusEntries' ]
-      -- The topK differential (M5) recompiles the `batched`-declaring programs
-      -- at a cutoff, so it draws from the same declaration, not from a second
-      -- eligibility condition of its own.
-      batchedDeclared = [ (n, p, tcs) | (n, p, bs, tcs) <- entries, Batched `elem` bs ]
-      denseNames = [ n | (n, _, bs, _) <- entries, Dense `elem` bs ]
+  -- Programs with no p()/cdf() rows have nothing to batch, so they are not
+  -- asked. The rest is the whole sweep: no declaration selects them.
+  let entries = [ (ceName e, ceProgram e, map (literalSymbolEnvelopes (ceProgram e)) (shapedCases e))
+                | e <- corpusEntries'
+                , any (\t -> isProbTestCase t || isCumulTestCase t) (ceCases e) ]
+      denseNames = [ ceName e | e <- corpusEntries', Dense `elem` ceBackends e ]
   -- Each eligibility check is a whole batched compile, and there is one per
   -- corpus program. They run here, before the tree exists, spread over the
   -- capabilities ('parMapIO'); serially they cost ~10 s of startup.
@@ -1351,20 +1426,20 @@ batchedPythonFixtures corpusEntries' = do
   -- deferred results are expensive shared thunks forced by many tasty threads
   -- at once -- the shape that deadlocked the Slow Fuzz group on a 12-core
   -- machine (docs-repo task fuzz-tier-blackhole-deadlock-at-property-start).
-  -- And 'batchedEligibility' catches every exception, so a tasty timeout or a
-  -- ^C landing in whichever test happened to force one would have recorded
-  -- that program as "crashed" for every other test too.
-  let eligibility (n, p, _, tcs) = (,) n <$> batchedEligibility p tcs
-  declaredC <- parMapIO (\(n, p, _, tcs) -> (,) n <$> batchedEligibilityCensus p tcs)
-                        [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
-  undeclared <- parMapIO eligibility [ e | e@(_, _, bs, _) <- entries, Batched `notElem` bs ]
-  let declared = [ (n, fmap fst r) | (n, r) <- declaredC ]
+  -- And 'batchedEligibilityCensus' catches every exception, so a tasty timeout
+  -- or a ^C landing in whichever test happened to force one would have
+  -- recorded that program as "crashed" for every other test too.
+  verdictsC <- parMapIO (\(n, p, tcs) -> (,) n <$> batchedEligibilityCensus p tcs) entries
+  let verdicts = [ (n, fmap fst r) | (n, r) <- verdictsC ]
       -- Per eligible program, the constructs of its batched compile the
       -- batched fuzz arm does not certify ('batchedUncertifiedConstructs').
-      censuses = [ (n, c) | (n, Right (_, c)) <- declaredC ]
-      eligible = [ (n, src, gs, nets) | (n, Right (src, gs, nets)) <- declared ]
-      gained   = [ n | (n, Right _) <- undeclared ]
-      topkEligible = topKEntries batchedDeclared
+      censuses = [ (n, c) | (n, Right (_, c)) <- verdictsC ]
+      eligible = [ (n, src, gs, nets) | (n, Right (src, gs, nets)) <- verdicts ]
+      eligibleNames = map (\(n, _, _, _) -> n) eligible
+      -- The topK differential (M5) recompiles the eligible programs at a
+      -- cutoff; a refused one is already named by the admission assertion.
+      topkEligible = topKEntries [ e | e@(n, _, _) <- entries, n `elem` eligibleNames
+                                     , n `notElem` map fst batchedTopKExceptions ]
       -- M3: a program declaring `dense` must actually get dense entry points.
       -- Read off the emitted source, which is where the capability is visible;
       -- a `dense` declaration on a program that is not even batched-eligible is
@@ -1379,7 +1454,7 @@ batchedPythonFixtures corpusEntries' = do
                       , takeWhile (/= '@') n `elem` denseNames
                       , not (null (denseEntryPoints src)) ]
   mpy <- findTorchPython
-  return (declared, gained, eligible, denseDeclared, topkEligible, denseTopK, mpy, censuses)
+  return (verdicts, eligible, denseDeclared, topkEligible, denseTopK, mpy, censuses)
 
 -- | The cheap, always-on half of the batched-mode differential: pure-Haskell
 -- eligibility bookkeeping (no torch, no subprocess) plus the value
@@ -1394,10 +1469,9 @@ batchedPythonTests :: Corpus -> Manifest -> IO TestTree
 batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
   { sweepName = "BatchedPython", sweepTier = Default, sweepSlow = SkipSlow, sweepSelect = const True
   , sweepNote = "batched/dense eligibility of every program, and the batched value differentials" } $ \entries -> do
-  (declared, gained, eligible, denseDeclared, _, _, mpy, censuses) <- batchedPythonFixtures entries
+  (verdicts, eligible, denseDeclared, _, _, mpy, censuses) <- batchedPythonFixtures entries
   mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
-  let refused  = [ (n, msg) | (n, Left msg) <- declared ]
-      -- Batched reference compliance (docs-repo task
+  let -- Batched reference compliance (docs-repo task
       -- batched-backend-reference-compliance): the interpreter is the
       -- reference, and the batched fuzz arm certifies the batched backend
       -- against it construct by construct ('CertifiedCensus.batchedCertifiedConstructs').
@@ -1411,8 +1485,7 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
       denseGained = [ n | (n, src, _, _) <- eligible
                         , n `notElem` denseNames, not (null (denseEntryPoints src)) ]
   return $ testGroup "BatchedPython" $
-    [ testProperty "declared-batched-eligible" (once (declaredEligibleProp (length declared) refused))
-    , testProperty "eligibility-gain-note" (once (gainNoteProp gained))
+    [ testProperty "batched-eligible" (once (admissionProp (map ceName (corpusEntries corpus)) verdicts))
     , testProperty "dense-eligibility-gain-note" (once (denseGainNoteProp denseGained))
     , testProperty "dense-domain-boundary" (once (denseBoundaryProp eligible))
     ] ++ case mtorch of
@@ -1438,7 +1511,7 @@ cachedTorch manifest torch name entries run
                   [ (n, batchedKey manifest torch name x, x) | x@(n, _, _, _) <- entries ] run
 
 -- | The topK-threshold half of the M5 differential ('topk-is-per-element',
--- 'dense-inherits-topk'): each recompiles every batched-declaring program at
+-- 'dense-inherits-topk'): each recompiles every batched-eligible program at
 -- every threshold in 'topKDiffThresholds' (batched, scalar and interpreter
 -- variants) and runs the lot through one torch subprocess. Measured at ~30s
 -- and ~19s respectively -- the two most expensive individual tests in the
@@ -1454,27 +1527,40 @@ cachedTorch manifest torch name entries run
 -- tick-redundant corpus programs were demoted (docs-repo task
 -- demote-tick-redundant-corpus-programs-to-slow). This group reads the
 -- `slow`-headered programs ('IgnoreSlow'), so that a declaration is checked
--- whichever tier its program is in. Only the programs declaring `batched` or
--- `dense` are selected; none of the programs `slow` for their compile cost
--- declares either.
+-- whichever tier its program is in, and it asserts batched admission of the
+-- `slow` programs ('admissionProp'; the default group asserts the rest) and
+-- checks their rows on the batched backend where the batched fuzz arms do
+-- not certify them, as the default group's batched-vs-expected does. The
+-- programs `slow` for their compile cost ('slowForCompileCost') stay out, as
+-- in every other sweep that reads the slow programs.
 slowBatchedPythonTests :: Corpus -> Manifest -> IO TestTree
 slowBatchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
   { sweepName = "Slow.BatchedPython (slow)", sweepTier = Slow, sweepSlow = IgnoreSlow
-  , sweepSelect = \e -> Batched `elem` ceBackends e || Dense `elem` ceBackends e
-  , sweepNote = "dense eligibility and values, and the batched topK differentials, recompiling every batched program per threshold" } $ \entries -> do
-  (_, _, eligible, denseDeclared, topkEligible, denseTopK, mpy, _) <- batchedPythonFixtures entries
+  , sweepSelect = notSlowForCompileCost
+  , sweepNote = "batched eligibility of the slow programs, dense eligibility and values, and the batched topK differentials, recompiling every eligible program per threshold" } $ \entries -> do
+  (verdicts, eligible, denseDeclared, topkEligible, denseTopK, mpy, censuses) <- batchedPythonFixtures entries
   mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
   let denseNames = map (\(n, _, _, _) -> n) denseDeclared
       denseRefused = [ n | n <- denseNames
                          , n `notElem` [ m | (m, src, _, _) <- eligible, not (null (denseEntryPoints src)) ] ]
+      slowNames = [ ceName e | e <- entries, ceSlow e ]
+      -- The default group's batched-vs-expected, over the `slow` programs it
+      -- skips (docs-repo task batched-vs-expected-skips-slow-batched-programs):
+      -- the eligible ones whose batched census the fuzz arms do not certify.
+      slowUncertified = [ n | (n, c) <- censuses, not (null c), n `elem` slowNames ]
+      slowValueRouted = [ e | e@(n, _, _, _) <- eligible, n `elem` slowUncertified ]
   return $ testGroup "BatchedPython (slow)" $
-    testProperty "declared-dense-eligible" (once (declaredDenseProp (length denseNames) denseRefused))
+    testProperty "batched-eligible" (once (admissionProp (map ceName (corpusEntries corpus))
+                                             [ v | v@(n, _) <- verdicts, n `elem` slowNames ]))
+    : testProperty "topk-exceptions-are-eligible" (once (topKExceptionsProp eligible))
+    : testProperty "declared-dense-eligible" (once (declaredDenseProp (length denseNames) denseRefused))
     : case mtorch of
         Nothing ->
           [ testProperty "torch-python-found" $ once $ ioProperty $
               noTorchProperty "BatchedPython (slow) dense and topK differentials" ]
         Just (py, torch) ->
-          [ testProperty "dense-matches-expected" (once (cachedTorch manifest torch "dense-matches-expected" denseDeclared (runBatchedDense False py)))
+          [ testProperty "batched-vs-expected" (once (cachedTorch manifest torch "batched-vs-expected" slowValueRouted (runBatchedPython py)))
+          , testProperty "dense-matches-expected" (once (cachedTorch manifest torch "dense-matches-expected" denseDeclared (runBatchedDense False py)))
           , testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
           , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
@@ -1522,28 +1608,6 @@ batchedEligibilityCensus p tcs = do
       let census = batchedUncertifiedConstructs (batchedProgramCensus (Right env :: Either () IREnv))
       return ((intercalate "\n" srcLines, groups, netNames), census)
 
--- | The point of the @batched@ routing token: a program that declares it must
--- still be batched-eligible. Each refusal names the program and quotes the
--- diagnostic.
-declaredEligibleProp :: Int -> [(String, String)] -> Property
-declaredEligibleProp 0 _ = counterexample
-  "no .tst file declares `batched` in its backends header; batched mode has no coverage" False
-declaredEligibleProp _ refused = counterexample
-  ("programs declaring `batched` in their .tst backends header are no longer batched-eligible:\n"
-   ++ unlines [ "  " ++ n ++ ": " ++ msg | (n, msg) <- refused ])
-  (null refused)
-
--- | A visible note (never a failure) for programs batched mode /could/ take but
--- whose @.tst@ file does not say so.
-gainNoteProp :: [String] -> Property
-gainNoteProp gained = ioProperty $ do
-  if null gained
-    then return ()
-    else hPutStrLn stderr ("BatchedPython: " ++ show (length gained) ++ " program(s) are batched-eligible but do not\n\
-      \  declare `batched` in their .tst backends header (add the token to gain coverage):\n"
-      ++ unlines [ "    " ++ n | n <- gained ])
-  return True
-
 -- ===========================================================================
 -- Batched-mode refusal coverage (design pytorch-tensorizer)
 -- ===========================================================================
@@ -1590,12 +1654,11 @@ batchedRefusalTable =
   -- fragment since task batched-refuses-list-constants-with-data (spelled as
   -- the runtime's cons structure over constant leaves), so
   -- `listLiteralDeconstruction` and `andInsideListOverDraws` (the `[ANY]` a
-  -- per-mask variant introduces) left this table and declare `batched`.
+  -- per-mask variant introduces) left this table.
   -- `map`, `mapMultList`, `partialInjFMapPlus` and `wrappedHoAdt` left this
   -- table with task batched-refuses-list-map, and `either_arith_inv`, `injApply`
   -- and `twiceApplication` with task batched-refuses-inner-lambda: a list map is a
   -- Python walk over the bucketed spine and an inner lambda a Python closure.
-  -- They declare `batched`.
   -- Either. Since heterogeneous M2 the tag is *structure*: it is part of the
   -- bucket signature, so the constructors, destructors and predicates are all
   -- in the fragment (`either`, `either_const`, `eitherDeconstruction`,
@@ -2798,11 +2861,13 @@ batchGroups enumOf isNeural tcs = mapM build grouped
 -- | Batch the positional symbol arguments of a neural program across points.
 -- Each row is one point's argument list; every argument is a mode-2 verbatim
 -- symbol envelope @(2, [logit0, ...])@ (what the neural .tst files pass), or a
--- rank-1 tensor input (a shaped network's, after 'shapeNeuralParams'). We
+-- shaped tensor input (a shaped network's, after 'shapeNeuralParams'). We
 -- transpose to columns (one per argument position) and stack each column's
 -- logit vectors into a @[B, n]@ tensor literal — fed to the identity mock the
--- driver installs for every declared network. 'Nothing' if the rows are ragged
--- or any argument is not a mode-2 envelope.
+-- driver installs for every declared network. A column of Float arguments,
+-- shaped tensors or tuples of those becomes the matching batched value
+-- ('batchSymColumn'). 'Nothing' if the rows are ragged or an argument is none
+-- of these.
 batchSymParamCols :: [[IRValue]] -> Maybe [String]
 batchSymParamCols rows
   | null rows                          = Just []
@@ -2817,15 +2882,35 @@ batchSymParamCols rows
 -- differential then pruned a path the interpreter kept (task
 -- batched-topk-per-element-failures-on-redeclared-programs, class E).
 batchSymColumn :: [IRValue] -> Maybe String
-batchSymColumn vs = do
-  logitRows <- mapM logitsOf vs
-  return ("torch.tensor([" ++ intercalate ", " (map renderRow logitRows) ++ "], dtype=torch.float64)")
+batchSymColumn [] = Nothing
+batchSymColumn vs@(v0 : _)
+  -- A Float argument (a @Float -> _@ network's input, or any Float parameter
+  -- of a neural main) is a @[B]@ column; the network's batched mock reads it
+  -- as a @[B, 1]@ block ('batchedMockExpr').
+  | Just xs <- mapM asFloat vs = Just (column (map show xs))
+  | Just rows <- mapM envelope vs = Just (column (map renderRow rows))
+  -- A shaped tensor input ('shapeNeuralParams') of any rank: the @[B, ...]@
+  -- stack of the points' tensors, fed to that network's batched projection
+  -- mock, which flattens the trailing axes.
+  | VTensor sh _ <- v0, Just rows <- mapM (tensorOf sh) vs =
+      Just (column (map renderRow rows) ++ ".reshape(-1" ++ concatMap ((", " ++) . show . extentSize) sh ++ ")")
+  -- A tuple input (@(Float, Float) -> _@): the runtime tuple of its fields'
+  -- columns, which the mock reads field by field.
+  | Just pairs <- mapM asPair vs = do
+      a <- batchSymColumn (map fst pairs)
+      b <- batchSymColumn (map snd pairs)
+      Just ("T(" ++ a ++ ", " ++ b ++ ")")
+  | otherwise = Nothing
   where
-    logitsOf (VTuple (VInt 2) (VList ls)) = Just (toList ls)
-    -- a shaped tensor input ('shapeNeuralParams'): one row of the [B, numel]
-    -- column, fed to that network's batched projection mock ('batchedMockExpr')
-    logitsOf (VTensor [_] xs)             = Just xs
-    logitsOf _                            = Nothing
+    column rows = "torch.tensor([" ++ intercalate ", " rows ++ "], dtype=torch.float64)"
+    asFloat (VFloat x) = Just x
+    asFloat _          = Nothing
+    envelope (VTuple (VInt 2) (VList ls)) = Just (toList ls)
+    envelope _                            = Nothing
+    tensorOf sh (VTensor sh' xs) | sh' == sh = Just xs
+    tensorOf _ _                             = Nothing
+    asPair (VTuple a b) = Just (a, b)
+    asPair _            = Nothing
     renderRow ls = "[" ++ intercalate ", " (map num ls) ++ "]"
     num (VFloat f) = show f
     num (VInt i)   = show (fromIntegral i :: Double)
@@ -3150,14 +3235,14 @@ declaredDenseProp _ refused = counterexample
   (null refused)
 
 -- | A visible note (never a failure) for batched programs that /could/ enumerate
--- densely but whose @.tst@ file does not say so. Same asymmetry as
--- 'gainNoteProp': losing the capability is the regression, gaining it is not.
+-- densely but whose @.tst@ file does not say so: losing the capability is the
+-- regression ('declaredDenseProp'), gaining it is not.
 denseGainNoteProp :: [String] -> Property
 denseGainNoteProp gained = ioProperty $ do
   if null gained
     then return ()
     else hPutStrLn stderr ("BatchedPython: " ++ show (length gained) ++ " batched program(s) have a finite\n\
-      \  query domain but do not declare `dense` in their .tst backends header:\n"
+      \  query domain but do not declare `dense` in their .tst header:\n"
       ++ unlines [ "    " ++ n | n <- gained ])
   return True
 
@@ -3338,8 +3423,8 @@ topKDiffThresholds = [0.3, 0.6]
 -- would be wrong wherever pruning bites.
 --
 -- Restricted to prob queries: the integrate path takes no @acc_prob@ parameter
--- (only the cutoff), and its pruning is seeded from its own root. Input is the @batched@-declaring corpus
--- entries, the same declaration 'batchedPythonTests' filters on — a program
+-- (only the cutoff), and its pruning is seeded from its own root. Input is the batched-eligible corpus
+-- entries ('batchedPythonFixtures') — a program
 -- whose fragment eligibility is asserted there is silently dropped here if it
 -- fails to compile at a cutoff, which is why the non-vacuity assertion below
 -- exists.
