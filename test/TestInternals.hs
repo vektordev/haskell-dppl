@@ -5109,24 +5109,46 @@ test_drawProductReadFactorizesPerField = testCase "drawProductReadFactorizesPerF
 -- -O0 IR, mask variants included, from k=1 to k=3; it was 44x and is ~2x.
 test_sharedFieldAcrossListIRNotExponential :: TestTree
 test_sharedFieldAcrossListIRNotExponential = testCase "sharedFieldAcrossListIRNotExponential" $ do
-  small <- sizeOf 1
-  large <- sizeOf 3
+  small <- sharedFieldAcrossListIRSize defaultCompilerConfig{optimizerLevel = 0} 1
+  large <- sharedFieldAcrossListIRSize defaultCompilerConfig{optimizerLevel = 0} 3
   let ratio = fromIntegral large / fromIntegral small :: Double
   assertBool ("-O0 IR grew " ++ show ratio ++ "x from 1 to 3 answers in between ("
               ++ show small ++ " -> " ++ show large ++ ")") (ratio < 4)
+
+-- | The same family at budget 0, where the plan engine answers it (task
+-- plan-world-binds-dead-branch-sum-per-world). 'measurePlanWorlds' bound each
+-- factor-carrying world's whole result, including a branch count that 'mixP'
+-- discards and that held every world's guard chain: the -O0 IR grew ~57x from
+-- 0 to 1 answers in between, and the slow-tier plan-engine differential on
+-- the corpus program (k=2) ran out of 6 GB. It is ~7x now. The growth at
+-- budget 0 is still exponential in k (~5x per answer, investigation
+-- engine-admission-silent-code-size-blowup); this pins the step that
+-- compounded it, at k=0 and k=1, which compile in well under a second.
+test_sharedFieldAcrossListBudgetZeroIRSize :: TestTree
+test_sharedFieldAcrossListBudgetZeroIRSize = testCase "sharedFieldAcrossListBudgetZeroIRSize" $ do
+  let cfg = defaultCompilerConfig{optimizerLevel = 0, materializationCardinality = 0}
+  small <- sharedFieldAcrossListIRSize cfg 0
+  large <- sharedFieldAcrossListIRSize cfg 1
+  let ratio = fromIntegral large / fromIntegral small :: Double
+  assertBool ("budget-0 -O0 IR grew " ++ show ratio ++ "x from 0 to 1 answers in between ("
+              ++ show small ++ " -> " ++ show large ++ ")") (ratio < 15)
+
+-- | The length of the shown IR of the shared-field transcript with @k@ answers
+-- on disjoint fields between the two that share @x0@.
+sharedFieldAcrossListIRSize :: CompilerConfig -> Int -> IO Int
+sharedFieldAcrossListIRSize cfg k = case tryParseProgram "sharedFieldAcrossList" src of
+    Left err -> assertFailure ("parse error: " ++ show err) >> return 0
+    Right prog -> case compile cfg prog of
+      Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+      Right ir -> return (length (show ir))
   where
-    src k = unlines
+    src = unlines
       [ "data Face = Face " ++ intercalate ", " [ "x" ++ show i ++ "::Bool" | i <- [0 .. 2 * k + 2] ]
       , "neural see :: (Symbol -> Face)"
       , "main img ="
       , "  draw truth = see img in"
       , "  [" ++ intercalate ", " (map pair ((0, 1) : [ (2 * i, 2 * i + 1) | i <- [1 .. k] ] ++ [(0, 2 * k + 2)])) ++ "]" ]
     pair (a, b) = "(if x" ++ show (a :: Int) ++ " truth then x" ++ show b ++ " truth else False)"
-    sizeOf k = case tryParseProgram "sharedFieldAcrossList" (src k) of
-      Left err -> assertFailure ("parse error: " ++ show err) >> return (0 :: Int)
-      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
-        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
-        Right ir -> return (length (show ir))
 
 -- | The conditions under which 'SPLL.DrawSinking' splits a draw of a neural
 -- read into per-field draws (task draw-product-read-enumerated-jointly),
@@ -6197,6 +6219,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
       , test_drawProductReadFactorizesPerField
       , test_productReadSplitConditions
       , test_sharedFieldAcrossListIRNotExponential
+      , test_sharedFieldAcrossListBudgetZeroIRSize
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed
