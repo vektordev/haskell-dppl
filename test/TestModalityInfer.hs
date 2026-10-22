@@ -854,11 +854,15 @@ justAt path src =
 -- inside a dead binding whose result is never read -- 'marginalize' correctly
 -- reports 'IntegralOnly' for that node, and 'projectGround' floors it to
 -- 'Bottom' exactly as designed. Not a soundness gap: this /is/ the fail-safe
--- path working.
+-- path working. The third is the operand of a 'collapse': a product of two
+-- continuous draws, which 'marginalize' types 'IntegralOnly' and nothing
+-- measures -- the collapse reads only its moments (task
+-- encode-07-collapse-operator).
 knownPartialSetExceptions :: [FilePath]
 knownPartialSetExceptions =
   [ corpusRoot ++ "/let-bindings/deadBindingIntractable.ppl"
   , corpusRoot ++ "/let-bindings/deadParamIntractable.ppl"
+  , corpusRoot ++ "/distributions/collapseProduct.ppl"
   ]
 
 -- | Every corpus @.ppl@ program under 'corpusRoot' (minus

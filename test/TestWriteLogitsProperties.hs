@@ -1,9 +1,6 @@
 -- Aspirational test suite for AutoNeural writeLogits.
 --
 -- OUT OF SCOPE (intentional — not tested here):
---   § 3.1  collapse operator itself (moment-matching) for non-Gaussian closures (task 07).
---          The *error path* — rejecting a non-Gaussian continuous slot that lacks a
---          collapse — IS covered (writeLogitsError_continuousMixtureRequiresCollapse).
 --   § 3.5  sigma=0 / sigma=epsilon floor for hardened / observed values
 --
 -- Everything else in the design is covered:
@@ -16,6 +13,9 @@
 --   § 2.5  Either/ADT non-identity: exact flag + conditional field slots, incl. composite
 --          (nested enum ADT) arms                      (sumTypeNonIdentity group)
 --   § 2.6  Tuple = concatenation                        (writeLogitsInvariant_outputDimMatchesPlan)
+--   § 3.1  collapse: moment-matched mixture, no-op on a Gaussian, under an Either arm,
+--          sample-only over a random let binding; a mixture without it is refused
+--          (collapseTests, writeLogitsError_continuousMixtureRequiresCollapse)
 --   § 3.3  Sample freely allowed                        (implicit in Gaussian programs)
 --   § 3.4  Noised void fill on constructor change: dead-arm slots are finite, on-manifold
 --          noise; live slots exact; tiny-probability arms stay live    (deadArm group)
@@ -518,8 +518,8 @@ writeLogitsError_continuousMixtureRequiresCollapse = testCase "continuousMixture
     ]
   case runWriteLogits defaultCompilerConfig prog mainTarget [] of
     Left err ->
-      assertBool ("error should report a non-Gaussian continuous output, got: " ++ err)
-                 ("not Gaussian" `isInfixOf` err)
+      assertBool ("error should report a non-Gaussian continuous output and name collapse, got: " ++ err)
+                 ("not Gaussian" `isInfixOf` err && "collapse" `isInfixOf` err && "main_normal" `isInfixOf` err)
     Right v  ->
       assertFailure ("expected a compile error for a non-Gaussian continuous output, got: "
                      ++ show v)
@@ -857,6 +857,7 @@ writeLogitsTests = testGroup "WriteLogits"
   , writeLogitsInvariant_probIndicesInBounds
   , deadArmTests
   , continuousUnderSumTests
+  , collapseTests
   , readPassthroughTests
   , outputSupportTests
   ]
@@ -909,12 +910,55 @@ outputSupportTests = testGroup "outputSupport"
   ]
 
 ------------------------------------------------------------------------
+-- `collapse` (task encode-07-collapse-operator): the Gaussian with its operand's mean and
+-- variance, the sanctioned way to write a non-Gaussian continuous value into a Gaussian slot.
+-- Its law in every mode is the moment-matched Gaussian; the corpus programs
+-- test/cases/distributions/collapse*.ppl pin its density and CDF.
+
+collapseTests :: TestTree
+collapseTests = testGroup "collapse"
+  [ testCase "mixtureMomentMatched" $
+      -- mu = 0.5*2 + 0.5*5, sigma^2 = 0.5*(1 + 1.5^2) * 2
+      closedWriteLogits "main = collapse (if Uniform < 0.5 then Normal + 2.0 else Normal + 5.0)"
+        >>= checkVector "mixture" [3.5, sqrt 3.25]
+  , testCase "gaussianIsNoOp" $ do
+      plain <- closedWriteLogits "main = Normal * 2.0 + 1.0"
+      collapsed <- closedWriteLogits "main = collapse (Normal * 2.0 + 1.0)"
+      checkVector "plain" [1.0, 2.0] plain
+      checkVector "collapsed" plain collapsed
+  , testCase "mixtureUnderEitherArm" $
+      -- Refused without collapse (continuousUnderSum): a mixture is not Normal given the arm.
+      closedWriteLogits "main = if Uniform < 0.25 then left (collapse (if Uniform < 0.5 then Normal else Normal + 2.0)) else right True"
+        >>= checkVector "Either" [0.25, 1.0, sqrt 2.0, 1.0, 0.0]
+  , testCase "resultIsGaussianWithNormalParams" $ do
+      -- The PType of collapse's result is PNormal: its function gets a normal-parameter
+      -- function, and a sum with a further Gaussian stays Gaussian.
+      prog <- parseOrFail "main = collapse (if Uniform < 0.5 then Normal else Normal + 2.0) + Normal * 3.0"
+      IREnv groups _ _ <- compileOrFail prog
+      assertBool "main has a normal-parameter function"
+        (maybe False (isJust . normalFun) (find ((== "main") . groupName) groups))
+      writeLogitsSlots prog [] >>= checkVector "sum" [1.0, sqrt 11.0]
+  , testCase "randomDrawnConditionIsSampleOnly" $ do
+      -- Moments are taken given the variables the operand reads. Over a random drawn
+      -- condition that is a mixture of two Gaussians again, which has no density here:
+      -- main generates, but has no probability function and no writeLogits.
+      prog <- parseOrFail "main = draw c = Uniform < 0.5 in collapse (if c then Normal else Normal + 3.0)"
+      IREnv groups _ _ <- compileOrFail prog
+      case find ((== "main") . groupName) groups of
+        Nothing -> assertFailure "no main group"
+        Just g -> do
+          assertBool "main generates" (isJust (genFun g))
+          assertBool "main has no probability function" (not (isJust (probFun g)))
+          assertBool "main has no writeLogits" (not (isJust (writeLogitsFun g)))
+  ]
+
+------------------------------------------------------------------------
 -- A Continuous leaf under an Either/ADT constructor (task
 -- writelogits-continuous-leaf-under-sum-type). Its slots hold the payload's (mu, sigma)
 -- *given* the constructor, from a component normal function the IRCompiler generates when
 -- one expression -- a single Normal by its own modality -- is the only producer of that
 -- position. A mixture and a truncated (gated) payload are not Normal given the arm, and
--- stay refused (no writeLogits) until encode-07's collapse.
+-- stay refused (no writeLogits); wrapping the payload in `collapse` makes it one (collapseTests).
 
 continuousUnderSumTests :: TestTree
 continuousUnderSumTests = testGroup "continuousUnderSum"

@@ -280,6 +280,24 @@ the data flow rather than for "encode"/"decode" — those words used to collide
   central generate-backed guard admits in a writeLogits body -- it sees the body
   through `AutoNeural.stripDeadSlotFills`, which recognises the `l_wlarm_*`
   guards and nothing else. A near-zero arm (1e-300) is live and written.
+- **A non-Gaussian continuous slot needs `collapse`** (task
+  `encode-07-collapse-operator`). A `Continuous` slot is written from the
+  function's normal-parameter function, which exists only where the value is
+  Gaussian (`PNormal`). An `if` mixture of Gaussians is not, so its writeLogits
+  is absent (top-level endpoint) or refused naming the missing `*_normal`
+  function and `collapse` (`validateWriteLogitsGaussian`, read-logits
+  declarations). `collapse e` is the Gaussian with `e`'s mean and variance.
+  It is a forward-only InjF (`PredefinedFunctions.collapseName`), so there is
+  no new AST or IR node. Its modality rule (`ModalityInfer`, the static twin
+  `collapseMomentable`) types it `PNormal`, so probability, integrate, the
+  normal function and every Gaussian combinator read it from its `(mu,
+  sigma)`. `IRCompiler.momentsOf` computes those: a point, a Gaussian, an
+  `if` mixture with a condition that has a probability, or sums, products
+  and negations of independent such parts. Its generate draws from the
+  Gaussian, not from the operand. The moments are taken over the operand's
+  own draws, given the variables it reads. Over a function parameter that is
+  a Gaussian. Over a random `draw`-bound variable it is a mixture again, and
+  the node is sample-only (`Bottom`). A point operand stays the point.
 - **Correlated slots are encoded independently, with a warning** (task
   `warn-correlated-slots`). Each plan leaf is written from its own marginal, so
   `main = draw w = Uniform < 0.5 in (w, w)` writes `[0.5, 0.5, 0.5, 0.5]`: the
