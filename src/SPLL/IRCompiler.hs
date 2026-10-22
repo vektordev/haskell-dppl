@@ -4198,42 +4198,68 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (InjF (Named name) [left
   let probF = if decons then toIRInferenceSave else toIRInference
   let metaOp = covOperandMeta cumulative invDeriv meta
   mTblEnum <- materializeOperandTable meta enumE
-  irTuple <- lift (runWriterT (do
-    setVariables [(xSample, sample)]
-    pEnumRaw <- operandProb meta mTblEnum enumE (IRVar xEnum)
-    pEnumVar <- mkVariable "p_enum"
-    setVariables [(pEnumVar, pEnumRaw)]
-    let pEnum = IRVar pEnumVar
-    contRes <- guardedSubInference metaOp [appTest]
-                 (probF metaOp cumulative contE invExpr)
-    let scaled = guardP sr [appTest] (scaleCoV sr cumulative invDeriv contRes)
-    -- A value of the enumerated operand's domain with no mass is an
-    -- impossible term, not a possible zero: 'enumMixP' below lets the
-    -- lowest-dim possible term decide the result's dim, and a zero-weight
-    -- atom must not outvote a real density. The tag over-approximates the
-    -- support, so such values are ordinary. Exact zero is sound here for the
-    -- reason 'opaqueMass' gives: this is a discrete mass.
-    return (prodP sr (impossibleWhen (IROp OpEq pEnum (srZero sr)) (mass pEnum)) scaled)
-    )) <&> generateLetInBlock meta
-  uniquePrefix <- mkVariable ""
-  let applyUnique = irMap (uniqueify [xEnum, xSample] uniquePrefix)
-  let (outerBinds, innerTuple) = hoistInvariantBindings xEnum irTuple
-  let renameHoisted (n, v) = (if n `elem` [xEnum, xSample] then uniquePrefix ++ n else n, applyUnique v)
-  setVariables (map renameHoisted outerBinds)
-  -- The "continuous" operand is only known to be a real scalar (its rType),
-  -- not to have a density: an operand no tag reaches -- a fold through a
-  -- recursive helper, which Analysis refuses to look through -- may be a
-  -- discrete count the plan path answers as a mass, or a mixture of atoms and
-  -- a density. So in probability mode each term keeps the dim its own
-  -- inference reports, and 'enumMixP' combines them as a mixture (possible
-  -- atoms outvote densities), instead of stamping dim 1 on the sum (task
-  -- plan-sum-with-sunk-discrete-draw-reports-density). A term that is a true
-  -- density reports 'anyGuardedDim', so a genuinely continuous operand gets
-  -- exactly the result it did before. Cumulative mode is a CDF, dim 0,
-  -- whatever the terms are.
-  summedTyped <- if cumulative
-    then enumSumP sr (countBranches (compilerConfig meta)) applyUnique xEnum enumList innerTuple
-    else enumMixP sr (countBranches (compilerConfig meta)) applyUnique (anyGuardedDim sample) xEnum enumList innerTuple
+  -- With no table for the enumerated operand, the loop below re-derives
+  -- p(enumE = e) for every value e of its domain, and that is a full
+  -- enumeration of the draws it is a function of: |dom(enumE)| x 10^N cells
+  -- for N digit reads (task noisy-observation-mixes-over-result-value-domain).
+  -- When the operand is such a function, sum over its draws' cells directly
+  -- instead ('latentCellSum'): one term per cell, at the cell's forward value.
+  let cellDraws = latentCellBinders meta enumE
+  perCell <- case (mTblEnum, cellDraws) of
+    (Nothing, ds@(_:_)) | not (any (`Set.member` freeVarsExpr contE) ds) -> do
+      uniquePrefix <- mkVariable ""
+      let un = irMap (uniqueify [xEnum, xSample] uniquePrefix)
+          metaOpU = covOperandMeta cumulative (un invDeriv) meta
+      -- Built in a scope of its own: a leaf that turns out to draw fresh
+      -- randomness declines the whole attempt, and its bindings are dropped.
+      (attempt, binds) <- lift $ runWriterT $
+        latentCellSum meta cumulative (anyGuardedDim sample) enumE (\fv -> fmap Just $ do
+          setVariables [(uniquePrefix ++ xSample, sample), (uniquePrefix ++ xEnum, fv)]
+          contRes <- guardedSubInference metaOpU [un appTest]
+                       (probF metaOpU cumulative contE (un invExpr))
+          return (guardP sr [un appTest] (scaleCoV sr cumulative (un invDeriv) contRes)))
+      mapM_ (\_ -> setVariables binds) attempt
+      return attempt
+    _ -> return Nothing
+  summedTyped <- case perCell of
+   Just r -> return r
+   Nothing -> do
+    irTuple <- lift (runWriterT (do
+      setVariables [(xSample, sample)]
+      pEnumRaw <- operandProb meta mTblEnum enumE (IRVar xEnum)
+      pEnumVar <- mkVariable "p_enum"
+      setVariables [(pEnumVar, pEnumRaw)]
+      let pEnum = IRVar pEnumVar
+      contRes <- guardedSubInference metaOp [appTest]
+                   (probF metaOp cumulative contE invExpr)
+      let scaled = guardP sr [appTest] (scaleCoV sr cumulative invDeriv contRes)
+      -- A value of the enumerated operand's domain with no mass is an
+      -- impossible term, not a possible zero: 'enumMixP' below lets the
+      -- lowest-dim possible term decide the result's dim, and a zero-weight
+      -- atom must not outvote a real density. The tag over-approximates the
+      -- support, so such values are ordinary. Exact zero is sound here for the
+      -- reason 'opaqueMass' gives: this is a discrete mass.
+      return (prodP sr (impossibleWhen (IROp OpEq pEnum (srZero sr)) (mass pEnum)) scaled)
+      )) <&> generateLetInBlock meta
+    uniquePrefix <- mkVariable ""
+    let applyUnique = irMap (uniqueify [xEnum, xSample] uniquePrefix)
+    let (outerBinds, innerTuple) = hoistInvariantBindings xEnum irTuple
+    let renameHoisted (n, v) = (if n `elem` [xEnum, xSample] then uniquePrefix ++ n else n, applyUnique v)
+    setVariables (map renameHoisted outerBinds)
+    -- The "continuous" operand is only known to be a real scalar (its rType),
+    -- not to have a density: an operand no tag reaches -- a fold through a
+    -- recursive helper, which Analysis refuses to look through -- may be a
+    -- discrete count the plan path answers as a mass, or a mixture of atoms and
+    -- a density. So in probability mode each term keeps the dim its own
+    -- inference reports, and 'enumMixP' combines them as a mixture (possible
+    -- atoms outvote densities), instead of stamping dim 1 on the sum (task
+    -- plan-sum-with-sunk-discrete-draw-reports-density). A term that is a true
+    -- density reports 'anyGuardedDim', so a genuinely continuous operand gets
+    -- exactly the result it did before. Cumulative mode is a CDF, dim 0,
+    -- whatever the terms are.
+    if cumulative
+      then enumSumP sr (countBranches (compilerConfig meta)) applyUnique xEnum enumList innerTuple
+      else enumMixP sr (countBranches (compilerConfig meta)) applyUnique (anyGuardedDim sample) xEnum enumList innerTuple
   -- mult(0, y) = 0 for every y (task mult-inversion-unguarded-at-zero, symptom
   -- 3): 'appTest' above already keeps the guarded scaling from dividing by
   -- e=0, but that just drops the term -- the true contribution of that
@@ -4717,6 +4743,105 @@ enumerateAppliedLambda meta cumulative l v sample = do
   setVariables outerBinds
   enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
 
+
+-- | The enumerable @draw@s an expression reads through the shapes
+-- 'latentCellSum' walks: a draw (an applied literal lambda whose argument is
+-- random and enumerable within the dense budget given the draws above it),
+-- and an 'InjF' over such operands. Whatever else is reached is a leaf, which
+-- 'latentCellSum' generates forward and declines if it draws fresh
+-- randomness. That is the shape 'DrawSinking' leaves the enumerated operand
+-- of a noisy observation in: @(draw x = r1 in draw y = r2 in f x y) + Normal
+-- * s@, or with the draws sunk further into @f@'s operands.
+--
+-- Purely structural on purpose: whether a leaf is deterministic given the
+-- draws is asked of its generated IR ('randomDrawSites', the test
+-- 'toIREnumerate' applies to an enumerated body), not by re-inferring the
+-- leaf -- a re-inference is a whole modality pass, and on the 1090-value
+-- operator fold it cost several times the rest of the compile.
+latentCellBinders :: CompilerMetadata -> Expr -> [String]
+latentCellBinders meta = go (recoveredVars meta)
+  where
+    go fixed e
+      | Expr _ (Apply (Expr _ (Lambda x b)) v) <- e
+      , latentCellDraw meta fixed v = x : go (x : fixed) b
+      | Expr _ (InjF (Named _) ops) <- e = concatMap (go fixed) ops
+      | otherwise = []
+
+-- | Is @v@, the value of a @draw@ with @fixed@ already enumerated, one
+-- 'latentCellSum' loops over: random given them, with a finite domain within
+-- the dense-enumeration budget ('enumerateAppliedLambda''s own gate).
+latentCellDraw :: CompilerMetadata -> [String] -> Expr -> Bool
+latentCellDraw meta fixed v =
+  enumerationWithinMaterializationBudget meta (tags (getTypeInfo v))
+  && pType (getTypeInfo (reinferReading meta fixed v)) /= Deterministic
+
+-- | 'reinferRecovered' over only the recovered names @e@ reads. The others
+-- cannot change its typing, and with none left there is no re-inference at
+-- all -- a draw over a neural read of an argument, the common case, is typed
+-- as it stands. A re-inference re-runs the modality engine, which costs a
+-- tenth of a second per call on the operator fold of
+-- 'latentCellBinders''s note, however small @e@ is.
+reinferReading :: CompilerMetadata -> [String] -> Expr -> Expr
+reinferReading meta names e = reinferRecovered meta (filter (`Set.member` freeVarsExpr e) names) e
+
+-- | @sum_cells p(cell) * k(value(cell))@ over the joint cells of the draws
+-- 'latentCellBinders' finds in @e@, one nested loop per draw, where @k@
+-- compiles the term for one forward value of @e@ (an 'IRExpr' over the loop
+-- variables). The terms keep their own dims and are combined as a mixture
+-- ('enumMixP', @densityDim@ being the density terms' dim) in probability mode
+-- and summed as CDF masses ('enumSumP') in cumulative mode -- the sums the
+-- value-domain loop of the mixed enumerate-and-shift equation builds, over
+-- cells instead of values. A cell with no mass is an impossible term, as a
+-- value with none is there.
+--
+-- @k@ runs once, inside the innermost loop, and binds what it needs through
+-- the writer, so its loop-invariant bindings are hoisted like any loop body's.
+-- 'Nothing' (from @k@, or) when a leaf is not deterministic given the draws; the caller
+-- then discards the writer scope this ran in.
+latentCellSum :: CompilerMetadata -> Bool -> IRExpr -> Expr -> (IRExpr -> CompilerMonad (Maybe PResult)) -> CompilerMonad (Maybe PResult)
+latentCellSum meta cumulative densityDim e k
+  | Expr _ (Apply (Expr _ (Lambda x b)) v) <- e
+  , latentCellDraw meta (recoveredVars meta) v = do
+      -- As in 'enumerateAppliedLambda': the loop binds @x@ around the draw's
+      -- own measure too, so a value reading another @x@ is renamed apart.
+      (boundVar, drawBody) <-
+        if x `Set.member` freeVarsExpr v
+          then do
+            fresh <- mkVariable x
+            return (fresh, renameFreeVar x fresh b)
+          else return (x, b)
+      let sr = semiringOf meta
+          bodyMeta = meta{ typeEnv = (boundVar, (rType (getTypeInfo v), False)) : typeEnv meta
+                         , recoveredVars = boundVar : recoveredVars meta
+                         , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
+      (inner, binds) <- lift (runWriterT (do
+        pRaw <- (unP . rProb) <$> toIRInference meta False (reinferReading meta (recoveredVars meta) v) (IRVar boundVar)
+        pVar <- mkVariable "cell_p"
+        setVariables [(pVar, pRaw)]
+        bodyRes <- latentCellSum bodyMeta cumulative densityDim drawBody k
+        return (prodP sr (impossibleWhen (IROp OpEq (IRVar pVar) (srZero sr)) (mass (IRVar pVar))) <$> bodyRes)))
+      forM inner $ \res -> do
+        let irTuple = generateLetInBlock meta (res, binds)
+            (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+            dom = head [mv | DiscreteValues mv <- tags (getTypeInfo v)]
+            bc = countBranches (compilerConfig meta)
+        setVariables outerBinds
+        if cumulative
+          then enumSumP sr bc id boundVar dom innerTuple
+          else enumMixP sr bc id densityDim boundVar dom innerTuple
+  | Expr ti (InjF (Named name) ops) <- e = do
+      let go acc [] = do
+            FPair fwd _ <- instantiate mkVariable (adtDecls meta) (resolveInjF (rType ti) name)
+            let FDecl {inputVars=vars, body=fwdExpr} = fwd
+            prefix <- mkVariable ""
+            k (irMap (uniqueify vars prefix) (buildLetIns (zip vars (reverse acc)) fwdExpr))
+          go acc (o : os) = latentCellSum meta cumulative densityDim o (\val -> go (val : acc) os)
+      go [] ops
+  | otherwise = do
+      ir <- toIRGenerate meta e
+      if null (randomDrawSites (detGenNames meta) ir)
+        then k ir
+        else return Nothing
 
 -- | The partial application @f a1 .. ak@ (k >= 1) of 'Apply' @l v@, retyped
 -- with the enclosing enumerated latents fixed, when the application should be

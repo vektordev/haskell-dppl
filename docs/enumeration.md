@@ -306,6 +306,43 @@ same in every copy and CSE binds it once, so an enumerated neural ADT
 domain's tensor does not make its leaf look large. The total counts every
 node.
 
+## A noisy observation sums over its operand's draws
+
+The mixed enumerate-and-shift/scale equation (`f + Normal * s`, `f * Normal`,
+one operand enumerable, the other a continuous `Float`) loops over the
+enumerable operand's **value domain** and asks `p(f = e)` per value. Without a
+Tier 0 table for `f`, each of those is a full enumeration of the draws `f`
+reads, so a query cost `|dom(f)| x 10^N` for `N` digit reads: 101 values x
+1000 cells for a product of three digits (7 s of emitted Python), 1090 x 1000
+for the operator-fold experiment (48 s). The draws were sunk into `f` by
+`DrawSinking`, because the other operand is random.
+
+When `f` is a function of enumerable draws -- a `draw` stack, `InjF`s over
+such operands, the draws possibly sunk into them (`latentCellBinders`), and
+leaves deterministic once the draws are fixed -- the equation instead sums
+over the draws' joint **cells** (`latentCellSum`): one nested loop per draw,
+weighted by its measure, and at each cell the continuous operand's density at
+the inverted forward value. Terms keep their dims (`enumMixP`; `enumSumP` for
+a CDF), a zero-weight cell is impossible, and `mult`'s atom at 0 is still
+added from `p(f = 0)` afterwards. A query is now `10^N` cells: 7.4 s -> 0.02 s
+for the product and 48 s -> 0.03 s for the fold at `N = 3`. A materialized
+table for `f` keeps the value loop (a long sum chain is cheaper as a
+convolution than per cell), and so does any other operand shape: a leaf that
+draws fresh randomness (an `if` over a random condition, a random leaf with
+no draw of its own) declines the attempt, which is built in a writer scope of
+its own and discarded, as does a draw name the continuous operand also reads.
+
+The leaf test is the generated IR's purity (`randomDrawSites`, as
+`toIREnumerate` asks of an enumerated body), not a re-inference: each
+`reinferRecovered` call re-runs the modality engine, about 0.1 s on the
+operator fold whatever the size of its argument, and the first version, which
+re-inferred every level, made that program's compile 5x slower. A draw's
+value is re-inferred only over the recovered names it reads
+(`reinferReading`; none for a neural read of an argument). The fold's
+probability variant now compiles in 48 s against 114 s before.
+Corpus: `neural/noisyProductOfReads`, `noisyIfFoldOfReads`,
+`noisyScaleOfRead`; cost pin: `Internals.noisyProductOfReadsPerCell`.
+
 ## The dense-enumeration budget gate
 
 An enumerable application (`let x = <discrete draw> in body`, with a
