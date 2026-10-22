@@ -6281,7 +6281,40 @@ invertToWorldsStep meta occs exprBody target = do
         case cb of
           Nothing -> return Nothing
           Just (meta', occsY, b, e) -> invertThroughBinding meta' occs occsY b e target
+      -- A projection of a literal pair is that field, in distribution: the
+      -- other field's value is discarded, so its randomness marginalises to
+      -- one and its reads of x constrain nothing. Reached only where the
+      -- whole subtree did not transport ('transportDirect' has no interval
+      -- step through @fst@, and none for several occurrences).
+      Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]) -> invertToWorlds meta occs a target
+      Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]) -> invertToWorlds meta occs b target
+      Expr _ (InjF (Named op) args)
+        | op `notElem` structuralInjFs, not (isFieldConstructor (adtDecls meta) op)
+        , [a] <- filter (subtreeHasOcc occs) args
+        , all (\o -> subtreeHasOcc occs o || pType (getTypeInfo o) == Deterministic) args
+        -> invertThroughStep meta occs exprBody a target
       _ -> return Nothing
+
+-- | The InjFs 'invertToWorldsStep' and 'worldsShape' invert structurally
+-- rather than as one step of a transport.
+structuralInjFs :: [String]
+structuralInjFs = ["eq", "lt", "gt", "not", "and", "or", "TCons"]
+
+-- | One InjF step @f (.., a, ..)@ whose operand @a@ alone reads x (@occs@)
+-- but does not transport as a whole -- an @if@-mixture, several occurrences
+-- -- wrapped in an invertible step: @(if x < 0.0 then 0.0 - x else x) +
+-- 0.0@. The step is the binding @let y = a in f (.., y, ..)@ without the
+-- @let@: the observation is transported through the step alone, seeded at
+-- the node and stopping at @a@ ('transportDirect' with @a@ in the variable's
+-- role, so a point picks up the step's change of variables and an interval
+-- the step's direction), and each resulting set is the target for inverting
+-- @a@ onto x ('invertOntoValue'). Field constructors are not steps here: their
+-- inverse consults no sibling field, which a residue factor at a bare
+-- occurrence makes up for ('residueFactor'), not at an operand.
+invertThroughStep :: CompilerMetadata -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+invertThroughStep meta occs stepNode a target = do
+  ws <- transportDirect meta [chainName (getTypeInfo a)] stepNode target
+  maybe (return Nothing) (invertOntoValue meta occs a) ws
 
 -- | The two-stage inversion through one binding of @y@ to @e@ over body @b@,
 -- with x (@occs@) in @e@ only (task set-witness-nested-let-classifier): the
@@ -6296,9 +6329,14 @@ invertThroughBinding meta occs occsY b e target = do
             -- unchanged; a dead y makes `b` y-free and reduces to the
             -- membership test of a deterministic body.
             wsY <- invertToWorlds meta occsY b target
-            case wsY of
-              Nothing -> return Nothing
-              Just ys -> do
+            maybe (return Nothing) (invertOntoValue meta occs e) wsY
+
+-- | Stage 2 of 'invertThroughBinding': each world's set on the value of @e@
+-- (the bound value of an inner binding, or the operand of an 'InjF' step,
+-- 'invertThroughStep') becomes the target for inverting @e@ onto x
+-- (@occs@).
+invertOntoValue :: CompilerMetadata -> [ChainName] -> Expr -> [WWorld] -> CompilerMonad (Maybe [WWorld])
+invertOntoValue meta occs e ys = do
                 -- Stage 2: each y-set is the target for inverting `e` onto x.
                 -- 'invertToWorlds' takes an arbitrary target set, so an
                 -- interval on y becomes an interval on x through

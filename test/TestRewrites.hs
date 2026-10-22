@@ -183,7 +183,12 @@ knownSequenceDivergences =
   -- the (x, ANY) marginal loses the Uniform's dimension. Pinned by
   -- known-issues/aliasedParameterPlusZeroMarginalDim; reached by seed
   -- 20261017 after the same corpus additions.
-  , KnownSeq "rewriteProbeHelperScaledNoise" [DrawIntro, InjFIdentity, AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim" ]
+  , KnownSeq "rewriteProbeHelperScaledNoise" [DrawIntro, InjFIdentity, AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim"
+  -- The same marginal with the parameter aliased twice and no `+ 0.0`.
+  -- Pinned by known-issues/aliasedParameterTwiceMarginalDim; reached by seed
+  -- 20261015 once the set-witness-walk-stops-at-identity-injf-wrapper corpus
+  -- additions moved what it draws.
+  , KnownSeq "rewriteProbeHelperScaledNoise" [AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim" ]
 
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =

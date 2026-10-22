@@ -278,8 +278,9 @@ data WorldsShape
     -- ^ A tuple observed at a point, per field.
   | WSThrough WorldsShape (Maybe WorldsShape)
     -- ^ A binding the variable reaches only through its value (a nested
-    -- @let@, or a call): the body inverted onto the inner parameter, then,
-    -- where the body constrains it, the value inverted onto the variable.
+    -- @let@, a call, or the one operand of an InjF step that reads it): the
+    -- body inverted onto the inner parameter, then, where the body
+    -- constrains it, the value inverted onto the variable.
   | WSOpaqueCall
     -- ^ A call of a function parameter, whose callee only the compile in
     -- scope knows; admitted here, decided there.
@@ -354,6 +355,19 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
             through os (fromMaybe [] (lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
         | otherwise -> Nothing
       Expr _ (Apply _ _) -> call os e tgt
+      -- A projection of a literal pair is that field.
+      Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]) -> walk os a tgt
+      Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]) -> walk os b tgt
+      -- One invertible step over the one operand the variable reaches, which
+      -- does not transport as a whole: the step transported onto the
+      -- operand, then the operand walked at the same kind of target.
+      Expr _ (InjF (Named op) args)
+        | op `notElem` ["eq", "lt", "gt", "not", "and", "or", "TCons"]
+        , not (isFieldConstructor (wcADTs wc) op)
+        , [a] <- filter (hasOcc os) args
+        , all (\o -> hasOcc os o || det o) args
+        , Just _ <- transport [getChainName a] e tgt
+        -> WSThrough WSTransport . Just <$> walk os a tgt
       _ -> Nothing
     -- The body onto the inner parameter (@osY@), then the value @v@ onto the
     -- variable, which the body consults only where it constrains the

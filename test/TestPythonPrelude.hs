@@ -18,18 +18,20 @@
 module TestPythonPrelude (pythonPreludeTests) where
 
 import Data.List (intercalate)
-import System.Directory (getCurrentDirectory)
+import System.Directory (findExecutable, getCurrentDirectory)
 import System.Exit (ExitCode(..))
 import System.IO (hPutStr, hClose)
 import System.IO.Temp (withSystemTempFile)
 import System.Process (readProcessWithExitCode)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertFailure)
+import Test.Tasty.HUnit (testCase, testCaseInfo, assertFailure)
 
-import SPLL.IntermediateRepresentation (CompilerConfig(..), defaultCompilerConfig)
+import SPLL.IntermediateRepresentation (CompilerConfig(..), IREnv, defaultCompilerConfig)
 import SPLL.Prelude (compile)
 import SPLL.Parser (tryParseProgram)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
+import SPLL.CodeGenPyTorch (generateFunctions)
+import qualified SPLL.CodeGenJulia as Julia
 import End2EndTesting (findTorchPython, noTorch)
 
 pythonPreludeTests :: TestTree
@@ -44,7 +46,117 @@ pythonPreludeTests = testGroup "PythonPrelude (python-codegen-silent-precision-t
       withTorch "batched tail constant" batchedTailConstant
   , testCase "a batched ANY list tail matches a longer constant list" $
       withTorch "batched ANY list tail" batchedAnyTailList
+  , testCase "the scalar query guard admits a 0-d float tensor sample, and its gradient" $
+      withTorch "scalar tensor sample" scalarTensorSample
+  , testCase "a batched module exports under torch.export and keeps its NaN check" $
+      withTorch "batched torch.export" batchedTorchExport
+  , testCaseInfo "juliaLib and the Julia query guard pass a dual number through" juliaDualProbe
   ]
+
+-- | Compile a program to a list of emitted source lines, failing the test on
+-- any parse or compile error.
+emitted :: CompilerConfig -> (IREnv -> Either String [String]) -> String -> IO [String]
+emitted cfg gen src = do
+  p <- either (assertFailure . ("parse: " ++) . show) return (tryParseProgram "" src)
+  env <- either (assertFailure . ("compile: " ++) . show) return (compile cfg p)
+  either (assertFailure . ("codegen: " ++)) return (gen env)
+
+-- | Run a python script (the emitted module's lines followed by checks) and
+-- fail with its output on a non-zero exit.
+runPyScript :: FilePath -> String -> [String] -> [String] -> IO ()
+runPyScript py name srcLines checks = do
+  cwd <- getCurrentDirectory
+  let script = unlines ([ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")" ] ++ srcLines ++ checks)
+  (code, out, err) <- withSystemTempFile name $ \path h -> do
+    hPutStr h script
+    hClose h
+    readProcessWithExitCode py [path] ""
+  case code of
+    ExitSuccess -> return ()
+    ExitFailure _ -> assertFailure (out ++ err)
+
+-- | Task emitted-runtime-differentiability-gaps, item 1: the scalar query-type
+-- guard tested @isinstance(sample, float)@, so the gradient of a density with
+-- respect to its sample (a score function) needed @--noTypeCheck@. A 0-d
+-- floating tensor is now one TFloat value; its value matches the float query
+-- and its gradient the central difference. A batch-shaped or integer tensor is
+-- still refused.
+scalarTensorSample :: FilePath -> IO ()
+scalarTensorSample py = do
+  srcLines <- emitted defaultCompilerConfig (Right . generateFunctions True)
+    "main th = if Uniform < (theta th @ 0) then exp (Normal * 0.5 + 1.0) else Normal * 2.0"
+  runPyScript py "scalar_tensor_sample.py" srcLines
+    [ "import torch"
+    , "th = ([0.3], [])"
+    , "x = torch.tensor(0.7, dtype=torch.float64, requires_grad=True)"
+    , "r = main.forward(x, th).t1"
+    , "want = main.forward(0.7, th).t1"
+    , "if abs(float(r) - want) > 1e-14:"
+    , "    raise SystemExit('tensor sample answered %r, float sample %r' % (float(r), want))"
+    , "(g,) = torch.autograd.grad(r, x)"
+    , "h = 1e-6"
+    , "fd = (main.forward(0.7 + h, th).t1 - main.forward(0.7 - h, th).t1) / (2 * h)"
+    , "if abs(float(g) - fd) > 1e-6 * max(1.0, abs(fd)):"
+    , "    raise SystemExit('d p / d sample = %r, central difference %r' % (float(g), fd))"
+    , "for bad in [torch.tensor([0.7], dtype=torch.float64), torch.tensor(1)]:"
+    , "    try:"
+    , "        main.forward(bad, th)"
+    , "    except Exception as e:"
+    , "        if 'does not conform' not in str(e): raise"
+    , "    else:"
+    , "        raise SystemExit('the guard admitted ' + repr(bad))"
+    ]
+
+-- | Task emitted-runtime-differentiability-gaps, item 2: @check_result@'s eager
+-- NaN test is a data-dependent branch, which torch.export refuses
+-- (GuardOnDataDependentSymNode). While tracing it is recorded as a graph
+-- assertion instead, so the module exports, the export agrees with eager
+-- exactly, and a NaN reaching the export's return still raises the same
+-- diagnostic.
+batchedTorchExport :: FilePath -> IO ()
+batchedTorchExport py = do
+  srcLines <- emitted defaultCompilerConfig{batched = True} (either (Left . show) Right . generateFunctionsBatched True)
+    "main th = if Uniform < (theta th @ 0) then exp (Normal * 0.5 + 1.0) else Normal * 2.0"
+  runPyScript py "batched_torch_export.py" srcLines
+    [ "class Wrap(torch.nn.Module):"
+    , "    def forward(self, sample, th):"
+    , "        return main.forward(sample, [th]).t1"
+    , "s = torch.tensor([0.5, 1.5, -0.3], dtype=torch.float64)"
+    , "th = torch.tensor([0.3], dtype=torch.float64)"
+    , "eager = Wrap()(s, th)"
+    , "ep = torch.export.export(Wrap(), (s, th))"
+    , "if not torch.equal(ep.module()(s, th), eager):"
+    , "    raise SystemExit('export %r != eager %r' % (ep.module()(s, th), eager))"
+    , "bad = torch.tensor([0.5, float('nan'), -0.3], dtype=torch.float64)"
+    , "for name, f in [('eager', Wrap()), ('exported', ep.module())]:"
+    , "    try:"
+    , "        f(bad, th)"
+    , "    except Exception as e:"
+    , "        if 'main.forward: result is NaN' not in str(e): raise"
+    , "    else:"
+    , "        raise SystemExit(name + ' module returned a NaN without raising')"
+    ]
+
+-- | Task emitted-runtime-differentiability-gaps, item 3 (and the Julia twin of
+-- item 1): @cumulative_IRNormal@ cast its argument with @Float64(x)@,
+-- @isclose@ took only @Float64@, and the query guard tested
+-- @isa AbstractFloat@, so no AD number (ForwardDiff's @Dual@ is a @Real@, not
+-- an @AbstractFloat@) passed. @test/julia_ad_probe.jl@ carries a minimal dual
+-- number, since no Julia AD package is a dependency. Skipped with a note when
+-- @julia@ is not on the PATH, as the SamplingPrimitives group is.
+juliaDualProbe :: IO String
+juliaDualProbe = findExecutable "julia" >>= \case
+  Nothing -> return "skipped: no julia on the PATH"
+  Just jl -> do
+    srcLines <- emitted defaultCompilerConfig (Right . Julia.generateFunctions) "main = Normal * 2.0 + 1.0"
+    cwd <- getCurrentDirectory
+    (code, out, err) <- withSystemTempFile "julia_ad_probe_main.jl" $ \path h -> do
+      hPutStr h (unlines srcLines)
+      hClose h
+      readProcessWithExitCode jl ["test/julia_ad_probe.jl", cwd, path] ""
+    case code of
+      ExitSuccess -> return ""
+      ExitFailure _ -> assertFailure (out ++ err) >> return ""
 
 withTorch :: String -> (FilePath -> IO ()) -> IO ()
 withTorch what k = findTorchPython >>= \case

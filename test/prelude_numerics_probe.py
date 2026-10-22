@@ -68,7 +68,7 @@ LIST_FLOAT_PATH = {"logsumexp"}
 # The sampling primitives' distributions are checked by the SamplingPrimitives
 # group (test/TestSamplingPrimitives.hs).
 NOT_FLOAT_PATH = {
-  "rand", "randn", "categorical_index", "isAny", "eq", "isclose", "throw",
+  "rand", "randn", "categorical_index", "isAny", "isFloat", "eq", "isclose", "throw",
   "fromLeft", "fromRight", "toList", "mapList", "indexOf", "listProd",
   "listConcat",
   "isPossible",

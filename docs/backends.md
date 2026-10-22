@@ -40,6 +40,32 @@ one means deciding whether a tensor can reach it. All but that classification
 check need a torch-enabled python and fail without one, like `BatchedPython`
 (`NEST_SKIP_TORCH=1` skips them).
 
+## Gradients with respect to the sample, export, and Julia AD
+
+Three more gaps blocked gradient or export use of an emitted module without
+changing any answer (task `emitted-runtime-differentiability-gaps`):
+
+- **The scalar query-type guard** (`CodeGenPyTorch.pyConforms`) tests a TFloat
+  with `pythonLib.isFloat`, which admits a 0-d floating tensor as well as a
+  python float, so `p(x)` with `x` a `requires_grad` tensor gives a score
+  function without `--noTypeCheck`. A batch-shaped or integer tensor is still
+  refused. The Julia guard tests `isa Real && !(isa Integer)` rather than
+  `isa AbstractFloat`, which a ForwardDiff `Dual` is not.
+- **`pythonLibBatched.check_result`** raises a `ValueError` on a NaN eagerly.
+  That test is a data-dependent branch, which `torch.export` refuses, so while
+  tracing (`torch.compiler.is_compiling()`) it records the same check as
+  `torch._assert_async(no NaN, message)` instead: the exported module raises a
+  `RuntimeError` with the same message. The eager path stays a `ValueError`,
+  because `_assert_async` on an accelerator is a device-side assert.
+- **`juliaLib`'s `cumulative_IRNormal`** keeps the libm `erfc` call for the
+  types that convert to `Float64` losslessly (IEEE floats, integers,
+  rationals) and sends any other `Real` (an AD number, a `BigFloat`) through
+  `_erfc_generic`, CPython's former series / continued-fraction `erfc` in plain
+  arithmetic (within 6e-14 of libm). `isclose` takes any `Real`.
+
+`PythonPrelude` pins all three; the Julia one runs `test/julia_ad_probe.jl`,
+which carries a minimal dual number since no Julia AD package is a dependency.
+
 ## The normal CDF is `erfc(-x / sqrt 2) / 2`
 
 Every runtime, the interpreter (`irCDF`/`irLogCDF`) and the optimizer's

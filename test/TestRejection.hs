@@ -1450,7 +1450,19 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
           Right (Right (VTuple (VFloat p) _)) ->
             assertBool ("expected Phi(1) = 0.8413, got " ++ show p) (abs (p - 0.8413447460685429) < 1e-4)
           Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
+  , testCase "an InjF step whose operands both read x is not inverted as one step" $
+      -- Task set-witness-walk-stops-at-identity-injf-wrapper inverts a step
+      -- over the ONE operand that reads x (setWitnessThroughStepAbs). With
+      -- two, the step's inverse would have to recover both operands from
+      -- one value, which it cannot; the refusal stays.
+      withParsed stepTwoReadersSrc $ \prog -> do
+        res <- forcedProb prog (VFloat 0.49)
+        assertNoEngine "a product of two x-reading mixtures" res
   ]
+
+stepTwoReadersSrc :: String
+stepTwoReadersSrc =
+  "main = draw x = Normal in (if x < 0.0 then 0.0 - x else x) * (if x < 0.0 then 0.0 - x else x)"
 
 -- ----------------------------------------------------------------------------
 -- A shared Gaussian latent: design pipeline-coherence's F2 row, still open
