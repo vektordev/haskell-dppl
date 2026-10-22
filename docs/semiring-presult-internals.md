@@ -180,13 +180,59 @@ skip it on a marginal query.
 `anySafeShared` binds the packed result once instead, on `shareResult`'s rules
 — only the fields that actually read the block go into the tuple, so a
 statically-known dim or flag stays the constant it is rather than being hidden
-from folding. It is gated on `blockIterates`: share only when the block
-contains a **loop** (`IRMap`, `BMap`, or `BReduce`). That gate is
-a claim about run time, not size — what makes a second copy cost anything is
-that it is a second traversal, and a block of constants and arithmetic folds to
-a few literals whether copied or not. A pre-optimization node count was tried
-first and is the wrong question: `test/cases/arithmetic/equalsCoin` builds ~100 nodes that
-fold to four literals, passing any size gate with nothing worth sharing.
+from folding. It is gated on `blockNests`, which has two halves:
+
+- `blockIterates`: the block contains a **loop** (`BMapList`, `BMap`,
+  `BReduce`) or a call (`IRApply`). That half is a claim about run time, not
+  size — what makes a second copy cost anything is that it is a second
+  traversal, and a block of constants and arithmetic folds to a few literals
+  whether copied or not. A pre-optimization node count was tried first and is
+  the wrong question: `test/cases/arithmetic/equalsCoin` builds ~100 nodes that
+  fold to four literals, passing any size gate with nothing worth sharing.
+- The block already holds a **copied field**: an `isAny`-guarded field whose
+  else-arm is a let-block, which is what `anySafe` leaves behind when a level
+  below declined to share (and what a shared level's binding looks like too).
+  Without this half a leaf block's copies compound under nesting: each
+  deconstructing level copies its child's copies into about three fields, and a
+  right-nested accessor over a mixture of tuples grew its -O0 IR ~7x per level
+  (task `structured-accessor-compile-blowup`, mechanism B). With it, one level of
+  copying is still allowed — a shallow program keeps its folded output — and
+  every level from the second on shares, so the IR grows linearly.
+
+`IROptimizer.foldConstProjections` recovers most of the cost of the shared
+tuple: a projection off a let-bound tuple whose every arm puts the same literal
+at that position (the dim 0 or the `False` flag of both the `isAny` defaults and
+the computed result) folds to that literal, so the tests reading it fold as they
+did inline.
+
+### The one rule: bind a non-atomic block
+
+A `PResult` has four fields, and any construction that puts a non-atomic
+expression into more than one of them copies it; when the expression holds a
+sub-result built the same way, the copies multiply per nesting level. That is
+the cause of most of this compiler's exponential compile times, and each was
+introduced by a fix that looked local. So (task
+`presult-unbound-block-copied-per-field`):
+
+- `unpackResult` takes a `Varname`. A block is bound first (`mkVariable` +
+  `setVariables`, a `WFactor`'s bindings, or `shareResult`) and the variable
+  unpacked. `packedProb` reads just the probability off a packed expression,
+  one read.
+- A sub-result's floated bindings are re-attached through `shareResult` (bound
+  once under guards), `guardedResult` (`guardP` semantics, the block inline in
+  its one reader or bound once), or `shareUnlessLeaf` (the sanctioned
+  exception: a leaf block, which holds no sub-result and so cannot compound, is
+  copied inline into its readers, keeping its constants foldable). Never
+  `mapResult (generateLetInExpr binds)`.
+- World factors (`WFactor`) carry their block as a binding; `measureWorld` and
+  `measurePlanWorlds` bind it under the world's guards. A factor that several
+  worlds share is still emitted once per world (task
+  `budget-zero-exponential-in-nested-enum-ifs` owns grouping them).
+
+Measured over the 751 corpus programs that compile in 60 s (Python, haskell-dppl
+`5776efa` against this change): -O0 output 54.9 MB → 35.5 MB, -O2 output
+13.72 MB → 13.09 MB (−4.7%). Sharing every Any-safe block at two readers instead
+of using the nesting test came out about 1% larger at -O2.
 
 Measured over the corpus: emitted scalar Python totals 68% of its former size
 (`clevrEqualLargeMetalSphere*` 2.8x smaller, the `mNistAdd` family 1.6–1.8x),

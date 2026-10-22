@@ -2177,16 +2177,20 @@ runPythonChecks name src checks = do
 -- interpreter, but its constructs are all certified by the agreement
 -- fuzzers, so the corpus does not run it on Python; this does. The IR-level
 -- cases (scalar, Julia and batched) are in "IRFuzz".
+--
+-- Since task presult-unbound-block-copied-per-field the program no longer
+-- reaches the shape: the cell list's lets were projections off a shared
+-- result tuple whose constant fields now fold ('foldConstProjections'), and
+-- no small int product found since builds one. The fix is held by IRFuzz's
+-- 'letInComprehensionIterableCases', which construct the IR directly; this
+-- keeps the program's answers on Python.
 comprehensionIterableLetTests :: TestTree
 comprehensionIterableLetTests = testGroup "let in a comprehension iterable (backends-agree-python-walrus-in-comprehension-iterable)"
   [ testProperty name $ once $ ioProperty $ do
       prog <- corpusPplPath name >>= parseProgram
       (_, _, _, tcs) <- corpusTstPath name >>= parseTestCases
       let env = compile defaultCompilerConfig prog
-          bindsAnIterable = either (const False) (isInfixOf "((_it" . torchFreePythonModule) env
-      return $ counterexample "the module binds no comprehension iterable, so this no longer reaches the fix"
-                 bindsAnIterable
-          .&&. testPython [] env tcs
+      return (testPython [] env tcs)
   ]
   where name = "intProductLetInComprehensionIterable"
 

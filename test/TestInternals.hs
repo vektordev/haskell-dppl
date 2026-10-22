@@ -2005,6 +2005,59 @@ test_setWitnessNestedDrawIfLinear = testCase "setWitnessNestedDrawIfLinear" $ do
         Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
         Right ir -> return (length (show ir))
 
+-- | Task presult-unbound-block-copied-per-field (mechanism B of
+-- structured-accessor-compile-blowup): a right-nested accessor over a mixture
+-- of tuples, @fst (fst (if .. then ((if .., True), True) else ..))@. Every
+-- deconstructing level is Any-safe, and 'anySafeShared' declined to share a
+-- block that does not iterate, so each level copied its child's block --
+-- which held the child's own copies -- into about three fields: the -O0 IR
+-- grew ~7x per level (128 MB of Python and 7 s at -O2 for four levels).
+-- 'Semiring.blockNests' now shares from the second nested level on. Pinned as
+-- the -O0 IR growth from depth 1 to depth 3: ~3x now, ~48x before; the bound
+-- of 8x fails on the old shape.
+test_deepAccessorOverMixtureLinear :: TestTree
+test_deepAccessorOverMixtureLinear = testCase "deepAccessorOverMixtureLinear" $ do
+  small <- sizeOf 1
+  large <- sizeOf 3
+  let ratio = fromIntegral large / fromIntegral small :: Double
+  assertBool ("-O0 IR grew " ++ show ratio ++ "x from depth 1 to depth 3 ("
+              ++ show small ++ " -> " ++ show large ++ ")")
+    (ratio < 8)
+  where
+    inner :: Int -> String
+    inner 0 = "(if Uniform < 0.5 then 1 else 2)"
+    inner d = "(if Uniform < 0.3 then (" ++ inner (d - 1) ++ ", True) else (" ++ zero (d - 1) ++ ", False))"
+    zero :: Int -> String
+    zero 0 = "0"
+    zero d = "(" ++ zero (d - 1) ++ ", False)"
+    src d = "main = " ++ concat (replicate d "fst (") ++ inner d ++ replicate d ')'
+    sizeOf :: Int -> IO Int
+    sizeOf d = case tryParseProgram "deepAccessor" (src d) of
+      Left err -> assertFailure ("parse error: " ++ show err) >> return 0
+      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
+        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+        Right ir -> return (length (show ir))
+
+-- | 'IROptimizer.foldConstProjections' (task
+-- presult-unbound-block-copied-per-field): a projection off a let-bound tuple
+-- folds to the literal every arm puts there, and only then. This is what lets
+-- a shared 'PResult' keep its statically-known dim and flag visible.
+test_foldConstProjectionsOffSharedTuple :: TestTree
+test_foldConstProjectionsOffSharedTuple = testCase "foldConstProjectionsOffSharedTuple" $ do
+  let c = IRUnaryOp OpIsAny (IRVar "s")
+      pack a b = IRConstruct TgTuple [a, b]
+      bound = IRIf c (pack (IRConst (VInt 0)) (IRConst (VFloat 1.0)))
+                     (IRLetIn "y" (IROp OpPlus (IRVar "s") (IRConst (VFloat 1.0)))
+                        (pack (IRConst (VInt 0)) (IRVar "y")))
+      -- The second field is read twice, so the binding stays a binding.
+      body = IRConstruct TgTuple [ IRDestruct AcFst (IRVar "v")
+                                 , IROp OpMult (IRDestruct AcSnd (IRVar "v")) (IRDestruct AcSnd (IRVar "v")) ]
+      opt = postProcess defaultCompilerConfig (IRLambda "s" (IRLetIn "v" bound body))
+      mentionsFstV e = e == IRDestruct AcFst (IRVar "v") || any mentionsFstV (getIRSubExprs e)
+      mentionsSndV e = e == IRDestruct AcSnd (IRVar "v") || any mentionsSndV (getIRSubExprs e)
+  assertBool ("the agreed-constant field was not folded: " ++ show opt) (not (mentionsFstV opt))
+  assertBool ("the disagreeing field was folded: " ++ show opt) (mentionsSndV opt)
+
 -- | Task field-constructor-prune-guard-exponential-in-width: a user-ADT
 -- constructor's field equation ORs each field's impossibility flag into an
 -- accumulator that guards the later fields. An inline field's flag already
@@ -6162,6 +6215,8 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_shortGaussianTrajectoryVariantsCompact
   , test_nestedEqualityChainAnyArmConstant
   , test_setWitnessNestedDrawIfLinear
+  , test_deepAccessorOverMixtureLinear
+  , test_foldConstProjectionsOffSharedTuple
   , test_wideConstructorPruneGuardLinear
   , test_witnessFoldOpenBodyShared
   , test_recursiveListMissedCSE

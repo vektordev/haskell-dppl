@@ -384,7 +384,7 @@ that are already fixed stay `TestInternals` growth tests, as before. The
 known-issues folder holds only open bugs.
 
 The pins today, together about 1.2 s of the default suite:
-`nestedEqualityChainGrowth` (alloc at `-O2`, about 8x per level) and
+`nestedEqualityChainGrowth` (alloc at `-O2`, about 2.2x per level) and
 `gaussianTrajectoryUnprunedModuleSize` (code size). The harness's own tests are
 `KnownIssuesScaling` (templates, slopes, the climb) and `KnownIssuesHarness`
 (both caps, header parsing).

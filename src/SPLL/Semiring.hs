@@ -47,8 +47,8 @@ module SPLL.Semiring (
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
   prodP, onProb, onDim, onBranches, mapResult, guardP, zipResult, zip3Result,
-  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, shareResult,
-  packResult, unpackResult, mixP, mixSubP, mixWith,
+  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, shareResult, guardedResult, shareUnlessLeaf,
+  packResult, unpackResult, packedProb, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
   CompilerMonad, CompilerM, refuse, runCompilerMonad, mkVariable, setVariables, generateLetInExpr, wrapBlockIfRead, mentionsAny
@@ -589,6 +589,11 @@ mapFlag f imp | imp == constFalseIR || imp == constTrueIR = imp
 -- result AND the later guards may crash when an earlier guard fails (a
 -- deconstructing inverse applied to the wrong arm -- observe-partials-umbrella
 -- N1b); only the branch form leaves them unevaluated.
+--
+-- Each guard is copied into every field, so a guard must be atomic or a small
+-- test (a bound variable, a comparison of one), never a sub-result's field:
+-- that would copy the sub-result per field, the duplication 'unpackResult'
+-- documents. Every caller passes one today.
 guardP :: Semiring -> [IRExpr] -> PResult -> PResult
 guardP sr conds r = PResult
   (P (nest (srZero sr) (unP (rProb r))))
@@ -599,6 +604,10 @@ guardP sr conds r = PResult
 
 -- | Combine two results field-wise with the same operator. For the cases that
 -- select between two whole results at runtime.
+--
+-- @f@ is applied once per field, so whatever it closes over -- typically the
+-- condition of an @IRIf@ -- is copied into each; as for 'guardP', it must be
+-- a bound variable or a small test, never a sub-result's field.
 zipResult :: (IRExpr -> IRExpr -> IRExpr) -> PResult -> PResult -> PResult
 zipResult f (PResult aP aDim aBC aImp) (PResult bP bDim bBC bImp) =
   PResult (P (f (unP aP) (unP bP))) (f aDim bDim) (f aBC bBC)
@@ -688,8 +697,8 @@ anySafeShared :: Semiring -> IRExpr -> [(Varname, IRExpr)] -> PResult
 anySafeShared sr sample binds (PResult p d bc imp)
   -- Below two readers there is no duplication to remove, and the tuple is not
   -- free; 'shareResult' declines on the same test. The second condition is the
-  -- one documented at 'blockIterates'.
-  | length readers <= 1 || not (any (blockIterates . snd) binds) =
+  -- nesting test documented at 'blockNests'.
+  | length readers <= 1 || not (any (blockNests . snd) binds) =
       return (anySafe sr sample (wrapBlockIfRead binds) (PResult p d bc imp))
   | otherwise = do
       v <- mkVariable "any_shared"
@@ -724,14 +733,17 @@ anySafeShared sr sample binds (PResult p d bc imp)
 -- element of a domain -- or a function call, whose cost is opaque to the
 -- compiler at this point and may itself be recursive?
 --
--- This is the gate on sharing, and it is a statement about /run time/, not
--- size: what makes a second copy of the block cost anything is that it is a
--- second traversal. A block of constants and arithmetic folds to a handful of
--- literals, so duplicating it costs nothing and hiding it behind a tuple costs
--- something -- the pack, the projections, and the per-arm split-and-rebuild
--- the optimizer does to a tuple binding. Worse, a folded field routed through
--- an opaque tuple is hidden from constant folding, which is the pessimization
--- 'shareResult' documents.
+-- This is the first half of the gate on sharing ('blockNests'), and it is a
+-- statement about /run time/, not size: what makes a second copy of the block
+-- cost anything is that it is a second traversal. A leaf block of constants
+-- and arithmetic folds to a handful of literals, so duplicating it once costs
+-- little and hiding it behind a tuple costs something -- the pack, the
+-- projections, and the per-arm split-and-rebuild the optimizer does to a tuple
+-- binding. A field that is not the same constant on every arm of the shared
+-- tuple stays hidden from constant folding ('IROptimizer.foldConstProjections'
+-- recovers the ones that are), which is the pessimization 'shareResult'
+-- documents. What a leaf block does NOT survive is nesting: the second half of
+-- the gate.
 --
 -- A pre-optimization node count was tried here first and is the wrong
 -- question: @testCases\/equalsCoin@ builds a block of ~100 nodes that folds to
@@ -765,6 +777,38 @@ anySafeShared sr sample binds (PResult p d bc imp)
 -- a guard now isolates the sub-inference's own bindings and re-threads them
 -- through 'shareResult' with that same guard, so the two changes are a
 -- matched pair.
+-- | Would copying this block per field compound? The gate on
+-- 'anySafeShared' (task presult-unbound-block-copied-per-field, settling
+-- structured-accessor-compile-blowup's mechanism B with its option (a)).
+--
+-- Copying a block costs a constant factor when the block is a leaf: its few
+-- bindings fold to literals, and the copies fold with them. It compounds when
+-- the block already holds a COPIED sub-result: each level then copies its
+-- child's copies, about three per deconstructing level, so a right-nested
+-- accessor @fst (fst (if .. then ((if .., True), True) else ..))@ grew its
+-- pre-optimization IR 7x per level (128 MB of -O0 Python, 7 s at -O2, for
+-- four levels). So a block is shared when it holds either
+--
+-- * a loop or a call ('blockIterates'): copying it repeats a traversal, at
+--   any depth; or
+-- * a field 'anySafe' has already wrapped in its own copy of a block, i.e. an
+--   @isAny@-guarded field whose else-arm is a let-block. This is the marker of
+--   a level below that declined to share, and of one that shared too (the
+--   shared binding has the same shape), so from the second nested level on
+--   every level shares and the IR grows linearly with depth.
+--
+-- A single level of copying is still allowed, which is what keeps a shallow
+-- program's folded output: sharing every block at two readers (option (d)
+-- there) cost 1% more emitted -O2 code over the corpus than this test, even
+-- with 'IROptimizer.foldConstProjections' recovering the shared tuple's
+-- constants.
+blockNests :: IRExpr -> Bool
+blockNests e = blockIterates e || holdsCopiedField e
+  where
+    holdsCopiedField x = case x of
+      IRIf (IRUnaryOp OpIsAny _) _ IRLetIn{} -> True
+      _ -> any holdsCopiedField (getIRSubExprs x)
+
 blockIterates :: IRExpr -> Bool
 blockIterates e = iterates e || any blockIterates (getIRSubExprs e)
   where
@@ -825,7 +869,7 @@ enumSumP sr withBranchCount wrap v vals packed
   -- Only the probability is read, so the packed body is projected directly --
   -- one copy, no binding to clean up afterwards.
   | not withBranchCount =
-      opaqueMass sr (wrap (enumSumNode sr v vals (unP (rProb (unpackResult packed))))) const0
+      opaqueMass sr (wrap (enumSumNode sr v vals (unP (packedProb packed)))) const0
   -- ONE let-bound map over the domain, its two projections ('rProb' and
   -- 'rBranches') each reduced on their own axis: the probability with the
   -- semiring's own operator, the branch count always with plain 'ROpAdd'
@@ -837,7 +881,7 @@ enumSumP sr withBranchCount wrap v vals packed
   | otherwise = do
       n <- mkVariable "enum_axis"
       body <- mkVariable "enum_body"
-      let r = unpackResult (IRVar body)
+      let r = unpackResult body
           mapped = IRBuiltin BMap [IRLambda v (IRLetIn body packed (IRConstruct TgTuple [unP (rProb r), rBranches r])), tensorDomainSR vals]
           probs  = IRBuiltin BMap [IRLambda (n ++ "_p") (IRDestruct AcFst (IRVar (n ++ "_p"))), IRVar n]
           bcs    = IRBuiltin BMap [IRLambda (n ++ "_b") (IRDestruct AcSnd (IRVar (n ++ "_b"))), IRVar n]
@@ -879,7 +923,7 @@ enumMixP sr withBranchCount wrap densityDim v vals packed = do
   t <- mkVariable "mix_term"
   hasAtom <- mkVariable "mix_has_atom"
   paired <- mkVariable "mix_paired"
-  let r = unpackResult (IRVar body)
+  let r = unpackResult body
       mapped = IRBuiltin BMap [ IRLambda v (IRLetIn body packed
                                   (packMany [unP (rProb r), rDim r, rImposs r, rBranches r]))
                               , tensorDomainSR vals ]
@@ -1008,6 +1052,50 @@ shareResult sr tag guards binds r
     -- Guards nest as IRIf, never OpOr/OpAnd -- see 'guardP'.
     guarded orElse e = foldr (\g acc -> IRIf g acc orElse) e guards
 
+-- | Re-attach a sub-result's let-in block: bound once ('shareResult', under
+-- @guards@) when copying it could compound, inline in each reading field when
+-- it cannot. The one sanctioned exception to binding every block (task
+-- presult-unbound-block-copied-per-field), and the same nesting test
+-- 'anySafeShared' applies ('blockNests'), with the caller's own static
+-- knowledge added: @nests@ says the sub-result's source holds a nested
+-- sub-inference of the kind that would copy this block again one level up (a
+-- probabilistic let, for the witness fold's body factor).
+--
+-- A leaf block is a bounded copy -- it holds no sub-result, so at most four
+-- copies of a few bindings that typically fold to constants, and folded inline
+-- a statically-known dim or flag stays visible where a shared tuple may hide it
+-- ('shareResult' records the -O2 cost of that). The guards are applied only to
+-- the shared binding, where they are what keeps the block unevaluated; the
+-- inline form leaves the fields unguarded, so a caller must guard the result
+-- field-wise itself (as 'guardP' does) whenever the block may not be
+-- evaluated outside them.
+shareUnlessLeaf :: Semiring -> String -> Bool -> [IRExpr] -> [(Varname, IRExpr)] -> PResult -> CompilerMonad PResult
+shareUnlessLeaf sr tag nests guards binds r
+  | nests || any (blockNests . snd) binds = shareResult sr tag guards binds r
+  | otherwise = return (mapResult (wrapBlockIfRead binds) r)
+
+-- | 'guardP' over a sub-result whose let-in block is re-attached to it: the
+-- form @guardP sr guards (mapResult (generateLetInExpr binds) r)@ takes,
+-- without copying the block into each field (task
+-- presult-unbound-block-copied-per-field).
+--
+-- When at most one field reads the block, that field gets it inline and the
+-- result is exactly 'guardP''s. Otherwise the block is bound once under the
+-- guards ('shareResult'), and a field that does not read it is guarded as
+-- 'guardP' guards it -- the branch count included, which 'shareResult' leaves
+-- unguarded -- so the two forms agree field by field.
+guardedResult :: Semiring -> String -> [IRExpr] -> [(Varname, IRExpr)] -> PResult -> CompilerMonad PResult
+guardedResult sr tag guards binds r
+  | length (filter reads' fields) <= 1 =
+      return (guardP sr guards (mapResult (wrapBlockIfRead binds) r))
+  | otherwise = do
+      s <- shareResult sr tag guards binds r
+      return (if reads' (rBranches r) then s
+                else s { rBranches = foldr (\g acc -> IRIf g acc const0) (rBranches r) guards })
+  where
+    reads' = mentionsAny (map fst binds)
+    fields = [unP (rProb r), rDim r, rBranches r, rImposs r]
+
 -- | Wrap a let-in block around an expression only if the expression actually
 -- reads something the block binds. A 'PResult' field that does not -- a
 -- statically-known dim of 0, a branch count of 0, a constant flag -- otherwise
@@ -1039,10 +1127,28 @@ packResult :: PResult -> IRExpr
 packResult (PResult p d bc imp) =
   IRConstruct TgTuple [unP p, IRConstruct TgTuple [d, IRConstruct TgTuple [bc, imp]]]
 
-unpackResult :: IRExpr -> PResult
-unpackResult e = PResult (P (IRDestruct AcFst e)) (IRDestruct AcFst (IRDestruct AcSnd e))
+-- | The fields of a packed result, read off the VARIABLE it is bound to.
+--
+-- It takes a name, not an expression, because that is the one rule for
+-- 'PResult' sharing (task presult-unbound-block-copied-per-field): a result is
+-- built from a non-atomic block only by binding the block. Unpacking an
+-- expression puts a copy of it into each of the four fields, and when that
+-- expression holds a sub-result built the same way the copies multiply per
+-- nesting level -- the cause of most of this compiler's exponential compile
+-- times, each one introduced by a fix that looked local. Bind the block
+-- ('mkVariable' + 'setVariables', a 'WFactor''s bindings, or 'shareResult',
+-- which also places guards), then unpack the variable. A caller that needs
+-- only the probability of a packed expression reads it once with 'packedProb'.
+unpackResult :: Varname -> PResult
+unpackResult v = PResult (P (IRDestruct AcFst e)) (IRDestruct AcFst (IRDestruct AcSnd e))
                          (IRDestruct AcFst (IRDestruct AcSnd (IRDestruct AcSnd e)))
                          (IRDestruct AcSnd (IRDestruct AcSnd (IRDestruct AcSnd e)))
+  where e = IRVar v
+
+-- | The probability field of a packed result: a single read, so unlike
+-- 'unpackResult' it may take the packed expression itself.
+packedProb :: IRExpr -> P
+packedProb = P . IRDestruct AcFst
 
 -- | Mixture of two alternatives (branch / disjunction): whichever side is
 -- non-zero wins, ties add, and the smaller dimension wins (a discrete mass and
