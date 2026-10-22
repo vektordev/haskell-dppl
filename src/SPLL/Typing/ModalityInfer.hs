@@ -81,7 +81,7 @@ import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.Modality
-import SPLL.Typing.ForwardChaining (FCData(..), isWitnessedLambda, WitnessCert(..), pointWitnessCert, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet)
+import SPLL.Typing.ForwardChaining (FCData(..), isWitnessedLambda, WitnessCert(..), pointWitnessCert, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet, unwrapLambdas)
 import PredefinedFunctions (isFieldConstructor, propagateValuesLazily)
 
 -- ---------------------------------------------------------------------------
@@ -653,11 +653,25 @@ inferE ctx env expr = case expr of
   -- the condition reads has been /conditioned/ on the condition's outcome:
   -- see 'conditionEnv'. The condition itself is inferred under the unrefined
   -- environment (it reads the variable's standalone law).
+  --
+  -- An observed @if@ under a condition with no random leaf passes the
+  -- observation on to its arms: whichever arm is taken, its value /is/ the
+  -- observed value, so a binding the arm reads is witnessed from the arm's
+  -- result ('armCtx'). Without it, a recursive call in the else arm of
+  -- @step t x = if t < 0.5 then [x] else x : step (t - 1.0) (mu x)@ bound
+  -- its parameter unwitnessed, so the inner @mu x@ read a random input and
+  -- floored the whole trajectory to 'Bottom' (task
+  -- tensor-gaussian-heads-rd-diffusion). IRCompiler already compiles each arm
+  -- against the same sample, so this only aligns the verdict with it.
   Expr ti (IfThenElse c t f) ->
     let (lc, c', ca) = inferE ctx env c
         armEnv       = conditionEnv env c
-        (lt, t', ta) = inferE ctx armEnv t
-        (lf, f', fa) = inferE ctx armEnv f
+        armCtx arm
+          | fst (unwrapLambdas (icFC ctx) (icObs ctx)) == cnOf expr
+          , gCap (outerI (lawMod lc)) == Exact = ctx { icObs = cnOf arm }
+          | otherwise = ctx
+        (lt, t', ta) = inferE (armCtx t) armEnv t
+        (lf, f', fa) = inferE (armCtx f) armEnv f
         m = mixOuterI (outerI (lawMod lc)) (meetI (lawMod lt) (lawMod lf))
         e' = Expr (setPType ti (projectI m)) (IfThenElse c' t' f')
     in doneL (pointOr m e') e' (ca ++ ta ++ fa)
