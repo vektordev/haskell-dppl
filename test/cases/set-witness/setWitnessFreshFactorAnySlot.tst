@@ -4,7 +4,6 @@
 -- raised on every backend, and batched mode (eager selects) raised for the
 -- whole bucketed batch. Found by Slow prop_Fuzz_BackendsAgree
 -- --quickcheck-replay=1. A wildcard slot is now the factor's marginal, 1.
-batched
 p((0.2, ANY))=(1.0, 1)
 p((0.7, ANY))=(1.0, 1)
 p((ANY, 0.3)) is impossible

@@ -1,4 +1,3 @@
-batched
 p((True, (True, True)))=(0.216, 0.0)
 p((True, (True, False)))=(0.054, 0.0)
 p((False, (False, True)))=(0.252, 0.0)

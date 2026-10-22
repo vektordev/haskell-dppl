@@ -4,7 +4,6 @@
 -- Was a known issue ("tagged invocation") until task
 -- named-function-list-head-witness-not-recovered.
 slow
-batched
 p((0.3, 0.3))=(1.0, 1.0, False)
 p((0.3, ANY))=(1.0, 1.0, False)
 p((0.3, 0.4)) is impossible

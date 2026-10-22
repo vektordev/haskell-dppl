@@ -5,7 +5,6 @@
 -- inversion measuring the product at `sample - 0.0` with the density
 -- machinery. Found by the rewrite-invariance net's injf-identity family
 -- (task dirac-law-point-lost-under-plus-or-helper).
-batched
 p(0.0)=(1.0, 0.0)
 p(1.0) is impossible
 cdf(-0.5)=(0.0, 0.0)

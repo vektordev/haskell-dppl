@@ -1,4 +1,3 @@
 slow
-batched
 p(0.25)=(0.5, 1.0, False)
 p(0.75)=(0.5, 1.0, False)

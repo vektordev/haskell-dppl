@@ -69,15 +69,16 @@ import System.FilePath ((</>), isExtensionOf, takeBaseName, stripExtension)
 -- without the line parses as 'defaultBackends', which the known-issues pins
 -- read as "interpreter and python".
 --
--- `batched` and `dense` are standalone header lines (like `slow`), and may
--- also appear inside a `backends:` list. `batched` is an opt-in declaration
--- that the program is expected to be batched-mode eligible (see
--- End2EndTesting.batchedPythonTests), asserted rather than filtered, so
--- silently losing eligibility fails the suite; its rows are also checked on
--- the batched backend. `dense` is the same kind of declaration one level in:
--- that the program's *query domain* is finite, so batched mode emits
--- dense-enumeration entry points for it (design heterogeneous-batch-inference,
--- M3). It presupposes `batched` and does not imply it -- list both.
+-- `dense` is a standalone header line (like `slow`), and may also appear
+-- inside a `backends:` list. It declares that the program's *query domain* is
+-- finite, so batched mode emits dense-enumeration entry points for it (design
+-- heterogeneous-batch-inference, M3), asserted rather than filtered.
+--
+-- `batched` is no header any more: batched admission is universal (docs-repo
+-- task batched-admission-universal), so every corpus program is asserted
+-- batched eligible (End2EndTesting.batchedPythonTests) and nothing declares
+-- it. 'Batched' survives as a backend a known-issues pin's `backends:` list
+-- names, saying a bug lives in the batched backend (TestKnownIssues).
 data Backend = Interpreter | Julia | Python | Batched | Dense
   deriving (Eq, Show, Enum, Bounded)
 
@@ -616,7 +617,7 @@ pPerfLine = choice [pKnobLine, pMetricLine, pFlagsLine, pCapLine] <* pNewline
 data TstFile = TstFile
   { tstBackends        :: [Backend]
     -- ^ The @backends:@ list ('defaultBackends' without one), plus the
-    -- standalone @batched@ / @dense@ lines.
+    -- standalone @dense@ line.
   , tstSlow            :: Bool
   , tstExpectFailure   :: Maybe ExpectFailure
   , tstNoNormalization :: Bool
@@ -628,7 +629,7 @@ data TstFile = TstFile
 
 -- The header lines are optional and may appear in any order. A missing
 -- `backends:` header means 'defaultBackends' (the three scalar backends),
--- never 'allBackends': `batched` must be opted into explicitly. A missing
+-- never 'allBackends'. A missing
 -- `expect-failure:` header means 'Nothing' -- an ordinary corpus program.
 pHeaders :: MonadParser m => m TstFile
 pHeaders = go (TstFile defaultBackends False Nothing False [])
@@ -636,12 +637,11 @@ pHeaders = go (TstFile defaultBackends False Nothing False [])
     go h =
       (try pBackendsHeader >>= \bs' -> go h { tstBackends = bs' ++ filter (`notElem` bs') (extraTokens h) }) <|>
       (try pSlowHeader >> go h { tstSlow = True }) <|>
-      (try (pFlagLine "batched") >> go (addToken Batched h)) <|>
       (try (pFlagLine "dense") >> go (addToken Dense h)) <|>
       (try (pFlagLine "no-normalization") >> go h { tstNoNormalization = True }) <|>
       (try pExpectFailureHeader >>= \ef' -> go h { tstExpectFailure = Just ef' }) <|>
       return h
-    extraTokens h = filter (`elem` [Batched, Dense]) (tstBackends h)
+    extraTokens h = filter (== Dense) (tstBackends h)
     addToken b h = if b `elem` tstBackends h then h else h { tstBackends = tstBackends h ++ [b] }
 
 -- | A standalone header line holding one word.

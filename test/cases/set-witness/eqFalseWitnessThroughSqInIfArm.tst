@@ -6,5 +6,4 @@
 -- binding-resolver-one-application-rule). p(False) is left out: it is the
 -- density through sq, which known-issues/sqInverseDropsNonpositivePreimages
 -- pins as halved.
-batched
 p(True)=(1.0, 0.0, False)

@@ -53,7 +53,6 @@ import BackendAgreement (AgreementCase, comparedBodies, maskedConstruct, batched
 import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies,
                         certifiedConstructs, allBodies, batchedCertifiedConstructs, batchedReachedNotCompared)
 import CorpusSweep
-import TestCaseParser (Backend(Batched))
 import IRFuzz (irGeneratorConstructs, irGeneratorBatchedConstructs)
 import TestFuzz (prepareAgreementCase, prepareAgreementNeighbour, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize)
 
@@ -82,8 +81,8 @@ fuzzCoverageExceptions =
 
 -- | The batched arms' counterpart of 'fuzzCoverageExceptions' (tasks
 -- @backend-agreement-batched-arm@, @batched-backend-reference-compliance@):
--- constructs of the probability and integrate bodies of the corpus programs
--- that declare @batched@, compiled for batched mode, that neither batched arm
+-- constructs of the probability and integrate bodies of the (non-slow) corpus
+-- programs, compiled for batched mode, that neither batched arm
 -- (the typed fuzzer's, the IR generator's) puts through the batched backend.
 -- Exact, like the scalar list. The programs using one are the ones that keep
 -- their @batched-vs-expected@ check ('CertifiedCensus.batchedCertifiedConstructs').
@@ -157,13 +156,14 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
         fuzz <- fuzzConstructs sample
         checkExceptions "scalar" "fuzzCoverageExceptions" "deterministic bodies" Nothing maskedConstruct corpus fuzz fuzzCoverageExceptions
     , testCase "batched corpus constructs the agreement fuzzers miss are exactly batchedFuzzCoverageExceptions" $ do
-        corpus <- corpusConstructsWith (defaultCompilerConfig { batched = True }) inferenceBodies
-                    [ e | e <- es, Batched `elem` ceBackends e ]
+        -- Batched admission is universal (docs-repo task
+        -- batched-admission-universal): every corpus program counts.
+        corpus <- corpusConstructsWith (defaultCompilerConfig { batched = True }) inferenceBodies es
         fuzz <- batchedSample
         ir <- irGeneratorBatchedConstructs
-        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of `batched`-declaring programs," Nothing maskedConstruct corpus (ir : fuzz) batchedFuzzCoverageExceptions
+        checkExceptions "batched" "batchedFuzzCoverageExceptions" "the batched-compiled inference bodies of the corpus programs," Nothing maskedConstruct corpus (ir : fuzz) batchedFuzzCoverageExceptions
     , testCase "batchedCertifiedConstructs is exactly what the two batched arms reach" $ do
-        -- Batched reference compliance (CertifiedCensus): a `batched`
+        -- Batched reference compliance (CertifiedCensus): a batched-eligible
         -- corpus program whose batched census lies in this list has no
         -- batched-vs-expected check.
         fuzz <- batchedSample

@@ -6,7 +6,6 @@
 -- Sibling of polymorphicParameterCompared (docs task
 -- polymorphic-parameter-compared-as-float).
 slow
-batched
 p(0.3, 0.30000000000000004)=(1.0, 0.0)
 p(0.3, 0.31)=(0.0, 0.0)
 p(True, True)=(1.0, 0.0)

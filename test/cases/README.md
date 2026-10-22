@@ -138,13 +138,18 @@ is the exception, for a program the interpreter cannot serve
 other.
 
 Header lines, each optional and on its own line before the rows: `slow` (the
-program belongs to the opt-in Slow tier), `batched` (the program is expected to
-be batched-mode eligible; its rows are checked on the batched backend too
-unless the batched fuzz arms certify every construct of its batched compile,
-see `docs/testing.md`, "Batched reference compliance"), `dense` (its query domain is finite, so batched mode emits dense entry
-points; list `batched` as well), and `no-normalization` (keep a neural program
-out of the Normalization sweep, which samples the output; say why in a leading
-comment).
+program belongs to the opt-in Slow tier), `dense` (its query domain is finite,
+so batched mode emits dense entry points), and `no-normalization` (keep a
+neural program out of the Normalization sweep, which samples the output; say
+why in a leading comment).
+
+Batched mode needs no declaration: admission is universal, so every program
+with `p()`/`cdf()` rows is asserted batched eligible (`BatchedPython`'s
+`batched-eligible`, the `slow` programs in `BatchedPython (slow)`), and its rows
+are checked on the batched backend too unless the batched fuzz arms certify
+every construct of its batched compile (`docs/testing.md`, "Batched reference
+compliance"). A program batched mode refuses is a bug: fix it, or list it in
+`End2EndTesting.batchedAdmissionExceptions` with the ticket that owns it.
 
 Further tests are employed for programs that declare neural networks. The Interpreter is capable of mimicking the functionality of neural networks. These Mock-Neural Networks have two modes: an NN outputting completely random results or a NN producing a probability spike at a given value.
 

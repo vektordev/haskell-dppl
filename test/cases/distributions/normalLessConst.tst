@@ -1,5 +1,4 @@
 slow
-batched
 dense
 p(True)=(0.8413447, 0.0)
 p(False)=(0.1586553, 0.0)

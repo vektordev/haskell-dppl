@@ -92,6 +92,33 @@ def safe_div(a, b):
   return torch.where(safe, astensor(a) / torch.where(safe, bt, torch.ones_like(bt)),
                      torch.full_like(bt, float('nan')))
 
+# --- integer division, remainder and max (task batched-int-mult-inverse-no-intdiv)
+# The scalar backends spell OpIntDiv / OpMod as Python's floor `//` and `%`, and
+# OpMax as `max`; these are the elementwise forms. multI's inverse divides only
+# under its applicability guard (the remainder is zero), and a torch.where
+# evaluates every arm, so a zero divisor reaches here on elements that guard
+# selects away. It is replaced by 1 there, and that value never survives.
+
+def _nonzero(b):
+  return torch.where(b != 0, b, torch.ones_like(b))
+
+def safe_intdiv(a, b):
+  if not torch.is_tensor(a) and not torch.is_tensor(b):
+    return a // b if b != 0 else a
+  return torch.div(torch.as_tensor(a), _nonzero(torch.as_tensor(b)), rounding_mode='floor')
+
+def safe_mod(a, b):
+  if not torch.is_tensor(a) and not torch.is_tensor(b):
+    return a % b if b != 0 else 0
+  return torch.remainder(torch.as_tensor(a), _nonzero(torch.as_tensor(b)))
+
+def elem_max(a, b):
+  if not torch.is_tensor(a) and not torch.is_tensor(b):
+    return max(a, b)
+  at, bt = torch.as_tensor(a), torch.as_tensor(b)
+  dt = torch.promote_types(at.dtype, bt.dtype)
+  return torch.maximum(at.to(dt), bt.to(dt))
+
 # --- poison: an IRError arm as a selected-away sentinel ----------------------
 # A refusal/error arm (IRError) has no batched value; it is emitted as a NaN
 # poison constant that the enclosing torch.where selects away on every element

@@ -1,4 +1,3 @@
-batched
 slow
 p(Zero)=(0.2, 0.0, False)
 p(One 0.5)=(0.4, 1.0, False)

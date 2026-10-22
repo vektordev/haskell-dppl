@@ -1,4 +1,3 @@
-batched
 p(True)=(0.6024034238205629, 0.0)
 p(False)=(0.3975965761794371, 0.0)
 -- The enumerable bound on the left of `>` against a Normal on the right:

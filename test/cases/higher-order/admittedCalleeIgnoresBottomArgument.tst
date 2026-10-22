@@ -7,7 +7,6 @@
 -- which the compiler now measures from that value (task
 -- dispatch-on-law-certificates), so no binding is compiled at all.
 slow
-batched
 p(1.0)=(1.0, 0.0)
 p(0.0) is impossible
 cdf(1.0)=(1.0, 0.0)

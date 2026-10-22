@@ -4,7 +4,6 @@
 -- (a residue factor, dim 0); it used to be dropped, answering 1.0 everywhere
 -- and 1.0 (not 0.5) on each ANY row.
 slow
-batched
 p((0.3, 1.0)) is impossible
 p((0.7, 0.0)) is impossible
 p((0.7, 1.0))=(1.0, 1.0)

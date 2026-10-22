@@ -6,7 +6,6 @@
 -- rewrite-invariance-net-draw-apply-helper-alias), which names a helper's
 -- parameters after the caller's variables.
 slow
-batched
 p(1)=(0.3, 0.0)
 p(0)=(0.7, 0.0)
 p(2) is impossible

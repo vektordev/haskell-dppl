@@ -1,5 +1,4 @@
 slow
-batched
 p(1.0)=(0.7558914042144173, 0.0, False)
 p(2.0)=(0.2441085957855827, 0.0, False)
 p(3.0) is impossible

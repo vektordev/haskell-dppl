@@ -1,5 +1,4 @@
 slow
-batched
 p(Right 1)=(0.18, 0.0)
 p(Right 2)=(0.28, 0.0)
 p(Left 11)=(0.42, 0.0)

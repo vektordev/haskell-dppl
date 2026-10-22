@@ -6,7 +6,6 @@
 -- (planEnumContPair). a ~ N(0,1), b ~ N(1,2):
 -- P(a < b) = Phi(1/sqrt(5)) = 0.672640.
 -- Task plan-pairwise-across-separate-neural-reads (was a known-issues pin).
-batched
 p(True, (2, [0.0, 1.0]), (2, [1.0, 2.0]))=(0.67264, 0.0)
 p(False, (2, [0.0, 1.0]), (2, [1.0, 2.0]))=(0.32736, 0.0)
 p(ANY, (2, [0.0, 1.0]), (2, [1.0, 2.0]))=(1.0, 0.0)

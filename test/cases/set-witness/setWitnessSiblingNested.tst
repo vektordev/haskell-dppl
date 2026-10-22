@@ -1,6 +1,5 @@
 -- A structured sibling: the whole residue is checked, not just a leaf.
 slow
-batched
 p((0.7, (1.0, 2.0)))=(1.0, 1.0)
 p((0.3, (0.0, 0.0)))=(1.0, 1.0)
 p((0.7, (1.0, 0.0))) is impossible

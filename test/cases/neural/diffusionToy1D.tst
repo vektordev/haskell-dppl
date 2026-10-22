@@ -8,7 +8,6 @@
 -- p = N(x0; 0, 1) N(x1; x0, 2) N(x2; x1, 1), a density of dimension 3.
 -- The marginal of the final state alone is refused (Rejection.TensorTypes,
 -- "the marginal of a scalar diffusion's final state is sample-only").
-batched
 p([0.0, 0.0, 0.0])=(0.03174682, 3.0)
 p([1.0, 0.0, -0.5])=(0.01499613, 3.0)
 p([-0.5, -2.0, -1.0])=(0.01282687, 3.0)

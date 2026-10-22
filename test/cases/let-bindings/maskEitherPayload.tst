@@ -1,5 +1,4 @@
 slow
-batched
 p(Left (0.5, 1.2))=(1.0, 2.0)
 p(Left (0.5, ANY))=(1.0, 1.0)
 p(Left ANY)=(1.0, 0.0)

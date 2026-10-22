@@ -201,7 +201,7 @@ uncertifiedConstructs census = census \\ certifiedConstructs
 -- calls a helper or holds a theta constant is refused there. Kept exact by
 -- @Slow.BackendAgreementCoverage@.
 --
--- A corpus program declaring @batched@ has its @batched-vs-expected@ value
+-- A batched-eligible corpus program has its @batched-vs-expected@ value
 -- check (its @.tst@ rows on the batched backend) exactly when
 -- 'batchedUncertifiedConstructs' of its 'batchedProgramCensus' is non-empty.
 -- Only that check: the arm compares @forward@ and @integrate@ at query
@@ -214,7 +214,10 @@ batchedCertifiedConstructs =
   -- batched-compared) reaches 54 constructs, the IR generator's (600 cases,
   -- 28 batched-compared) 49; together 58. "Const:VList ListCont" since
   -- 2026-10-21, when batched mode admitted non-empty list constants (task
-  -- batched-refuses-list-constants-with-data).
+  -- batched-refuses-list-constants-with-data). "Operand:OpIntDiv" and
+  -- "Operand:OpMod" since 2026-10-22, when the batched backend got their
+  -- elementwise forms and the arms' multI inverses stopped crashing it (task
+  -- batched-int-mult-inverse-no-intdiv).
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcTail",
     "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BReduce ROpAdd",
@@ -228,7 +231,8 @@ batchedCertifiedConstructs =
     "IRExpr:IRError", "IRExpr:IRIf", "IRExpr:IRIsPossible", "IRExpr:IRLambda",
     "IRExpr:IRLetIn", "IRExpr:IROp", "IRExpr:IRSelect", "IRExpr:IRUnaryOp", "IRExpr:IRVar",
     "Operand:OpAnd", "Operand:OpApprox", "Operand:OpDiv", "Operand:OpEq",
-    "Operand:OpGreaterThan", "Operand:OpLessThan", "Operand:OpMax", "Operand:OpMult",
+    "Operand:OpGreaterThan", "Operand:OpIntDiv", "Operand:OpLessThan", "Operand:OpMax",
+    "Operand:OpMod", "Operand:OpMult",
     "Operand:OpOr", "Operand:OpPlus", "Operand:OpSub",
     "UnaryOperand:OpAbs", "UnaryOperand:OpExp", "UnaryOperand:OpIsAny", "UnaryOperand:OpLog",
     "UnaryOperand:OpNeg", "UnaryOperand:OpNot", "UnaryOperand:OpSign"

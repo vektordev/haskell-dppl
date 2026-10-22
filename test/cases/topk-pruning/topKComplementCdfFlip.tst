@@ -4,7 +4,6 @@
 -- only contributing arm prunes away at threshold 0.1. Before the fix
 -- cdf(-0.5) answered 1.0 under topK; Corpus.TopKNeverInflatesCdf pins <= 0.95.
 slow
-batched
 p(-0.2)=(0.05, 0.0)
 p(-0.7)=(0.95, 0.0)
 cdf(-0.8)=(0.0, 0.0)

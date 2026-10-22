@@ -1,5 +1,4 @@
 slow
-batched
 dense
 p(Left 1)=(0.3, 0.0)
 p(Right 0)=(0.7, 0.0)

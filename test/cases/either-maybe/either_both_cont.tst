@@ -1,5 +1,4 @@
 slow
-batched
 p(Left 0.5)=(0.4, 1.0, False)
 p(Right 0.7)=(0.6, 1.0)
 p(Left 1.5) is impossible

@@ -1,4 +1,3 @@
-batched
 slow
 p(Dot 0.5)=(0.3, 1.0, False)
 p(Pair 0.5 0.25)=(0.7, 2.0, False)

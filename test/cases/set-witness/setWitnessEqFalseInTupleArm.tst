@@ -6,7 +6,6 @@
 -- (0.0, False). The transport is now declined there and the tuple split
 -- answers. A wildcard in the Bool slot used to be branched on as the
 -- polarity ("Condition is not a boolean: VAny").
-batched
 p((0.0, False))=(0.5, 0.0)
 p((1.0, True))=(0.5, 0.0)
 p((0.0, True))=(0.12098536, 1.0)

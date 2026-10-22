@@ -4,6 +4,5 @@
 -- alias to coin's lambda (ForwardChaining.resolveTopLevelLambda). Docs task
 -- point-free-alias-called-with-argument-crashes-forward-chaining.
 slow
-batched
 p(True, 0.3)=(0.3, 0.0)
 p(False, 0.3)=(0.7, 0.0)

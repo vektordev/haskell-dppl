@@ -1,5 +1,4 @@
 slow
-batched
 p(Right ANY)=(0.3413447460685429, 0.0, False)
 p(Left ANY)=(0.6586552539314571, 0.0, False)
 p(Left ())=(0.6586552539314571, 0.0, False)
