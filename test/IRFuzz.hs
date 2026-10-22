@@ -1391,6 +1391,37 @@ letInComprehensionIterableBatchedCases =
   , batchedRepro (IROp OpMult (lcLit 0.125) (lcTotal (lcNestedSameName (IRVar "a0")))) (VFloat 0.25)
   ]
 
+-- | A type-tag check of a number literal (task
+-- ir-conformsto-lowering-gaps-in-text-backends): a tuple or either check
+-- reads a component by attribute, which did not parse on a literal
+-- (Python @-3.t1@ and @3.t1@, Julia @-1.0.t1@). Negative and positive, Int
+-- and Float, plus a tuple of negative literals that does conform.
+conformsLiteralCases :: [IRCase]
+conformsLiteralCases =
+  [ chk (Tuple TInt TInt) (IRConst (VInt (-3)))
+  , chk (Tuple TFloat TFloat) (IRConst (VFloat (-1)))
+  , chk (Tuple TInt TFloat) (IRConst (VInt 3))
+  , chk (Tuple TFloat TInt) (IRConst (VFloat 2.5))
+  , chk (TEither TInt TFloat) (IRConst (VInt (-2)))
+  , chk (TEither TFloat TInt) (IRConst (VFloat (-0.5)))
+  , chk (Tuple TInt TFloat) (IRConstruct TgTuple [IRConst (VInt (-3)), IRConst (VFloat (-1))])
+  , chk (Tuple TFloat TFloat) (IROp OpSub (IRConst (VFloat 0)) (IRConst (VFloat 1)))
+  ]
+  where chk t x = repro [] ITBool (IRConformsTo t x) []
+
+-- | The batched twin (task batched-conformsto-of-a-literal-fails-to-parse):
+-- the batched float check calls a method on its operand
+-- (@0.is_floating_point()@), so a negative or positive Int or Float literal
+-- under it, as a probability body's guard.
+conformsLiteralBatchedCases :: [IRCase]
+conformsLiteralBatchedCases =
+  [ guarded (IRConst (VInt (-3)))
+  , guarded (IRConst (VInt 0))
+  , guarded (IRConst (VFloat (-1.5)))
+  , guarded (IRConst (VFloat 2))
+  ]
+  where guarded x = batchedRepro (IRIf (IRConformsTo TFloat x) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1)
+
 lcLit :: Double -> IRExpr
 lcLit = IRConst . VFloat
 
@@ -1588,14 +1619,6 @@ knownDisagreements =
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (AsIf (const (irMap conformsUnitUnchecked)))
       ((repro [] ITBool (IRConformsTo (TADT "Qt") (IRConst (VBool True))) []) { icADTs = [ADTDecl "Qt" [("Qa", [])] Nothing] })
-  , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["julia"]
-      (ByAnswer (\c _ a -> raisedWith "module did not load" a
-                           && not (null [ () | IRConformsTo _ x <- caseUniverse c, not (isVar x) ])))
-      -- Julia cannot parse a field access on a negative literal
-      -- (@-1.0.t1@). (Python's half of this, a let's walrus in the
-      -- comprehension a list check iterates, is fixed: see
-      -- 'letInComprehensionIterableCases'.)
-      (repro [] ITBool (IRConformsTo (Tuple TFloat TFloat) (IRConst (VFloat (-1)))) [])
   -- M3 (builtins, tensors and function groups).
   , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
       (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
@@ -1733,14 +1756,11 @@ knownDisagreements =
                   (Interpreted v, Sampled toks) -> either (const False) (const True) (valueAgreesWith probAgrees v toks)
                   _ -> False))
       (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat (-0.0))]]) (VFloat 1))
-  -- The batched type-tag check of a number literal renders a method call on
-  -- it (@0.is_floating_point()@), which Python cannot parse.
-  , KnownFamily "batched-conformsto-of-a-literal-fails-to-parse" ["batched"]
-      (ByAnswer (\c _ a -> raisedWith "module did not load" a && raisedWith "SyntaxError" a
-                         && not (null [ () | IRConformsTo _ (IRConst _) <- caseUniverse c ])))
-      (batchedRepro (IRIf (IRConformsTo TFloat (IRConst (VInt 0))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
   -- The batched categorical index reads its weights as a tensor, so a list
-  -- of batched weights is indexed by a tuple.
+  -- of batched weights is indexed by a tuple. (A list of constant weights
+  -- too.) While it stands, BCategoricalIndex is in
+  -- CertifiedCensus.batchedReachedNotCompared; a fix moves it to
+  -- batchedCertifiedConstructs.
   , KnownFamily "batched-categorical-index-over-batched-weights-fails" ["batched"]
       (ByAnswer (\c _ a -> (raisedWith "list indices must be integers or slices, not tuple" a
                             || raisedWith "not supported between instances of 'tuple' and 'int'" a)
@@ -1766,8 +1786,6 @@ knownDisagreements =
       MultiTuple _ _ -> True
       MultiEither l r -> tupleDomain l || tupleDomain r
       _ -> False
-    isVar (IRVar _) = True
-    isVar _ = False
     -- The draw counts agree (the first token after the tuple's).
     -- What Python floats out of an expression to statements before it: a
     -- let-spine or a conditional under a node that is not itself a statement
@@ -2697,6 +2715,29 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
         Nothing -> noTorch "IR fuzz generator batched let in a comprehension iterable" >>= maybe (return ()) assertFailure
         Just py -> do
           bcs <- mapM prepareBatchedIRCase letInComprehensionIterableBatchedCases
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  -- ir-conformsto-lowering-gaps-in-text-backends (its literal half, and
+  -- batched-conformsto-of-a-literal-fails-to-parse; both formerly
+  -- knownDisagreements families): a type-tag check spliced a number literal
+  -- before an attribute access, which neither Python nor Julia parses.
+  , testCase "a type-tag check of a number literal loads and agrees on scalar Python and Julia" $ do
+      julia <- findExecutable "julia"
+      cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c)))
+                    conformsLiteralCases
+      (_, pyD) <- runIRCasesPython cases
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  , testCase "batched: a type-tag check of a number literal loads and agrees" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched type-tag check of a literal" >>= maybe (return ()) assertFailure
+        Just py -> do
+          bcs <- mapM prepareBatchedIRCase conformsLiteralBatchedCases
           case sequence bcs of
             Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
             Right bs -> do
