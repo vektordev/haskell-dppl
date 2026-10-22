@@ -21,10 +21,10 @@ adtNeuralCountingAccum addTerm.prob=3
 adtNeuralCountingFlat countRed.prob=4
 affineChainEndpoint main.integ=7 main.prob=5
 affineChainPartial main__m10.prob=5
+aliasReadTwice main.prob=6 main__m10.prob=6 main__m11.prob=4
 aliasedDrawScaledChain main.prob=10 main__m100.prob=4
 aliasedDrawScaledSibling main.integ=8 main.prob=7
 aliasedDrawThroughScalingHelper main.integ=6 main.prob=6
-aliasReadTwice main.prob=6 main__m10.prob=6 main__m11.prob=4
 applyEnumComparison selF.prob=3
 applyEnumForwardOnly notB.prob=3
 applyEnumOperandPair sel.prob=3
@@ -35,6 +35,8 @@ call distr.integ=3 distr.prob=3
 clevrEqualLargeMetalSphere level2.prob=4 level3.prob=4
 clevrEqualLargeMetalSphereNatural main.integ=4 main.prob=4 total.prob=4
 clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
+collapseGivenParam main.prob=3
+collapseMixture main.integ=3 main.prob=4
 comparisonSiblingJacobian main.prob=6
 crossLatentSideOperandJacobian main.prob=12 main__m10.prob=7
 ctorTestOverTransformedDraw main.integ=24 main.prob=24
@@ -55,15 +57,15 @@ drawBoundSceneIntermediate main.integ=3 main.prob=3 main.writeLogits=10
 drawDestructuredAgreementArmLet main.integ=3 main.prob=3
 drawDestructuredAgreementHelperArm pair.integ=8 pair.prob=8
 drawDestructuredShared main.prob=14
+drawProductReadPerField main.integ=3 main.prob=3
 drawProductReadPerField20 main.integ=5 main.prob=5
 drawProductReadPerField4 main.integ=3 main.prob=3
-drawProductReadPerField main.integ=3 main.prob=3
 drawProductReadUnderBinding main.integ=8 main.prob=4
+eitherIfDeconstructObserve main.prob=3
+eitherIntegral main.integ=8 main.prob=8
 either_arith_inv main.integ=15 main.prob=22
 either_both_cont main.integ=4 main.prob=4
 either_branch_disc main.integ=4 main.prob=8
-eitherIfDeconstructObserve main.prob=3
-eitherIntegral main.integ=8 main.prob=8
 either_isleft main.integ=6 main.prob=8
 either_map_any main.integ=15 main.prob=26
 either_mixed_arms main.integ=4 main.prob=8
@@ -72,8 +74,8 @@ enumDeadLetFreshDrawTuple main.integ=3 main.prob=7
 enumLetGatesFreshDrawCondition main.prob=5
 enumLetGatesFreshDrawTwoObs main__m011.prob=7
 enumNeuralDeadBranchFreshDraw main.prob=4
-equalsCoin main.prob=3
 equals oneOfThree.integ=4 oneOfThree.prob=4
+equalsCoin main.prob=3
 fieldDiscardsComparedDraw main.integ=11 main.prob=8
 fstOfPairWrapperNestedStructuredDraw main.prob=20 main__m01.prob=4
 fstOfPairWrapperStructuredDraw main.prob=20 main__m01.prob=4
@@ -101,15 +103,15 @@ letBoundEitherDestructure main.prob=15
 letChainNormalVarTuple main.prob=6 main__m10.prob=4
 letInProbChainedMults main.integ=11 main.prob=8
 letThreadEnumerable contrib.prob=3
-letTwoUniformIndirect main.prob=20 main__m01.prob=6
 letTwoUniform main.integ=3 main.prob=4
+letTwoUniformIndirect main.prob=20 main__m01.prob=6
 letWitnessedChain main.prob=6 main__m011.prob=4 main__m111.prob=4
 letWitnessedEitherFpUlp main.prob=18 main__m001.prob=11 main__m010.prob=14 main__m100.prob=16
 letWitnessedSharedLatent main__m11.prob=4
 letWitnessedSharedLatentMult main__m11.prob=4
 letWitnessedTupleFpUlp main.prob=12 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
-mapEither main.integ=15 main.prob=18
 map main.prob=3
+mapEither main.integ=15 main.prob=18
 mapMultList main.prob=3
 maskComplementSlot main__m10.prob=4
 maskIndependentLatents main.integ=3 main.prob=4
@@ -137,8 +139,8 @@ observeKeywordTruncated main.prob=3
 observeMaybePayloadRightAny main.prob=3
 observeNegatedContinuousEqualsLetfree main.integ=4 main.prob=4
 observePredicateParameterLambda main.prob=3
-observeTwoSidedIntervalAnd main.prob=6
 observeTwoSidedInterval main.prob=6
+observeTwoSidedIntervalAnd main.prob=6
 ofRealLeafCountingCurriedThreshold match.integ=4 match.prob=4
 ofRealLeafCountingReadsPosition match.integ=4 match.prob=4
 ofRealLeafCountingSharedPredicate match.integ=4 match.prob=4
@@ -202,8 +204,8 @@ sharedFieldAcrossList main.integ=3 main.prob=3
 sharedLatentCallChain inner.prob=3
 sharedLatentNestedLet contrib.prob=3
 sharedLatentOneSideOnly contrib.prob=3
-sharedLatentPerSlotHoisted match.integ=3 match.prob=3
 sharedLatentPerSlot match.integ=3 match.prob=3
+sharedLatentPerSlotHoisted match.integ=3 match.prob=3
 sharedLatentPlusFresh contrib.prob=3
 sharedLatentThreeUses contrib.prob=3
 sharedLatentTupleSlot contrib.prob=3
