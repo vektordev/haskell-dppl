@@ -408,7 +408,8 @@ mechanism is for the common single-diagnostic shape only, and migrating the
 existing `TestRejection.hs` groups onto it is out of scope. Seeded with
 `correlatedGaussianLetSharesLatent` (task
 correlated-gaussian-let-shares-latent), the `diagnostic` shape, whose fuller
-multi-assertion sibling is `TestRejection.SetWitnessSharedLatent`.
+multi-assertion sibling is `TestRejection.SetWitnessSharedLatent`. That seed
+has since been fixed and moved to `let-bindings/` (affine-gaussian-forms M2).
 
 ### Duplication census: catching a fan-out at depth 2
 
