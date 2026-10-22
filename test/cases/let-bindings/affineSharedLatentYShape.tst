@@ -1,5 +1,4 @@
 slow
-batched
 p(0.5)=(0.17400739347725858, 1.0)
 cdf(0.5)=(0.5884683631209393, 0.0)
 -- x read by the binding of y and by the result: x + y = 2e1 + e2 is
