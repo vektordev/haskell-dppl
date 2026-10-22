@@ -36,6 +36,8 @@
 -- never goes through it.
 module SPLL.Typing.ModalityInfer
   ( addModalityPTypeInfo
+  , collapseMomentable
+  , collapsePoint
   , perNodeOuterGrounds
   , IMod(..)
   , Law(..)
@@ -83,7 +85,7 @@ import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.Modality
 import SPLL.Typing.ForwardChaining (FCData(..), isWitnessedLambda, WitnessCert(..), pointWitnessCert, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet, unwrapLambdas)
-import PredefinedFunctions (isFieldConstructor, propagateValuesLazily)
+import PredefinedFunctions (isFieldConstructor, propagateValuesLazily, isCollapse, collapseName)
 
 -- ---------------------------------------------------------------------------
 -- Internal closure-carrying modality
@@ -633,6 +635,31 @@ inferE ctx env expr = case expr of
   Expr ti (InjF (Named fname) [a, b])
     | fname `elem` ["gt", "lt"] -> compareNode ti fname a b
 
+  -- 'collapse' (task encode-07-collapse-operator) is the Gaussian with its
+  -- operand's mean and variance, whatever the operand's own law: a mixture, a
+  -- Gaussian (a no-op) or anything else whose moments the compiler can read
+  -- ('IRCompiler.momentsOf' refuses the rest). A fresh leaf, like 'Normal': not
+  -- an image of the operand's value, so neither witnessed by it nor sharing
+  -- its latents. A point-mass operand stays the point.
+  --
+  -- The moments are taken over the operand's own draws, given the values of
+  -- the variables it reads: under a function parameter (a point) that is a
+  -- Gaussian, but over a random @let@-bound variable it is a mixture of
+  -- Gaussians again, which is left sample-only. So is an operand whose moments
+  -- the compiler cannot read ('collapseMomentable').
+  Expr ti (InjF name@(Named fname) [a])
+    | isCollapse fname ->
+      let (la, a', aa) = inferE ctx env a
+          givenPoints = all (\v -> maybe True (isPointLaw . lawMod) (Map.lookup v env))
+                            (Set.toList (freeVarsExpr a) `excluding` topLevel)
+          isPointLaw m = gCap (outerI m) == Exact
+          topLevel v = isJust (lookup v (functions (icProg ctx)))
+          excluding vs p = filter (not . p) vs
+          l | isPointLaw (lawMod la) = la
+            | givenPoints && collapseMomentable topLevel a' = Law (IG gNormal) (JLeaf collapseName [la])
+            | otherwise = bareLaw (IG (groundMod SampleOnly Infinite FamNone))
+      in doneL l (Expr (setPType ti (projectI (lawMod l))) (InjF name [a'])) aa
+
   -- An affine operator ('affineInjF') over operands that have affine forms
   -- is Gaussian, and its law is the form: the family verdict is the form's
   -- existence (design law-carrying-modality M4), not a table over the
@@ -774,6 +801,32 @@ inferE ctx env expr = case expr of
                                (outerI (lawMod la)) (outerI (lawMod lb)))
           e' = Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])
       in doneL (pointOr (IG g) e') e' (aacc ++ bacc)
+
+-- | Can 'collapse' read the mean and variance of this pType-annotated operand,
+-- given the values of the local variables it reads? The static twin of
+-- 'IRCompiler.momentsOf'; keep the two in step. A part drawing nothing of its
+-- own is a point; a mixture needs a condition with a probability and
+-- momentable arms; a sum, product or negation needs momentable operands
+-- (independent: every draw in one is fresh); a Gaussian is read from its
+-- (mu, sigma). @isTop@ names the top-level declarations, which are calls
+-- (fresh draws), not given values.
+collapseMomentable :: (String -> Bool) -> Expr -> Bool
+collapseMomentable isTop e@(Expr ti nd)
+  | collapsePoint isTop e = True
+  | otherwise = case nd of
+      IfThenElse c a b -> pType (getTypeInfo c) `elem` [Deterministic, Integrate] && go a && go b
+      InjF (Named n) [a, b] | n `elem` ["plus", "mult"] -> go a && go b
+      InjF (Named "neg") [a] -> go a
+      _ -> pType ti == PNormal
+  where go = collapseMomentable isTop
+
+-- | A part of a 'collapse' operand that draws nothing itself, so is a point
+-- given the variables it reads: Deterministic as annotated, or with no
+-- primitive draw or neural read and no call to a top-level declaration.
+collapsePoint :: (String -> Bool) -> Expr -> Bool
+collapsePoint isTop e =
+  pType (getTypeInfo e) == Deterministic
+    || (not (hasRandomLeaf e) && not (any isTop (Set.toList (freeVarsExpr e))))
 
 -- | The affine form of a scalar value of law @l@ at node @cn@ (design
 -- affine-gaussian-forms §3): its certificate if it has one, a constant if it

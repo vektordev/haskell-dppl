@@ -140,6 +140,10 @@ discretesTags adtsParam funEnv visited env e = case e of
       -- them lets and/or (and any boolean InjF above them) take the
       -- discrete-enumeration path. Must come before the generic InjF case.
       (Expr _ (InjF (Named name) [_, _])) | name `elem` ["gt", "lt"] -> Just $ MultiDiscretes [VBool True, VBool False]
+      -- 'collapse' is a Gaussian, not an image of its operand's values: listing
+      -- its (identity) forward over a discrete operand would claim the operand's
+      -- support for a continuous law.
+      (Expr _ (InjF (Named name) _)) | isCollapse name -> Nothing
       -- Structural InjFs (tuple/Either/ADT accessors, constructor tests and
       -- constructors) act on the operand's value set itself rather than on
       -- its listed elements ('structuralTag'), so the cross product a
@@ -426,6 +430,7 @@ definitelyUntagged funEnv visited e = case e of
   Expr _ (Constant VAny) -> True
   Expr _ (Constant _) -> False
   Expr _ (InjF (Named name) [_, _]) | name `elem` ["gt", "lt"] -> False
+  Expr _ (InjF (Named name) _) | isCollapse name -> True
   Expr _ (InjF _ params) -> any (definitelyUntagged funEnv visited) params
   Expr _ (IfThenElse _ l r) -> definitelyUntagged funEnv visited l || definitelyUntagged funEnv visited r
   _ -> True

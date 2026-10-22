@@ -2845,7 +2845,7 @@ injFCatalogTests = testGroup "InjF catalog"
       -- generatable -- 'injFCatalog' derives that -- it is a tripwire on
       -- 'PredefinedFunctions' changing under the generator.
       assertEqual "generated InjF names"
-        [ "and", "double", "eq", "exp", "gt", "lt", "max", "mult", "multI"
+        [ "and", "collapse", "double", "eq", "exp", "gt", "lt", "max", "mult", "multI"
         , "neg", "negI", "not", "or", "plus", "plusI", "sq" ]
         (sort (nub (map injFName injFCatalog)))
 

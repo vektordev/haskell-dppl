@@ -913,14 +913,15 @@ validateWriteLogitsGaussian adtDecls registry neuralDecls env = mapM_ checkDecl 
       let plan     = makePartitionPlan adtDecls target (resolvePartitionAnnotation registry target tag)
           required = requiredNormalFns "main_normal" plan
           missing  = filter (`notElem` available) required
-      in if null missing then Right () else Left (writeLogitsGaussianError name)
-    writeLogitsGaussianError name =
+      in if null missing then Right () else Left (writeLogitsGaussianError name missing)
+    writeLogitsGaussianError name missing =
       "writeLogits: neural declaration '" ++ name ++ "' has a continuous output slot that cannot "
-      ++ "be written. Either it is not Gaussian (a mixture produced by `if`, a product of "
-      ++ "random variables), or it is a continuous payload inside an Either/ADT that is not "
-      ++ "one Gaussian given its constructor (a mixture, a payload gated by its own value, or "
-      ++ "one produced where the compiler cannot see it), so it is refused rather than "
-      ++ "silently zero-stubbed."
+      ++ "be written (no " ++ intercalate ", " missing ++ "). Either it is not Gaussian (a mixture "
+      ++ "produced by `if`, a product of random variables), or it is a continuous payload inside "
+      ++ "an Either/ADT that is not one Gaussian given its constructor (a mixture, a payload gated "
+      ++ "by its own value, or one produced where the compiler cannot see it), so it is refused "
+      ++ "rather than silently zero-stubbed. To fit such a value into the slot, wrap it in "
+      ++ "`collapse`, which moment-matches it to a Gaussian."
 
 -- | Normal-parameter function names that `writeLogits` references for the Continuous slots of a
 -- plan.  Mirrors the name threading in `makeWriteLogitsPlan` (top-level `main_normal`,

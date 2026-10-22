@@ -2378,6 +2378,9 @@ readNNSlotNormal meta k (Expr _ (ReadNN name arg)) = do
 readNNSlotNormal _ _ e = error ("readNNSlotNormal: not a network read: " ++ show e)
 
 toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
+-- 'collapse' is the Gaussian of its operand's moments. First: it is a fresh
+-- leaf whatever its operand reads, so it never takes the affine equation.
+toIRNormalParams meta (Expr _ (InjF (Named n) [a])) | isCollapse n = momentsOf meta a
 -- An expression reading an analytically marginalised binding is collapsed from
 -- its affine form. Tried first: the scalar equations below combine their
 -- operands as independent, which is exactly wrong for two operands sharing a
@@ -2435,6 +2438,73 @@ toIRNormalParams meta e@(Expr _ (ReadNN _ _)) = readNNSlotNormal meta 0 e
 toIRNormalParams meta e | Just act <- normalParamsViaCall meta PNormal e = act
 toIRNormalParams _ e = refuse (chainName (getTypeInfo e)) $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
 
+-- | The mean and standard deviation of a 'collapse' operand's law, over its
+-- own draws and given the values of the variables it reads (task
+-- encode-07-collapse-operator). The dynamic twin of
+-- 'ModalityInfer.collapseMomentable', which decides the collapse node's type;
+-- a shape that answers no here is refused. A mixture @if c then a else b@ is
+-- moment-matched:
+--
+-- > mu     = p mu_a + (1-p) mu_b
+-- > sigma² = p (sigma_a² + (mu_a - mu)²) + (1-p) (sigma_b² + (mu_b - mu)²)
+--
+-- and sums and products of independent parts combine their moments. Only the
+-- sum-product semiring has expectations to take.
+momentsOf :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
+momentsOf meta e@(Expr ti nd)
+  | semiringFamily meta /= SRSumProduct = refuse cn "collapse: moment matching needs the sum-product semiring"
+  | any (`elem` map fst (affineEnv meta)) (Set.toList (freeVarsExpr e)) =
+      refuse cn "collapse: the operand reads a marginalised random binding, so it has no moments given its variables"
+  | ModalityInfer.collapsePoint isTop e = do
+      v <- toIRGenerate meta e
+      return (v, IRConst (VFloat 0))
+  | IfThenElse c a b <- nd, ModalityInfer.collapseMomentable isTop e = do
+      let sr = semiringOf meta
+      -- The condition's False weight is its True weight's complement in the
+      -- semiring's sense, compiled unpruned, exactly as the IfThenElse
+      -- inference equation takes it; a True outcome that is a density (a null
+      -- event, dim > 0) has mass zero.
+      condTrue <- toIRInference (unpruned meta) False c (IRConst (VBool True))
+      condFalse <- mixWith (\_ p -> srComplement sr p) const0 (mass (srOne sr)) condTrue
+      let weight r = IRIf (IROp OpEq (rDim r) (IRConst (VInt 0))) (toLinearSR sr (unP (rProb r))) (IRConst (VFloat 0))
+      pT <- bind "collapse_pT" (weight condTrue)
+      pF <- bind "collapse_pF" (weight condFalse)
+      (muA, sA) <- momentsOf meta a >>= bindPair
+      (muB, sB) <- momentsOf meta b >>= bindPair
+      mu <- bind "collapse_mu" (IROp OpPlus (IROp OpMult pT muA) (IROp OpMult pF muB))
+      let armVar m s = IROp OpPlus (sq s) (sq (IROp OpSub m mu))
+      return (mu, irSqrt (IROp OpPlus (IROp OpMult pT (armVar muA sA)) (IROp OpMult pF (armVar muB sB))))
+  | InjF (Named "plus") [a, b] <- nd, ModalityInfer.collapseMomentable isTop e = do
+      (muA, sA) <- momentsOf meta a
+      (muB, sB) <- momentsOf meta b
+      sigma <- irHypot sA sB
+      return (IROp OpPlus muA muB, sigma)
+  | InjF (Named "mult") [a, b] <- nd, ModalityInfer.collapseMomentable isTop e = do
+      -- Independent factors: E[ab] = mu_a mu_b and
+      -- Var[ab] = (sigma_a² + mu_a²)(sigma_b² + mu_b²) - mu_a² mu_b².
+      (muA, sA) <- momentsOf meta a >>= bindPair
+      (muB, sB) <- momentsOf meta b >>= bindPair
+      let second m s = IROp OpPlus (sq s) (sq m)
+          var = IROp OpSub (IROp OpMult (second muA sA) (second muB sB)) (sq (IROp OpMult muA muB))
+      -- Rounding can take the difference a hair below zero, where the square
+      -- root would be NaN.
+      return (IROp OpMult muA muB, irSqrt (IROp OpMax var (IRConst (VFloat 0))))
+  | InjF (Named "neg") [a] <- nd, ModalityInfer.collapseMomentable isTop e = do
+      (mu, s) <- momentsOf meta a
+      return (IRUnaryOp OpNeg mu, s)
+  | pType ti == PNormal = toIRNormalParams meta e
+  | otherwise = refuse cn ("collapse: cannot read the mean and variance of " ++ show (pType ti) ++ " operand " ++ show e
+                           ++ " (a Gaussian, a point, an if-mixture of such with a condition that has a probability, or sums, products and negations of independent such parts)")
+  where
+    cn = chainName ti
+    isTop v = isJust (lookup v (functions (compilingProgram meta)))
+    sq x = IROp OpMult x x
+    bind tag x = do
+      v <- mkVariable tag
+      setVariables [(v, x)]
+      return (IRVar v)
+    bindPair (m, s) = (,) <$> bind "collapse_m" m <*> bind "collapse_s" s
+
 -- | True if the expression reads a variable bound in 'affineEnv'.
 mentionsAffineVar :: CompilerMetadata -> Expr -> Bool
 mentionsAffineVar meta e =
@@ -2455,6 +2525,9 @@ affineFormOf meta e@(Expr ti nd)
                 return (AffineForm c Map.empty)
         else do (mu, s) <- toIRNormalParams meta e
                 return (AffineForm mu (Map.singleton (chainName ti) s))
+  | InjF (Named n) [_] <- nd, isCollapse n = do
+      (mu, s) <- toIRNormalParams meta e
+      return (AffineForm mu (Map.singleton (chainName ti) s))
   | Var n <- nd, Just form <- lookup n (affineEnv meta) = return form
   | InjF (Named "plus") [a, b] <- nd = do
       fa <- affineFormOf meta a
@@ -2489,6 +2562,8 @@ isAffineOver meta names e@(Expr ti nd)
   | otherwise = case nd of
       Var n -> n `Set.member` names
       Apply _ _ -> affineCallOver names
+      -- A fresh Gaussian leaf whatever it reads ('affineFormOf').
+      InjF (Named n) [_] | isCollapse n -> pType ti == PNormal
       InjF (Named "plus") [a, b] -> isAffineOver meta names a && isAffineOver meta names b
       InjF (Named "mult") [a, b] -> (constant a && isAffineOver meta names b)
                                  || (constant b && isAffineOver meta names a)
@@ -4918,6 +4993,14 @@ toIRGenerate _ (Expr _ (Var "Normal")) = return $ IRSample IRNormal
 toIRGenerate meta e@(Expr _ (InjF (Named name) [_, _]))
   | name `elem` ["mult", "multI"], Just v <- lawPoint meta e =
   return (IRConst (valueToIR v))
+-- A random 'collapse' draws from the Gaussian of its operand's moments, not
+-- from the operand; a point operand is the point, which the generic equation
+-- below gives through the identity forward. The moments' bindings are scoped
+-- to the draw: generate code closes no block of its own.
+toIRGenerate meta (Expr ti (InjF (Named name) [a]))
+  | isCollapse name, pType ti /= Deterministic = do
+  moments <- scoped (momentsOf meta a)
+  return (closeExpr moments (\(mu, sigma) -> IROp OpPlus mu (IROp OpMult sigma (IRSample IRNormal))))
 toIRGenerate meta (Expr ti (InjF (Named name) params)) = do
   -- Assuming that the logic within packParamsIntoLetinsGen typeEnv is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.
