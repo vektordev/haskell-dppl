@@ -730,7 +730,7 @@ runCompile meta codeGen = generateLetInBlock meta <$> (runCompilerMonad $ do
   case unP (rProb res) of
     IRLambda _ _ -> return res
     _ -> tell [("l_r", packResult res)] >>
-                return (unpackResult (IRVar "l_r"))
+                return (unpackResult "l_r")
   --
   )
 
@@ -3261,8 +3261,14 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   -- if-then-else would otherwise stop compiling under it.
   condFalseMix <- mixWith (\_ p -> srComplement sr p) const0 (mass (srOne sr)) condTrue
   let condFalseExpr = unP (rProb condFalseMix)
+  -- Every later read of a condition weight reads its binding: the raw
+  -- 'condTrueExpr' is the condition's whole probability field, and the arm
+  -- guards and branch-count checks below read it three to four times (task
+  -- presult-unbound-block-copied-per-field).
+  let condTrueV  = IRVar var_condT_p
+      condFalseV = IRVar var_condF_p
   let condFalse = mkPResult (sealP condFalseExpr) (rDim condFalseMix) const0
-                          (IROp OpEq condFalseExpr (srZero sr))
+                          (IROp OpEq condFalseV (srZero sr))
   setVariables [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
 
   -- The arm is weighted by the condition's probability -- an independent factor,
@@ -3335,12 +3341,12 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
         -- expensive (or recursive) sub-inference. 'shareResult' places the
         -- binding inside the dead-arm guard below, so a call whose condition
         -- cannot hold is still never evaluated.
-        trueAtZ  <- shareResult sr "armTz" [liveArm condTrueExpr]  [trueBind]  (unpackResult (IRVar trueCallV))
-        falseAtZ <- shareResult sr "armFz" [liveArm condFalseExpr] [falseBind] (unpackResult (IRVar falseCallV))
+        trueAtZ  <- shareResult sr "armTz" [liveArm condTrueV]  [trueBind]  (unpackResult trueCallV)
+        falseAtZ <- shareResult sr "armFz" [liveArm condFalseV] [falseBind] (unpackResult falseCallV)
         let weighedTrue  = weighByCond var_condT_p condTrue  trueAtZ
             weighedFalse = weighByCond var_condF_p condFalse falseAtZ
-            branchesZ = IROp OpPlus (zeroCheckBC condTrueExpr  (rBranches weighedTrue))
-                                    (zeroCheckBC condFalseExpr (rBranches weighedFalse))
+            branchesZ = IROp OpPlus (zeroCheckBC condTrueV  (rBranches weighedTrue))
+                                    (zeroCheckBC condFalseV (rBranches weighedFalse))
         mixP sr branchesZ weighedTrue weighedFalse)) <&> generateLetInBlock meta
       return (detP (IRLambda zVar closureBody))
     _ -> do
@@ -3362,8 +3368,8 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
       -- The check is the arm block's guard (see 'shareResult'), so an arm whose
       -- condition cannot hold is never evaluated -- it may hold the recursive call
       -- the check exists to skip.
-      mul1Zeroed <- shareResult sr "armT" [liveArm condTrueExpr] binds1 mul1Raw
-      mul2Zeroed <- shareResult sr "armF" [liveArm condFalseExpr] binds2 mul2Raw
+      mul1Zeroed <- shareResult sr "armT" [liveArm condTrueV] binds1 mul1Raw
+      mul2Zeroed <- shareResult sr "armF" [liveArm condFalseV] binds2 mul2Raw
       let leftBranchesExpr  = rBranches mul1Zeroed
       let rightBranchesExpr = rBranches mul2Zeroed
       -- Dispatching is free: a node that delegates to sub-computations contributes
@@ -3375,8 +3381,8 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
       -- inflated the parent by its dispatch cost for no principled reason. Every
       -- other combinator here -- the enumerated sum, toIREnumerate, the topK dispatch --
       -- already sums surviving children and adds nothing for dispatching.)
-      let branches = IROp OpPlus (zeroCheckBC condTrueExpr  leftBranchesExpr)
-                                 (zeroCheckBC condFalseExpr rightBranchesExpr)
+      let branches = IROp OpPlus (zeroCheckBC condTrueV  leftBranchesExpr)
+                                 (zeroCheckBC condFalseV rightBranchesExpr)
       addRes <- mixP sr branches mul1Zeroed mul2Zeroed
       case thr of
         Just _ -> do
@@ -3405,7 +3411,7 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
                   (packResult mul1Zeroed)
                   (packResult addRes))
           setVariables [(prunedV, prunedExpr)]
-          return (unpackResult (IRVar prunedV))
+          return (unpackResult prunedV)
         -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
         Nothing -> return addRes
 -- Both sides Gaussian: left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)), so the
@@ -3553,7 +3559,7 @@ toIRInference meta _ (Expr _ (ReadNN name symbol)) sample = do
   setVariables [(nnRaw, IRApply (IRVar name) sym)]
   setVariables [(var, IRApply (IRApply (IRVar (name ++ "_auto_prob")) (IRVar nnRaw)) sample)]
   -- Not a leaf: the network's own _auto_prob function already packed a triple.
-  return (unpackResult (IRVar var))
+  return (unpackResult var)
 toIRInference meta cumulative (Expr t (Lambda name subExpr)) sample = do
   let newMeta = extendMetaForLambda meta t name
   irTuple <- lift (runWriterT (toIRInference newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
@@ -3676,7 +3682,7 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply _ _)) sample
         _ -> do
           retVal <- mkVariable "call"
           setVariables [(retVal, wholeCall)]
-          return (unpackResult (IRVar retVal))
+          return (unpackResult retVal)
 -- A dead binding of a function value: the body never reads it, so it is
 -- compiled alone, exactly as the scalar arm below does at its own
 -- 'deadBindingBodyCN' check. The arms next would generate the argument (the
@@ -3701,7 +3707,7 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply l v)) sample 
           _ -> do
             retVal <- mkVariable "call"
             setVariables [(retVal, applied)]
-            return (unpackResult (IRVar retVal))
+            return (unpackResult retVal)
   -- A call whose earlier argument is random, @obs b p@ with @b@ random: the
   -- callee applied to its leading arguments is a closure whose body reads a
   -- parameter bound to a random argument, which the arms compiling @l@ alone
@@ -3722,7 +3728,7 @@ toIRInference meta cumulative (Expr TypeInfo{rType=_, chainName=_} (Apply l v)) 
   vIR <- (unP . rProb) <$> toIRInference meta cumulative v sample
   applied <- mkVariable "call"
   setVariables [(applied, IRApply lIR vIR)]
-  return (unpackResult (IRVar applied))
+  return (unpackResult applied)
 toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt, chainName=_} (Apply l v)) sample | pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
@@ -4099,7 +4105,16 @@ toIRInference meta cumulative (Expr _ (InjF (Named name) [a, b])) sample
   let absorbed = if cumulative
         then mass (compareValueExpr sr TBool (IRConst (VBool absorbing)) sample)
         else indicatorP sr (equalityGuard TBool (IRConst (VBool absorbing)) sample)
-  let decides = if absorbing then d else IRUnaryOp OpNot d
+  -- The deterministic operand selects every field, so it is bound once rather
+  -- than copied into each ('zipResult'); a literal stays inline and folds.
+  dv <- case d of
+    IRConst _ -> return d
+    IRVar _   -> return d
+    _ -> do
+      v <- mkVariable "and_or_det"
+      setVariables [(v, d)]
+      return (IRVar v)
+  let decides = if absorbing then dv else IRUnaryOp OpNot dv
   return (zipResult (IRIf decides) absorbed r)
 --
 -- Not for a forward-only InjF (@and@/@or@): it has no inverse to solve for the
@@ -4367,7 +4382,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
       calleeName <- calleeInferenceName meta cumulative n
       let callExpr = inferenceCall meta cumulative (IRVar calleeName) sample
       setVariables [(var, callExpr)]
-      return (unpackResult (IRVar var))
+      return (unpackResult var)
     -- Var is a local variable
     -- A bound parameter used directly as a return value is a LEAF resolution:
     -- it compares a deterministically-known value against the sample and stops,
@@ -5812,14 +5827,19 @@ substIRVar n val = irMap (\e -> case e of { IRVar n' | n' == n -> val; _ -> e })
 -- evaluated under the world's guards, never before them.
 data WWorld = WWorld [IRExpr] WSet [WFactor]
 
--- | A world factor: a result, plus bindings its fields read. A residue factor
--- carries none (its block is folded into each field, 'unpackResult'). An
--- x-free factor's block is a whole sub-inference, often itself a set-witness
--- world sum, so it is bound ONCE and its fields project that variable:
--- folding it into each of the four fields copied it four times per nesting
--- level, which made a nested fresh draw's unoptimized IR grow 4^depth (23MB
--- for a two-level fuzz program) and its optimized compile 6x slower.
--- 'measureWorld' emits the bindings under the world's guards.
+-- | A world factor: a result, plus bindings its fields read. A residue
+-- factor's block and an x-free factor's are each a whole sub-inference (the
+-- latter often itself a set-witness world sum), so each is bound ONCE and its
+-- fields project that variable ('unpackResult'): folding it into each of the
+-- four fields copied it four times per nesting level, which made a nested
+-- fresh draw's unoptimized IR grow 4^depth (23MB for a two-level fuzz program)
+-- and its optimized compile 6x slower. 'measureWorld' and
+-- 'measurePlanWorlds' emit the bindings under the world's guards.
+--
+-- A factor carried by several worlds ('intersectW', 'intersectPlanW',
+-- 'planAddFactor') is still emitted once per world: binding it once above the
+-- worlds would evaluate it outside their guards, and is part of the
+-- world-grouping design in task budget-zero-exponential-in-nested-enum-ifs.
 --
 -- 'WMass' is the other kind of factor: a pre-measured dim-0 mass, already in
 -- the ambient semiring, multiplied into the world's constraint mass with no
@@ -6137,15 +6157,16 @@ measureWorld :: CompilerMetadata -> Expr -> WWorld -> CompilerMonad PResult
 measureWorld meta v (WWorld guards set factors) = do
   let sr = semiringOf meta
   (res, binds) <- lift (runWriterT (measureSet meta v set))
-  let wrap = generateLetInExpr binds
   -- The set's measure and the residue factors are independent: the product
   -- rule, exactly as the point-witness path's body-factor fold applies it.
   let factorBinds = concat [bs | WFactor bs _ <- factors]
   let factorResults = [r | WFactor _ r <- factors]
-  let combined = foldl (prodP sr) (mapResult wrap res) factorResults
   -- A world whose guards fail is not part of the observation at all.
   if null factorBinds
-    then return (guardP sr guards combined)
+    -- The set measure's own bindings, under the guards: inline in the one
+    -- field that reads them, else bound once ('guardedResult'). Re-wrapped
+    -- around every field, they were copied up to four times per world.
+    then guardedResult sr "world" guards binds (foldl (prodP sr) res factorResults)
     -- Factor bindings are read by several fields, so the world's result is
     -- packed and bound once, under the guards ('shareResult'), rather than
     -- copying the bindings into each field. The set measure's own bindings
@@ -6228,7 +6249,7 @@ measureSet meta v (WExcept s p) = do
   sRes <- scopedMeasureSet metaSub v s
   let rt = rType (getTypeInfo v)
   (ptRes0, ptBinds) <- lift (runWriterT (measureSet metaSub v (WPoint p const1)))
-  let ptRes = guardP (semiringOf meta) [memberGuard rt p s] (mapResult (generateLetInExpr ptBinds) ptRes0)
+  ptRes <- guardedResult (semiringOf meta) "except_pt" [memberGuard rt p s] ptBinds ptRes0
   mixSubP (semiringOf meta) (rBranches sRes) sRes ptRes
 -- Each side is measured in its own writer scope and keeps its own bindings, so
 -- the untaken side's work sits under the selecting 'IRIf' rather than being
@@ -6255,19 +6276,23 @@ measureSet meta v (WChoice c a b) = do
   (ra, ba) <- lift (runWriterT (measureSet meta v a))
   (rb, bb) <- lift (runWriterT (measureSet meta v b))
   let readers binds r = length (filter (mentionsAny (map fst binds)) (resultFields r))
+  -- At most one reading field per side: each side's block goes inline into
+  -- the one field that reads it, which copies nothing.
   if readers ba ra <= 1 && readers bb rb <= 1
     then return (zipResult (IRIf c) (mapResult (wrapBlockIfRead ba) ra) (mapResult (wrapBlockIfRead bb) rb))
     else do
       w <- mkVariable "choice"
       setVariables [(w, IRIf c (generateLetInExpr ba (packResult ra)) (generateLetInExpr bb (packResult rb)))]
-      return (unpackResult (IRVar w))
+      return (unpackResult w)
   where resultFields r = [unP (rProb r), rDim r, rBranches r, rImposs r]
 
--- | 'measureSet' in its own writer scope, its bindings folded into the result.
+-- | 'measureSet' in its own writer scope, its bindings re-attached to the
+-- result: inline in the one field that reads them, else bound once
+-- ('guardedResult' with no guards) rather than copied into every field.
 scopedMeasureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 scopedMeasureSet meta v s = do
   (r, binds) <- lift (runWriterT (measureSet meta v s))
-  return (mapResult (generateLetInExpr binds) r)
+  guardedResult (semiringOf meta) "scoped_set" [] binds r
 
 cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExpr)
 cdfAtBound meta _ WNegInf = return (srZero (semiringOf meta), const1)
@@ -6782,7 +6807,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
             | any (\n -> isFieldCtorNode meta n || isNamedCallNode n || letHidesField meta n) (init spine)
             , Expr occTI (Var boundName) <- last spine -> do
                 f <- residueFactor meta exprBody boundName (rType occTI) (wildValue (rType occTI) value) s
-                return [WFactor [] f]
+                return [f]
           _ -> return []
         -- A path through an '==' (or constructor test) observed False
         -- recovers "any value but this one" as a 'VAnyExcept' sentinel.
@@ -6891,17 +6916,21 @@ isNamedCallNode _ = False
 -- 'IRLetIn' around the compiled block, so the block is self-contained: its
 -- floated bindings stay under that binding (they may read it, and evaluation
 -- is strict), and the result can be multiplied into a world's measure
--- anywhere under the world's guards. The four result projections of the one
--- block are what 'unpackResult' hands out; CSE recovers the sharing, the
--- same trade the fold makes.
-residueFactor :: CompilerMetadata -> Expr -> String -> RType -> IRExpr -> IRExpr -> CompilerMonad PResult
+-- anywhere under the world's guards. The block is the factor's one binding
+-- and its fields project that variable, like 'worldFactorFree''s factor:
+-- 'measureWorld' emits it once, under the world's guards. Unpacked inline, each
+-- of the four fields carried its own copy of the block, which compounds through
+-- a residue whose subtree holds another field constructor of a witnessed let
+-- (task presult-unbound-block-copied-per-field).
+residueFactor :: CompilerMetadata -> Expr -> String -> RType -> IRExpr -> IRExpr -> CompilerMonad WFactor
 residueFactor meta subtree boundName boundRT value target = do
   let recovered = boundName : recoveredVars meta
   let retyped = reinferRecovered meta recovered subtree
   let fMeta = meta { typeEnv = (boundName, (boundRT, False)) : typeEnv meta
                    , recoveredVars = recovered }
   block <- lift (runWriterT (toIRInference fMeta False retyped target)) <&> generateLetInBlock fMeta
-  return (unpackResult (IRLetIn boundName value block))
+  fv <- mkVariable "residue_factor"
+  return (WFactor [(fv, IRLetIn boundName value block)] (unpackResult fv))
 
 -- | An x-free subtree that draws fresh randomness, measured as a factor of an
 -- otherwise unconstrained world (task world-residual-factor-delegation). It
@@ -6936,7 +6965,7 @@ worldFactorFree meta sub target
   | otherwise = do
       block <- lift (runWriterT (measureSet meta sub (wildcardTolerant target))) <&> generateLetInBlock meta
       fv <- mkVariable "xfree_factor"
-      return (Just [WWorld [] WFull [WFactor [(fv, block)] (unpackResult (IRVar fv))]])
+      return (Just [WWorld [] WFull [WFactor [(fv, block)] (unpackResult fv)]])
   where
     hasInterval (WInterval _ _) = True
     hasInterval (WChoice _ a b) = hasInterval a || hasInterval b
@@ -7191,10 +7220,15 @@ pw1 cs = PlanWorld [] cs [] [] [] False
 planWorldTrivial :: PlanWorld -> Bool
 planWorldTrivial (PlanWorld g c p rs b _) = null g && null c && null p && null rs && null b
 
--- | A world's independent sub-inference factors (the plan engine's are
--- always self-contained blocks, so they carry no bindings).
+-- | A world's independent sub-inference factors, without their bindings
+-- ('pwSubFactorBinds').
 pwSubFactors :: PlanWorld -> [PResult]
 pwSubFactors w = [ r | WFactor _ r <- pwFactors w ]
+
+-- | The bindings a world's sub-inference factors read: each factor's block,
+-- bound once ('planFactorFree', 'planFactorBool').
+pwSubFactorBinds :: PlanWorld -> [(Varname, IRExpr)]
+pwSubFactorBinds w = concat [ bs | WFactor bs _ <- pwFactors w ]
 
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
@@ -7905,14 +7939,16 @@ planFactorFree meta env sub target
             PTUpTo  s -> (True,  s)
       block <- lift (lift (runWriterT (toIRInference meta cumulative sub sample)))
                  <&> generateLetInBlock meta
-      return (Right [(pw1 []) { pwFactors = [WFactor [] (unpackResult block)] }])
+      fv <- lift (mkVariable "plan_factor")
+      return (Right [(pw1 []) { pwFactors = [WFactor [(fv, block)] (unpackResult fv)] }])
 
 -- | The two polarity factors of a plan-free condition that draws fresh
 -- randomness: @(P(c = True), P(c = False))@, each a self-contained compiled
--- block. Same independence argument as 'planFactorFree' -- @c@ mentions no
+-- block bound as the factor's one binding (as 'planFactorFree' binds its).
+-- Same independence argument as 'planFactorFree' -- @c@ mentions no
 -- plan-bound variable and shares no draw with the branches, so the if is a
 -- mixture whose weights factor out of the plan measure.
-planFactorBool :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String (PResult, PResult))
+planFactorBool :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String (WFactor, WFactor))
 planFactorBool meta env c
   | subtreeHasOcc (planEnvDetOccs env) c =
       return (Left ("an if condition independent of the plan-bound variables draws fresh randomness and also reads a specialized parameter: "
@@ -7927,11 +7963,12 @@ planFactorBool meta env c
     polarity v = do
       block <- lift (lift (runWriterT (toIRInference meta False c v)))
                  <&> generateLetInBlock meta
-      return (unpackResult block)
+      fv <- lift (mkVariable "plan_cond_factor")
+      return (WFactor [(fv, block)] (unpackResult fv))
 
 -- | Attach an independent factor to a world.
-planAddFactor :: PResult -> PlanWorld -> PlanWorld
-planAddFactor r w = w { pwFactors = WFactor [] r : pwFactors w }
+planAddFactor :: WFactor -> PlanWorld -> PlanWorld
+planAddFactor f w = w { pwFactors = f : pwFactors w }
 
 -- | Invert the observation @body ∈ target@ into plan-leaf constraint worlds.
 -- The plan-backed analogue of 'invertToWorlds'. Left carries a diagnostic
@@ -9070,8 +9107,11 @@ planFieldProduct wss = do
               lift (setVariables [(mv, sumAllSR sr (map (planWorldMass sr raws) rs))])
               return [PlanWorld [] common [] [WMass (IRVar mv)] baked clash]
             else do
-              r <- lift (measurePlanWorlds sr raws rs)
-              return [PlanWorld [] common [] [WFactor [] r] baked clash]
+              -- Measured in its own writer scope, its bindings carried by the
+              -- factor, so whichever world it joins binds them under that
+              -- world's guards ('measurePlanWorlds').
+              (r, binds) <- lift (lift (runWriterT (measurePlanWorlds sr raws rs)))
+              return [PlanWorld [] common [] [WFactor binds r] baked clash]
     mergeable w = null (pwPairs w) && null (pwSubFactors w) && not (any isPt (pwCons w))
     isPt PLeafPt{} = True
     isPt _         = False
@@ -9471,10 +9511,12 @@ measurePlanWorlds sr raws worlds
               -- guards are already baked into 'worldMass', but a factor is a
               -- whole compiled block that must not be evaluated when they
               -- fail, so the product is re-guarded (a no-op on the numbers,
-              -- which 'worldMass' has already zeroed).
-              return $ if null (pwSubFactors w)
-                then base
-                else guardP sr (pwGuards w)
+              -- which 'worldMass' has already zeroed), and the factors'
+              -- blocks are bound once, under those guards, rather than
+              -- copied into each field ('guardedResult').
+              if null (pwSubFactors w)
+                then return base
+                else guardedResult sr "plan_world" (pwGuards w) (pwSubFactorBinds w)
                        (foldl (prodP sr) base (pwSubFactors w))
       case ws of
         []     -> return (impossibleP sr)
@@ -10033,11 +10075,11 @@ applyBinding meta cumulative rt binding sample = do
                     let impossible = packResult (impossibleP sr)
                     let guardedCall = IRIf guard (IRIf bodyReadable call impossible) impossible
                     return (detP (guarded
-                      (wrapInLambdas (IRLetIn callVar guardedCall (packResult (withBody (unpackResult (IRVar callVar))))))
+                      (wrapInLambdas (IRLetIn callVar guardedCall (packResult (withBody (unpackResult callVar)))))
                       (wrapInLambdas (packResult (detP (srZero sr))))))
                   _ -> do
                     bodyRes <- shareResult sr "body_factor" [guard, bodyReadable]
-                                 [(callVar, call)] (unpackResult (IRVar callVar))
+                                 [(callVar, call)] (unpackResult callVar)
                     return (withBody bodyRes)
           TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
                                        (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr)))))))
@@ -10131,10 +10173,8 @@ applyBinding meta cumulative rt binding sample = do
             -- emitted code.
             let bodyReadable = if bindingIsSink then notIR readsAnyW else notIR anyW
             let bodyBlock = (toInvCN, appliedSample) : bodyBinds
-            bodyRes <- if holdsProbabilisticLet bodyExpr
-              then shareResult sr "body_factor" [guard, bodyReadable] bodyBlock bodyRes0
-              else return (unpackResult (IRLetIn toInvCN appliedSample
-                                           (generateLetInBlock bodyMeta (bodyRes0, bodyBinds))))
+            bodyRes <- shareUnlessLeaf sr "body_factor" (holdsProbabilisticLet bodyExpr)
+                         [guard, bodyReadable] bodyBlock bodyRes0
             -- Independent factors: probabilities multiply, dims add, branch counts add.
             let combined = prodP sr scaled bodyRes
             -- A sink's body factor absorbs a wildcard-VALUED witness, which is
@@ -10171,10 +10211,9 @@ applyBinding meta cumulative rt binding sample = do
               -- through such nesting, and a leaf block's constant dim and flag
               -- fold away inline but not through the shared tuple.
               case r of
-                Just (openRes, binds)
-                  | holdsProbabilisticLet openBody ->
-                      shareResult sr "open_body" [guard, if bindingIsSink then readsAnyW else anyW] binds openRes
-                  | otherwise -> return (unpackResult (generateLetInBlock openMeta (openRes, binds)))
+                Just (openRes, binds) ->
+                  shareUnlessLeaf sr "open_body" (holdsProbabilisticLet openBody)
+                    [guard, if bindingIsSink then readsAnyW else anyW] binds openRes
                 Nothing -> return (constResult anyRefusal)
             let whenAny whenAnySink whenUneval
                   | bindingIsSink = IRIf readsAnyW whenUneval whenAnySink
