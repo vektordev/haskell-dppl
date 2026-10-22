@@ -159,6 +159,23 @@ prop_TopKCrossFunction = once $ ioProperty $ do
              .&&. counterexample ("exact P(1.0) should be 0.0144") (VFloat exactP `reasonablyClose` VFloat 0.0144)
     _ -> return $ counterexample "Return type was no tuple" False
 
+-- A generate function that calls a probability function (a collapse mixture's
+-- condition is a call) passes it the cutoff a topK probability function takes,
+-- though the generate function has no such parameter. Sampling the corpus
+-- program collapseConditionThroughCall under topK used to fail on the unbound
+-- top_k_cutoff; its mean is 3 (sd sqrt 4.75, so the mean of 2000 has sd ~0.05).
+prop_TopKGenerateCallsProbability :: Property
+prop_TopKGenerateCallsProbability = once $ ioProperty $ do
+  prog <- corpusPplPath "collapseConditionThroughCall" >>= parseProgram
+  let env = expectCompiled (compile (topKConf 0.1) prog)
+  xs <- evalRandIO (sequence (replicate 2000 (runGenC prog env [])))
+  let fs = [ x | VFloat x <- xs ]
+      mean = sum fs / fromIntegral (length fs)
+  return $ counterexample ("non-float samples: " ++ show (take 3 [ x | x <- xs, not (isFloat x) ])) (length fs == length xs)
+      .&&. counterexample ("sample mean " ++ show mean ++ ", expected 3") (abs (mean - 3) < 0.3)
+  where isFloat (VFloat _) = True
+        isFloat _ = False
+
 -- BC counts both if-else leaf branches and InjF enumerable branches.
 -- testDiceAdd = plusI(dice6, dice6): for P(sum=7), all 6 die combinations are valid,
 -- so without topK BC=6.  With threshold=0.2 (>1/6), accProb*(1/6)<0.2 → all 6 pruned → BC=0.

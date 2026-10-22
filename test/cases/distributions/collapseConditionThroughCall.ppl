@@ -1,0 +1,8 @@
+-- collapse whose mixture condition is a call to another definition (the
+-- helper-extract rewrite of collapseMixture, same law: mu = 3,
+-- sigma^2 = 4.75). The generate function reads the call's probability, so it
+-- must see the callee's result in the layout the probability functions do
+-- (branch-count field stripped), and under topK pass a cutoff it has no
+-- parameter for.
+main = collapse (if cond then Normal * 2.0 else Normal + 4.0)
+cond = Uniform < 0.25
