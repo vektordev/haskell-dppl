@@ -64,7 +64,7 @@ import SPLL.Validator (validateProgram)
 import SPLL.ReservedNames (queryParamName, distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
-import End2EndTesting (findTorchPython, noTorch, batchedTopKExceptions)
+import End2EndTesting (findTorchPython, noTorch, batchedRunExceptions)
 import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, interpreterBodyAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
                          runPythonBatchWith, runJuliaBatchWith, Disagreement(..), interpreterGenerateFails,
                          prepareBatchedCase, runBatchedPythonBatch)
@@ -2335,7 +2335,8 @@ test_wideProductSceneBatchedCompilesFast = testCase "wideProductSceneBatchedComp
         (not (any (\l -> "DOMAIN = [" `isInfixOf` l && "Scene(" `isInfixOf` l) (concatMap lines ls)))
 
 -- | The corpus copy of the ten-slot scene, wideProductSceneCount, stays out of
--- Slow.BatchedPython's topK differentials ('End2EndTesting.topKEntries'): its
+-- Slow.BatchedPython's topK differentials ('End2EndTesting.topKEntries') and
+-- its batched-vs-expected: its
 -- running batched kernel nests one split loop per slot and is past 20 minutes
 -- at ten slots (task batched-count-chain-enumeration-factorial; the shape is
 -- task scene-count-query-binomial-in-count's). The scalar topK query used to be
@@ -2344,14 +2345,14 @@ test_wideProductSceneBatchedCompilesFast = testCase "wideProductSceneBatchedComp
 -- ('test_wideProductSceneTopKQueryPolynomial' pins the fix), so the batched
 -- kernel is the only blocker. Batched admission is universal (task
 -- batched-admission-universal), so the exclusion is a row of
--- 'End2EndTesting.batchedTopKExceptions'. Drop the row and this test when the
+-- 'End2EndTesting.batchedRunExceptions'. Drop the row and this test when the
 -- kernel is affordable.
 test_wideProductSceneCountNotBatched :: TestTree
 test_wideProductSceneCountNotBatched = testCase "wideProductSceneCountNotBatched" $
-  assertBool ("wideProductSceneCount left End2EndTesting.batchedTopKExceptions: its batched kernel \
+  assertBool ("wideProductSceneCount left End2EndTesting.batchedRunExceptions: its batched kernel \
               \nests one split loop per slot and does not finish at ten slots (docs-repo task \
               \nscene-count-query-binomial-in-count)")
-             ("wideProductSceneCount" `elem` map fst batchedTopKExceptions)
+             ("wideProductSceneCount" `elem` map fst batchedRunExceptions)
 
 -- | A topK compile of the n-slot scene count answers p(0) with polynomial
 -- growth in n, and the ten-slot program answers it exactly at a cutoff that

@@ -192,9 +192,9 @@ the non-slow ones by `BatchedPython.batched-eligible` and the `slow` ones by
 is a bug. The exceptions are the exact list
 `End2EndTesting.batchedAdmissionExceptions`, one ticket per row, empty when
 the list was introduced; a row whose program becomes eligible fails as stale.
-`End2EndTesting.batchedTopKExceptions` keeps an eligible program whose batched
-kernel is too slow to run out of the topK differentials, also with a ticket per
-row. `batched` survives only as a backend a known-issues pin's `backends:` line
+`End2EndTesting.batchedRunExceptions` keeps an eligible program whose batched
+kernel is too slow to run out of the Slow group's topK differentials and
+batched-vs-expected, also with a ticket per row. `batched` survives only as a backend a known-issues pin's `backends:` line
 names; `loadCorpus` refuses it on an ordinary program, and a standalone
 `batched` line no longer parses.
 Comments are only allowed as a leading/trailing block, not interleaved

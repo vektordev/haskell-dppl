@@ -1348,12 +1348,14 @@ batchedAdmissionExceptions :: [(String, String)]
 batchedAdmissionExceptions =
   []
 
--- | Batched-eligible corpus programs the topK differentials ('topKEntries')
--- leave out because running their batched kernel is unaffordable, each with
+-- | Batched-eligible corpus programs whose batched kernel is unaffordable to
+-- run: the Slow group's topK differentials ('topKEntries') and its
+-- batched-vs-expected leave them out (the default group skips them as `slow`
+-- already; a non-slow row would be run there regardless). Each comes with
 -- the docs-repo ticket that owns the cost. Exact: a row must name a program
 -- the Slow group finds eligible.
-batchedTopKExceptions :: [(String, String)]
-batchedTopKExceptions =
+batchedRunExceptions :: [(String, String)]
+batchedRunExceptions =
   -- The ten-slot product scene's batched kernel nests one split loop per slot
   -- and is past 20 minutes (the scalar query's ~C(n,k) shape, which the
   -- batched kernel shares).
@@ -1384,14 +1386,14 @@ admissionProp names verdicts = counterexample (unlines (refusedMsg ++ staleMsg +
       "batchedAdmissionExceptions rows naming no corpus program (remove them):"
       : [ "  " ++ n | n <- unknown ]
 
--- | 'batchedTopKExceptions' names only programs the Slow group finds batched
+-- | 'batchedRunExceptions' names only programs the Slow group finds batched
 -- eligible: a refused or renamed one is a stale row.
-topKExceptionsProp :: [(String, String, [BatchGroup], [NetMock])] -> Property
-topKExceptionsProp eligible = counterexample
-  ("batchedTopKExceptions rows naming no batched-eligible corpus program (remove them):\n"
+runExceptionsProp :: [(String, String, [BatchGroup], [NetMock])] -> Property
+runExceptionsProp eligible = counterexample
+  ("batchedRunExceptions rows naming no batched-eligible corpus program (remove them):\n"
    ++ unlines [ "  " ++ n | n <- stale ])
   (null stale)
-  where stale = [ n | (n, _) <- batchedTopKExceptions, n `notElem` [ m | (m, _, _, _) <- eligible ] ]
+  where stale = [ n | (n, _) <- batchedRunExceptions, n `notElem` [ m | (m, _, _, _) <- eligible ] ]
 
 -- | Everything both 'batchedPythonTests' and 'slowBatchedPythonTests' need:
 -- working out batched/dense eligibility of the sweep's programs, and finding
@@ -1439,7 +1441,7 @@ batchedPythonFixtures corpusEntries' = do
       -- The topK differential (M5) recompiles the eligible programs at a
       -- cutoff; a refused one is already named by the admission assertion.
       topkEligible = topKEntries [ e | e@(n, _, _) <- entries, n `elem` eligibleNames
-                                     , n `notElem` map fst batchedTopKExceptions ]
+                                     , n `notElem` map fst batchedRunExceptions ]
       -- M3: a program declaring `dense` must actually get dense entry points.
       -- Read off the emitted source, which is where the capability is visible;
       -- a `dense` declaration on a program that is not even batched-eligible is
@@ -1548,11 +1550,12 @@ slowBatchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
       -- skips (docs-repo task batched-vs-expected-skips-slow-batched-programs):
       -- the eligible ones whose batched census the fuzz arms do not certify.
       slowUncertified = [ n | (n, c) <- censuses, not (null c), n `elem` slowNames ]
-      slowValueRouted = [ e | e@(n, _, _, _) <- eligible, n `elem` slowUncertified ]
+      slowValueRouted = [ e | e@(n, _, _, _) <- eligible, n `elem` slowUncertified
+                            , n `notElem` map fst batchedRunExceptions ]
   return $ testGroup "BatchedPython (slow)" $
     testProperty "batched-eligible" (once (admissionProp (map ceName (corpusEntries corpus))
                                              [ v | v@(n, _) <- verdicts, n `elem` slowNames ]))
-    : testProperty "topk-exceptions-are-eligible" (once (topKExceptionsProp eligible))
+    : testProperty "run-exceptions-are-eligible" (once (runExceptionsProp eligible))
     : testProperty "declared-dense-eligible" (once (declaredDenseProp (length denseNames) denseRefused))
     : case mtorch of
         Nothing ->
