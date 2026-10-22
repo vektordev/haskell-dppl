@@ -573,7 +573,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
             else Nothing
         genE =
             if not noGen then
-              Just (toGenDecl name . openValue <$> runCompilerMonad (toIRGenerate (meta progTypeEnv) binding))
+              Just (toGenDecl name . cutoffBinding . openValue <$> runCompilerMonad (toIRGenerate (meta progTypeEnv) binding))
             else
               Nothing
         normalE =
@@ -585,7 +585,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
             -- Normal shortcut as a one-argument one
             -- (task normal-shortcut-crashes-through-function-call).
             if (ptUnderLambdas == PNormal || ptUnderLambdas == PLogNormal) && isNormalExtractable binding then
-              Just (toNormalDecl name <$> compileNormalExpr (meta progTypeEnv) binding)
+              Just (toNormalDecl name . cutoffBinding <$> compileNormalExpr (meta progTypeEnv) binding)
             else
               Nothing
         baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom, maskVariantOf=Nothing,
@@ -681,6 +681,19 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- runtime-parametric-topk-threshold); the TOP_K_CUTOFF const above is only
     -- the default a caller passes.
     cutoffLambda = if isJust (topKThreshold conf) then IRLambda topKCutoffParamName else id
+    -- A generate or normal body has no cutoff parameter, yet it can call a
+    -- probability function: a 'collapse' operand's mixture weighs its arms by
+    -- its condition's probability, and the condition may be a call. That call
+    -- is compiled 'unpruned' (accumulated probability infinite), so no arm is
+    -- cut whatever the cutoff; the body binds the parameter's name to the
+    -- default so the call's argument is in scope.
+    cutoffBinding = if isJust (topKThreshold conf) then underParams else id
+    underParams (IRLambda n b) = IRLambda n (underParams b)
+    underParams b
+      | readsCutoff b = IRLetIn topKCutoffParamName (IRVar topKCutoffName) b
+      | otherwise = b
+    readsCutoff (IRVar n) = n == topKCutoffParamName
+    readsCutoff e = any readsCutoff (getIRSubExprs e)
     -- The four rungs a probability and an integrate function are compiled for.
     admittedPT pt' = pt' == Deterministic || pt' == Integrate || pt' == PNormal || pt' == PLogNormal
     presentVariant :: Maybe (Either VariantRefusal IRFunDecl) -> Maybe IRFunDecl
@@ -5743,13 +5756,33 @@ floatFree decls = go Set.empty
 -- the outermost (prob, (dim, (bc, imposs))) result to (prob, (dim, imposs)).
 -- The impossibility flag is NOT stripped: it is the last field either way, and a
 -- called function's callers read it (see 'unpackResult').
+--
+-- A generate function can call an inference function too: a 'collapse'
+-- operand's moments weigh a mixture's arms by its condition's probability,
+-- and that condition may be a call (a helper-extract rewrite of the
+-- corpus program collapseMixture found it).
+-- Its projections off such a call shift like any caller's, but the generate
+-- body is not an inference result, so it is rewritten with 'stripGen': no
+-- 'stripOuterTriple' (a sampled four-tuple is a value, not a packed result),
+-- and only a call whose head is an inference function's name counts as a
+-- callee result (a sampled tuple from a @_gen@ call keeps every field).
 stripBranchCount :: IREnv -> IREnv
 stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) adtDecls'' consts
   where
     stripGroup fg = fg { probFun  = fmap stripFun (probFun fg)
                        , integFun = fmap stripFun (integFun fg)
-                       , normalFun = fmap stripFun (normalFun fg) }
-    stripFun (expr, doc) = (strip Set.empty expr, doc)
+                       , normalFun = fmap stripFun (normalFun fg)
+                       , genFun = fmap stripGen (genFun fg) }
+    stripFun (expr, doc) = (strip (const True) True Set.empty expr, doc)
+    stripGen (expr, doc) = (strip callsInference False Set.empty expr, doc)
+
+    inferenceNames = Set.fromList (concat [ [groupName fg ++ "_prob" | isJust (probFun fg)]
+                                           ++ [groupName fg ++ "_integ" | isJust (integFun fg)]
+                                         | fg <- funcs ])
+    callsInference e = case e of
+      IRApply f _ -> callsInference f
+      IRVar n -> n `Set.member` inferenceNames
+      _ -> False
 
     -- Scope-aware rewrite. @callResults@ holds the variables currently bound to
     -- ANOTHER function's result tuple: that callee's own body was collapsed by
@@ -5765,8 +5798,13 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- tuples inline as a workaround (the body-factor binding in the
     -- witnessed-let case), which in turn is what made per-field re-wrapping of
     -- let-in blocks the only option there.
-    strip :: Set.Set Varname -> IRExpr -> IRExpr
-    strip callResults e = case e of
+    --
+    -- @isCall@ decides which applications return a callee result, and @outer@
+    -- whether a lambda body is a function's packed result ('stripOuterTriple').
+    strip :: (IRExpr -> Bool) -> Bool -> Set.Set Varname -> IRExpr -> IRExpr
+    strip isCall outer = go
+     where
+     go callResults e = case e of
       -- Projections off a callee's result: the bc slot is gone (read 0), and
       -- the flag that followed it moves up into the slot bc vacated.
       IRDestruct AcFst (IRDestruct AcSnd (IRDestruct AcSnd (IRVar x))) | x `Set.member` callResults -> IRConst (VFloat 0)
@@ -5774,10 +5812,10 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       -- Binding forms: rebind the name, so shadowing cannot leak a stale
       -- classification into an inner scope.
       IRLetIn n v irBody ->
-        let v' = strip callResults v
-        in IRLetIn n v' (strip (rebind n (holdsCalleeResult callResults v') callResults) irBody)
+        let v' = go callResults v
+        in IRLetIn n v' (go (rebind n (holdsCalleeResult isCall callResults v') callResults) irBody)
       IRLambda n irBody ->
-        IRLambda n (stripOuterTriple (strip (rebind n False callResults) irBody))
+        IRLambda n ((if outer then stripOuterTriple else id) (go (rebind n False callResults) irBody))
       -- A tensor map's lambda is an enumeration LOOP binder, not a function
       -- body, so it gets the rebind but NOT 'stripOuterTriple' -- which exists
       -- to collapse the result triple a compiled function returns. Before task
@@ -5786,9 +5824,9 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       -- that it is a 'BMap' over an 'IRLambda', the distinction has to be made
       -- here or the generic 'IRLambda' arm above would claim it.
       IRBuiltin BMap [IRLambda n lamBody, t] ->
-        IRBuiltin BMap [ IRLambda n (strip (rebind n False callResults) lamBody)
-                       , strip callResults t ]
-      _ -> irDescend (strip callResults) e
+        IRBuiltin BMap [ IRLambda n (go (rebind n False callResults) lamBody)
+                       , go callResults t ]
+      _ -> irDescend (go callResults) e
 
     rebind n True  = Set.insert n
     rebind n False = Set.delete n
@@ -5797,11 +5835,11 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- collapsed? Only an application does; a locally assembled 'IRConstruct'
     -- keeps its four fields. Both branch forms must agree, and an alias
     -- inherits the classification of what it aliases.
-    holdsCalleeResult env v = case v of
-      IRApply _ _      -> True
+    holdsCalleeResult isCall env v = case v of
+      IRApply _ _      -> isCall v
       IRVar x          -> x `Set.member` env
-      IRLetIn n b irBody -> holdsCalleeResult (rebind n (holdsCalleeResult env b) env) irBody
-      IRIf _ t f       -> holdsCalleeResult env t || holdsCalleeResult env f
+      IRLetIn n b irBody -> holdsCalleeResult isCall (rebind n (holdsCalleeResult isCall env b) env) irBody
+      IRIf _ t f       -> holdsCalleeResult isCall env t || holdsCalleeResult isCall env f
       _                -> False
 
     -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers,
