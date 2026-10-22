@@ -208,10 +208,9 @@ way to convert to IR"), the Bottom-argument `Apply` arm, the InjF form checks,
 the generate-backed enumeration guard, the Normal/LogNormal parameter
 extractors, a CDF call under an extra semiring -- it calls `Semiring.refuse`
 rather than `error` (task `static-refusals-become-absent-variants`, design
-`pipeline-coherence` P1). `CompilerMonad` is
+`pipeline-coherence` P1). `CompilerMonad` wraps
 `WriterT [...] (ExceptT VariantRefusal Supply)`: the `ExceptT` sits *under*
-the writer so the many `lift (runWriterT ...)` sub-scopes keep their shape and
-a refusal passes through them. `runCompile` answers `Either`, and
+the writer so a refusal passes through every `scoped` sub-scope. `runCompile` answers `Either`, and
 `envToIRUnoptimized'` turns a `Left` into an absent variant whose reason is
 kept in `IRFunGroup.refusedVariants` (keyed `gen`/`prob`/`integ`/`normal`/
 `writeLogits`) -- the same observable as a `Bottom` verdict, so `generate`

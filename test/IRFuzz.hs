@@ -102,7 +102,6 @@ import SPLL.IntermediateRepresentation
 import SPLL.IRTypeCheck (IRType(..), checkIREnv, showIRType, showIRTypeError, irTypeOfRType)
 import SPLL.Semiring
 import SPLL.IRCompiler (stripBranchCount)
-import Control.Monad.Writer.Lazy (runWriterT)
 import SPLL.Typing.RType (RType(..), TVarR(..), shapeNumel)
 import IRInterpreter (generateDet, generateReplay)
 import qualified SPLL.CodeGenPyTorch as Py
@@ -1043,7 +1042,7 @@ data PPlan
   | PMixSub PPlan PPlan                         -- ^ not drawn under max-product ('srMinus' is undefined there)
   | PIf IRExpr PPlan PPlan                      -- ^ 'zipResult' of an 'IRIf'
   | PLet String IRExpr PPlan                    -- ^ a let-binding the sub-plan may read
-  | PShare [IRExpr] PPlan                       -- ^ 'shareResult' under guards
+  | PShare [IRExpr] PPlan                       -- ^ 'closeResult' under guards
   | PEnumSum Bool String MultiValue PPlan       -- ^ 'enumSumP', with or without branch counts
   | PEnumMix Bool IRExpr String MultiValue PPlan -- ^ 'enumMixP', with its density dim
   deriving (Show)
@@ -1092,14 +1091,14 @@ planLabels c =
 -- | The packed result the plan builds, its floated let-bindings around it.
 buildPlan :: SemiringChoice -> PPlan -> IRExpr
 buildPlan c plan = case runCompilerMonad (go plan) of
-  Right (r, binds) -> generateLetInExpr binds (packResult r)
+  Right o -> closeExpr o packResult
   Left refusal -> error ("IRFuzz.buildPlan: a combinator refused: " ++ show refusal)
   where
     sr = semiringFor c
-    nested p = lift (runWriterT (go p))
+    nested p = scoped (go p)
     packedOf p = do
-      (r, binds) <- nested p
-      return (generateLetInExpr binds (packResult r))
+      o <- nested p
+      return (closeExpr o packResult)
     go :: PPlan -> CompilerMonad PResult
     go pl = case pl of
       PDensity d x -> return (density (distDensity sr d x) x)
@@ -1128,15 +1127,15 @@ buildPlan c plan = case runCompilerMonad (go plan) of
         return (mkPResult (sealP x) (rDim r) (rBranches r) (rImposs r))
       PAnySafe x a -> anySafe sr x id <$> go a
       PAnySafeShared x a -> do
-        (r, binds) <- nested a
-        anySafeShared sr x binds r
+        o <- nested a
+        anySafeShared sr x o
       PMix a b -> mix (mixP sr) a b
       PMixSub a b -> mix (mixSubP sr) a b
       PIf cond a b -> zipResult (IRIf cond) <$> go a <*> go b
       PLet v e a -> setVariables [(v, e)] >> go a
       PShare guards a -> do
-        (r, binds) <- nested a
-        shareResult sr "share" guards binds r
+        o <- nested a
+        closeResult sr "share" guards o
       PEnumSum bc v dom a -> packedOf a >>= enumSumP sr bc id v dom
       PEnumMix bc dd v dom a -> packedOf a >>= enumMixP sr bc id dd v dom
     -- The caller's branch count, as an 'IfThenElse' passes it: both arms'.

@@ -41,7 +41,6 @@ import Data.Maybe
 import Data.Either (partitionEithers)
 import Data.List (isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate, sort, partition)
 import Data.Functor ((<&>))
-import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural hiding (planReadOf, planProjectedReadOf)
 import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
@@ -51,9 +50,9 @@ import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
-import Control.Monad (foldM, forM, mfilter, when, zipWithM, (>=>))
+import Control.Monad (foldM, forM, mfilter, unless, void, when, zipWithM, (>=>))
 import Debug.Trace (traceM)
-import Control.Monad.State.Strict (StateT, runStateT, get, gets, put, modify)
+import Control.Monad.State.Strict (StateT, runStateT, get, gets, put, modify, lift)
 import Control.Monad.Except (catchError)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -574,7 +573,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
             else Nothing
         genE =
             if not noGen then
-              Just (toGenDecl name . fst <$> runCompilerMonad (toIRGenerate (meta progTypeEnv) binding))
+              Just (toGenDecl name . openValue <$> runCompilerMonad (toIRGenerate (meta progTypeEnv) binding))
             else
               Nothing
         normalE =
@@ -729,18 +728,16 @@ runCompile meta codeGen = generateLetInBlock meta <$> (runCompilerMonad $ do
   res <- codeGen
   case unP (rProb res) of
     IRLambda _ _ -> return res
-    _ -> tell [("l_r", packResult res)] >>
+    _ -> setVariables [("l_r", packResult res)] >>
                 return (unpackResult "l_r")
   --
   )
 
-generateLetInBlock :: CompilerMetadata -> (PResult, [(String, IRExpr)]) -> IRExpr
-generateLetInBlock _ codeGen =
+generateLetInBlock :: CompilerMetadata -> Open PResult -> IRExpr
+generateLetInBlock _ codeGen = closeExpr codeGen $ \res ->
   case unP (rProb res) of
-    (IRLambda _ _) -> (foldr (\(var, val) expr  -> IRLetIn var val expr) (unP (rProb res)) binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
-    _ -> generateLetInExpr binds (packResult res)
-  where
-    (res, binds) = codeGen
+    p@(IRLambda _ _) -> p --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
+    _ -> packResult res
 
 -- | Compile a PNormal/PLogNormal expression to a function returning (mu, sigma) as
 -- an @IRConstruct TgTuple@ pair.  Lambda wrappers are preserved so the result has
@@ -756,8 +753,8 @@ compileNormalWith extract meta (Expr _ (Lambda name subExpr)) =
   let newMeta = meta { typeEnv = (name, (rType (getTypeInfo subExpr), False)) : typeEnv meta }
   in IRLambda name <$> compileNormalWith extract newMeta subExpr
 compileNormalWith extract meta expr = do
-  ((mu, sigma), binds) <- runCompilerMonad (extract meta expr)
-  return (generateLetInExpr binds (IRConstruct TgTuple [mu, sigma]))
+  o <- runCompilerMonad (extract meta expr)
+  return (closeExpr o (\(mu, sigma) -> IRConstruct TgTuple [mu, sigma]))
 
 -- | True when the expression (with lambdas stripped) has its own toIRInference
 -- handler and cannot be processed by toIRNormalParams.  Mirrors the
@@ -1517,7 +1514,7 @@ convolveTables meta dom buckets = do
 -- order of magnitude -- measured 14x, and a 0.17s compile turning into 16s,
 -- before this guard.
 --
--- So the first value is compiled in its own writer scope as a PROBE, and the
+-- So the first value is compiled in its own scope as a PROBE, and the
 -- whole table is declined -- with the probe's bindings discarded, never
 -- reaching the enclosing scope -- unless the unrolling it implies is
 -- affordable. The probe is kept and reused for its own cell rather than
@@ -1533,13 +1530,13 @@ convolveTables meta dom buckets = do
 pointQueryTable :: CompilerMetadata -> Expr -> [Value] -> CompilerMonad (Maybe MarginalTable)
 pointQueryTable _ _ [] = return Nothing
 pointQueryTable meta e dom@(v0 : vs) = do
-  probe@(probeRes, probeBinds) <- lift $ runWriterT $ inferAt v0
+  probe <- scoped (inferAt v0)
   let probeSize = compiledSize irNodeCount probe
       bound = materializationCardinality (compilerConfig meta)
       withinTotal = withinMaterializationBudget bound (length dom * probeSize)
   if withinTotal && compiledSize irLogicNodeCount probe <= maxTabulatedLeafNodes
     then do
-      setVariables probeBinds
+      probeRes <- inline probe
       cell0 <- bindCell (unP (rProb probeRes))
       cells <- forM vs (\v -> inferAt v >>= bindCell . unP . rProb)
       return (Just (zip dom (cell0 : cells)))
@@ -1564,17 +1561,17 @@ pointQueryTable meta e dom@(v0 : vs) = do
         -- was going to do anyway; and the total above is still judged on the
         -- raw size, so the unrolled volume the optimizer receives stays
         -- inside the cardinality budget.
-        rest <- mapM (lift . runWriterT . inferAt) vs
+        rest <- mapM (scoped . inferAt) vs
         let copies = probe : rest
         if all ((<= maxTabulatedLeafNodes) . foldedSize) copies
           then do
-            cells <- forM copies (\(res, binds) -> setVariables binds >> bindCell (unP (rProb res)))
+            cells <- forM copies (\o -> inline o >>= bindCell . unP . rProb)
             return (Just (zip dom cells))
           else return Nothing
   where
     inferAt v = toIRInference meta False e (IRConst (valueToIR v))
-    compiledSize count (res, binds) = count (unP (rProb res)) + sum (map (count . snd) binds)
-    foldedSize (res, binds) = irLogicNodeCount (postProcess (compilerConfig meta) (buildLetIns binds (unP (rProb res))))
+    compiledSize count o = count (unP (rProb (openValue o))) + openBlockSize count o
+    foldedSize o = irLogicNodeCount (postProcess (compilerConfig meta) (closeExpr o (unP . rProb)))
     bindCell p = do
       cellName <- mkVariable "mat_leaf"
       setVariables [(cellName, p)]
@@ -2192,11 +2189,11 @@ renameVar' _ _ x = x
 toIRInferenceSave :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 toIRInferenceSave meta cumulative (Expr t (Lambda name subExpr)) sample = do
   let newMeta = extendMetaForLambda meta t name
-  irTuple <- lift (runWriterT (toIRInferenceSave newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
+  irTuple <- scoped (toIRInferenceSave newMeta cumulative subExpr sample) <&> generateLetInBlock meta
   return (detP (IRLambda name irTuple))
 toIRInferenceSave meta cumulative expr sample = do
-  (res, letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
-  anySafeShared (semiringOf meta) sample letins res
+  o <- scoped (toIRInference meta cumulative expr sample)
+  anySafeShared (semiringOf meta) sample o
 
 -- | The marginal operand of the marginal-minus-point split ('mixSubP' of this
 -- and the excepted point's result): 'toIRInferenceSave' at the wildcard sample
@@ -2262,9 +2259,9 @@ dimZeroByType decls = go []
       -- BottomTuple, GreaterType, NotSetYet.
       _            -> False
 
--- | Isolate a sub-inference's own let-in bindings into a fresh writer scope
+-- | Isolate a sub-inference's own let-in bindings into a fresh scope
 -- and re-embed them gated on @guards@ -- baking the guard into the bound
--- value via 'shareResult' -- rather than running the action directly in the
+-- value via 'closeResult' -- rather than running the action directly in the
 -- ambient scope and applying a guard to the returned 'PResult' only
 -- afterwards (task recursive-list-prob-missed-cse).
 --
@@ -2287,16 +2284,23 @@ dimZeroByType decls = go []
 -- (observe-partials-umbrella N1b's reasoning applies here identically),
 -- and a self-referential recursive call can fail to terminate.
 --
--- Isolating the writer scope here and re-threading it through
--- 'shareResult' with @guards@ fixes that: whether or not the inner call
+-- Isolating the scope here and re-threading it through
+-- 'closeResult' with @guards@ fixes that: whether or not the inner call
 -- decides to share, the guard ends up baked inside the returned value
 -- itself, so any later, unguarded read of it (another 'setVariables', a
 -- CSE'd duplicate, an enclosing combinator's own eager bind) still only
 -- evaluates the protected computation when the guard holds.
 guardedSubInference :: CompilerMetadata -> [IRExpr] -> CompilerMonad PResult -> CompilerMonad PResult
 guardedSubInference meta guards action = do
-  (res0, binds) <- lift (runWriterT action)
-  shareResult (semiringOf meta) "guarded" guards binds res0
+  o <- scoped action
+  closeResult (semiringOf meta) "guarded" guards o
+
+-- | Keep a scope tried for a 'Just': its bindings are emitted when it
+-- answered, dropped when it declined.
+inlineIfJust :: Open (Maybe a) -> CompilerMonad (Maybe a)
+inlineIfJust o = case openValue o of
+  Just _  -> inline o
+  Nothing -> return Nothing
 
 -- | Recognise a sample that is an 'IRIf' selecting between a plain value and
 -- the 'VAnyExcept' placeholder -- the shape 'transportDirect' produces when it
@@ -3115,7 +3119,7 @@ toIRInference meta cumulative e sample
   -- them via 'setVariables' -- the same mechanism the InjF 'hasAnyExcept'
   -- combinator below uses for its own seeded variables -- rather than
   -- rewrapping the result afterwards keeps them properly threaded through
-  -- 'guardedSubInference'/'shareResult's own let-hoisting, which floats a
+  -- 'guardedSubInference'/'closeResult's own let-hoisting, which floats a
   -- sub-result's binding to a scope a post-hoc rewrap would sit below.
   setVariables binds
   -- Both operands of the subtraction are compiled 'unpruned': a pruned
@@ -3328,7 +3332,7 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
       trueClosure  <- toIRInference metaTrue  cumulative left  sample
       falseClosure <- toIRInference metaFalse cumulative right sample
       zVar <- mkVariable "argZ"
-      closureBody <- lift (runWriterT (do
+      closureBody <- scoped (do
         trueCallV  <- mkVariable "armTcall"
         falseCallV <- mkVariable "armFcall"
         let trueBind  = (trueCallV,  IRApply (unP (rProb trueClosure))  (IRVar zVar))
@@ -3338,16 +3342,16 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
         -- 'unpackResult' directly on the raw 'IRApply': that destructures its
         -- argument into four separate projections, which would otherwise
         -- inline four copies of a call that may itself be an arbitrarily
-        -- expensive (or recursive) sub-inference. 'shareResult' places the
+        -- expensive (or recursive) sub-inference. 'closeResult' places the
         -- binding inside the dead-arm guard below, so a call whose condition
         -- cannot hold is still never evaluated.
-        trueAtZ  <- shareResult sr "armTz" [liveArm condTrueV]  [trueBind]  (unpackResult trueCallV)
-        falseAtZ <- shareResult sr "armFz" [liveArm condFalseV] [falseBind] (unpackResult falseCallV)
+        trueAtZ  <- closeResult sr "armTz" [liveArm condTrueV]  (openWith [trueBind]  (unpackResult trueCallV))
+        falseAtZ <- closeResult sr "armFz" [liveArm condFalseV] (openWith [falseBind] (unpackResult falseCallV))
         let weighedTrue  = weighByCond var_condT_p condTrue  trueAtZ
             weighedFalse = weighByCond var_condF_p condFalse falseAtZ
             branchesZ = IROp OpPlus (zeroCheckBC condTrueV  (rBranches weighedTrue))
                                     (zeroCheckBC condFalseV (rBranches weighedFalse))
-        mixP sr branchesZ weighedTrue weighedFalse)) <&> generateLetInBlock meta
+        mixP sr branchesZ weighedTrue weighedFalse) <&> generateLetInBlock meta
       return (detP (IRLambda zVar closureBody))
     _ -> do
       -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
@@ -3355,21 +3359,21 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
       -- We need to restart the monad stack, because variables inside the branches may not be valid outside
       -- E.g. if length(a) > 0 then a[0] else ...
       -- If we were to access a[0] outside of the branch we would error
-      (mul1Raw, binds1) <- lift (runWriterT (do
+      mul1Raw <- scoped (do
         let metaTrue = meta { accProb = srTimes sr (accProb meta) (IRVar var_condT_p) }
-        weighByCond var_condT_p condTrue <$> toIRInference metaTrue cumulative left sample))
-      (mul2Raw, binds2) <- lift (runWriterT (do
+        weighByCond var_condT_p condTrue <$> toIRInference metaTrue cumulative left sample)
+      mul2Raw <- scoped (do
         let metaFalse = meta { accProb = srTimes sr (accProb meta) (IRVar var_condF_p) }
-        weighByCond var_condF_p condFalse <$> toIRInference metaFalse cumulative right sample))
+        weighByCond var_condF_p condFalse <$> toIRInference metaFalse cumulative right sample)
       -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
       -- A condition that cannot hold makes its arm an impossible event, which is
       -- exactly what the mixture below needs to know to drop it -- so record it
       -- rather than leaving the zeroed product to be recognised numerically.
-      -- The check is the arm block's guard (see 'shareResult'), so an arm whose
+      -- The check is the arm block's guard (see 'closeResult'), so an arm whose
       -- condition cannot hold is never evaluated -- it may hold the recursive call
       -- the check exists to skip.
-      mul1Zeroed <- shareResult sr "armT" [liveArm condTrueV] binds1 mul1Raw
-      mul2Zeroed <- shareResult sr "armF" [liveArm condFalseV] binds2 mul2Raw
+      mul1Zeroed <- closeResult sr "armT" [liveArm condTrueV] mul1Raw
+      mul2Zeroed <- closeResult sr "armF" [liveArm condFalseV] mul2Raw
       let leftBranchesExpr  = rBranches mul1Zeroed
       let rightBranchesExpr = rBranches mul2Zeroed
       -- Dispatching is free: a node that delegates to sub-computations contributes
@@ -3390,8 +3394,8 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
           -- variable, rather than wrapping each of the four PResult fields in
           -- its own copy of the accTrue/accFalse IRIf (the previous shape):
           -- that field-wise wrapping is exactly the duplication pattern
-          -- 'shareResult' exists to avoid (see its docs) -- here it wasn't
-          -- routed through shareResult at all, so it re-embedded mul1Zeroed's/
+          -- 'closeResult' exists to avoid (see its docs) -- here it wasn't
+          -- routed through closeResult at all, so it re-embedded mul1Zeroed's/
           -- mul2Zeroed's/addRes's own fields FOUR times per level. Since this
           -- whole 'IfThenElse' case can itself be 'cond' of an enclosing
           -- topK-guarded IfThenElse, that 4x-per-level duplication compounds
@@ -3496,12 +3500,12 @@ toIRInference meta False (Expr _ (InjF (Named cmp) [left, right])) sample
     let cdfBelow = (cmp == "lt") /= enumLeft
     bnd <- mkVariable "enumerated_bound"
     mTbl <- materializeOperandTable meta enumE
-    (returnExpr, binds) <- lift $ runWriterT $ do
+    returnO <- scoped $ do
       pE <- operandProb meta mTbl enumE (IRVar bnd)
       integ <- toIRInference (unpruned meta) True cdfE (IRVar bnd)  -- complemented below, see 'unpruned'
       pCmp <- complementWhen sr (if cdfBelow then notIR sample else sample) (unP (rProb integ))
       return (srTimes sr pE pCmp)
-    let (outerBinds, body') = hoistInvariantBindings bnd (buildLetIns binds returnExpr)
+    let (outerBinds, body') = hoistInvariantBindings bnd (closeExpr returnO id)
     setVariables outerBinds
     opaqueMass sr (enumSumNode sr bnd enumList body') const0
 -- The run-time twin of the Dirac-law clause ('lawPoint') (task
@@ -3544,10 +3548,10 @@ toIRInference meta True e@(Expr TypeInfo {rType=rt, tags=tgs, chainName=cn} (Rea
     Just dom | enumerationWithinMaterializationBudget meta tgs -> do
       let sr = semiringOf meta
       v <- mkVariable "nn_cdf_value"
-      (summand, binds) <- lift $ runWriterT $ do
+      summandO <- scoped $ do
         pV <- (unP . rProb) <$> toIRInference meta False e (IRVar v)
         return (srTimes sr pV (compareValueExpr sr rt (IRVar v) sample))
-      let (outerBinds, body') = hoistInvariantBindings v (buildLetIns binds summand)
+      let (outerBinds, body') = hoistInvariantBindings v (closeExpr summandO id)
       setVariables outerBinds
       opaqueMass sr (enumSumNode sr v dom body') const0
     _ -> refuse cn ("cannot compute the cumulative distribution of the neural read '" ++ name
@@ -3562,7 +3566,7 @@ toIRInference meta _ (Expr _ (ReadNN name symbol)) sample = do
   return (unpackResult var)
 toIRInference meta cumulative (Expr t (Lambda name subExpr)) sample = do
   let newMeta = extendMetaForLambda meta t name
-  irTuple <- lift (runWriterT (toIRInference newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
+  irTuple <- scoped (toIRInference newMeta cumulative subExpr sample) <&> generateLetInBlock meta
   return (detP (IRLambda name irTuple))
 -- Deterministic lambda and bound expression PDF
 toIRInference meta False (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
@@ -3718,9 +3722,9 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply l v)) sample 
   case leading of
     Nothing -> viaCallee
     Just b -> do
-      first <- lift ((Right <$> runWriterT viaCallee) `catchError` (return . Left))
+      first <- (Right <$> scoped viaCallee) `catchError` (return . Left)
       case first of
-        Right (res, binds) -> setVariables binds >> return res
+        Right o -> inline o
         Left _ -> applyBinding meta cumulative rt b sample
 -- Probabilistic bound expression
 toIRInference meta cumulative (Expr TypeInfo{rType=_, chainName=_} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
@@ -3839,7 +3843,7 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params
   --
   -- The guard is threaded through 'guardedSubInference' -- the same mechanism
   -- the applicability test already uses -- so it is baked INTO the bound value
-  -- by 'shareResult' rather than applied to the returned 'PResult' afterwards.
+  -- by 'closeResult' rather than applied to the returned 'PResult' afterwards.
   -- That is what makes it prune rather than merely zero: a shared let-in block
   -- is evaluated where it is bound, so a guard layered on top of the result
   -- would come too late to stop the recursion.
@@ -3934,7 +3938,7 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
   let metaOp = covOperandMeta cumulative invDerivExpr meta
   paramRes <- guardedSubInference metaOp [appTest] (probF metaOp cumulative a finalInvExpr)
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  return (mapResult renVar (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDerivExpr paramRes)))
+  return (substResult renVar (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDerivExpr paramRes)))
 -- A function value computed by an InjF with no probabilistic operand --
 -- @head ((\v3 -> [\v4 -> Uniform]) 1.0)@, @left (\r1 -> ..)@ -- would be
 -- answered by the two leaf equations below, which generate the value and
@@ -4058,10 +4062,10 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   setVariables [(detVar, detIR)]
   let sr = semiringOf meta
   mTblRand <- materializeOperandTable meta randExprSrc
-  (returnExpr, binds) <- lift $ runWriterT $ do
+  returnO <- scoped $ do
     pRand <- operandProb meta mTblRand randExprSrc (IRVar randVar)
     return (IRIf (IROp OpEq f sample) pRand (srZero sr))
-  let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
+  let (outerBinds, body') = hoistInvariantBindings randVar (closeExpr returnO id)
   setVariables outerBinds
   opaqueMass sr (enumSumNode sr randVar enumList body') const0
 -- Cumulative (cdf) counterpart of the single-operand enumeration case above.
@@ -4083,10 +4087,10 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   setVariables [(detVar, detIR)]
   let sr = semiringOf meta
   mTblRand <- materializeOperandTable meta randExprSrc
-  (returnExpr, binds) <- lift $ runWriterT $ do
+  returnO <- scoped $ do
     pRand <- operandProb meta mTblRand randExprSrc (IRVar randVar)
     return (IRIf (IROp OpLessThan sample f) (srZero sr) pRand)
-  let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
+  let (outerBinds, body') = hoistInvariantBindings randVar (closeExpr returnO id)
   setVariables outerBinds
   opaqueMass sr (enumSumNode sr randVar enumList body') const0
 -- A Boolean connective with one deterministic operand: @d || b@ is True where
@@ -4187,11 +4191,11 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let sr = semiringOf meta
   mTblL <- materializeOperandTable meta left
   mTblR <- materializeOperandTable meta right
-  (returnExpr, binds) <- lift $ runWriterT $ do
+  returnO <- scoped $ do
     pLeft <- operandProb meta mTblL left (IRVar v1)
     pRight <- operandProb meta mTblR right (IRVar v2)
     return (IRIf (IROp OpEq f sample) (srTimes sr pLeft pRight) (srZero sr))
-  let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (buildLetIns binds returnExpr)
+  let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (closeExpr returnO id)
   let innerSum = buildLetIns v2InvBinds (enumSumNode sr v2 enumListR v2Body)
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
@@ -4229,7 +4233,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   -- computed once instead of once per iteration of the enumeration below.
   mTblL <- materializeOperandTable meta left
   mTblR <- materializeOperandTable meta right
-  irTuple <- lift (runWriterT (do
+  irTuple <- scoped (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
     -- The inversion's own applicability (task mult-enumerable-zero-divisor-crash):
@@ -4256,29 +4260,29 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     -- still lifts them out of the loop.
     (pLeft, leftNames, possible) <- case topKThreshold (compilerConfig meta) of
       Nothing -> do
-        (pL, lBinds) <- listen (operandProb meta mTblL left (IRVar x2))
-        return (pL, map fst lBinds, possibleExpr)
+        oL <- scoped (operandProb meta mTblL left (IRVar x2))
+        pL <- inline oL
+        return (pL, openNames oL, possibleExpr)
       Just _ -> do
-        (pL, lBinds) <- lift (runWriterT (operandProb meta mTblL left (IRVar x2)))
-        let (lFree, lGuarded) = splitHoistable [x2, x3] lBinds
-        setVariables lFree
+        oL <- scoped (operandProb meta mTblL left (IRVar x2))
+        let (lFree, lGuarded) = splitOpen (splitHoistable [x2, x3]) oL
+        inline lFree
         possibleV <- mkVariable "possible"
         pLeftV <- mkVariable "pLeft"
         setVariables [ (possibleV, possibleExpr)
-                     , (pLeftV, IRIf (IRVar possibleV) (generateLetInExpr lGuarded pL) (srZero sr)) ]
-        return (IRVar pLeftV, map fst lGuarded ++ [possibleV, pLeftV], IRVar possibleV)
+                     , (pLeftV, IRIf (IRVar possibleV) (closeExpr lGuarded id) (srZero sr)) ]
+        return (IRVar pLeftV, openNames lGuarded ++ [possibleV, pLeftV], IRVar possibleV)
     -- pRight is computed in a nested writer so its bindings can be guarded by the topK check,
     -- avoiding the inner right-side inference work whenever acc_prob * pLeft is already below cutoff.
     -- The right-hand key is the INVERTED value, an expression rather than an
     -- enumeration variable, so a table read has to bind it first: the lookup
     -- reads its key once per arm.
-    (pRightRes, pRightBinds) <- lift $ runWriterT $ case mTblR of
+    pRightO <- scoped $ case mTblR of
           Just tbl -> do
             keyName <- mkVariable "mat_key"
             setVariables [(keyName, invExpr)]
             return (mass (lookupMarginal meta tbl (IRVar keyName)))
           Nothing -> toIRInference meta False right invExpr
-    let pRight = unP (rProb pRightRes)
     -- The guard below keeps pRight's per-cell work out of cells that fail it,
     -- but it also used to trap pRight's loop-invariant bindings -- a neural
     -- operand's raw network call, @nn_raw = n(b)@ -- inside the loop body,
@@ -4289,9 +4293,8 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     -- MNIST sum). Pure bindings that read no loop variable and nothing bound
     -- per iteration are released into this writer instead, so they are
     -- hoisted exactly like pLeft's; everything else stays guarded.
-    let (rFree, rGuarded) = splitHoistable (x2 : x3 : leftNames) pRightBinds
-    setVariables rFree
-    let wrapR e = generateLetInExpr rGuarded e
+    let (rFree, rGuarded) = splitOpen (splitHoistable (x2 : x3 : leftNames)) pRightO
+    inline rFree
     -- accProb * pLeft is a semiring product (srTimes): under logSpace both
     -- operands are log-probabilities, so a hardcoded OpMult here silently
     -- pruned every branch (task topk-logspace-unsound). The comparison against
@@ -4303,10 +4306,10 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
                        (IROp OpGreaterThan
                           (srTimes sr (accProb meta) pLeft)
                           (IRVar topKCutoffParamName))
-    let returnExpr   = IRIf cutoffOk (wrapR (srTimes sr pLeft pRight)) (srZero sr)
+    let returnExpr   = IRIf cutoffOk (closeExpr rGuarded (srTimes sr pLeft . unP . rProb)) (srZero sr)
     let branchesExpr = IRIf cutoffOk (IRConst (VFloat 1)) (IRConst (VFloat 0))
     return (mkPResult (sealP returnExpr) dim0 branchesExpr (notIR cutoffOk))
-    )) <&> generateLetInBlock meta
+    ) <&> generateLetInBlock meta
   uniquePrefix <- mkVariable ""
   let applyUnique = irMap (uniqueify [x2, x3] uniquePrefix)
   let (outerBinds, innerTuple) = hoistInvariantBindings x2 irTuple
@@ -4351,14 +4354,14 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   -- enumSum, not above it.
   mTblL <- materializeOperandTable meta left
   mTblR <- materializeOperandTable meta right
-  (returnExpr, binds) <- lift $ runWriterT $ do
+  returnO <- scoped $ do
     pLeft <- operandProb meta mTblL left (IRVar v1)
     pRight <- operandProb meta mTblR right (IRVar v2)
     return (IRIf (IROp OpLessThan sample f) (srZero sr) (srTimes sr pLeft pRight))
   -- Place each binding at the outermost scope where it remains well-formed: fully
   -- invariant bindings are hoisted to the function top level, bindings depending only
   -- on v1 sit between the two enumSums, and bindings depending on v2 stay innermost.
-  let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (buildLetIns binds returnExpr)
+  let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (closeExpr returnO id)
   let innerSum = buildLetIns v2InvBinds (enumSumNode sr v2 enumListR v2Body)
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
@@ -4476,19 +4479,18 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (InjF (Named name) [left
           metaOpU = covOperandMeta cumulative (un invDeriv) meta
       -- Built in a scope of its own: a leaf that turns out to draw fresh
       -- randomness declines the whole attempt, and its bindings are dropped.
-      (attempt, binds) <- lift $ runWriterT $
+      attemptO <- scoped $
         latentCellSum meta cumulative (anyGuardedDim sample) enumE (\fv -> fmap Just $ do
           setVariables [(uniquePrefix ++ xSample, sample), (uniquePrefix ++ xEnum, fv)]
           contRes <- guardedSubInference metaOpU [un appTest]
                        (probF metaOpU cumulative contE (un invExpr))
           return (guardP sr [un appTest] (scaleCoV sr cumulative (un invDeriv) contRes)))
-      mapM_ (\_ -> setVariables binds) attempt
-      return attempt
+      inlineIfJust attemptO
     _ -> return Nothing
   summedTyped <- case perCell of
    Just r -> return r
    Nothing -> do
-    irTuple <- lift (runWriterT (do
+    irTuple <- scoped (do
       setVariables [(xSample, sample)]
       pEnumRaw <- operandProb meta mTblEnum enumE (IRVar xEnum)
       pEnumVar <- mkVariable "p_enum"
@@ -4504,7 +4506,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (InjF (Named name) [left
       -- support, so such values are ordinary. Exact zero is sound here for the
       -- reason 'opaqueMass' gives: this is a discrete mass.
       return (prodP sr (impossibleWhen (IROp OpEq pEnum (srZero sr)) (mass pEnum)) scaled)
-      )) <&> generateLetInBlock meta
+      ) <&> generateLetInBlock meta
     uniquePrefix <- mkVariable ""
     let applyUnique = irMap (uniqueify [xEnum, xSample] uniquePrefix)
     let (outerBinds, innerTuple) = hoistInvariantBindings xEnum irTuple
@@ -4996,7 +4998,7 @@ enumerateAppliedLambda meta cumulative l v sample = do
       else return (paramVar, findExprWithCN fExprs bodyCn)
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
   let sr = semiringOf meta
-  irTuple <- lift (runWriterT (do
+  irTuple <- scoped (do
     -- The argument is measured with the enclosing enumerated latents fixed:
     -- inside their loops each holds one value, and a curried helper call such
     -- as @contrib u 1@ (u enumerated outside) is only measurable as a call
@@ -5011,7 +5013,7 @@ enumerateAppliedLambda meta cumulative l v sample = do
     let bodyMeta = meta{ typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta
                        , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
     bodyRes <- toIREnumerate bodyMeta cumulative lBodyExpr sample
-    return (onProb (\p -> srTimes sr p pBranch) bodyRes))) <&> generateLetInBlock meta
+    return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
@@ -5071,7 +5073,7 @@ reinferReading meta names e = reinferRecovered meta (filter (`Set.member` freeVa
 -- @k@ runs once, inside the innermost loop, and binds what it needs through
 -- the writer, so its loop-invariant bindings are hoisted like any loop body's.
 -- 'Nothing' (from @k@, or) when a leaf is not deterministic given the draws; the caller
--- then discards the writer scope this ran in.
+-- then discards the scope this ran in.
 latentCellSum :: CompilerMetadata -> Bool -> IRExpr -> Expr -> (IRExpr -> CompilerMonad (Maybe PResult)) -> CompilerMonad (Maybe PResult)
 latentCellSum meta cumulative densityDim e k
   | Expr _ (Apply (Expr _ (Lambda x b)) v) <- e
@@ -5088,14 +5090,14 @@ latentCellSum meta cumulative densityDim e k
           bodyMeta = meta{ typeEnv = (boundVar, (rType (getTypeInfo v), False)) : typeEnv meta
                          , recoveredVars = boundVar : recoveredVars meta
                          , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
-      (inner, binds) <- lift (runWriterT (do
+      innerO <- scoped (do
         pRaw <- (unP . rProb) <$> toIRInference meta False (reinferReading meta (recoveredVars meta) v) (IRVar boundVar)
         pVar <- mkVariable "cell_p"
         setVariables [(pVar, pRaw)]
         bodyRes <- latentCellSum bodyMeta cumulative densityDim drawBody k
-        return (prodP sr (impossibleWhen (IROp OpEq (IRVar pVar) (srZero sr)) (mass (IRVar pVar))) <$> bodyRes)))
-      forM inner $ \res -> do
-        let irTuple = generateLetInBlock meta (res, binds)
+        return (prodP sr (impossibleWhen (IROp OpEq (IRVar pVar) (srZero sr)) (mass (IRVar pVar))) <$> bodyRes))
+      forM (openValue innerO) $ \res -> do
+        let irTuple = generateLetInBlock meta (res <$ innerO)
             (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
             dom = head [mv | DiscreteValues mv <- tags (getTypeInfo v)]
             bc = countBranches (compilerConfig meta)
@@ -5161,10 +5163,10 @@ enumerateCurriedArgument meta cumulative appTi l v sample = do
       bodyMeta = meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
                       , recoveredVars = boundVar : recoveredVars meta }
       sr = semiringOf meta
-  irTuple <- lift (runWriterT (do
+  irTuple <- scoped (do
     pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
     bodyRes <- toIREnumerate bodyMeta cumulative loopBody sample
-    return (onProb (\p -> srTimes sr p pBranch) bodyRes))) <&> generateLetInBlock meta
+    return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags vTi]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
@@ -5346,12 +5348,12 @@ enumerateAgreement meta cumulative ag sample = do
       -- an O(V) probability computation back into O(V) *network invocations*
       -- -- which at vocabulary scale is the whole cost.
       closeOver m = do
-        (e, binds) <- m
-        let (invariant, inner) = hoistInvariantBindings v (generateLetInExpr binds e)
+        o <- m
+        let (invariant, inner) = hoistInvariantBindings v (closeExpr o id)
         setVariables invariant
         return inner
-  paBody <- closeOver (lift (runWriterT ((unP . rProb) <$> toIRInference metaV False (agOpA ag) (IRVar v))))
-  pbBody <- closeOver (lift (runWriterT ((unP . rProb) <$> toIRInference metaV False (agOpB ag) (IRVar v))))
+  paBody <- closeOver (scoped ((unP . rProb) <$> toIRInference metaV False (agOpA ag) (IRVar v)))
+  pbBody <- closeOver (scoped ((unP . rProb) <$> toIRInference metaV False (agOpB ag) (IRVar v)))
   -- The arms are generated forward and compared against the query, exactly as
   -- 'toIREnumerate's 'IfThenElse' equation does -- including its premise
   -- check, since the fused form generates the same operands it does.
@@ -5363,12 +5365,12 @@ enumerateAgreement meta cumulative ag sample = do
       -- 'closeOver' for an arm, also handing back the arm's generated value so
       -- 'armSum' can recognise a constructor of the loop variable.
       closeOverArm m = do
-        ((eIR, armM), binds) <- m
-        let (invariant, inner) = hoistInvariantBindings v (generateLetInExpr binds armM)
+        o <- m
+        let (invariant, inner) = hoistInvariantBindings v (closeExpr o snd)
         setVariables invariant
-        return (eIR, inner)
-  (thenIR, thenBody) <- closeOverArm (lift (runWriterT (armMass (agThen ag))))
-  (elseIR, elseBody) <- closeOverArm (lift (runWriterT (armMass (agElse ag))))
+        return (fst (openValue o), inner)
+  (thenIR, thenBody) <- closeOverArm (scoped (armMass (agThen ag)))
+  (elseIR, elseBody) <- closeOverArm (scoped (armMass (agElse ag)))
   let mkMap b = IRBuiltin BMap [IRLambda v b, tensorDomainSR dom]
       zipSR a b  = IRBuiltin (BZip (srTimesOp sr)) [a, b]
       reduceSR t = IRBuiltin (BReduce (srReduceOp sr) 0) [t]
@@ -5847,7 +5849,7 @@ data WWorld = WWorld [IRExpr] WSet [WFactor]
 -- itself). It is what the plan engine's value grouping collapses a group of
 -- same-value worlds into (see 'planGroupValues'); the set-witness engine
 -- builds none.
-data WFactor = WFactor [(Varname, IRExpr)] PResult
+data WFactor = WFactor (Open PResult)
              | WMass IRExpr
 
 addGuard :: IRExpr -> WWorld -> WWorld
@@ -6103,7 +6105,7 @@ setWitnessApply meta0 cumulative rt binding planDiag sample = do
   let target = if cumulative
         then WInterval WNegInf (WFinite sample)
         else WPoint sample const1
-  -- Attempted in its own writer scope: a failed inversion's bindings are
+  -- Attempted in its own scope: a failed inversion's bindings are
   -- dropped, and a successful one's are re-emitted unchanged, in order.
   -- A sub-compile inside the inversion that refuses is a refusal of the
   -- inversion as a whole.
@@ -6120,9 +6122,8 @@ setWitnessApply meta0 cumulative rt binding planDiag sample = do
         TInt   -> True
         TBool  -> True
         _      -> False
-  (worldsM, worldBinds) <- if cumulative && not intervalTarget then return (Nothing, []) else
-    lift (runWriterT (invertToWorlds meta occs bodyExpr target))
-  when (isJust worldsM) (setVariables worldBinds)
+  worldsM <- if cumulative && not intervalTarget then return Nothing else
+    scoped (invertToWorlds meta occs bodyExpr target) >>= inlineIfJust
   case worldsM of
     -- A cumulative query the engine cannot invert (e.g. the multivariate CDF of
     -- a correlated tuple) is refused like any other shape: only the integrate
@@ -6151,28 +6152,27 @@ setWitnessApply meta0 cumulative rt binding planDiag sample = do
                        (mass (srOne sr)) summed)
 
 -- | Measure one world against the bound distribution. The measure is compiled
--- in its own writer scope and kept under the world's guards, so bindings whose
+-- in its own scope and kept under the world's guards, so bindings whose
 -- evaluation is only valid when the guards hold are not hoisted past them.
 measureWorld :: CompilerMetadata -> Expr -> WWorld -> CompilerMonad PResult
 measureWorld meta v (WWorld guards set factors) = do
   let sr = semiringOf meta
-  (res, binds) <- lift (runWriterT (measureSet meta v set))
+  setO <- scoped (measureSet meta v set)
   -- The set's measure and the residue factors are independent: the product
   -- rule, exactly as the point-witness path's body-factor fold applies it.
-  let factorBinds = concat [bs | WFactor bs _ <- factors]
-  let factorResults = [r | WFactor _ r <- factors]
+  let factorOs = [o | WFactor o <- factors]
+  let world = foldl (prodP sr) <$> setO <*> sequenceA factorOs
   -- A world whose guards fail is not part of the observation at all.
-  if null factorBinds
+  if all openIsEmpty factorOs
     -- The set measure's own bindings, under the guards: inline in the one
     -- field that reads them, else bound once ('guardedResult'). Re-wrapped
     -- around every field, they were copied up to four times per world.
-    then guardedResult sr "world" guards binds (foldl (prodP sr) res factorResults)
+    then guardedResult sr "world" guards world
     -- Factor bindings are read by several fields, so the world's result is
-    -- packed and bound once, under the guards ('shareResult'), rather than
+    -- packed and bound once, under the guards ('closeResult'), rather than
     -- copying the bindings into each field. The set measure's own bindings
     -- join them in that one block instead of being wrapped per field.
-    else shareResult sr "world" guards (binds ++ factorBinds)
-           (foldl (prodP sr) res factorResults)
+    else closeResult sr "world" guards world
 
 measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 measureSet meta v (WPoint p cov) = do
@@ -6229,7 +6229,7 @@ measureSet meta _ WEmpty = return (impossibleP (semiringOf meta))
 -- follow, so the letfree and let-bound spellings of a program agree. The
 -- point is measured with no change-of-variables factor: when it matters (a
 -- density), 'mixWith' discards it anyway. Both operands are compiled in their
--- own writer scope, the point's under its membership guard, which is what
+-- own scope, the point's under its membership guard, which is what
 -- keeps a density at a point outside an interval from being evaluated.
 --
 -- Both operands of the subtraction are compiled 'unpruned' (see there: a
@@ -6248,10 +6248,10 @@ measureSet meta v (WExcept s p) = do
   let metaSub = unpruned meta
   sRes <- scopedMeasureSet metaSub v s
   let rt = rType (getTypeInfo v)
-  (ptRes0, ptBinds) <- lift (runWriterT (measureSet metaSub v (WPoint p const1)))
-  ptRes <- guardedResult (semiringOf meta) "except_pt" [memberGuard rt p s] ptBinds ptRes0
+  ptO <- scoped (measureSet metaSub v (WPoint p const1))
+  ptRes <- guardedResult (semiringOf meta) "except_pt" [memberGuard rt p s] ptO
   mixSubP (semiringOf meta) (rBranches sRes) sRes ptRes
--- Each side is measured in its own writer scope and keeps its own bindings, so
+-- Each side is measured in its own scope and keeps its own bindings, so
 -- the untaken side's work sits under the selecting 'IRIf' rather than being
 -- hoisted in front of it -- the same reason 'measureWorld' scopes a world's
 -- measure under its guards. It matters here: the point side evaluates a
@@ -6266,33 +6266,35 @@ measureSet meta v (WExcept s p) = do
 -- the -O0 IR grew ~9x per level (task slow-fuzz-seed-findings-2026-10-06,
 -- SharedDrawInvariants seed 825059). The binding still selects with the same
 -- 'IRIf', so only the taken side is evaluated; it lands in the caller's
--- writer scope, which every caller keeps under its own guards.
+-- scope, which every caller keeps under its own guards.
 -- The bound closure ('closeNullExcept') decides only whether a point query at
 -- the bound is a member; the set's measure is the interval minus the point's,
 -- which is the interval's own for a continuous point. Measuring it once, from
 -- the excepted side, keeps one CDF difference rather than two.
 measureSet meta v s@(WChoice _ _ b) | isBoundClosure s = measureSet meta v b
 measureSet meta v (WChoice c a b) = do
-  (ra, ba) <- lift (runWriterT (measureSet meta v a))
-  (rb, bb) <- lift (runWriterT (measureSet meta v b))
-  let readers binds r = length (filter (mentionsAny (map fst binds)) (resultFields r))
+  oa <- scoped (measureSet meta v a)
+  ob <- scoped (measureSet meta v b)
+  let readers o = length (filter (openReads o) (resultFields (openValue o)))
   -- At most one reading field per side: each side's block goes inline into
   -- the one field that reads it, which copies nothing.
-  if readers ba ra <= 1 && readers bb rb <= 1
-    then return (zipResult (IRIf c) (mapResult (wrapBlockIfRead ba) ra) (mapResult (wrapBlockIfRead bb) rb))
+  if readers oa <= 1 && readers ob <= 1
+    -- unsafeDistributeBlock: each side's block has at most one reader, so it
+    -- is placed once, not copied.
+    then return (zipResult (IRIf c) (unsafeDistributeBlock oa) (unsafeDistributeBlock ob))
     else do
       w <- mkVariable "choice"
-      setVariables [(w, IRIf c (generateLetInExpr ba (packResult ra)) (generateLetInExpr bb (packResult rb)))]
+      setVariables [(w, IRIf c (closeExpr oa packResult) (closeExpr ob packResult))]
       return (unpackResult w)
   where resultFields r = [unP (rProb r), rDim r, rBranches r, rImposs r]
 
--- | 'measureSet' in its own writer scope, its bindings re-attached to the
+-- | 'measureSet' in its own scope, its bindings re-attached to the
 -- result: inline in the one field that reads them, else bound once
 -- ('guardedResult' with no guards) rather than copied into every field.
 scopedMeasureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 scopedMeasureSet meta v s = do
-  (r, binds) <- lift (runWriterT (measureSet meta v s))
-  guardedResult (semiringOf meta) "scoped_set" [] binds r
+  o <- scoped (measureSet meta v s)
+  guardedResult (semiringOf meta) "scoped_set" [] o
 
 cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExpr)
 cdfAtBound meta _ WNegInf = return (srZero (semiringOf meta), const1)
@@ -6327,7 +6329,7 @@ measureIntInterval meta _ _ WNegInf = return (impossibleP (semiringOf meta))
 measureIntInterval meta v lo hi = do
   let sr = semiringOf meta
   let cdfAt e = toIRInference (unpruned meta) True v e
-  (r, binds) <- lift $ runWriterT $ do
+  o <- scoped $ do
     hiRes <- case hi of
       WFinite e -> cdfAt e
       _         -> return (mass (srOne sr))
@@ -6347,7 +6349,7 @@ measureIntInterval meta v lo hi = do
                         constFalseIR
     return (impossibleWhen zeroMass diff { rProb = sealP (IRVar pVar), rDim = IRVar dVar })
   let nonEmpty = [notIR (IROp OpGreaterThan l h) | WFinite l <- [lo], WFinite h <- [hi]]
-  shareResult sr "int_ivl" nonEmpty binds r
+  closeResult sr "int_ivl" nonEmpty o
 
 -- | Invert the observation @body ∈ target@ into constraint worlds on the bound
 -- variable (occurrences @occs@). Nothing when some node on the way is not
@@ -6928,9 +6930,9 @@ residueFactor meta subtree boundName boundRT value target = do
   let retyped = reinferRecovered meta recovered subtree
   let fMeta = meta { typeEnv = (boundName, (boundRT, False)) : typeEnv meta
                    , recoveredVars = recovered }
-  block <- lift (runWriterT (toIRInference fMeta False retyped target)) <&> generateLetInBlock fMeta
+  block <- scoped (toIRInference fMeta False retyped target) <&> generateLetInBlock fMeta
   fv <- mkVariable "residue_factor"
-  return (WFactor [(fv, IRLetIn boundName value block)] (unpackResult fv))
+  return (WFactor (openWith [(fv, IRLetIn boundName value block)] (unpackResult fv)))
 
 -- | An x-free subtree that draws fresh randomness, measured as a factor of an
 -- otherwise unconstrained world (task world-residual-factor-delegation). It
@@ -6946,7 +6948,7 @@ residueFactor meta subtree boundName boundRT value target = do
 -- change-of-variables factor, which is not 1 when the target is a nested
 -- let's transported y-point), an interval its CDF difference (both bounds
 -- unpruned), 'WFull' certainty and a 'WChoice' either side at runtime. It
--- runs in its own writer scope folded into a self-contained block, so the
+-- runs in its own scope folded into a self-contained block, so the
 -- factor is evaluated under the world's guards and never hoisted past them.
 --
 -- Two refusals, both answering Nothing (the caller's refusal, or the runtime
@@ -6963,9 +6965,9 @@ worldFactorFree meta sub target
   | not (null (planFactorExternals (typeEnv meta) (recoveredVars meta) sub)) = return Nothing
   | hasInterval target && not (isScalar (rType (getTypeInfo sub))) = return Nothing
   | otherwise = do
-      block <- lift (runWriterT (measureSet meta sub (wildcardTolerant target))) <&> generateLetInBlock meta
+      block <- scoped (measureSet meta sub (wildcardTolerant target)) <&> generateLetInBlock meta
       fv <- mkVariable "xfree_factor"
-      return (Just [WWorld [] WFull [WFactor [(fv, block)] (unpackResult fv)]])
+      return (Just [WWorld [] WFull [WFactor (openWith [(fv, block)] (unpackResult fv))]])
   where
     hasInterval (WInterval _ _) = True
     hasInterval (WChoice _ a b) = hasInterval a || hasInterval b
@@ -7220,15 +7222,10 @@ pw1 cs = PlanWorld [] cs [] [] [] False
 planWorldTrivial :: PlanWorld -> Bool
 planWorldTrivial (PlanWorld g c p rs b _) = null g && null c && null p && null rs && null b
 
--- | A world's independent sub-inference factors, without their bindings
--- ('pwSubFactorBinds').
-pwSubFactors :: PlanWorld -> [PResult]
-pwSubFactors w = [ r | WFactor _ r <- pwFactors w ]
-
--- | The bindings a world's sub-inference factors read: each factor's block,
--- bound once ('planFactorFree', 'planFactorBool').
-pwSubFactorBinds :: PlanWorld -> [(Varname, IRExpr)]
-pwSubFactorBinds w = concat [ bs | WFactor bs _ <- pwFactors w ]
+-- | A world's independent sub-inference factors, each with the block it
+-- reads, bound once ('planFactorFree', 'planFactorBool').
+pwSubFactors :: PlanWorld -> [Open PResult]
+pwSubFactors w = [ o | WFactor o <- pwFactors w ]
 
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
@@ -7937,10 +7934,10 @@ planFactorFree meta env sub target
       let (cumulative, sample) = case target of
             PTPoint s -> (False, s)
             PTUpTo  s -> (True,  s)
-      block <- lift (lift (runWriterT (toIRInference meta cumulative sub sample)))
+      block <- lift (scoped (toIRInference meta cumulative sub sample))
                  <&> generateLetInBlock meta
       fv <- lift (mkVariable "plan_factor")
-      return (Right [(pw1 []) { pwFactors = [WFactor [(fv, block)] (unpackResult fv)] }])
+      return (Right [(pw1 []) { pwFactors = [WFactor (openWith [(fv, block)] (unpackResult fv))] }])
 
 -- | The two polarity factors of a plan-free condition that draws fresh
 -- randomness: @(P(c = True), P(c = False))@, each a self-contained compiled
@@ -7961,10 +7958,10 @@ planFactorBool meta env c
       return (Right (t, f))
   where
     polarity v = do
-      block <- lift (lift (runWriterT (toIRInference meta False c v)))
+      block <- lift (scoped (toIRInference meta False c v))
                  <&> generateLetInBlock meta
       fv <- lift (mkVariable "plan_cond_factor")
-      return (WFactor [(fv, block)] (unpackResult fv))
+      return (WFactor (openWith [(fv, block)] (unpackResult fv)))
 
 -- | Attach an independent factor to a world.
 planAddFactor :: WFactor -> PlanWorld -> PlanWorld
@@ -8489,7 +8486,7 @@ planProbe :: PlanM a -> PlanM a
 planProbe act = do
   st0 <- get
   sup0 <- lift get
-  r <- lift (censor (const []) (fst <$> runStateT act st0))
+  r <- lift (openValue <$> scoped (fst <$> runStateT act st0))
   lift (put sup0)
   return r
 
@@ -8622,9 +8619,9 @@ planAttempt :: PlanM (a, Bool) -> PlanM (Maybe a)
 planAttempt act = do
   st0 <- get
   sup0 <- lift get
-  ((r, ok), st1) <- lift $ pass $ do
-    res@((_, ok), _) <- runStateT act st0
-    return (res, if ok then id else const [])
+  o <- lift (scoped (runStateT act st0))
+  let ((r, ok), st1) = openValue o
+  when ok (void (lift (inline o)))
   if ok
     then put st1 >> return (Just r)
     else lift (put sup0) >> put st0 >> return Nothing
@@ -9107,11 +9104,11 @@ planFieldProduct wss = do
               lift (setVariables [(mv, sumAllSR sr (map (planWorldMass sr raws) rs))])
               return [PlanWorld [] common [] [WMass (IRVar mv)] baked clash]
             else do
-              -- Measured in its own writer scope, its bindings carried by the
+              -- Measured in its own scope, its bindings carried by the
               -- factor, so whichever world it joins binds them under that
               -- world's guards ('measurePlanWorlds').
-              (r, binds) <- lift (lift (runWriterT (measurePlanWorlds sr raws rs)))
-              return [PlanWorld [] common [] [WFactor binds r] baked clash]
+              o <- lift (scoped (measurePlanWorlds sr raws rs))
+              return [PlanWorld [] common [] [WFactor o] baked clash]
     mergeable w = null (pwPairs w) && null (pwSubFactors w) && not (any isPt (pwCons w))
     isPt PLeafPt{} = True
     isPt _         = False
@@ -9516,8 +9513,8 @@ measurePlanWorlds sr raws worlds
               -- copied into each field ('guardedResult').
               if null (pwSubFactors w)
                 then return base
-                else guardedResult sr "plan_world" (pwGuards w) (pwSubFactorBinds w)
-                       (foldl (prodP sr) base (pwSubFactors w))
+                else guardedResult sr "plan_world" (pwGuards w)
+                       (foldl (prodP sr) base <$> sequenceA (pwSubFactors w))
       case ws of
         []     -> return (impossibleP sr)
         -- Every world whose guards hold was traversed, so the branch count is the
@@ -9679,10 +9676,11 @@ planWitnessApply meta0 cumulative rt binding sample
             return ((filter (not . pwUnsat) . map (addSliceCons sliceCons) <$> ws, psRaws st), psFactored st)
           attempt merge factor = do
             supply <- get
-            pass $ do
-              (r, factored) <- runPlan merge factor
-              let c = either (const False) (any pwClash) (fst r)
-              return ((r, c, factored, supply), if c then const [] else id)
+            o <- scoped (runPlan merge factor)
+            let (r, factored) = openValue o
+                c = either (const False) (any pwClash) (fst r)
+            unless c (void (inline o))
+            return (r, c, factored, supply)
       (factoredR, clashed1, didFactor, supply0) <- attempt True True
       (groupedR, clashed2, supply1) <-
         if clashed1 && didFactor
@@ -9806,10 +9804,10 @@ bindIfConditions :: CompilerMetadata -> Binding -> InvChain -> CompilerMonad (Ma
 bindIfConditions meta binding chain = case used of
   [] -> return (Just chain)
   _ -> do
-    -- In its own writer scope: the leading parameters' bindings are folded
+    -- In its own scope: the leading parameters' bindings are folded
     -- into each condition, so a declining binding leaves nothing behind.
-    (entered, scopeBinds) <- lift (runWriterT (enterBindingScope meta binding))
-    case entered of
+    scopeO <- scoped (enterBindingScope meta binding)
+    case openValue scopeO of
       Nothing -> return Nothing
       Just (scopeMeta, scopedBody) -> do
         let conds = [ (v, findCond cn scopedBody) | (v, cn) <- used ]
@@ -9817,8 +9815,11 @@ bindIfConditions meta binding chain = case used of
           then return Nothing
           else do
             binds <- forM conds $ \(v, c) -> do
-              (cIR, cBinds) <- lift (runWriterT (toIRGenerate scopeMeta (fromJust c)))
-              return (v, generateLetInExpr (scopeBinds ++ cBinds) cIR)
+              cO <- scoped (toIRGenerate scopeMeta (fromJust c))
+              -- Each condition closes over its own copy of the scope's block
+              -- (a few parameter bindings), so a declining binding leaves
+              -- nothing behind.
+              return (v, closeExpr (scopeO *> cO) id)
             let wrap e = foldr (\(v, cIR) acc -> if freeInIR v acc then IRLetIn v cIR acc else acc) e binds
             return (Just chain { invValue = wrap (invValue chain), invCoV = wrap (invCoV chain)
                                , invGuard = wrap (invGuard chain), invReadsAny = wrap (invReadsAny chain)
@@ -9971,7 +9972,7 @@ applyBinding meta cumulative rt binding sample = do
         -- Do probabilistic inference using the applied inverse; unpruned when the
         -- cumulative CoV below may flip it through a complement ('covOperandMeta').
         --
-        -- In its own writer scope: a binding the argument's inference floats (a
+        -- In its own scope: a binding the argument's inference floats (a
         -- mixture's operands, an enumerated sum) reads the inverse, and floated
         -- to the enclosing scope it is evaluated before -- and regardless of --
         -- the domain guard: @draw r = (if Uniform < 0.5 then Stop else Stop) in
@@ -9995,9 +9996,9 @@ applyBinding meta cumulative rt binding sample = do
         let resReadable = IRIf readsAnyW (IRConst (VBool False)) (notIR wildW)
         let wildcardSafe = if wildcardHasOwnAnswer then id else anySafe sr appliedSample id
         let operandAt c = do
-              (res0, resBinds) <- lift (runWriterT (toIRInference (covOperandMeta cumulative appliedCoV meta) c v appliedSample))
-              wildcardSafe <$> if null resBinds then return res0
-                else shareResult sr "inverted" [guard, resReadable] resBinds res0
+              resO <- scoped (toIRInference (covOperandMeta cumulative appliedCoV meta) c v appliedSample)
+              wildcardSafe <$> if openIsEmpty resO then return (openValue resO)
+                else closeResult sr "inverted" [guard, resReadable] resO
         res <- operandAt cumulative
         -- Change of variables for the inverse the observation was pushed through;
         -- a decreasing CDF flip adds the operand's mass at the bound back.
@@ -10036,7 +10037,7 @@ applyBinding meta cumulative rt binding sample = do
               && usesThroughBinders toInvCN (bindBody binding) <= 1
         let bindingIsSink = singleUse && not (containsRandomSource bodyExpr)
         let anyW = IRIf readsAnyW (IRConst (VBool True)) (IRUnaryOp OpIsAny appliedSample)
-        let constResult e = mapResult (const e) (detP (srZero sr))
+        let constResult = constantResult
         case rt of
           -- A saturated call of a top-level function (`f v`, `step 2.0 v`) whose
           -- parameter was just recovered: the body factor is the callee's own
@@ -10070,7 +10071,7 @@ applyBinding meta cumulative rt binding sample = do
                 case rt of
                   -- Inside the closure the call reads its parameters, so its
                   -- binding cannot float out: it is let-bound in place, under the
-                  -- same two guards 'shareResult' would have put on it.
+                  -- same two guards 'closeResult' would have put on it.
                   TArrow _ _ -> do
                     let impossible = packResult (impossibleP sr)
                     let guardedCall = IRIf guard (IRIf bodyReadable call impossible) impossible
@@ -10078,8 +10079,8 @@ applyBinding meta cumulative rt binding sample = do
                       (wrapInLambdas (IRLetIn callVar guardedCall (packResult (withBody (unpackResult callVar)))))
                       (wrapInLambdas (packResult (detP (srZero sr))))))
                   _ -> do
-                    bodyRes <- shareResult sr "body_factor" [guard, bodyReadable]
-                                 [(callVar, call)] (unpackResult callVar)
+                    bodyRes <- closeResult sr "body_factor" [guard, bodyReadable]
+                                 (openWith [(callVar, call)] (unpackResult callVar))
                     return (withBody bodyRes)
           TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
                                        (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr)))))))
@@ -10113,7 +10114,7 @@ applyBinding meta cumulative rt binding sample = do
                 -- an unevaluable one none anywhere. A tuple-valued CDF through
                 -- such a callee still measures only the witnessed slot.
                 let anyHere = if cumulative then anyW else readsAnyW in
-                return (mapResult wrapInLambdas (guardedZero (mapResult (IRIf anyHere anyRefusal) scaled)))
+                return (underLambdas lambdaVars (guardedZero (errorWhen anyHere anyRefusal scaled)))
           _ -> do
             -- The inversion above only recovers and infers the variable bound by THIS
             -- lambda. Any additional independent latents bound deeper in the body (e.g. a
@@ -10135,17 +10136,17 @@ applyBinding meta cumulative rt binding sample = do
             -- It is folded into 'anyW' rather than wrapped around the result,
             -- which would be a fifth IRIf level per field: every field already
             -- reads 'anyW', so putting it here adds no reader and no nesting,
-            -- where 'mapResult' around the whole result grew the emitted chain
-            -- programs up to 6x (the duplication 'shareResult' documents).
-            -- Compile the body factor in its own writer scope: any bindings the
+            -- where wrapping each field of the whole result grew the emitted chain
+            -- programs up to 6x (the duplication 'closeResult' documents).
+            -- Compile the body factor in its own scope: any bindings the
             -- recursion floats (e.g. the shared `l_*_call` triple of an inner Apply)
             -- must stay under the recovered-variable binding -- evaluation is
             -- strict, so a floated binding that mentions the bound variable would
             -- otherwise be evaluated before the recovered value is in scope.
-            (bodyRes0, bodyBinds) <- lift (runWriterT (toIRInference bodyMeta cumulative bodyExpr sample))
+            bodyO <- scoped (toIRInference bodyMeta cumulative bodyExpr sample)
             -- The recovered value of the bound variable heads that block, so free
             -- occurrences in the body factor resolve (and redundant comparisons
-            -- collapse to true), and the whole block is bound ONCE ('shareResult'),
+            -- collapse to true), and the whole block is bound ONCE ('closeResult'),
             -- with the fields below projected off it.
             --
             -- It used to be kept inline and unpacked field by field, i.e. one copy
@@ -10167,14 +10168,14 @@ applyBinding meta cumulative rt binding sample = do
             -- Only a body that itself holds a probabilistic let is bound. The
             -- duplication compounds only through such nesting, and a leaf body
             -- factor is typically an indicator whose dim and flag fold to
-            -- constants inline but not through a tuple ('shareResult' records
+            -- constants inline but not through a tuple ('closeResult' records
             -- the -O2 cost of routing constants through one), so the innermost
             -- level keeps the inline form -- and single-let programs their
             -- emitted code.
             let bodyReadable = if bindingIsSink then notIR readsAnyW else notIR anyW
-            let bodyBlock = (toInvCN, appliedSample) : bodyBinds
+            let bodyBlock = openWith [(toInvCN, appliedSample)] () *> bodyO
             bodyRes <- shareUnlessLeaf sr "body_factor" (holdsProbabilisticLet bodyExpr)
-                         [guard, bodyReadable] bodyBlock bodyRes0
+                         [guard, bodyReadable] bodyBlock
             -- Independent factors: probabilities multiply, dims add, branch counts add.
             let combined = prodP sr scaled bodyRes
             -- A sink's body factor absorbs a wildcard-VALUED witness, which is
@@ -10197,9 +10198,9 @@ applyBinding meta cumulative rt binding sample = do
             unevaluable <- if not singleUse then return (constResult anyRefusal) else do
               let openBody = bindBody binding
               let openMeta = withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN
-              r <- lift ((Just <$> runWriterT (toIRInference openMeta cumulative openBody sample))
-                           `catchError` (\_ -> return Nothing))
-              -- Bound ONCE ('shareResult'), like the body factor above: unpacked
+              r <- (Just <$> scoped (toIRInference openMeta cumulative openBody sample))
+                     `catchError` (\_ -> return Nothing)
+              -- Bound ONCE ('closeResult'), like the body factor above: unpacked
               -- inline, every field of the result carried its own copy of the
               -- open body, which holds the next binding's fold and so its own
               -- four copies -- ~8x per binding on independent single-use lets
@@ -10211,16 +10212,16 @@ applyBinding meta cumulative rt binding sample = do
               -- through such nesting, and a leaf block's constant dim and flag
               -- fold away inline but not through the shared tuple.
               case r of
-                Just (openRes, binds) ->
+                Just openO ->
                   shareUnlessLeaf sr "open_body" (holdsProbabilisticLet openBody)
-                    [guard, if bindingIsSink then readsAnyW else anyW] binds openRes
+                    [guard, if bindingIsSink then readsAnyW else anyW] openO
                 Nothing -> return (constResult anyRefusal)
             let whenAny whenAnySink whenUneval
                   | bindingIsSink = IRIf readsAnyW whenUneval whenAnySink
                   | singleUse     = whenUneval
                   | otherwise     = anyRefusal
             let guardAny ok whenAnySink whenUneval = IRIf anyW (whenAny whenAnySink whenUneval) ok
-            return (mapResult wrapInLambdas (guardedZero (zip3Result guardAny combined bodyRes unevaluable)))
+            return (underLambdas lambdaVars (guardedZero (zip3Result guardAny combined bodyRes unevaluable)))
    -- The engines of a probabilistic application, as data, in dispatch order
    -- (task engine-applicability-as-data): each entry's applicability is the
    -- predicate the modality engine's let rule reads too, and its

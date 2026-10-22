@@ -223,7 +223,7 @@ nested `let`'s transported y-point), an interval its CDF difference, a
 `WChoice` either side at runtime. The factor is compiled in its own writer
 scope into a self-contained block that is let-bound **once** (`WFactor` carries
 the binding), and `measureWorld` emits it under the world's guards through
-`shareResult`. Folding the block into each of the four `PResult` fields instead
+`closeResult`. Folding the block into each of the four `PResult` fields instead
 (as `residueFactor` does) copied it four times per nesting level: a fuzz
 program with a fresh `draw` nested in an x-free field grew to 23MB of `-O0`
 IR and compiled 6x slower, enough to trip the fuzz per-case deadline. That answers the program above as
