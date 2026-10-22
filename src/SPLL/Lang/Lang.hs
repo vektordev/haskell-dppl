@@ -451,6 +451,11 @@ unionMultiValues a b = error ("unionMultiValues: mismatched value-set shapes " +
 -- for Int and Symbol (unbounded domains) and for recursive ADTs (would not terminate).
 autoDeriveMultiValue :: [ADTDecl] -> RType -> Either String MultiValue
 autoDeriveMultiValue _ TFloat = Right MultiContinuous
+-- A Float tensor's elements are each continuous (a diagonal Gaussian head);
+-- any other element type has no probabilistic plan (decision C of design
+-- tensors-in-core-language), which the Validator refuses with its own
+-- diagnostic before a plan is ever asked for.
+autoDeriveMultiValue _ (TTensor _ TFloat) = Right MultiContinuous
 autoDeriveMultiValue _ TBool = Right (MultiDiscretes [VBool True, VBool False])
 autoDeriveMultiValue _ TInt = Left "cannot auto-derive an enumeration for Int (unbounded) - specify the values explicitly, e.g. [0,1,2,...,10]"
 autoDeriveMultiValue _ TSymbol = Left "cannot auto-derive an enumeration for Symbol - specify the values explicitly"

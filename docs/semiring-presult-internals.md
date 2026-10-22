@@ -7,7 +7,7 @@
 `density`/`mass`/`detP`, `prodP` is independent conjunction, branches mix
 via `mixP`/`mixSubP`, enumeration sums via `enumSumP`, and the
 change-of-variables correction (`scaleCoV`) reads the result's own dim so
-call sites never name it. `shareResult` binds a sub-result's floated
+call sites never name it. `closeResult` binds a sub-result's floated
 let-in block once and projects fields off it instead of re-wrapping the
 block per field — the difference between linear and geometric IR growth as
 nesting deepens; the zero-probability guard must still sit on the bound
@@ -177,16 +177,86 @@ should not: the copies sit in the else-arms of two different `isAny` ifs, so
 sharing them means hoisting the enumeration above the guard whose job is to
 skip it on a marginal query.
 
-`anySafeShared` binds the packed result once instead, on `shareResult`'s rules
+`anySafeShared` binds the packed result once instead, on `closeResult`'s rules
 — only the fields that actually read the block go into the tuple, so a
 statically-known dim or flag stays the constant it is rather than being hidden
-from folding. It is gated on `blockIterates`: share only when the block
-contains a **loop** (`IRMap`, `BMap`, or `BReduce`). That gate is
-a claim about run time, not size — what makes a second copy cost anything is
-that it is a second traversal, and a block of constants and arithmetic folds to
-a few literals whether copied or not. A pre-optimization node count was tried
-first and is the wrong question: `test/cases/arithmetic/equalsCoin` builds ~100 nodes that
-fold to four literals, passing any size gate with nothing worth sharing.
+from folding. It is gated on `blockNests`, which has two halves:
+
+- `blockIterates`: the block contains a **loop** (`BMapList`, `BMap`,
+  `BReduce`) or a call (`IRApply`). That half is a claim about run time, not
+  size — what makes a second copy cost anything is that it is a second
+  traversal, and a block of constants and arithmetic folds to a few literals
+  whether copied or not. A pre-optimization node count was tried first and is
+  the wrong question: `test/cases/arithmetic/equalsCoin` builds ~100 nodes that
+  fold to four literals, passing any size gate with nothing worth sharing.
+- The block already holds a **copied field**: an `isAny`-guarded field whose
+  else-arm is a let-block, which is what `anySafe` leaves behind when a level
+  below declined to share (and what a shared level's binding looks like too).
+  Without this half a leaf block's copies compound under nesting: each
+  deconstructing level copies its child's copies into about three fields, and a
+  right-nested accessor over a mixture of tuples grew its -O0 IR ~7x per level
+  (task `structured-accessor-compile-blowup`, mechanism B). With it, one level of
+  copying is still allowed — a shallow program keeps its folded output — and
+  every level from the second on shares, so the IR grows linearly.
+
+`IROptimizer.foldConstProjections` recovers most of the cost of the shared
+tuple: a projection off a let-bound tuple whose every arm puts the same literal
+at that position (the dim 0 or the `False` flag of both the `isAny` defaults and
+the computed result) folds to that literal, so the tests reading it fold as they
+did inline.
+
+### The one rule: bind a non-atomic block
+
+A `PResult` has four fields, and any construction that puts a non-atomic
+expression into more than one of them copies it; when the expression holds a
+sub-result built the same way, the copies multiply per nesting level. That is
+the cause of most of this compiler's exponential compile times, and each was
+introduced by a fix that looked local. So (task
+`presult-unbound-block-copied-per-field`):
+
+- `unpackResult` takes a `Varname`. A block is bound first (`mkVariable` +
+  `setVariables`, a `WFactor`'s block, or `closeResult`) and the variable
+  unpacked. `packedProb` reads just the probability off a packed expression,
+  one read.
+- A sub-result's floated bindings are re-attached through `closeResult` (bound
+  once under guards), `guardedResult` (`guardP` semantics, the block inline in
+  its one reader or bound once), or `shareUnlessLeaf` (a leaf block, which holds
+  no sub-result and so cannot compound, is copied inline into its readers,
+  keeping its constants foldable).
+- World factors (`WFactor`) carry their block as an `Open PResult`;
+  `measureWorld` and `measurePlanWorlds` bind it under the world's guards.
+
+### Scopes are opaque: the rule by construction
+
+The rule above is enforced by types (design
+`presult-blocks-shared-by-construction`). `CompilerM` is a newtype in
+`SPLL.Semiring` that exports no `MonadWriter`: a sub-compile that wants its
+own bindings runs under `scoped :: CompilerM a -> CompilerM (Open a)`, and an
+`Open a` holds the value and its scope's bindings without exporting the
+bindings. The only ways out:
+
+| function | what it does | copies of the block |
+|---|---|---|
+| `closeExpr o f` | wrap the block around one expression built from the value (a lambda or loop body, a packed result) | 1 |
+| `closeResult sr tag guards o` (and `guardedResult`, `shareUnlessLeaf`, `anySafeShared`) | close back into a `PResult`: bind once under the guards and project, inline when at most one field reads it | 1 |
+| `inline o` | re-emit the bindings into the enclosing scope; only for scopes opened to inspect (it makes the block eager there, so never across a guard) | 1 |
+| `unsafeDistributeBlock o` | the escape hatch: copy the block into each reading field. Every use carries a comment with its reason; `grep unsafeDistributeBlock` is the audit | up to 4 |
+| `openValue o` | drop the bindings: for a scope run only for its result's structure (a probe) | 0 |
+
+Questions about a block go through `openReads`, `openIterates`, `openNests`,
+`openIsEmpty`, `openBlockSize` and `openNames`; `splitOpen` partitions a block
+(the loop-invariant bindings `splitHoistable` hoists); `Open` is an
+`Applicative` whose `<*>` concatenates blocks (a world's set measure and its
+factors). `runCompilerMonad` hands back the top-level scope as an `Open` too.
+There is no `mapResult`: the per-field transforms that remain are named for
+what they do (`underLambdas`, `substResult`, `errorWhen`) and add no binding. A factor that several
+  worlds share is still emitted once per world (task
+  `budget-zero-exponential-in-nested-enum-ifs` owns grouping them).
+
+Measured over the 751 corpus programs that compile in 60 s (Python, haskell-dppl
+`5776efa` against this change): -O0 output 54.9 MB → 35.5 MB, -O2 output
+13.72 MB → 13.09 MB (−4.7%). Sharing every Any-safe block at two readers instead
+of using the nesting test came out about 1% larger at -O2.
 
 Measured over the corpus: emitted scalar Python totals 68% of its former size
 (`clevrEqualLargeMetalSphere*` 2.8x smaller, the `mNistAdd` family 1.6–1.8x),

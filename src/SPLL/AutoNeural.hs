@@ -140,10 +140,12 @@ data InputSlot = InputSlot
   } deriving (Show, Eq)
 
 -- | The flat packing order of a network input: element-major, tuple fields left to
--- right, tensor elements row-major (outermost axis first). The same order
--- 'MockNN' packs and unpacks a mock input in, and the one a real network's input
--- tensor is expected to follow. Only admissible input types ('isNeuralInputType')
--- have a layout.
+-- right, tensor elements row-major (outermost axis first). The order 'MockNN'
+-- packs and unpacks a mock input in. It is /not/ a contract on a real network:
+-- the emitted code passes the input structurally (a tuple stays a tuple, so a
+-- denoiser receives @(x_t, t)@ apart for its timestep embedding; decision
+-- D-input of task tensor-gaussian-heads-rd-diffusion), and nothing flattens it.
+-- Only admissible input types ('isNeuralInputType') have a layout.
 inputSlots :: RType -> [InputSlot]
 inputSlots = fst . go 0 ""
   where
@@ -169,7 +171,8 @@ inputLayoutString TSymbol = "Symbol (an opaque handle, passed to the network unc
 inputLayoutString ty =
   intercalate "\n" (heading : map tableLine (headerRow : sepRow : rows))
   where
-    heading = "layout (" ++ show (inputWidth ty) ++ " values; element-major: tuple fields left to right, tensor elements row-major)"
+    heading = "layout (" ++ show (inputWidth ty) ++ " values; element-major: tuple fields left to right, tensor elements row-major; "
+              ++ "the mocks' packing order -- a network receives the input structurally)"
     rows = [ (rangeStr (slotStart sl) (slotWidth sl), prettyRType (slotElem sl), meaning sl) | sl <- inputSlots ty ]
     meaning sl =
       let what = case slotShape sl of
@@ -195,6 +198,18 @@ inputLayoutString ty =
 -- 'makeForwardDecl') and each endpoint's writeLogits function (NN2's input, via the
 -- writeLogits doc).  Multi-line output is safe: codegen comments every line of a doc
 -- (see CodeGenPyTorch/CodeGenJulia).
+--
+-- __The layout is a wire format.__ A trained network's output head is laid out
+-- by it, so changing any plan's slot order is a retraining event for every
+-- checkpoint trained against it. In particular a tensor ('TensorPlan') is
+-- laid out /element-major/, elements row-major: @[mu_1, sigma_1, mu_2,
+-- sigma_2, ...]@ for a @Tensor[n] Float@ (decision D6 of design
+-- tensors-in-core-language). That is what @n@ times the element plan gives,
+-- and it is the layout of the equivalent nested-tuple program
+-- (@(Float, (Float, ...))@), so a network trained against the tuple spelling
+-- reads the tensor spelling unchanged. Should a tensor of tuples ever be
+-- admitted and prefer field-major (structure-of-arrays) order, this table
+-- would carry two conventions.
 planLayoutString :: PartitionPlan -> String
 planLayoutString plan =
   intercalate "\n" (heading : tableLine headerRow : tableLine sepRow : map tableLine rows)
@@ -232,6 +247,17 @@ planLayoutString plan =
                    MultiDiscretes vals -> "enum " ++ show rty ++ " " ++ showVals vals
                    _                   -> "enum " ++ show rty
       in ([(rangeStr ix n, "softmax", sub path desc)], ix + n)
+    -- One row for the whole tensor rather than one per element, so the
+    -- layout table, like the reader, is O(1) in the tensor's size.
+    planRows ix path p@(TensorPlan sh elemPlan) =
+      let n = getSize p
+          w = getSize elemPlan
+          desc = "Tensor" ++ prettyShape sh ++ " elements, element-major, row-major: element k is "
+                 ++ (if elemPlan == Continuous
+                       then "Gaussian mu at " ++ show ix ++ " + " ++ show w ++ "k, sigma (> 0) at "
+                              ++ show (ix + 1) ++ " + " ++ show w ++ "k"
+                       else "slots " ++ show ix ++ " + " ++ show w ++ "k ..")
+      in ([(rangeStr ix n, "per element", sub path desc)], ix + n)
     planRows ix path Continuous =
       ([ (show ix,       "free", sub path "Gaussian mu")
        , (show (ix + 1), "> 0",  sub path "Gaussian sigma") ], ix + 2)
@@ -288,6 +314,15 @@ data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: firs
                    | Discretes RType MultiValue -- Logit layout: Enumerated values in order of "tagToValues"
                    | ADTPlan String [(String, [PartitionPlan])] -- Logit layout: Flag for each constructor (none for a single one, see 'adtFlagSlots'), then each field of each constructor
                    | Continuous -- Logit layout: Mu, Sigma
+                   -- | A tensor of independent elements, each laid out by the
+                   -- element plan (task tensor-gaussian-heads-rd-diffusion).
+                   -- Logit layout: element-major, elements row-major -- the
+                   -- whole element plan of element 0, then of element 1, ...
+                   -- See 'planLayoutString' for why that order is a wire format.
+                   -- Only a 'Continuous' element is built ('makePartitionPlan'):
+                   -- a tensor is probabilistic only over Float (decision C of
+                   -- design tensors-in-core-language).
+                   | TensorPlan Shape PartitionPlan
                    deriving (Show, Eq)
 
 vector :: String
@@ -295,6 +330,10 @@ vector = "l_x_neural_out"
 
 symbol :: String
 symbol = "l_x_neural_in"
+
+-- | The element-position binder of a tensor plan's reader and sampler.
+tensorElemVar :: String
+tensorElemVar = "l_x_neural_el"
 
 -- The read-logits network's reader assembles its result tuple by hand rather than through
 -- IRCompiler's PResult algebra, so the impossibility flag (design
@@ -358,6 +397,31 @@ makeProbRec sr _adtDecls Continuous ix sample = (noAny sr sample p, noAnyDim0 sa
     sigma = IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]
     mu = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
     p = scaledNormalDensity sr (IROp OpDiv (IROp OpSub sample mu) sigma) [sigma]
+-- A tensor of independent Gaussians, one BMap over the element axis
+-- ('BIota'): element k reads its (mu, sigma) at slots ix + 2k, ix + 2k + 1 --
+-- the element-major layout -- so the emitted reader is O(1) in the tensor's
+-- size. The per-element log-densities are summed (a product of densities is a
+-- sum of logs, and 'BReduce' has no product operator), then carried into the
+-- compile's semiring. Under the log semiring an element's log-density is the
+-- native log-pdf leaf; under the linear one it is the log of the linear leaf,
+-- which is what the batched backend lowers (it has no log-pdf leaf) and the
+-- same leaf the scalar Gaussian slot reads. The dim is the element count: one per element, as the
+-- equivalent tuple program's 'prodP' would add up. Rank 1 only, the one rank
+-- the Validator admits for an output (the text backends render no other).
+makeProbRec sr _adtDecls (TensorPlan sh Continuous) ix sample =
+  (noAny sr sample p, noAnyDim0 sample (IRConst (VInt (shapeNumel sh))), IRConst (VFloat 0))
+  where
+    k = tensorElemVar
+    slot off = IRBuiltin BListIndex [IRVar vector,
+                 IROp OpPlus (IRConst (VInt (ix + off))) (IROp OpMult (IRConst (VInt 2)) (IRVar k))]
+    mu = slot 0
+    sigma = slot 1
+    x = IRBuiltin (BIndex 0) [sample, IRVar k]
+    dens = scaledNormalDensity sr (IROp OpDiv (IROp OpSub x mu) sigma) [sigma]
+    logDens = if srLogSpace sr then dens else IRUnaryOp OpLog dens
+    logP = IRBuiltin (BReduce ROpAdd 0) [IRBuiltin BMap [IRLambda k logDens, IRBuiltin (BIota sh) []]]
+    p = if srLogSpace sr then logP else IRUnaryOp OpExp logP
+makeProbRec _ _ plan@(TensorPlan _ _) _ _ = error ("makeProbRec: only a Float tensor has a plan, got " ++ show plan)
 --Not entirely sure how to combine elements in the next case. For now:
 --  probabilities of the two tuple elements are multiplied.
 --  dims should be added.
@@ -430,6 +494,15 @@ makeGenRec _adtDecls (Discretes _rty (MultiDiscretes vals)) ix = lottery (map va
 makeGenRec _adtDecls Continuous ix = IROp OpPlus
   (IROp OpMult (IRSample IRNormal) (IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]))
   (IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)])
+-- A Float tensor: element k is mu_k + sigma_k * z_k with a fresh z_k per
+-- element, its slots read as in 'makeProbRec'.
+makeGenRec _adtDecls (TensorPlan sh Continuous) ix =
+  IRBuiltin BMap [IRLambda k (IROp OpPlus (IROp OpMult (IRSample IRNormal) (slot 1)) (slot 0)), IRBuiltin (BIota sh) []]
+  where
+    k = tensorElemVar
+    slot off = IRBuiltin BListIndex [IRVar vector,
+                 IROp OpPlus (IRConst (VInt (ix + off))) (IROp OpMult (IRConst (VInt 2)) (IRVar k))]
+makeGenRec _ plan@(TensorPlan _ _) _ = error ("makeGenRec: only a Float tensor has a plan, got " ++ show plan)
 -- Flags occupy one slot per constructor *present in the plan* ('adtFlagSlots'), then the
 -- fields follow -- matching getSize and makeProbRec.  A depth-limited recursive ADT prunes
 -- constructors at its deepest level, so the plan's constructor count can be smaller than the
@@ -504,6 +577,7 @@ getSize (Discretes _ (MultiDiscretes vals)) = length vals
 getSize (Discretes ty tag) = discretesTagError "getSize" ty tag
 getSize (ADTPlan _ plans) = sum (map (sum . map getSize . snd) plans) + adtFlagSlots plans
 getSize Continuous = 2
+getSize (TensorPlan sh p) = shapeNumel sh * getSize p
 
 -- | Constructor-flag slots an 'ADTPlan' region carries ahead of its field blocks: one
 -- softmax slot per constructor present in the plan -- except a lone constructor, which
@@ -558,6 +632,9 @@ makePartitionPlan _adtDecls ty@(TEither {}) (Just tag) = error ("MultiValue anno
 makePartitionPlan _adtDecls ty@(TADT _) (Just tag) = error ("MultiValue annotation for ADT type " ++ show ty ++ " must be a matching ADT, e.g. {...}, but got: " ++ show tag)
 makePartitionPlan _adtDecls ty (Just tag@(MultiDiscretes _)) | isDiscrete ty = Discretes ty tag
 makePartitionPlan _adtDecls TFloat (Just MultiContinuous) = Continuous
+-- A Float tensor: an independent Gaussian per element (a diagonal head). The
+-- annotation is the element's, so @of Real@ (or none) is the only one.
+makePartitionPlan _adtDecls (TTensor sh TFloat) (Just MultiContinuous) = TensorPlan sh Continuous
 makePartitionPlan _adtDecls ty (Just tag) | isDiscrete ty = error ("MultiValue annotation for discrete type " ++ show ty ++ " must be an explicit enumeration (e.g. [0,1,2]), but got: " ++ show tag)
 makePartitionPlan _adtDecls TFloat (Just tag) = error ("enum range supplied to continuous (Float) value in AutoNeural: " ++ show tag ++ ". Use 'Real' or '_' for a continuous value instead.")
 makePartitionPlan _adtDecls x y = error ("erroneous combination of type and tag in AutoNeural: " ++ show x ++ " / " ++ show y)
@@ -662,6 +739,10 @@ makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan
     in bindAll (concatLists (flagSlots : map ctorFields ctors))
 
   Discretes ty tag -> discretesTagError "makeWriteLogitsPlan" ty tag
+
+  -- Invariant: a tensor's continuous slots name no generated normal function
+  -- ('requiredNormalFns'), so every writeLogits over one is refused before this.
+  TensorPlan _ _ -> error "makeWriteLogitsPlan: a tensor plan has no writeLogits (refused by requiredNormalFns)"
   where
     rec w nf n p = makeWriteLogitsPlan w probFnName nf n p outerArgs
     irList       = irListE
@@ -723,6 +804,9 @@ deadSlotFill pre plan = case plan of
     [ irListE [sigmoid (IRSample IRNormal)]
     , deadSlotFill (pre ++ "_left") a
     , deadSlotFill (pre ++ "_right") b ]
+  -- Invariant: the Validator admits a tensor output only outside every
+  -- Either/ADT arm, so no dead region holds one.
+  TensorPlan _ _ -> error "deadSlotFill: a tensor plan inside an Either/ADT arm (refused by the Validator)"
   ADTPlan _ ctors -> concatIR $
     (if adtFlagSlots ctors == 0 then irListE [] else softmaxNoise (pre ++ "_flags") (length ctors))
     : [ fillPlans (pre ++ "_" ++ cName) fps | (cName, fps) <- ctors ]
@@ -829,14 +913,15 @@ validateWriteLogitsGaussian adtDecls registry neuralDecls env = mapM_ checkDecl 
       let plan     = makePartitionPlan adtDecls target (resolvePartitionAnnotation registry target tag)
           required = requiredNormalFns "main_normal" plan
           missing  = filter (`notElem` available) required
-      in if null missing then Right () else Left (writeLogitsGaussianError name)
-    writeLogitsGaussianError name =
+      in if null missing then Right () else Left (writeLogitsGaussianError name missing)
+    writeLogitsGaussianError name missing =
       "writeLogits: neural declaration '" ++ name ++ "' has a continuous output slot that cannot "
-      ++ "be written. Either it is not Gaussian (a mixture produced by `if`, a product of "
-      ++ "random variables), or it is a continuous payload inside an Either/ADT that is not "
-      ++ "one Gaussian given its constructor (a mixture, a payload gated by its own value, or "
-      ++ "one produced where the compiler cannot see it), so it is refused rather than "
-      ++ "silently zero-stubbed."
+      ++ "be written (no " ++ intercalate ", " missing ++ "). Either it is not Gaussian (a mixture "
+      ++ "produced by `if`, a product of random variables), or it is a continuous payload inside "
+      ++ "an Either/ADT that is not one Gaussian given its constructor (a mixture, a payload gated "
+      ++ "by its own value, or one produced where the compiler cannot see it), so it is refused "
+      ++ "rather than silently zero-stubbed. To fit such a value into the slot, wrap it in "
+      ++ "`collapse`, which moment-matches it to a Gaussian."
 
 -- | Normal-parameter function names that `writeLogits` references for the Continuous slots of a
 -- plan.  Mirrors the name threading in `makeWriteLogitsPlan` (top-level `main_normal`,
@@ -864,6 +949,10 @@ requiredNormalFns nf (ADTPlan _ ctors) =
   concat [ requiredNormalFns (nf ++ "_" ++ cName ++ "_" ++ show j) fp
          | (cName, fps) <- ctors, (j, fp) <- zip [0 :: Int ..] fps ]
 requiredNormalFns _  (Discretes _ _)   = []
+-- A tensor has no scalar normal function: a name no compile generates, so a
+-- writeLogits over it is refused rather than built (task
+-- tensor-gaussian-heads-rd-diffusion; writing a tensor's logits is not built).
+requiredNormalFns nf (TensorPlan _ _)  = [nf ++ "_tensor"]
 
 -- | Every Continuous slot of a plan: its position suffix in the 'requiredNormalFns' name
 -- scheme (@""@ for a bare Continuous plan) and the offset of its mu (sigma follows).  The
@@ -880,6 +969,7 @@ continuousSlotPaths = go [] 0
   where
     go p ix Continuous      = [(p, ix)]
     go _ _  (Discretes _ _) = []
+    go _ _  (TensorPlan _ _) = []
     go p ix (TuplePlan a b)  = go (p ++ ["_fst"]) ix a ++ go (p ++ ["_snd"]) (ix + getSize a) b
     go p ix (EitherPlan a b) = go (p ++ ["_left"]) (ix + 1) a ++ go (p ++ ["_right"]) (ix + 1 + getSize a) b
     go p ix (ADTPlan _ ctors) =
@@ -1003,6 +1093,7 @@ fitPlanToSupport support plan = case plan of
         rs' = map fitCtor ctors
     in (ADTPlan name (map fst rs'), concatMap snd rs')
   Continuous -> (plan, [])
+  TensorPlan _ _ -> (plan, [])
   Discretes _ _ -> (plan, [])
   where
     both k (p1, u1) (p2, u2) = (k p1 p2, u1 ++ u2)
@@ -1022,6 +1113,7 @@ closedDomainCovered ty ds = maybe False (all (`elem` ds)) (closedDomain ty)
 -- function).
 planUsesProb :: PartitionPlan -> Bool
 planUsesProb Continuous       = False
+planUsesProb (TensorPlan _ _) = False
 planUsesProb (TuplePlan a b)  = planUsesProb a || planUsesProb b
 planUsesProb (Discretes _ _)  = True
 planUsesProb (EitherPlan _ _) = True

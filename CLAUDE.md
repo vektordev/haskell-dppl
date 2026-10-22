@@ -46,6 +46,7 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
 - Store test output in a temp file and grep that. Don't rerun to grep again.
 - CLI flags: `-v`, `-O 0-2`, `-k CUTOFF` (topK), `-c` (branch counts), `-d`
   (dump AST/IR after each stage), `--logSpace`, `--batched`, `--marginals`,
+  `--duplicationCensus` (copies of large subtrees in the -O0 IR),
   `--marginalSlots N`, `--materializationBudget N`, `--noTypeCheck`,
   `--pruneAnyChecks`, `--no{Integrate,Probability,Generate}`. Subcommand
   flags: `--help`.
@@ -140,6 +141,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `CompileWarnings` — compile-time warnings (non-blocking diagnostics), computed by `Prelude.programWarnings`/`compiledWarnings`.
 - `ReservedNames` — the single registry of compiler-claimed and target-language names.
 - `Prelude` — `compile`, smart constructors and the `run*` query entry points.
+- `DuplicationCensus` — counts copies of large subtrees in unoptimized IR, the tripwire for exponential compile blowups (`docs/testing.md`, "Duplication census").
 - `StageDiff` — compiles two equivalent programs side by side and names the first stage that diverges (`docs/testing.md`, "Rewrite invariance").
 - `Examples` — hand-built example programs.
 
@@ -165,7 +167,7 @@ stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
 | `neural.md` | neural declarations, input types (`Tensor`), `of` annotations, the categorical sampler, sharing one network call per argument, readLogits/writeLogits |
 | `batched-mode-pytorch-tensorizer.md` | batched backend, dense mode, refusals |
 | `backends.md` | runtime libraries under torch, float literals, Python nesting spill, safe unary math |
-| `testing.md` | suite layout, corpus sweeps (the registry and its cost table), `.tst` format and expectations, the known-issues corpus and its performance pins (growth over a templated family, code size), rewrite invariance, tiers, impact analysis (skipping unchanged checks), suite time, coverage-informed tiering, benchmarks |
+| `testing.md` | suite layout, corpus sweeps (the registry and its cost table), `.tst` format and expectations, the known-issues corpus and its performance pins (growth over a templated family, code size), the duplication census, rewrite invariance, tiers, impact analysis (skipping unchanged checks), suite time, coverage-informed tiering, benchmarks |
 | `fuzz-testing.md` | generators, shrinking, coverage, budgets, the admission-totality and backend-agreement properties |
 
 Design, task and investigation documents live in the separate

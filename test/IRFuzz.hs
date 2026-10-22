@@ -102,7 +102,6 @@ import SPLL.IntermediateRepresentation
 import SPLL.IRTypeCheck (IRType(..), checkIREnv, showIRType, showIRTypeError, irTypeOfRType)
 import SPLL.Semiring
 import SPLL.IRCompiler (stripBranchCount)
-import Control.Monad.Writer.Lazy (runWriterT)
 import SPLL.Typing.RType (RType(..), TVarR(..), shapeNumel)
 import IRInterpreter (generateDet, generateReplay)
 import qualified SPLL.CodeGenPyTorch as Py
@@ -686,6 +685,8 @@ genExpr sc t n
                  f <- funcOf s a
                  IRBuiltin BMap . (\te -> [f, te]) <$> genExpr sc (ITTensor sh s) half)
         ] ++
+        -- The element positions a tensor plan's reader maps over ('BIota').
+        [ (2, return (IRBuiltin (BIota sh) [])) | a == ITInt ] ++
         [ (3, do (op, operandTy) <- liftG (elements zs)
                  s <- operandTy
                  IRBuiltin (BZip op) <$> sequence [genExpr sc (ITTensor sh s) half, genExpr sc (ITTensor sh s) half])
@@ -1041,7 +1042,7 @@ data PPlan
   | PMixSub PPlan PPlan                         -- ^ not drawn under max-product ('srMinus' is undefined there)
   | PIf IRExpr PPlan PPlan                      -- ^ 'zipResult' of an 'IRIf'
   | PLet String IRExpr PPlan                    -- ^ a let-binding the sub-plan may read
-  | PShare [IRExpr] PPlan                       -- ^ 'shareResult' under guards
+  | PShare [IRExpr] PPlan                       -- ^ 'closeResult' under guards
   | PEnumSum Bool String MultiValue PPlan       -- ^ 'enumSumP', with or without branch counts
   | PEnumMix Bool IRExpr String MultiValue PPlan -- ^ 'enumMixP', with its density dim
   deriving (Show)
@@ -1090,14 +1091,14 @@ planLabels c =
 -- | The packed result the plan builds, its floated let-bindings around it.
 buildPlan :: SemiringChoice -> PPlan -> IRExpr
 buildPlan c plan = case runCompilerMonad (go plan) of
-  Right (r, binds) -> generateLetInExpr binds (packResult r)
+  Right o -> closeExpr o packResult
   Left refusal -> error ("IRFuzz.buildPlan: a combinator refused: " ++ show refusal)
   where
     sr = semiringFor c
-    nested p = lift (runWriterT (go p))
+    nested p = scoped (go p)
     packedOf p = do
-      (r, binds) <- nested p
-      return (generateLetInExpr binds (packResult r))
+      o <- nested p
+      return (closeExpr o packResult)
     go :: PPlan -> CompilerMonad PResult
     go pl = case pl of
       PDensity d x -> return (density (distDensity sr d x) x)
@@ -1126,15 +1127,15 @@ buildPlan c plan = case runCompilerMonad (go plan) of
         return (mkPResult (sealP x) (rDim r) (rBranches r) (rImposs r))
       PAnySafe x a -> anySafe sr x id <$> go a
       PAnySafeShared x a -> do
-        (r, binds) <- nested a
-        anySafeShared sr x binds r
+        o <- nested a
+        anySafeShared sr x o
       PMix a b -> mix (mixP sr) a b
       PMixSub a b -> mix (mixSubP sr) a b
       PIf cond a b -> zipResult (IRIf cond) <$> go a <*> go b
       PLet v e a -> setVariables [(v, e)] >> go a
       PShare guards a -> do
-        (r, binds) <- nested a
-        shareResult sr "share" guards binds r
+        o <- nested a
+        closeResult sr "share" guards o
       PEnumSum bc v dom a -> packedOf a >>= enumSumP sr bc id v dom
       PEnumMix bc dd v dom a -> packedOf a >>= enumMixP sr bc id dd v dom
     -- The caller's branch count, as an 'IfThenElse' passes it: both arms'.
@@ -1655,6 +1656,20 @@ knownDisagreements =
       (repro [] ITFloat
          (IRLetIn "g" (IRApply (IRLambda "x" (IRLambda "y" (IROp OpPlus (IRVar "x") (IRVar "y")))) (IRConst (VFloat 1)))
             (IRApply (IRVar "g") (IRConst (VFloat 2)))) [])
+  -- The batched backend uncurries the same way (its 'IRLambda' case merges
+  -- nested lambdas), shown by a partial application under a type test in a
+  -- max-product probability body; the let-bound repro above does not raise on
+  -- batched, so it cannot show it. Found by
+  -- prop_Fuzz_IRBackendsAgree (--quickcheck-replay=299099) on 2026-10-22,
+  -- shrunk.
+  , KnownFamily "text-backends-uncurry-lambdas-and-application-chains" ["python", "julia", "batched"]
+      (ByAnswer (\_ o a -> isValue o && (  (raisedWith "TypeError" a && raisedWith "positional argument" a)
+                                        || (raisedWith "MethodError: no method matching" a
+                                            && (raisedWith "var\"#" a || raisedWith "_normal(" a || raisedWith "_gen(" a)))))
+      (IRCase ProbBody (Just (SRMaxLog, True)) [("a0", ITFloat), ("a1", ITFloat)] (ITTuple ITFloat (ITTuple ITInt ITBool)) []
+         (IRConstruct TgTuple [IRConst (VFloat 0.0), IRConstruct TgTuple [IRConst (VInt 0),
+            IRUnaryOp OpIsAny (IRApply (IRLambda "p0" (IRLambda "f1" (IRConst VUnit))) (IRConst (VEither (Left (VFloat 0.0)))))]])
+         [[VFloat 800.0, VFloat (-2.5)]] [] [] ([], []))
   -- M4 (generate bodies, judged by replaying the backend's draws).
   --
   -- Both text backends lower a type-tag check by repeating its operand
@@ -2568,13 +2583,13 @@ accessorLabels = map (\a -> "Accessor:" ++ takeWhile (/= ' ') (show (accessorWit
 -- drawn with. A complete match, as above.
 builtinLabels :: [String]
 builtinLabels = map ("Builtin:" ++) $
-  [ "BTensor", "BMap", "BIndex", "BMapList", "BListIndex", "BCategoricalIndex" ]
+  [ "BTensor", "BMap", "BIndex", "BMapList", "BListIndex", "BCategoricalIndex", "BIota" ]
   ++ [ "BReduce " ++ show op | op <- [ROpAdd, ROpLogSumExp, ROpMax] ]
   ++ [ "BZip " ++ show op | op <- [OpPlus, OpMult, OpSub, OpDiv, OpMax, OpAnd, OpOr, OpApprox, OpLessThan, OpGreaterThan, OpEq] ]
   where
     _complete b = case b of
       BTensor _ -> (); BMap -> (); BReduce _ _ -> (); BIndex _ -> (); BZip _ -> ()
-      BMapList -> (); BListIndex -> (); BCategoricalIndex _ _ -> ()
+      BMapList -> (); BListIndex -> (); BCategoricalIndex _ _ -> (); BIota _ -> ()
 
 -- | The function-group and ADT shapes a case reaches (M3), for the coverage
 -- check.

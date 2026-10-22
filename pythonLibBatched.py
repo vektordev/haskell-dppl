@@ -761,6 +761,10 @@ def signature(v):
     return ('L',) + tuple(signature(x) for x in v)
   if isinstance(v, T):
     return ('T', signature(v.t1), signature(v.t2))
+  # A rank-1 tensor value (a plain list, as the IR's BTensor renders one; task
+  # tensor-gaussian-heads-rd-diffusion): its extent is structure.
+  if isinstance(v, list):
+    return ('V',) + tuple(signature(x) for x in v)
   if isinstance(v, Left):
     return ('L?', signature(v.val))
   if isinstance(v, Right):
@@ -796,6 +800,10 @@ def _pack(vs):
     return toList([_pack([s[i] for s in vs]) for i in range(len(head))])
   if isinstance(head, T):
     return T(_pack([s.t1 for s in vs]), _pack([s.t2 for s in vs]))
+  # A tensor packs element-wise into the batched tensor representation: a
+  # Python list of [B] columns.
+  if isinstance(head, list):
+    return [_pack([s[i] for s in vs]) for i in range(len(head))]
   if _is_enum_value(head):
     return EnumBatch(type(head)._enum, torch.tensor([s._enum_tag for s in vs]))
   if hasattr(head, '_fields'):

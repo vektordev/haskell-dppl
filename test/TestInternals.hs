@@ -24,8 +24,9 @@ import SPLL.Typing.ForwardChaining (WorldsShape(..))
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
-import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlot(..), inputSlots, inputWidth, inputLayoutString)
-import MockNN (flattenMockInput, mockInputFor, shapedMockLogits)
+import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlot(..), inputSlots, inputWidth, inputLayoutString, planLayoutString)
+import qualified SPLL.AutoNeural
+import MockNN (flattenMockInput, mockInputFor, shapedMockLogits, planAwareMockLogits)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IRGatherPass (gatherPassExpr)
@@ -53,7 +54,7 @@ import Data.Char (isAlphaNum)
 import Test.Tasty.QuickCheck (testProperties, testProperty)
 import System.Random (StdGen, mkStdGen)
 import Control.Monad.Random (Rand, evalRand)
-import Control.Monad (forM, forM_, when)
+import Control.Monad (forM, forM_, replicateM, when)
 import Data.Number.Erf (erf)
 import Utils (splitByString, reflexiveEq)
 import Data.Maybe (isJust)
@@ -2010,6 +2011,59 @@ test_setWitnessNestedDrawIfLinear = testCase "setWitnessNestedDrawIfLinear" $ do
       Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
         Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
         Right ir -> return (length (show ir))
+
+-- | Task presult-unbound-block-copied-per-field (mechanism B of
+-- structured-accessor-compile-blowup): a right-nested accessor over a mixture
+-- of tuples, @fst (fst (if .. then ((if .., True), True) else ..))@. Every
+-- deconstructing level is Any-safe, and 'anySafeShared' declined to share a
+-- block that does not iterate, so each level copied its child's block --
+-- which held the child's own copies -- into about three fields: the -O0 IR
+-- grew ~7x per level (128 MB of Python and 7 s at -O2 for four levels).
+-- 'Semiring.blockNests' now shares from the second nested level on. Pinned as
+-- the -O0 IR growth from depth 1 to depth 3: ~3x now, ~48x before; the bound
+-- of 8x fails on the old shape.
+test_deepAccessorOverMixtureLinear :: TestTree
+test_deepAccessorOverMixtureLinear = testCase "deepAccessorOverMixtureLinear" $ do
+  small <- sizeOf 1
+  large <- sizeOf 3
+  let ratio = fromIntegral large / fromIntegral small :: Double
+  assertBool ("-O0 IR grew " ++ show ratio ++ "x from depth 1 to depth 3 ("
+              ++ show small ++ " -> " ++ show large ++ ")")
+    (ratio < 8)
+  where
+    inner :: Int -> String
+    inner 0 = "(if Uniform < 0.5 then 1 else 2)"
+    inner d = "(if Uniform < 0.3 then (" ++ inner (d - 1) ++ ", True) else (" ++ zero (d - 1) ++ ", False))"
+    zero :: Int -> String
+    zero 0 = "0"
+    zero d = "(" ++ zero (d - 1) ++ ", False)"
+    src d = "main = " ++ concat (replicate d "fst (") ++ inner d ++ replicate d ')'
+    sizeOf :: Int -> IO Int
+    sizeOf d = case tryParseProgram "deepAccessor" (src d) of
+      Left err -> assertFailure ("parse error: " ++ show err) >> return 0
+      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
+        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+        Right ir -> return (length (show ir))
+
+-- | 'IROptimizer.foldConstProjections' (task
+-- presult-unbound-block-copied-per-field): a projection off a let-bound tuple
+-- folds to the literal every arm puts there, and only then. This is what lets
+-- a shared 'PResult' keep its statically-known dim and flag visible.
+test_foldConstProjectionsOffSharedTuple :: TestTree
+test_foldConstProjectionsOffSharedTuple = testCase "foldConstProjectionsOffSharedTuple" $ do
+  let c = IRUnaryOp OpIsAny (IRVar "s")
+      pack a b = IRConstruct TgTuple [a, b]
+      bound = IRIf c (pack (IRConst (VInt 0)) (IRConst (VFloat 1.0)))
+                     (IRLetIn "y" (IROp OpPlus (IRVar "s") (IRConst (VFloat 1.0)))
+                        (pack (IRConst (VInt 0)) (IRVar "y")))
+      -- The second field is read twice, so the binding stays a binding.
+      body = IRConstruct TgTuple [ IRDestruct AcFst (IRVar "v")
+                                 , IROp OpMult (IRDestruct AcSnd (IRVar "v")) (IRDestruct AcSnd (IRVar "v")) ]
+      opt = postProcess defaultCompilerConfig (IRLambda "s" (IRLetIn "v" bound body))
+      mentionsFstV e = e == IRDestruct AcFst (IRVar "v") || any mentionsFstV (getIRSubExprs e)
+      mentionsSndV e = e == IRDestruct AcSnd (IRVar "v") || any mentionsSndV (getIRSubExprs e)
+  assertBool ("the agreed-constant field was not folded: " ++ show opt) (not (mentionsFstV opt))
+  assertBool ("the disagreeing field was folded: " ++ show opt) (mentionsSndV opt)
 
 -- | Task field-constructor-prune-guard-exponential-in-width: a user-ADT
 -- constructor's field equation ORs each field's impossibility flag into an
@@ -6104,6 +6158,8 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   [ testProperties "properties" $(allProperties)
   , testGroup "tensor builtins" tensorBuiltinTests
   , shapedNeuralInputTests
+  , tensorGaussianHeadTests
+  , scalarDiffusionSamplerTest
   , categoricalIndexTests
   , gatherPassTests
   , untaggedShortCircuit
@@ -6164,6 +6220,8 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_shortGaussianTrajectoryVariantsCompact
   , test_nestedEqualityChainAnyArmConstant
   , test_setWitnessNestedDrawIfLinear
+  , test_deepAccessorOverMixtureLinear
+  , test_foldConstProjectionsOffSharedTuple
   , test_wideConstructorPruneGuardLinear
   , test_witnessFoldOpenBodyShared
   , test_recursiveListMissedCSE
@@ -6650,7 +6708,7 @@ reservedNameTests = testGroup "reserved names"
       -- p_ob<n>: the AST-level check must not refuse what the parser built.
       let src = unlines [ "isPos v = v > 0.0"
                         , "main = draw h : t = [1.0, 2.0] in observe (h + Normal) isPos" ]
-      prog <- either (\e -> assertFailure (show e) >> undefined) return (tryParseProgram "<test>" src)
+      prog <- either (\e -> assertFailure (show e)) return (tryParseProgram "<test>" src)
       assertEqual "validation" (Right ()) (validateProgram prog)
       -- Probability mode cannot invert through a named predicate (see
       -- SPLL.Parser.pObserve), so only the generate variant is compiled.
@@ -6803,4 +6861,80 @@ shapedNeuralInputTests = testGroup "shaped neural inputs"
       conforms t3 (VTensor [EFixed 3] (map VInt [1, 2, 3])) @?= Right (VBool False)
       conforms (TTensor [EFixed 3, EFixed 1] TFloat) (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool False)
       conforms t3 (VFloat 1) @?= Right (VBool False)
+  ]
+
+-- | Design diffusion-models-wishlist, M2: the toy 1-D diffusion's ancestral
+-- sampler draws the trajectories whose density neural/diffusionToy1D pins.
+-- The shaped-input mock makes mu (x, t) N(x, t), so the increments
+-- x0, x1 - x0, x2 - x1 are independent N(0, 1), N(0, 2), N(0, 1). The corpus
+-- sampling sweep does not reach this program (it is neural, of dimension 3).
+scalarDiffusionSamplerTest :: TestTree
+scalarDiffusionSamplerTest = testCase "the toy 1-D diffusion samples the trajectory its density describes" $ do
+  src <- readFile "test/cases/neural/diffusionToy1D.ppl"
+  prog <- either (\e -> assertFailure ("parse failed: " ++ show e)) return (tryParseProgram "<diffusionToy1D>" src)
+  gen <- either (\e -> assertFailure ("generate refused: " ++ show e)) return
+           (runGen defaultCompilerConfig prog [] :: Either CompilerError (Rand StdGen IRValue))
+  let n = 4000 :: Int
+      draws = evalRand (replicateM n gen) (mkStdGen 7)
+      asStates v = case v of
+        VList (ListCont (VFloat a) (ListCont (VFloat b) (ListCont (VFloat c) EmptyList))) -> Just (a, b, c)
+        _ -> Nothing
+  states <- case mapM asStates draws of
+    Just ss -> return ss
+    Nothing -> assertFailure ("a draw is not a three-state trajectory: " ++ show (take 3 draws))
+  let mean xs = sum xs / fromIntegral (length xs)
+      variance xs = let m = mean xs in mean [(x - m) ^ (2 :: Int) | x <- xs]
+      corr xs ys = let mx = mean xs; my = mean ys
+                   in mean (zipWith (\x y -> (x - mx) * (y - my)) xs ys) / sqrt (variance xs * variance ys)
+      d0 = [a | (a, _, _) <- states]
+      d1 = [b - a | (a, b, _) <- states]
+      d2 = [c - b | (_, b, c) <- states]
+      checkInc name xs sd = do
+        assertBool (name ++ " mean " ++ show (mean xs)) (abs (mean xs) < 4 * sd / sqrt (fromIntegral n))
+        assertBool (name ++ " variance " ++ show (variance xs) ++ ", expected " ++ show (sd * sd))
+          (abs (variance xs / (sd * sd) - 1) < 0.1)
+  checkInc "x0" d0 1
+  checkInc "x1 - x0" d1 2
+  checkInc "x2 - x1" d2 1
+  assertBool ("x1 - x0 correlates with x0: " ++ show (corr d0 d1)) (abs (corr d0 d1) < 0.08)
+  assertBool ("x2 - x1 correlates with x1: " ++ show (corr [b | (_, b, _) <- states] d2)) (abs (corr [b | (_, b, _) <- states] d2) < 0.08)
+
+-- | Task tensor-gaussian-heads-rd-diffusion: a tensor-valued Gaussian head's
+-- plan, its element-major layout, the plan-aware mock, and the reader's emitted
+-- size, which must not grow with the tensor's.
+tensorGaussianHeadTests :: TestTree
+tensorGaussianHeadTests = testGroup "tensor Gaussian heads"
+  [ testCase "a Tensor[n] Float plans as n Gaussian elements, 2n logits" $ do
+      let plan = makePartitionPlan [] (TTensor [EFixed 3] TFloat) Nothing
+      plan @?= TensorPlan [EFixed 3] Continuous
+      SPLL.AutoNeural.getSize plan @?= 6
+  , testCase "a tensor's layout is element-major, the layout of its tuple spelling" $ do
+      -- D6: [mu_1, sigma_1, mu_2, sigma_2]; the tuple twin is laid out the same
+      let layout = planLayoutString (makePartitionPlan [] (TTensor [EFixed 2] TFloat) Nothing)
+      assertBool ("expected the element-major row in:\n" ++ layout)
+        ("mu at 0 + 2k, sigma (> 0) at 1 + 2k" `isInfixOf` layout)
+      SPLL.AutoNeural.getSize (makePartitionPlan [] (Tuple TFloat TFloat) Nothing) @?= 4
+  , testCase "the plan-aware mock reads mu off input slot k, sigma 1/sqrt(2 pi), pads with 0" $ do
+      let s = 1 / sqrt (2 * pi)
+          plan = makePartitionPlan [] (TTensor [EFixed 2] TFloat) Nothing
+      planAwareMockLogits (Tuple (TTensor [EFixed 2] TFloat) TFloat) plan
+        (VTuple (VTensor [EFixed 2] [VFloat 3, VFloat 4]) (VFloat 9)) @?= [3, s, 4, s]
+      planAwareMockLogits TFloat plan (VFloat 0.5) @?= [0.5, s, 0, s]
+  , testCase "the emitted reader is O(1) in the tensor's size" $ do
+      -- d = 4 and d = 64 differ only in the digits of the extent: the reader is
+      -- one map over the element axis, not d inlined Gaussians
+      let src d = unlines
+            [ "neural mu :: ((Tensor[" ++ show d ++ "] Float, Float) -> Tensor[" ++ show d ++ "] Float)"
+            , "neural prior :: (Float -> Tensor[" ++ show d ++ "] Float)"
+            , "step t x = if t < 0.5 then [x] else x : step (t - 1.0) (mu (x, t))"
+            , "main = step 100.0 (prior 0.0)" ]
+          size d = case tryParseProgram "<test>" (src (d :: Int)) of
+            Left err -> assertFailure ("parse failed: " ++ show err) >> return 0
+            Right prog -> case compile defaultCompilerConfig prog of
+              Left err -> assertFailure ("compile failed: " ++ show err) >> return 0
+              Right env -> return (length (unlines (SPLL.CodeGenPyTorch.generateFunctions True env)))
+      s4 <- size 4
+      s64 <- size 64
+      assertBool ("emitted Python grew from " ++ show s4 ++ " to " ++ show s64 ++ " bytes")
+        (s4 > 0 && abs (s64 - s4) < 200)
   ]

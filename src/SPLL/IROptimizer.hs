@@ -15,6 +15,7 @@ module SPLL.IROptimizer (
 , deterministicGens
 , distributeIf
 , headHash
+, hashMix
 , allNamesIR
 ) where
 
@@ -472,7 +473,70 @@ optimizeLetIns det (IRLetIn name val scope)
   | duplicableBinding det val = replaceAll (IRVar name) val scope
   | countUses name scope == 1 && not (usedInEnumSumBodyInvariant name val scope) = replaceAll (IRVar name) val scope
   | countUses name scope == 0 = scope
+  | hasTupleLeaf val, scope' <- foldConstProjections name val scope, scope' /= scope = IRLetIn name val scope'
 optimizeLetIns _ ex = ex
+
+-- | Does some way of evaluating @e@ end in a tuple construction? The cheap
+-- pre-test for 'foldConstProjections'.
+hasTupleLeaf :: IRExpr -> Bool
+hasTupleLeaf e = case e of
+  IRConstruct TgTuple _ -> True
+  IRConst (VTuple _ _)  -> True
+  IRIf _ t f            -> hasTupleLeaf t || hasTupleLeaf f
+  IRLetIn _ _ b         -> hasTupleLeaf b
+  _                     -> False
+
+-- | Replace a projection off a let-bound tuple by the literal it is, wherever
+-- every way the bound value can evaluate puts the same literal at that
+-- position.
+--
+-- This is what keeps a shared 'PResult' from costing its constants (task
+-- presult-unbound-block-copied-per-field). 'Semiring.closeResult' and
+-- 'Semiring.anySafeShared' bind a sub-result once as a packed tuple, usually
+-- @if isAny(s) then <defaults> else (let .. in <fields>)@, and project its
+-- fields off that one binding. A field that is the same constant on every arm
+-- -- a dim of 0, a False impossibility flag -- used to stay an opaque
+-- projection, so every test reading it (a mixture's dim comparisons, a guard on
+-- the flag) survived to the emitted code. Folding it here lets those tests fold
+-- as they did when each field carried its own inline copy of the block.
+--
+-- Sound because only the projection is replaced: the binding itself stays, and
+-- is still evaluated (with any error or effect it has) wherever it was. A use
+-- under a binder that shadows @name@ is left alone.
+foldConstProjections :: Varname -> IRExpr -> IRExpr -> IRExpr
+foldConstProjections name val = go
+  where
+    go e = case projPath e of
+      Just path | Just v <- constAt path val -> IRConst v
+      _ -> case e of
+        IRLetIn n v b | n == name -> IRLetIn n (go v) b
+        IRLambda n _  | n == name -> e
+        _ -> setIRSubExprs e (map go (getIRSubExprs e))
+    -- The accessors from @name@ outward, for a chain of tuple projections
+    -- rooted at it.
+    projPath (IRDestruct ac inner)
+      | ac == AcFst || ac == AcSnd = (++ [ac]) <$> rootPath inner
+    projPath _ = Nothing
+    rootPath (IRVar n) | n == name = Just []
+    rootPath e = projPath e
+    -- The literal at @path@ of every value @e@ can evaluate to, if they agree.
+    constAt :: [Accessor] -> IRExpr -> Maybe IRValue
+    constAt path e = case e of
+      IRIf _ t f -> do
+        a <- constAt path t
+        b <- constAt path f
+        if a == b then Just a else Nothing
+      IRLetIn _ _ b -> constAt path b
+      IRConstruct TgTuple [a, b] -> case path of
+        AcFst : rest -> constAt rest a
+        AcSnd : rest -> constAt rest b
+        _            -> Nothing
+      IRConst v -> constValAt path v
+      _ -> Nothing
+    constValAt [] v = Just v
+    constValAt (AcFst : rest) (VTuple a _) = constValAt rest a
+    constValAt (AcSnd : rest) (VTuple _ b) = constValAt rest b
+    constValAt _ _ = Nothing
 
 -- | A binding whose value may be duplicated across all uses without changing
 -- semantics or blowing up code size: a literal constant, or a pure bare
@@ -848,6 +912,7 @@ forceAnyCheck _ (IRSample _) = IRConst $ VBool False
 forceAnyCheck _ (IRBuiltin (BTensor _) _) = IRConst $ VBool False
 forceAnyCheck _ (IRBuiltin BMap _) = IRConst $ VBool False
 forceAnyCheck _ (IRBuiltin (BReduce _ _) _) = IRConst $ VBool False
+forceAnyCheck _ (IRBuiltin (BIota _) _) = IRConst $ VBool False
 -- Push the check through the binding forms, so a scalar body above can decide
 -- it. Only kept when it actually decided: otherwise this would just relocate
 -- the test (and, for an if, duplicate it).

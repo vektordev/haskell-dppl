@@ -40,9 +40,10 @@ import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.QSem (newQSem, waitQSem, signalQSem)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
-import MockNN (evaluateMockNN, mockInputFor)
+import MockNN (evaluateMockNN, mockInputFor, MockSlot(..), planAwareMockSlots, planHasTensor)
 import ImpactManifest
 import CorpusSweep
+import TestDuplicationCensus (duplicationCensusSweep)
 import CertifiedCensus (programCensus, uncertifiedConstructs, batchedProgramCensus, batchedUncertifiedConstructs)
 import qualified Data.Map as Map
 
@@ -820,17 +821,31 @@ literalSymbolEnvelopes p tc = case tc of
 -- @Symbol@ network is the identity: its parameter arrives pre-resolved to raw
 -- logits ('resolveNeuralParams'). A shaped network gets the projection mock
 -- 'MockNN.shapedMockLogits' implements for the interpreter: the input flattened
--- in layout order, truncated or padded with @1.0@ to the plan's width.
+-- in layout order, truncated or padded with @1.0@ to the plan's width. A
+-- shaped network whose output holds a tensor gets the plan-aware mock instead
+-- ('MockNN.planAwareMockSlots'), whose recipe 'netMockRecipe' carries.
 data NetMock = NetMock
-  { netMockName  :: String
-  , netMockInput :: RType
-  , netMockWidth :: Int
+  { netMockName   :: String
+  , netMockInput  :: RType
+  , netMockWidth  :: Int
+  , netMockRecipe :: Maybe [MockSlot]
   } deriving (Show)
 
 -- | A program's declared networks, in declaration order -- what the
 -- Julia/Python harnesses install mocks for.
 networkMocks :: Program -> [NetMock]
-networkMocks p = [ NetMock nm (networkInput p nm) (SPLL.AutoNeural.getSize (networkPlan p nm)) | (nm, _, _) <- neurals p ]
+networkMocks p =
+  [ NetMock nm (networkInput p nm) (SPLL.AutoNeural.getSize plan)
+      (if planHasTensor plan then Just (planAwareMockSlots plan) else Nothing)
+  | (nm, _, _) <- neurals p, let plan = networkPlan p nm ]
+
+-- | A plan-aware mock recipe as a Python/Julia list of @(slot, constant)@
+-- pairs: slot @i >= 0@ reads flat input position @i@ (0.0 past the input's
+-- end), slot @-1@ is the constant.
+recipePairs :: [MockSlot] -> String
+recipePairs r = "[" ++ intercalate ", " (map pair r) ++ "]"
+  where pair (FromInput i) = "(" ++ show i ++ ", 0.0)"
+        pair (MockConst c) = "(-1, " ++ show c ++ ")"
 
 -- | Just the declared network names, for harnesses that install identity mocks
 -- (BackendAgreement).
@@ -839,14 +854,18 @@ networkNames p = [ nm | (nm, _, _) <- neurals p ]
 
 -- | The Python definition of a mock network.
 pyMockDef :: NetMock -> String
-pyMockDef (NetMock nm TSymbol _) = "def " ++ nm ++ "(s):\n    return s\n"
-pyMockDef (NetMock nm _ n) = unlines
+pyMockDef (NetMock nm TSymbol _ _) = "def " ++ nm ++ "(s):\n    return s\n"
+pyMockDef (NetMock nm _ n recipe) = unlines $
   [ "def " ++ nm ++ "(s):"
   , "    def _flat(v):"
   , "        if isinstance(v, T): return _flat(v.t1) + _flat(v.t2)"
   , "        if isinstance(v, list): return [float(x) for x in v]"
-  , "        return [float(v)]"
-  , "    return (_flat(s) + [1.0] * " ++ show n ++ ")[:" ++ show n ++ "]" ]
+  , "        return [float(v)]" ]
+  ++ case recipe of
+       Nothing -> [ "    return (_flat(s) + [1.0] * " ++ show n ++ ")[:" ++ show n ++ "]" ]
+       Just r  -> [ "    f = _flat(s)"
+                  , "    return [((f[i] if i < len(f) else 0.0) if i >= 0 else c) for (i, c) in "
+                      ++ recipePairs r ++ "]" ]
 
 -- | The Julia definitions of a module's mock networks (inside the module, after
 -- @using ..JuliaSPPLLib@, so the runtime's tuple 'T' is in scope).
@@ -859,8 +878,11 @@ juliaMockDefs nets =
      else "")
   ++ concatMap def nets
   where
-    def (NetMock nm TSymbol _) = nm ++ "(s) = s\n"
-    def (NetMock nm _ n) = nm ++ "(s) = vcat(_nest_flat(s), fill(1.0, " ++ show n ++ "))[1:" ++ show n ++ "]\n"
+    def (NetMock nm TSymbol _ _) = nm ++ "(s) = s\n"
+    def (NetMock nm _ n Nothing) = nm ++ "(s) = vcat(_nest_flat(s), fill(1.0, " ++ show n ++ "))[1:" ++ show n ++ "]\n"
+    def (NetMock nm _ _ (Just r)) =
+      nm ++ "(s) = (f -> Float64[i >= 0 ? (i < length(f) ? f[i + 1] : 0.0) : c for (i, c) in "
+        ++ recipePairs r ++ "])(_nest_flat(s))\n"
 
 -- | The batched-Python mock: a column of @[B, ...]@ inputs in, @[B, n]@ logits
 -- out. A tensor input has its trailing axes flattened, row-major. A scalar or
@@ -868,11 +890,38 @@ juliaMockDefs nets =
 -- left to right into @[B, k]@, padded with ones and cut to @n@ columns. Any
 -- other input raises, so such a program fails the batched differentials
 -- loudly rather than passing on the identity.
+--
+-- A plan-aware mock (an output holding a tensor) reads its recipe off the
+-- input's flattened @[B, k]@ columns. Its tensor input may be a program
+-- parameter (a @[B, n]@ torch tensor) or a tensor the program computed (the
+-- batched backend's list of @[B]@ columns), so both are flattened.
 batchedMockExpr :: NetMock -> String
-batchedMockExpr (NetMock _ TSymbol _) = "(lambda s: s)"
-batchedMockExpr (NetMock _ (TTensor sh _) n) =
+batchedMockExpr (NetMock _ TSymbol _ _) = "(lambda s: s)"
+batchedMockExpr (NetMock nm ty _ (Just r)) = case flatCols ty "s" of
+  Just flat ->
+    "(lambda s: (lambda f: torch.stack([((f[..., i] if i < f.shape[-1] else torch.zeros(f.shape[:-1])) "
+    ++ "if i >= 0 else torch.full(f.shape[:-1], c)) for (i, c) in " ++ recipePairs r ++ "], -1))("
+    ++ flat ++ "))"
+  Nothing ->
+    "(lambda s: (_ for _ in ()).throw(NotImplementedError(" ++ show ("no batched mock for network " ++ nm ++ " with input " ++ prettyRType ty) ++ ")))"
+  where
+    flatCols t v
+      | t `elem` [TFloat, TInt, TBool] =
+          Just ("torch.as_tensor(" ++ v ++ ", dtype=torch.float).reshape(-1, 1)")
+    flatCols (TTensor sh _) v =
+      Just ("(torch.stack(torch.broadcast_tensors(*[torch.as_tensor(_e, dtype=torch.float).reshape(-1) for _e in "
+            ++ v ++ "]), -1) if isinstance(" ++ v ++ ", list) else torch.as_tensor(" ++ v
+            ++ ", dtype=torch.float).flatten(" ++ show (negate (shapeRank sh)) ++ ").reshape(-1, "
+            ++ show (shapeNumel sh) ++ "))")
+    flatCols (Tuple a b) v = do
+      fa <- flatCols a (v ++ ".t1")
+      fb <- flatCols b (v ++ ".t2")
+      Just ("(lambda a, b: torch.cat([a.expand(max(a.shape[0], b.shape[0]), -1), "
+            ++ "b.expand(max(a.shape[0], b.shape[0]), -1)], -1))(" ++ fa ++ ", " ++ fb ++ ")")
+    flatCols _ _ = Nothing
+batchedMockExpr (NetMock _ (TTensor sh _) n Nothing) =
   "(lambda s: s.flatten(" ++ show (negate (shapeRank sh)) ++ ")[..., :" ++ show n ++ "])"
-batchedMockExpr (NetMock nm ty n) = case flatCols ty "s" of
+batchedMockExpr (NetMock nm ty n Nothing) = case flatCols ty "s" of
   Just flat ->
     "(lambda s: (lambda x: torch.cat([x, torch.ones(x.shape[0], " ++ show n ++ ")], -1)[..., :"
     ++ show n ++ "])(" ++ flat ++ "))"
@@ -2195,16 +2244,20 @@ runPythonChecks name src checks = do
 -- interpreter, but its constructs are all certified by the agreement
 -- fuzzers, so the corpus does not run it on Python; this does. The IR-level
 -- cases (scalar, Julia and batched) are in "IRFuzz".
+--
+-- Since task presult-unbound-block-copied-per-field the program no longer
+-- reaches the shape: the cell list's lets were projections off a shared
+-- result tuple whose constant fields now fold ('foldConstProjections'), and
+-- no small int product found since builds one. The fix is held by IRFuzz's
+-- 'letInComprehensionIterableCases', which construct the IR directly; this
+-- keeps the program's answers on Python.
 comprehensionIterableLetTests :: TestTree
 comprehensionIterableLetTests = testGroup "let in a comprehension iterable (backends-agree-python-walrus-in-comprehension-iterable)"
   [ testProperty name $ once $ ioProperty $ do
       prog <- corpusPplPath name >>= parseProgram
       (_, _, _, tcs) <- corpusTstPath name >>= parseTestCases
       let env = compile defaultCompilerConfig prog
-          bindsAnIterable = either (const False) (isInfixOf "((_it" . torchFreePythonModule) env
-      return $ counterexample "the module binds no comprehension iterable, so this no longer reaches the fix"
-                 bindsAnIterable
-          .&&. testPython [] env tcs
+      return (testPython [] env tcs)
   ]
   where name = "intProductLetInComprehensionIterable"
 
@@ -2978,6 +3031,10 @@ containsStructureV VUnit        = True
 -- there is what lets an ADT-valued program (e.g. a `Color` result) join the
 -- differential at all -- before, its whole group was refused as unbatchable.
 containsStructureV (VADT _ _)   = True
+-- A tensor value goes through the wrapper too, which packs it element-wise
+-- into the batched backend's list of [B] columns (@pythonLibBatched._pack@;
+-- task tensor-gaussian-heads-rd-diffusion).
+containsStructureV (VTensor _ _) = True
 containsStructureV _            = False
 
 -- | 'VAnyExcept' (a wildcard excluding specific values) is the one ANY-like
@@ -4353,8 +4410,10 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
           in testProperty n (once $ cachedProperty manifest (check "Python Unoptimized") n (pythonKey manifest [] (unopt e) (queries e))
                                       (testPython [] (unopt e) (queries e)))
     ]
+  -- The duplication census reads the same -O0 compiles (design ir-duplication-census).
+  census <- if includeBackends then (: []) <$> duplicationCensusSweep corpus path unopt else return []
   let headers = [ headerBackendsTests entries | includeBackends ]
-  return $ testGroup treeName ([interp, interpUnopt] ++ headers ++ backends)
+  return $ testGroup treeName ([interp, interpUnopt] ++ headers ++ backends ++ census)
   where
     -- The manifest slot prefix: the sweep's full group name.
     check grp = treeName ++ "." ++ grp

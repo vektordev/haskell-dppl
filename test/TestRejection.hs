@@ -1465,53 +1465,25 @@ stepTwoReadersSrc =
   "main = draw x = Normal in (if x < 0.0 then 0.0 - x else x) * (if x < 0.0 then 0.0 - x else x)"
 
 -- ----------------------------------------------------------------------------
--- A shared Gaussian latent: design pipeline-coherence's F2 row, still open
+-- A shared Gaussian latent: the joint affine engine (design affine-gaussian-forms M2)
 -- ----------------------------------------------------------------------------
 
--- These two pin a *defect*, not a contract, and they are here so that the
--- remaining half of task @unwitnessed-gaussian-let-chain-admitted-but-crashes@
--- has an executable instance rather than only prose in the docs repo. Its
--- single-use half (@let x = Normal in let y = x + Normal in y@) was briefly
--- closed at @003f933@ by a substitution pass, @SPLL.Typing.LetInline@, which
--- has since been reverted: substitution answers the single-use shape only, and
--- the multi-use shape below is the same defect with the remedy removed. Both
--- halves are now owned by @affine-gaussian-forms@, which represents the latent
--- rather than rewriting it away. The multi-use half is also filed as
--- @correlated-gaussian-let-shares-latent@.
+-- These pinned a defect for as long as nothing in the compiler represented a
+-- bivariate Gaussian (task correlated-gaussian-let-shares-latent): first a
+-- compile-time crash, then, after affine-form-as-law-certificate, a missing
+-- variant ('JSharedLatent'). Design affine-gaussian-forms M2's joint affine
+-- engine answers the first program for real: @(a, b)@ is bivariate normal
+-- with covariance @[[2,1],[1,2]]@, so at the origin the density is the
+-- correlated @1/(2*pi*sqrt 3) = 0.0918882@, never the decorrelated
+-- @1/(4*pi) = 0.0795775@ a rewrite substituting @x@ at each use would give.
+-- (The corpus pins the same number, @let-bindings/correlatedGaussianLetSharesLatent@.)
 --
--- Each sum is Gaussian (it has an affine form), and no engine compiles them:
--- @x@ has two uses, so substitution is unavailable — it would replace one
--- shared draw with two independent ones and silently decorrelate the output —
--- and the honest density is a *bivariate* Gaussian (covariance @[[2,1],[1,2]]@
--- for the first program) that nothing in the compiler represents.
---
--- __When these fail, read them before changing them.__ Three landings move
--- them, and each wants a different edit. The first two have landed:
---
--- * [[static-refusals-become-absent-variants]] (P1) makes a static refusal an
---   absent variant. The refusal then arrives as @Right (Left …)@ and the whole
---   compile survives, so 'assertSharedLatentRefusal' moves to the declined
---   branch and the third case below inverts: @compile@ succeeds and @generate@
---   works. That is the fix landing, and the cases must be updated, not deleted.
--- * The affine form as a law certificate (law-carrying-modality M4,
---   [[affine-form-as-law-certificate]]) types these @Bottom@: the tuple's
---   fields share a marginal latent, and its certificate says so
---   ('JSharedLatent'). The probability variant is a missing variant, and
---   @generate@ is unaffected. ([[engine-applicability-as-data]] (P3) would
---   have had the same effect.)
--- * A multivariate-Gaussian capability (@affine-gaussian-forms@) answers them
---   for real. Then they stop
---   being rejection cases and become corpus cases pinning the correlated
---   density — at a point where it differs from the decorrelated one, which for
---   @(a, b)@ at @(0, 0)@ is @1/(2*pi*sqrt 3) = 0.0918882@ against
---   @1/(4*pi) = 0.0795775@. A rewrite that decorrelates them passes any weaker
---   check.
---
--- What must never happen is one of these quietly starting to return a number
--- without one of those three landing: that is the decorrelated answer, and it
--- is wrong by 15% at the origin.
+-- The second shares the sum itself: @(x + y, x + y)@ has the singular
+-- covariance @[[2,2],[2,2]]@, a degenerate law the engine does not measure
+-- (the rank is milestone M4). It must stay a recorded refusal, with generate
+-- intact, rather than a number from a covariance it cannot invert.
 
--- Two sums over one latent. Both slots recover the same @x@, correlating them.
+-- Two sums over one latent. Both slots read the same @x@, correlating them.
 sharedLatentTwoSumsSrc :: String
 sharedLatentTwoSumsSrc =
   "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)"
@@ -1523,38 +1495,35 @@ sharedLatentTwoUsesSrc =
 
 setWitnessSharedLatentTests :: TestTree
 setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
-  [ testCase "two sums over one latent are a missing variant, never silently decorrelated" $
+  [ testCase "two sums over one latent answer the correlated density, never the decorrelated one" $
       withParsed sharedLatentTwoSumsSrc $ \prog -> do
         res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
-        assertSharedLatentRefusal "two sums over one latent" res
-  , testCase "two uses of one sum are a missing variant, never silently decorrelated" $
+        case res of
+          Left ex -> assertFailure ("two sums over one latent crashed: " ++ show ex)
+          Right (Left e) -> assertFailure ("two sums over one latent were refused: " ++ e)
+          Right (Right (VTuple (VFloat p) (VTuple (VInt d) _))) -> do
+            assertBool ("expected the correlated 1/(2 pi sqrt 3) = 0.0918882 at the origin, got " ++ show p
+                        ++ (if abs (p - 1 / (4 * pi)) < 1e-6 then " -- the decorrelated answer" else ""))
+              (abs (p - 1 / (2 * pi * sqrt 3)) < 1e-9)
+            assertEqual "dimension of a bivariate density" 2 d
+          Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
+  , testCase "two uses of one sum are a recorded refusal (singular covariance), never a number" $
       withParsed sharedLatentTwoUsesSrc $ \prog -> do
         res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
-        assertSharedLatentRefusal "two uses of one sum" res
-  , testCase "generate survives the absent probability variant" $
-      -- Inverted by static-refusals-become-absent-variants: the refusal used to
-      -- be a compile-time 'error' that took 'generate' down with it. Since
-      -- affine-form-as-law-certificate the variant is not compiled at all.
-      withParsed sharedLatentTwoSumsSrc $ \prog -> do
+        case res of
+          Right (Left e) -> assertBool ("expected the singular-covariance refusal, got: " ++ e)
+            ("has no compiled probability function" `isInfixOf` e && "singular covariance" `isInfixOf` e)
+          Left ex -> assertFailure ("two uses of one sum crashed instead of recording a refusal: " ++ show ex)
+          Right (Right v) -> assertFailure ("two uses of one sum were ACCEPTED, returning " ++ show v
+                                            ++ " -- the covariance [[2,2],[2,2]] is singular")
+  , testCase "generate survives the refused probability variant" $
+      withParsed sharedLatentTwoUsesSrc $ \prog -> do
         let compiled = compile defaultCompilerConfig prog
-        assertBool "the probability variant of a shared-latent tuple was compiled"
+        assertBool "the probability variant of a singular shared-latent tuple was compiled"
           (either (const False) (isNothing . probFun . lookupIREnv "main") compiled)
-        assertBool "generate was taken down with the absent probability variant"
+        assertBool "generate was taken down with the refused probability variant"
           (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   ]
-  where
-    -- The modality pass types the tuple Bottom, so the answer is the
-    -- missing-variant one, and no number comes back.
-    assertSharedLatentRefusal what res = case res of
-      Right (Left e) -> assertBool
-        ("expected the missing-variant answer for " ++ what ++ ", got: " ++ e)
-        ("has no compiled probability function" `isInfixOf` e)
-      Left ex -> assertFailure
-        (what ++ " crashed instead of recording a refusal: " ++ show ex)
-      Right (Right v) -> assertFailure
-        (what ++ " was ACCEPTED, returning " ++ show v ++ " -- a shared latent has a \
-         \bivariate density no engine implements, so a number here is the \
-         \decorrelated one (0.0795775 against the correct 0.0918882 at the origin)")
 
 -- Task set-witness-interval-partial-inverse: interval transport through a
 -- monotone InjF chain covers exactly 'ForwardChaining.stepMonotonicity's
@@ -2051,10 +2020,30 @@ tensorTypeTests =testGroup "TensorTypes"
           Left ex -> assertFailure ("compile crashed: " ++ show ex)
           Right _ -> assertBool "compile refused" (not (isLeft (compile defaultCompilerConfig prog)))
 
-  , testCase "a tensor-typed neural output is refused (tensors S2)" $ do
-      msg <- validationRefusal "neural n :: (Symbol -> Tensor[3] Float)\nmain s = n s\n"
-      assertBool ("expected the tensor-output refusal in: " ++ msg)
-        ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+  -- Tensors S2 (task tensor-gaussian-heads-rd-diffusion): a rank-1 Float
+  -- tensor is a diagonal Gaussian head, as the whole output or a tuple field.
+  , testCase "a Float tensor neural output is admitted, whole or in a tuple field" $
+      forM_ [ "neural n :: (Symbol -> Tensor[3] Float)\nmain s = n s\n"
+            , "neural n :: (Symbol -> (Tensor[3] Float, Bool))\nmain s = n s\n" ] $ \src ->
+        withParsed src $ \prog -> assertEqual src (Right ()) (validateProgram prog)
+
+  , testCase "a Tensor[3] Bool neural output is refused: only Float tensors are probabilistic" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> Tensor[3] Bool)\nmain s = n s\n"
+      assertBool ("expected the element-type refusal in: " ++ msg)
+        ("Tensor[3] Bool has Bool elements. Only Float tensors are probabilistic outputs" `isInfixOf` msg)
+
+  , testCase "a Tensor[3] Int neural output is refused, inside a tuple too" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> (Float, Tensor[3] Int))\nmain s = n s\n"
+      assertBool ("expected the element-type refusal in: " ++ msg)
+        ("Only Float tensors are probabilistic outputs" `isInfixOf` msg)
+
+  , testCase "a rank-2 tensor neural output is refused" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> Tensor[2, 2] Float)\nmain s = n s\n"
+      assertBool ("expected the rank refusal in: " ++ msg) ("must have rank 1" `isInfixOf` msg)
+
+  , testCase "a tensor under an Either of a neural output is refused" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> Either Tensor[2] Float Float)\nmain s = n s\n"
+      assertBool ("expected the placement refusal in: " ++ msg) (tensorPlacement `isInfixOf` msg)
 
   -- neural-output-tensor-check-misses-adt-fields: the output check looked
   -- through tuples and lists but not ADT fields, so a tensor field crashed
@@ -2063,16 +2052,16 @@ tensorTypeTests =testGroup "TensorTypes"
       [ testCase "with an of clause" $ do
           msg <- validationRefusal (tensorAdtSrc " of {Img Real}")
           assertBool ("expected the tensor-output refusal in: " ++ msg)
-            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+            (tensorPlacement `isInfixOf` msg)
       , testCase "without an of clause" $ do
           msg <- validationRefusal (tensorAdtSrc "")
           assertBool ("expected the tensor-output refusal in: " ++ msg)
-            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+            (tensorPlacement `isInfixOf` msg)
       , testCase "through mutually recursive ADTs" $ do
           msg <- validationRefusal
             "data A = A0 | A1 b::B\ndata B = B0 | B1 a::A, t::Tensor[2] Float\nneural n :: (Symbol -> A)\nmain s = n s\n"
           assertBool ("expected the tensor-output refusal in: " ++ msg)
-            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+            (tensorPlacement `isInfixOf` msg)
       , testCase "a recursive ADT without a tensor field is still accepted" $
           withParsed "data Chain = End | Link hd::Float, tl::Chain\nneural n :: (Symbol -> Chain)\nmain s = n s\n" $ \prog ->
             assertEqual "" (Right ()) (validateProgram prog)
@@ -2105,6 +2094,61 @@ tensorTypeTests =testGroup "TensorTypes"
                 VFloat _ -> return ()
                 v -> assertFailure ("generate returned a non-float: " ++ show v)
       ]
+
+  -- The marginal of the final state of an R^d diffusion: no state is in the
+  -- output, so every network input is random and unwitnessed and each read is
+  -- a continuous mixture with no closed form (task
+  -- tensor-gaussian-heads-rd-diffusion). Its trajectory twin is
+  -- neural/tensorDiffusionTrajectory.
+  , testGroup "the marginal of a diffusion's final state is sample-only"
+      [ testCase "probability is a missing variant" $
+          withParsed diffusionMarginalSrc $ \prog -> do
+            res <- forcedProb prog (VTensor [EFixed 4] (map VFloat [0, 0, 0, 0]))
+            case res of
+              Left ex -> assertFailure ("crashed the compiler: " ++ show ex)
+              Right (Left e) -> assertBool
+                ("expected the missing-variant answer, got: " ++ e)
+                ("has no compiled probability function" `isInfixOf` e)
+              Right (Right v) -> assertFailure ("compiled to a probability function (" ++ show v ++ ")")
+      , testCase "generate still draws a Tensor[4] Float" $
+          withParsed diffusionMarginalSrc $ \prog ->
+            case runGen defaultCompilerConfig prog [] of
+              Left e -> assertFailure ("generate refused: " ++ e)
+              Right r -> case evalRand r (mkStdGen 1) of
+                VTensor [EFixed 4] xs | all isFloat xs -> return ()
+                v -> assertFailure ("generate returned something else: " ++ show v)
+      ]
+  -- The scalar twin, spelled as design diffusion-models-wishlist's M2 wrote
+  -- it (a Normal initial state). Its trajectory twin is neural/diffusionToy1D.
+  , testGroup "the marginal of a scalar diffusion's final state is sample-only"
+      [ testCase "probability is a missing variant" $
+          withParsed scalarDiffusionMarginalSrc $ \prog -> do
+            res <- forcedProb prog (VFloat 0.0)
+            case res of
+              Left ex -> assertFailure ("crashed the compiler: " ++ show ex)
+              Right (Left e) -> assertBool
+                ("expected the missing-variant answer, got: " ++ e)
+                ("has no compiled probability function" `isInfixOf` e)
+              Right (Right v) -> assertFailure ("compiled to a probability function (" ++ show v ++ ")")
+      , testCase "generate still draws a Float" $
+          withParsed scalarDiffusionMarginalSrc $ \prog ->
+            case runGen defaultCompilerConfig prog [] of
+              Left e -> assertFailure ("generate refused: " ++ e)
+              Right r -> case evalRand r (mkStdGen 1) of
+                VFloat _ -> return ()
+                v -> assertFailure ("generate returned something else: " ++ show v)
+      ]
   ]
   where
+    scalarDiffusionMarginalSrc = unlines
+      [ "neural mu :: ((Float, Float) -> Float)"
+      , "step t x = if t < 0.5 then x else step (t - 1.0) (mu (x, t))"
+      , "main = step 2.0 Normal" ]
+    isFloat v = case v of { VFloat _ -> True; _ -> False }
+    tensorPlacement = "may only be the whole output or a tuple field of it"
+    diffusionMarginalSrc = unlines
+      [ "neural mu :: ((Tensor[4] Float, Float) -> Tensor[4] Float)"
+      , "neural prior :: (Float -> Tensor[4] Float)"
+      , "step t x = if t < 0.5 then x else step (t - 1.0) (mu (x, t))"
+      , "main = step 3.0 (prior 0.0)" ]
     sampleOnlyReadSrc = "neural mu :: (Float -> Float)\nmain = mu Normal\n"

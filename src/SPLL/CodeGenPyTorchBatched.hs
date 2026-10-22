@@ -53,7 +53,7 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Typing.RType (RType(TFloat), shapeRank)
+import SPLL.Typing.RType (RType(TFloat), shapeRank, shapeNumel)
 import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
 import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
 -- 'pyDouble' is shared with the scalar backend for the same reason
@@ -2335,6 +2335,11 @@ batchedExpr env (IRIsPossible multiVal expr) =
 batchedExpr env (IRBuiltin (BTensor sh) elems)
   | shapeRank sh == 1 = "[" ++ intercalate ", " (map (batchedExpr env) elems) ++ "]"
   | otherwise = error (batchedRankUnsupported "BTensor" (shapeRank sh))
+-- The element positions are plain Python ints: an index is the same in every
+-- row of the batch, so it needs no batch axis.
+batchedExpr _ (IRBuiltin (BIota sh) [])
+  | shapeRank sh == 1 = "list(range(" ++ show (shapeNumel sh) ++ "))"
+  | otherwise = error (batchedRankUnsupported "BIota" (shapeRank sh))
 batchedExpr env (IRBuiltin BMap [IRLambda name body, t]) =
   bindIterable ("_it_" ++ name) (batchedExpr env t)
     (\it -> "[" ++ batchedExpr (bindMap env name t) body ++ " for " ++ name ++ " in " ++ it ++ "]")

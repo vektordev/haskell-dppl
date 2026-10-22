@@ -1,0 +1,4 @@
+-- collapse: the moment-matched Gaussian of a two-component mixture
+-- (task encode-07-collapse-operator): mu = 0.25*0 + 0.75*4 = 3,
+-- sigma^2 = 0.25*(4 + 9) + 0.75*(1 + 1) = 4.75.
+main = collapse (if Uniform < 0.25 then Normal * 2.0 else Normal + 4.0)

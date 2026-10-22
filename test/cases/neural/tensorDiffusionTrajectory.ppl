@@ -1,0 +1,5 @@
+neural mu :: ((Tensor[4] Float, Float) -> Tensor[4] Float)
+neural prior :: (Float -> Tensor[4] Float)
+
+step t x = if t < 0.5 then [x] else x : step (t - 1.0) (mu (x, t))
+main = step 3.0 (prior 0.0)

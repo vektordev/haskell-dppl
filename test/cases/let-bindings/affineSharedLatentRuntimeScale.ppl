@@ -1,0 +1,1 @@
+main th = draw x = Normal * th in (x + Normal, x + Normal)

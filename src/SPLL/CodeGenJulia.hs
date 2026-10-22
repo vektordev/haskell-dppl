@@ -401,6 +401,10 @@ generateExpression (IRBuiltin (BTensor sh) elems)
         es <- mapM generateExpression elems
         return $ "[" ++ intercalate ", " es ++ "]"
     | otherwise = error (juliaRankUnsupported "BTensor" (shapeRank sh))
+-- The element positions, 0-based like every IR index (BIndex adds the 1).
+generateExpression (IRBuiltin (BIota sh) [])
+    | shapeRank sh == 1 = return $ "collect(0:" ++ show (shapeNumel sh - 1) ++ ")"
+    | otherwise = error (juliaRankUnsupported "BIota" (shapeRank sh))
 generateExpression (IRBuiltin BMap [IRLambda v body, t]) = do
     b <- generateExpression body
     tt <- generateExpression t

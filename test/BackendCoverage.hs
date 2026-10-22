@@ -71,6 +71,7 @@ fuzzCoverageExceptions =
   [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (lambdaThetaInverse, affineChainEndpoint)")
   , ("Builtin:BIndex",     "agreement point query: needs the agreement fusion's `right v` arm over a contiguous Int domain (categoricalProductFusion)")
+  , ("Builtin:BIota",      "tensor Gaussian head: the generator draws no tensor-valued neural output (tensorDiffusionTrajectory, tensorHeadLayout)")
   , ("Builtin:BMapList",   "list map: the generator has no higher-order map over a list (map, mapMultList)")
   , ("Builtin:BZip OpMult", "agreement fusion: needs two independent categoricals compared with == (categoricalProductFusion)")
   , ("Operand:OpMax",      "max is forward-only and reaches an inference body only with enumerable operands (maxEnumerateBoth)")
@@ -103,6 +104,7 @@ batchedFuzzCoverageExceptions =
   -- task batched-fuzz-arms-never-compare-list-map-or-zip-product.
   [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (gaussianTrajectory4, theta)")
+  , ("Builtin:BIota",      "tensor Gaussian head: the typed generator draws no tensor-valued neural output, and the IR generator's batched arm builds no tensor plan reader (tensorDiffusionTrajectory, tensorHeadLayout)")
   , ("Builtin:BMapList",   "list map: the typed generator has no higher-order map over a list, and the IR generator's batched cases map a list only in helper bodies (mapMultList)")
   , ("Builtin:BZip OpMult", "agreement fusion: the typed generator never builds two independent categoricals compared with ==, and the interpreter answers none of the IR generator's batched zipped products (categoricalProductFusion)")
   ]

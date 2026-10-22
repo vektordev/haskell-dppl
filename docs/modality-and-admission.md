@@ -66,6 +66,19 @@ twin was declined. `projectNode` now recurses down the arrow spine, as it
 already did for a `Var` referencing the function; IRCompiler's `pt` and
 `ptUnderLambdas` therefore agree.
 
+**An observed `if` under a deterministic condition passes the observation to
+its arms** (task `tensor-gaussian-heads-rd-diffusion`). The witness question
+of a binding (`isWitnessedLambda`) is seeded at the context's observed node
+(`icObs`), the declaration root. When that root is an `if` whose condition's
+law is `Exact`, each arm is inferred with `icObs` set to the arm: whichever
+arm runs, its value is the observation, and IRCompiler compiles each arm
+against the same sample. Without it, the recursive call in
+`step t x = if t < 0.5 then [x] else x : step (t - 1.0) (mu x)` bound its
+parameter unwitnessed (the observation could not reach the else arm through
+the `if`), so the inner `mu x` read a random input and the trajectory was
+`Bottom`. Arithmetic steps such as `distributions/ouChainRecursive` never
+showed it: an unwitnessed Gaussian argument still gives a Gaussian.
+
 ## Recovered variables are re-inferred, not re-typed
 
 Once an engine fixes a variable's value -- the point-witness fold recovering it
@@ -162,6 +175,7 @@ order:
 | plan-guided enumeration | `AutoNeural.planReadOf` (a neural read whose declaration yields a plan) | the network |
 | point inversion | `ForwardChaining.pointWitnessCert` (`toInvExprMaybe`, seeded at the lambda's body) | the inverse, and the root-seeded witness verdict |
 | affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |
+| joint affine marginalisation | `ModalityInfer.jointAffineBindingCert` (an affine form with latents, read by a spine of affine bindings ending in a tuple of at most 3 affine fields) | the form |
 | set-valued witnesses | `ForwardChaining.worldsShape`, `invertToWorlds`' shape walk without its IR | the shape |
 
 For a `draw` (a lambda in place) whose argument is random, not a function of
@@ -194,10 +208,9 @@ way to convert to IR"), the Bottom-argument `Apply` arm, the InjF form checks,
 the generate-backed enumeration guard, the Normal/LogNormal parameter
 extractors, a CDF call under an extra semiring -- it calls `Semiring.refuse`
 rather than `error` (task `static-refusals-become-absent-variants`, design
-`pipeline-coherence` P1). `CompilerMonad` is
+`pipeline-coherence` P1). `CompilerMonad` wraps
 `WriterT [...] (ExceptT VariantRefusal Supply)`: the `ExceptT` sits *under*
-the writer so the many `lift (runWriterT ...)` sub-scopes keep their shape and
-a refusal passes through them. `runCompile` answers `Either`, and
+the writer so a refusal passes through every `scoped` sub-scope. `runCompile` answers `Either`, and
 `envToIRUnoptimized'` turns a `Left` into an absent variant whose reason is
 kept in `IRFunGroup.refusedVariants` (keyed `gen`/`prob`/`integ`/`normal`/
 `writeLogits`) -- the same observable as a `Bottom` verdict, so `generate`

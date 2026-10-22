@@ -909,6 +909,10 @@ generateExpression (IRBuiltin (BTensor sh) elems)
 -- A comprehension rather than map(lambda ...): it binds the loop variable
 -- directly, saving a Python call per element, and the bound name is already a
 -- valid identifier.
+-- The element positions as a flat list of ints: rank 1, as for 'BTensor'.
+generateExpression (IRBuiltin (BIota sh) [])
+  | shapeRank sh == 1 = return ("list(range(" ++ show (shapeNumel sh) ++ "))")
+  | otherwise = error (rankUnsupported "BIota" (shapeRank sh))
 generateExpression (IRBuiltin BMap [IRLambda v body, t]) = do
   b <- generateExpression body
   tt <- generateExpression t

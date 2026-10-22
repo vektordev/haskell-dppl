@@ -155,7 +155,7 @@ certifiedConstructs =
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcSubtree",
     "Accessor:AcTail", "Accessor:AcTheta",
-    "Builtin:BCategoricalIndex", "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BMapList",
+    "Builtin:BCategoricalIndex", "Builtin:BIndex", "Builtin:BIota", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BMapList",
     "Builtin:BReduce ROpAdd", "Builtin:BReduce ROpLogSumExp", "Builtin:BReduce ROpMax",
     "Builtin:BTensor", "Builtin:BZip OpAnd", "Builtin:BZip OpApprox", "Builtin:BZip OpDiv",
     "Builtin:BZip OpEq", "Builtin:BZip OpGreaterThan", "Builtin:BZip OpLessThan",

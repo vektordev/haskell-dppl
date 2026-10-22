@@ -6,8 +6,11 @@
 -- D=4, 7 s at D=5, at 5c4627b). The pin reads the compile's allocation at the
 -- default -O2. It holds until both halves are fixed: docs tasks
 -- anyexcept-any-arm-compiled-instead-of-constant (about 5x per level after it)
--- and anyexcept-twin-point-compiled-twice.
+-- and anyexcept-twin-point-compiled-twice. Since
+-- presult-unbound-block-copied-per-field shares the Any-safe blocks the levels
+-- copied, it is about 2.2x per level (the twin point; 0.4 s at D=8), so the
+-- knob reaches further to see it: at D = 1..4 the slopes stayed under the bound.
 expect-failure: growth above polynomial 2
-knob: D = 1, 2, 3, 4
+knob: D = 2, 4, 6, 8
 metric: alloc
 flags: --noIntegrate
