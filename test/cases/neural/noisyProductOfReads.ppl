@@ -1,0 +1,3 @@
+neural readD :: (Symbol -> Int) of [0, 1, 2]
+toF v = if v == 0 then 0.0 else if v == 1 then 1.0 else 2.0
+main a b = draw x = readD a in draw y = readD b in (toF x) * (toF y) + Normal * 0.5

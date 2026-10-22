@@ -27,8 +27,9 @@ flag, and the fold follows `mixWith`'s rule (impossible terms dropped, a
 possible atom outvotes any density, equal dims sum). It decides "lowest dim"
 by an `ROpAdd` count of possible dim-0 terms rather than a max/min reduction,
 because the batched backend refuses `ROpMax`; that is sufficient only because
-a scalar's dim is 0 or 1. Its one caller is the mixed enumerate-and-shift/scale
-rule, whose "continuous" operand is known only to be a `Float` -- it may be a
+a scalar's dim is 0 or 1. Its caller is the mixed enumerate-and-shift/scale
+rule (over the operand's values, or over its draws' cells via
+`IRCompiler.latentCellSum`, `docs/enumeration.md`), whose "continuous" operand is known only to be a `Float` -- it may be a
 plan-answered discrete count or an atom/density mixture (task
 plan-sum-with-sunk-discrete-draw-reports-density; corpus
 `plan-enumeration/planSumWithSunkDiscreteDraw`,

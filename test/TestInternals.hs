@@ -2404,6 +2404,72 @@ test_wideProductSceneTopKQueryPolynomial = testCase "wideProductSceneTopKQueryPo
                >> error "unreachable")
             (\(p, d) -> p `seq` d `seq` return (p, d)) res
 
+-- | A Gaussian observation of a product of K digit reads costs one term per
+-- digit cell (task noisy-observation-mixes-over-result-value-domain). The
+-- mixed enumerate-and-shift equation looped over the product's value domain
+-- (37 values at K = 2, 101 at K = 3) and re-enumerated the digits inside each
+-- value, so adding a read multiplied the query by ~100 (0.06 s to 7.4 s of
+-- emitted Python from K = 2 to 3); summed per cell it multiplies by ~10, the
+-- read's domain. The metric is the bytes one interpreted query allocates on
+-- this thread (compile excluded); a step over 2.5x the domain size, or a point
+-- past the cap, is the value axis being back. The K = 3 answer is checked
+-- against the brute-force sum.
+test_noisyProductOfReadsPerCell :: TestTree
+test_noisyProductOfReadsPerCell = testCase "noisyProductOfReadsPerCell" $ do
+  points <- mapM (\k -> (,) k <$> queryAlloc k) [1, 2, 3 :: Int]
+  let measured = [ (k, b) | (k, Right b) <- points ]
+      capped = [ k | (k, Left _) <- points ]
+      ratios = zipWith (\(_, b1) (k2, b2) -> (k2, fromInteger b2 / fromInteger b1 :: Double)) measured (drop 1 measured)
+      table = intercalate ", " [ show k ++ " -> " ++ either id show b | (k, b) <- points ]
+  assertBool ("a query hit the allocation cap at K = " ++ show capped ++ " (" ++ table ++ ")") (null capped)
+  forM_ ratios $ \(k, r) ->
+    assertBool ("adding read " ++ show k ++ " multiplied the query's allocation by " ++ show r
+                ++ ", more than 2.5x the 10-value domain: the value-domain mixture is back (" ++ table ++ ")")
+      (r <= 25)
+  (prog, env) <- compiled 3
+  let (p, d) = query prog env 3
+      oracle = sum [ product (zipWith (!!) probs [x, y, z])
+                       * normalPdf ((y0 - fromIntegral (x * y * z)) / 0.5) / 0.5
+                   | x <- [0 .. 9], y <- [0 .. 9], z <- [0 .. 9 :: Int] ]
+  assertBool ("K = 3: p = " ++ show p ++ ", brute force " ++ show oracle) (abs (p - oracle) < 1e-12 * max 1 oracle)
+  assertEqual "K = 3 dimension" 1 d
+  where
+    y0 = 20.3 :: Double
+    cap = 4 * 10 ^ (9 :: Int) :: Integer
+    probs = [ [ fromIntegral (1 + (i * 7 + j * 3) `mod` 5) / 30 | j <- [0 .. 9 :: Int] ] | i <- [0 .. 2 :: Int] ]
+    normalPdf u = exp (-0.5 * u * u) / sqrt (2 * pi)
+    src :: Int -> String
+    src k = unlines
+      [ "neural readMNist :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+      , "toF v = " ++ concatMap (\i -> "if v == " ++ show i ++ " then " ++ show i ++ ".0 else ") [0 .. 8 :: Int] ++ "9.0"
+      , "main " ++ unwords [ "a" ++ show i | i <- [1 .. k] ] ++ " = "
+          ++ concatMap (\i -> "draw x" ++ show i ++ " = readMNist a" ++ show i ++ " in ") [1 .. k]
+          ++ intercalate " * " [ "(toF x" ++ show i ++ ")" | i <- [1 .. k] ] ++ " + Normal * 0.5"
+      ]
+    compiled k = do
+      prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+                (tryParseProgram "noisyProductOfReadsPerCell" (src k))
+      env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+               (compile defaultCompilerConfig prog)
+      _ <- evaluate (length (show env))
+      return (prog, env)
+    -- Each read's probabilities sum to 1: 1+2+3+4+5 twice over, /30.
+    logits k = [ VTuple (VInt 2) (VList (foldr (ListCont . VFloat) EmptyList ps)) | ps <- take k probs ]
+    query prog env k = either (\e -> error ("prob query error: " ++ show e)) probDimOf
+                         (runProbC prog env (logits k) (VFloat y0))
+    queryAlloc k = do
+      (prog, env) <- compiled k
+      r <- try $ flip finally disableAllocationLimit $ do
+        setAllocationCounter (fromInteger cap)
+        enableAllocationLimit
+        (p, d) <- evaluate (query prog env k)
+        _ <- evaluate (p + fromIntegral d)
+        remaining <- getAllocationCounter
+        return (cap - toInteger remaining)
+      return $ case r of
+        Left AllocationLimitExceeded -> Left (show cap ++ " bytes (cap)")
+        Right bytes -> Right bytes
+
 -- | Network logits for 'wideProductSceneSrc' @n@: the per-slot layout and
 -- probabilities of 'test_wideProductSceneAccessorCompilesFast', as one
 -- envelope for the scene network.
@@ -6104,6 +6170,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_wideProductSceneBatchedCompilesFast
   , test_wideProductSceneCountNotBatched
   , test_wideProductSceneTopKQueryPolynomial
+  , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
   , test_sceneCountConditionalEditPolynomial
