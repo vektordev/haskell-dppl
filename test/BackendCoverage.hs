@@ -51,7 +51,7 @@ import Control.Concurrent.MVar (newMVar, modifyMVar)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv, IRExpr)
 import BackendAgreement (AgreementCase, comparedBodies, maskedConstruct, batchedComparedBodies)
 import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies,
-                        certifiedConstructs, allBodies, batchedCertifiedConstructs)
+                        certifiedConstructs, allBodies, batchedCertifiedConstructs, batchedReachedNotCompared)
 import CorpusSweep
 import TestCaseParser (Backend(Batched))
 import IRFuzz (irGeneratorConstructs, irGeneratorBatchedConstructs)
@@ -93,8 +93,19 @@ batchedFuzzCoverageExceptions =
   -- Measured 2026-10-09 (the same 1000-draw sample: 337 of its 548 compared
   -- programs are batched-eligible; 233 non-slow corpus programs declare
   -- `batched`): the corpus uses 56 constructs, the sample reaches 54.
+  --
+  -- BMapList and BZip OpMult since 2026-10-22, when the batched list map
+  -- (merge e9e5759) and categoricalProductFusion's batched declaration
+  -- (merge 6287798, batched-refuses-unit-constant) brought them into the batched census. The scalar list carries both for
+  -- the typed fuzzer's reasons; the IR generator's batched arm does not
+  -- reach them either: its admitted cases hold a list map only inside a
+  -- helper body (which the arm does not count), and the interpreter answers
+  -- none of its three zipped products at any point. Removed by docs-repo
+  -- task batched-fuzz-arms-never-compare-list-map-or-zip-product.
   [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (gaussianTrajectory4, theta)")
+  , ("Builtin:BMapList",   "list map: the typed generator has no higher-order map over a list, and the IR generator's batched cases map a list only in helper bodies (mapMultList)")
+  , ("Builtin:BZip OpMult", "agreement fusion: the typed generator never builds two independent categoricals compared with ==, and the interpreter answers none of the IR generator's batched zipped products (categoricalProductFusion)")
   ]
 
 -- | Constructs some corpus config compiles to that the IR fuzz generator has
@@ -155,16 +166,21 @@ backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
         -- batched-vs-expected check.
         fuzz <- batchedSample
         ir <- irGeneratorBatchedConstructs
+        -- A construct reached only by cases failing as a filed family is
+        -- listed in batchedReachedNotCompared instead.
         let reached = sort (filter (not . maskedConstruct) (nub (concat (ir : fuzz))))
-            listed = sort (nub batchedCertifiedConstructs)
+            notCompared = map fst batchedReachedNotCompared
+            listed = sort (nub (batchedCertifiedConstructs ++ notCompared))
             missing = reached \\ listed
             stale = listed \\ reached
+            both = filter (`elem` notCompared) batchedCertifiedConstructs
         hPutStrLn stderr ("batched arms: the typed fuzzer's sample reaches " ++ show (length (nub (concat fuzz)))
                           ++ " constructs, the IR generator's " ++ show (length ir) ++ ", together " ++ show (length reached))
-        if null missing && null stale then return () else assertFailure $ unlines $
-          [ "batchedCertifiedConstructs is out of date." ]
+        if null missing && null stale && null both then return () else assertFailure $ unlines $
+          [ "batchedCertifiedConstructs (with batchedReachedNotCompared) is out of date." ]
           ++ (if null missing then [] else "Reached by a batched arm, not listed (add them):" : map ("  " ++) missing)
           ++ (if null stale then [] else "Listed, but no batched arm reaches them any more (remove them):" : map ("  " ++) stale)
+          ++ (if null both then [] else "In both lists (a certified construct is compared):" : map ("  " ++) both)
     ]
 
 -- | The compiler configs the corpus checks a program under (default, log

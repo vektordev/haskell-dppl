@@ -10,6 +10,7 @@ import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
 import Data.List (intercalate, dropWhileEnd)
+import Data.Char (isDigit)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
@@ -479,18 +480,26 @@ jlConformsShape _ TFloat  e = "((" ++ e ++ " isa Real) && !(" ++ e ++ " isa Inte
 jlConformsShape _ TBool   e = "(" ++ e ++ " isa Bool)"
 jlConformsShape _ TInt    e = "((" ++ e ++ " isa Integer) && !(" ++ e ++ " isa Bool))"
 jlConformsShape d (Tuple a b) e =
-  "((" ++ e ++ " isa T) && " ++ jlConformsAt d a (e ++ ".t1") ++ " && " ++ jlConformsAt d b (e ++ ".t2") ++ ")"
+  "((" ++ e ++ " isa T) && " ++ jlConformsAt d a (jlFieldBase e ++ ".t1") ++ " && " ++ jlConformsAt d b (jlFieldBase e ++ ".t2") ++ ")"
 jlConformsShape d (ListOf t) e =
   let v = "_ce" ++ show d
   in "((" ++ e ++ " isa InferenceList) && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
 jlConformsShape d (TEither a b) e =
-  "(((" ++ e ++ " isa Left) && " ++ jlConformsAt d a (e ++ ".val") ++ ") || ((" ++ e ++ " isa Right) && " ++ jlConformsAt d b (e ++ ".val") ++ "))"
+  "(((" ++ e ++ " isa Left) && " ++ jlConformsAt d a (jlFieldBase e ++ ".val") ++ ") || ((" ++ e ++ " isa Right) && " ++ jlConformsAt d b (jlFieldBase e ++ ".val") ++ "))"
 jlConformsShape d (TTensor sh t) e
   | shapeRank sh == 1 =
       let v = "_ce" ++ show d
       in "((" ++ e ++ " isa AbstractVector) && length(" ++ e ++ ") == " ++ show (shapeNumel sh)
          ++ " && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
 jlConformsShape _ _ _ = "true"
+
+-- | An operand as the base of a field access (@e.t1@): a number literal is
+-- parenthesised, since @-1.0.t1@ does not parse and @3.t1@ reads as a
+-- juxtaposition (task ir-conformsto-lowering-gaps-in-text-backends).
+-- Anything else is emitted as it was.
+jlFieldBase :: String -> String
+jlFieldBase e@(c : _) | c == '-' || isDigit c = "(" ++ e ++ ")"
+jlFieldBase e = e
 
 
 generateLambdaExpression :: IRExpr -> GlobalVariableSupply String

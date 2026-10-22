@@ -10,6 +10,7 @@ module SPLL.CodeGenPyTorch (
   pyMangle,
   groupClassName,
   pyDouble,
+  pyAttrBase,
   pythonKeywords,
   irFreeVars
 ) where
@@ -22,7 +23,7 @@ import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd, nub)
-import Data.Char (toUpper)
+import Data.Char (toUpper, isDigit)
 import Data.Maybe (fromMaybe)
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift), gets, modify)
 import Utils (Supply, demandUniqueNumber, evalSupply)
@@ -990,18 +991,27 @@ pyConformsShape _ TFloat  e = "isFloat(" ++ e ++ ")"
 pyConformsShape _ TBool   e = "isinstance(" ++ e ++ ", bool)"
 pyConformsShape _ TInt    e = "(isinstance(" ++ e ++ ", int) and not isinstance(" ++ e ++ ", bool))"
 pyConformsShape d (Tuple a b) e =
-  "(isinstance(" ++ e ++ ", T) and " ++ pyConformsAt d a (e ++ ".t1") ++ " and " ++ pyConformsAt d b (e ++ ".t2") ++ ")"
+  "(isinstance(" ++ e ++ ", T) and " ++ pyConformsAt d a (pyAttrBase e ++ ".t1") ++ " and " ++ pyConformsAt d b (pyAttrBase e ++ ".t2") ++ ")"
 pyConformsShape d (ListOf t) e =
   let v = "_ce" ++ show d
   in "(isinstance(" ++ e ++ ", InferenceList) and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
 pyConformsShape d (TEither a b) e =
-  "((isinstance(" ++ e ++ ", Left) and " ++ pyConformsAt d a (e ++ ".val") ++ ") or (isinstance(" ++ e ++ ", Right) and " ++ pyConformsAt d b (e ++ ".val") ++ "))"
+  "((isinstance(" ++ e ++ ", Left) and " ++ pyConformsAt d a (pyAttrBase e ++ ".val") ++ ") or (isinstance(" ++ e ++ ", Right) and " ++ pyConformsAt d b (pyAttrBase e ++ ".val") ++ "))"
 pyConformsShape d (TTensor sh t) e
   | shapeRank sh == 1 =
       let v = "_ce" ++ show d
       in "(isinstance(" ++ e ++ ", list) and len(" ++ e ++ ") == " ++ show (shapeNumel sh)
          ++ " and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
 pyConformsShape _ _ _ = "True"
+
+-- | An operand as the base of an attribute access (@e.t1@): a number
+-- literal is parenthesised, since @3.t1@ does not parse and @-3.t1@ reads as
+-- @-(3.t1)@ (task ir-conformsto-lowering-gaps-in-text-backends). Anything
+-- else is emitted as it was: a name or a call is already a primary, and the
+-- generator parenthesises its operator and conditional expressions.
+pyAttrBase :: String -> String
+pyAttrBase e@(c : _) | c == '-' || isDigit c = "(" ++ e ++ ")"
+pyAttrBase e = e
 
 -- | Whether 'pyConforms' iterates over (a component of) its operand.
 checksElements :: RType -> Bool

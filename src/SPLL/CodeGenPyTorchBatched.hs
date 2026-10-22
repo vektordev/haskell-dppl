@@ -60,7 +60,7 @@ import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
-import SPLL.CodeGenPyTorch (envToLUT, normalRefName, replaceCalls, pyMangle, pyDouble, groupClassName, irFreeVars)
+import SPLL.CodeGenPyTorch (envToLUT, normalRefName, replaceCalls, pyMangle, pyDouble, pyAttrBase, groupClassName, irFreeVars)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
@@ -2254,9 +2254,11 @@ batchedExpr env (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr env e ++ ")"
 -- run time, not a per-element mask -- 'isAny' in pythonLibBatched.py.
 batchedExpr env (IRUnaryOp OpIsAny e) = "isAny(" ++ batchedExpr env e ++ ")"
 -- A plain Python bool, like 'isAny': see the 'IRConformsTo' row of 'structural'.
+-- A number literal is parenthesised before the method call
+-- (@0.is_floating_point()@ does not parse; 'pyAttrBase').
 batchedExpr env (IRConformsTo TFloat e) =
   let x = batchedExpr env e
-  in "(isinstance(" ++ x ++ ", float) or (torch.is_tensor(" ++ x ++ ") and " ++ x ++ ".is_floating_point()))"
+  in "(isinstance(" ++ x ++ ", float) or (torch.is_tensor(" ++ x ++ ") and " ++ pyAttrBase x ++ ".is_floating_point()))"
 -- A value-to-constant lookup -- @x == k0 ? v0 : x == k1 ? v1 : .. : d@ with
 -- constant keys and arms, which is what 'SPLL.IROptimizer.indexOfChain' folds a
 -- read-logits network's value-to-slot lookup into for a non-contiguous domain

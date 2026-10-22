@@ -36,6 +36,7 @@ module CertifiedCensus
   , programCensus
   , uncertifiedConstructs
   , batchedCertifiedConstructs
+  , batchedReachedNotCompared
   , batchedProgramCensus
   , batchedUncertifiedConstructs
   , structureSplitLabel
@@ -232,6 +233,22 @@ batchedCertifiedConstructs =
     "UnaryOperand:OpAbs", "UnaryOperand:OpExp", "UnaryOperand:OpIsAny", "UnaryOperand:OpLog",
     "UnaryOperand:OpNeg", "UnaryOperand:OpNot", "UnaryOperand:OpSign"
   ]
+
+-- | Constructs a batched arm admits and runs but never sees agree: every
+-- case of the arm that uses one fails as a filed knownDisagreements family,
+-- so the arm reaches the construct without comparing it, and it is not
+-- certified. Each with the family's ticket. Kept exact with
+-- 'batchedCertifiedConstructs' by @Slow.BackendAgreementCoverage@: the two
+-- lists are disjoint and together are what the arms reach. A fix of the
+-- ticket moves the construct to 'batchedCertifiedConstructs'.
+batchedReachedNotCompared :: [(String, String)]
+batchedReachedNotCompared =
+  -- 2026-10-22: the IR generator's fixed sample has one batched case with a
+  -- categorical index, admitted since batched mode lets a prob/integ path
+  -- call a helper's normal_params (dcd0ecd): the index is that call's
+  -- argument. Its weights are a constant list, which the batched
+  -- categorical_index reads as a tensor and raises on, at every point.
+  [ ("Builtin:BCategoricalIndex", "batched-categorical-index-over-batched-weights-fails") ]
 
 -- | A program's batched census: the constructs of the probability and
 -- integrate bodies of its batched compile (after the select pass), which is
