@@ -2149,8 +2149,32 @@ tensorTypeTests =testGroup "TensorTypes"
                 VTensor [EFixed 4] xs | all isFloat xs -> return ()
                 v -> assertFailure ("generate returned something else: " ++ show v)
       ]
+  -- The scalar twin, spelled as design diffusion-models-wishlist's M2 wrote
+  -- it (a Normal initial state). Its trajectory twin is neural/diffusionToy1D.
+  , testGroup "the marginal of a scalar diffusion's final state is sample-only"
+      [ testCase "probability is a missing variant" $
+          withParsed scalarDiffusionMarginalSrc $ \prog -> do
+            res <- forcedProb prog (VFloat 0.0)
+            case res of
+              Left ex -> assertFailure ("crashed the compiler: " ++ show ex)
+              Right (Left e) -> assertBool
+                ("expected the missing-variant answer, got: " ++ e)
+                ("has no compiled probability function" `isInfixOf` e)
+              Right (Right v) -> assertFailure ("compiled to a probability function (" ++ show v ++ ")")
+      , testCase "generate still draws a Float" $
+          withParsed scalarDiffusionMarginalSrc $ \prog ->
+            case runGen defaultCompilerConfig prog [] of
+              Left e -> assertFailure ("generate refused: " ++ e)
+              Right r -> case evalRand r (mkStdGen 1) of
+                VFloat _ -> return ()
+                v -> assertFailure ("generate returned something else: " ++ show v)
+      ]
   ]
   where
+    scalarDiffusionMarginalSrc = unlines
+      [ "neural mu :: ((Float, Float) -> Float)"
+      , "step t x = if t < 0.5 then x else step (t - 1.0) (mu (x, t))"
+      , "main = step 2.0 Normal" ]
     isFloat v = case v of { VFloat _ -> True; _ -> False }
     tensorPlacement = "may only be the whole output or a tuple field of it"
     diffusionMarginalSrc = unlines
