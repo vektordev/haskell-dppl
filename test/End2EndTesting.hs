@@ -43,6 +43,7 @@ import IRInterpreter (generateRand, generateDet)
 import MockNN (evaluateMockNN, mockInputFor, MockSlot(..), planAwareMockSlots, planHasTensor)
 import ImpactManifest
 import CorpusSweep
+import TestDuplicationCensus (duplicationCensusSweep)
 import CertifiedCensus (programCensus, uncertifiedConstructs, batchedProgramCensus, batchedUncertifiedConstructs)
 import qualified Data.Map as Map
 
@@ -4321,8 +4322,10 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
           in testProperty n (once $ cachedProperty manifest (check "Python Unoptimized") n (pythonKey manifest [] (unopt e) (queries e))
                                       (testPython [] (unopt e) (queries e)))
     ]
+  -- The duplication census reads the same -O0 compiles (design ir-duplication-census).
+  census <- if includeBackends then (: []) <$> duplicationCensusSweep corpus path unopt else return []
   let headers = [ headerBackendsTests entries | includeBackends ]
-  return $ testGroup treeName ([interp, interpUnopt] ++ headers ++ backends)
+  return $ testGroup treeName ([interp, interpUnopt] ++ headers ++ backends ++ census)
   where
     -- The manifest slot prefix: the sweep's full group name.
     check grp = treeName ++ "." ++ grp

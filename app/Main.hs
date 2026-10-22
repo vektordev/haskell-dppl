@@ -16,6 +16,7 @@ import Data.Maybe (fromMaybe)
 import System.Exit (exitFailure, exitWith, ExitCode (ExitFailure))
 import System.IO (hPutStrLn, stderr)
 import Control.Exception (SomeException, evaluate, try)
+import SPLL.DuplicationCensus (censusEnv, defaultMinSize, renderCensus)
 import SPLL.StageDiff (StageDiffOpts(..), StageReport(..), defaultStageDiffOpts, stageDiff, renderStageReport)
 
 data GlobalOpts = GlobalOpts {
@@ -37,6 +38,7 @@ data GlobalOpts = GlobalOpts {
   marginalSlotsBudget :: Int,
   materializationBudget :: Int,
   marginalsReport :: Bool,
+  duplicationReport :: Bool,
   commandOpts :: CommandOpts
 }
 
@@ -186,6 +188,9 @@ parseGlobalOpts = GlobalOpts
         <*> switch
             ( long "marginals"
             <> help "Print the observation-mask report before running the subcommand: per function, its leaf observation slots with their accessor paths, the correlation classes, which slots are enumerated and why, and the per-mask capability table (the projected pType of each masked program). Analysis only -- it changes nothing about what is compiled.")
+        <*> switch
+            ( long "duplicationCensus"
+            <> help "Print the duplication census before running the subcommand (design ir-duplication-census): the program is compiled at -O0, and for every function body the report gives M, the copy count of its most-copied subtree of at least 30 IR nodes (binders up to renaming), and its most-copied subtrees with the fresh-name tags that usually name the compiler site that built them. A count that grows with the program's nesting depth is an exponential compile blowup in the making. Analysis only -- it changes nothing about what is compiled.")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -269,10 +274,11 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR, marginalSlotsBudget=mSlots, materializationBudget=matBudget, marginalsReport=wantMarginals}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR, marginalSlotsBudget=mSlots, materializationBudget=matBudget, marginalsReport=wantMarginals, duplicationReport=wantCensus}) = do
   prog <- parseProgram inFile
   let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=matBudget, marginalSlots=mSlots, extraSemirings=extraSR})
   reportMarginals wantMarginals conf prog
+  reportDuplicationCensus wantCensus conf prog
   -- The compile-time warnings that read only the program (today: functions
   -- over the --marginalSlots budget), for every subcommand. 'compiledWarnings'
   -- below adds the ones that depend on what a compile emitted.
@@ -387,3 +393,14 @@ reportMarginals True conf prog =
   case marginalReport conf prog of
     Left err -> handleError err
     Right rs -> putStr (renderMarginalReport (adts prog) rs)
+
+-- | The @--duplicationCensus@ report (design ir-duplication-census): the
+-- program's -O0 IR, counted for repeated subtrees. Printed before the
+-- subcommand, like @--marginals@; quiet, so @-d@ does not dump the extra
+-- compile.
+reportDuplicationCensus :: Bool -> CompilerConfig -> Program -> IO ()
+reportDuplicationCensus False _ _ = return ()
+reportDuplicationCensus True conf prog =
+  case compile conf { optimizerLevel = 0, showIntermediates = False, verbose = 0 } prog of
+    Left err -> handleError err
+    Right env -> putStr (renderCensus defaultMinSize 3 (censusEnv defaultMinSize env))

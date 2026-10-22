@@ -398,6 +398,39 @@ existing `TestRejection.hs` groups onto it is out of scope. Seeded with
 correlated-gaussian-let-shares-latent), the `diagnostic` shape, whose fuller
 multi-assertion sibling is `TestRejection.SetWitnessSharedLatent`.
 
+### Duplication census: catching a fan-out at depth 2
+
+A growth pin guards a wall already found. The duplication census (design
+ir-duplication-census, `SPLL.DuplicationCensus`) is the tripwire for the next
+one: an exponential compile blowup shows up as *copies* long before it shows
+up as size, since a construct copied b times per nesting level already occurs
+b² times at depth 2. For each function body of a program's `-O0` IR (`gen`,
+`prob`, `integ`, ..., every per-mask variant on its own), the census counts
+the occurrences of every subtree of at least 30 nodes, keyed up to renaming
+of the variables the subtree binds itself (its binders hash as de Bruijn
+indices, its free names verbatim, so two compiles of one expression match but
+two different outer variables do not). M is the copy count of the most-copied
+subtree. It ignores guards, unlike CSE, and reads the IR before the optimizer,
+whose CSE is what hides these copies at `-O2`.
+
+- **Corpus ratchet** (`End2End.DuplicationCensus`, default tier, in
+  `test/TestDuplicationCensus.hs`). One test per corpus program, `slow` ones
+  included bar `slowForCompileCost`, on the `-O0` compile End2End already
+  holds. Every body's M must be exactly its pin in
+  `test/duplication-census-pins.txt`, or at most 2 if it has none. A rise
+  fails with the copied subtree and its fresh-name tags (which usually name
+  the compiler site that built it); a fall fails too, so a pin goes down in
+  the commit of the fix. The failure prints the pin line to use. About 3 s of
+  wall time.
+- **Growth rows** (`DuplicationGrowth`): M on the three families of the
+  repeated-computation audit at a few sizes. Reverting any of their point
+  fixes turns the corpus ratchet or its row red.
+- **Fuzz property** (`prop_Fuzz_DuplicationLinearInSize`, Slow): M stays
+  within 6 copies per source node over `genAgreementProgram` draws.
+- **Diagnostic**: `--duplicationCensus` prints the census of one program
+  (worst bodies first, their most-copied subtrees). Start a new wall's
+  investigation there rather than with a bisect.
+
 ## Rewrite invariance
 
 `test/Rewrites.hs` holds semantics-preserving source rewrites. Four come from
