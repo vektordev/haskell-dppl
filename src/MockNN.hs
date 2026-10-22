@@ -2,6 +2,10 @@ module MockNN
   ( evaluateMockNN
   , evaluateMockNNFor
   , shapedMockLogits
+  , planAwareMockLogits
+  , MockSlot (..)
+  , planAwareMockSlots
+  , planHasTensor
   , flattenMockInput
   , mockInputFor
   , symbolEnvName
@@ -51,8 +55,72 @@ evaluateMockNN _ v = error $ "Mock NN parameter " ++ show v ++ " is not one of t
 -- computed, so the mock is a fixed function of it instead -- 'shapedMockLogits'.
 evaluateMockNNFor :: RType -> PartitionPlan -> IRValue -> IRValue
 evaluateMockNNFor TSymbol plan v = evaluateMockNN plan v
-evaluateMockNNFor inputTy plan v =
-  constructVList (map VFloat (shapedMockLogits inputTy (getSize plan) v))
+evaluateMockNNFor inputTy plan v
+  | planHasTensor plan = constructVList (map VFloat (planAwareMockLogits inputTy plan v))
+  | otherwise = constructVList (map VFloat (shapedMockLogits inputTy (getSize plan) v))
+
+-- | Does a plan hold a tensor anywhere? A shaped network whose output does is
+-- mocked plan-aware ('planAwareMockLogits') rather than by the projection.
+planHasTensor :: PartitionPlan -> Bool
+planHasTensor plan = case plan of
+  TensorPlan _ _ -> True
+  TuplePlan a b  -> planHasTensor a || planHasTensor b
+  EitherPlan a b -> planHasTensor a || planHasTensor b
+  ADTPlan _ cs   -> any (any planHasTensor . snd) cs
+  _              -> False
+
+-- | Where one logit of the plan-aware mock comes from: an input slot (by flat
+-- 'SPLL.AutoNeural.inputSlots' position; @0.0@ past the input's end) or a
+-- constant.
+data MockSlot = FromInput Int | MockConst Double
+  deriving (Show, Eq)
+
+-- | The plan-aware mock's logits for a plan, as a recipe over the input
+-- (decision D-mock (a) of task tensor-gaussian-heads-rd-diffusion). Walking
+-- the plan in layout order, the @k@-th Gaussian leaf (a tensor element
+-- included) reads its mu from input slot @k@ and has sigma 'mockSigma'; every
+-- discrete region is uniform (each Either flag 0.5, each enumeration and
+-- constructor flag set @1/n@). So @(Tensor[d] Float, Float) -> Tensor[d] Float@
+-- is @N(x, s^2 I)@, a random walk whose trajectory density has a closed form,
+-- and a @Float -> Tensor[d] Float@ read at @0.0@ is @N(0, s^2 I)@.
+--
+-- The projection mock ('shapedMockLogits') stays for every plan without a
+-- tensor: the scalar-head pins of the shaped-input slice are written against
+-- it, and it reads (mu, sigma) off a @(Float, Float)@ input, which this one
+-- does not.
+planAwareMockSlots :: PartitionPlan -> [MockSlot]
+planAwareMockSlots = fst . go 0
+  where
+    go k plan = case plan of
+      Continuous -> ([FromInput k, MockConst mockSigma], k + 1)
+      TensorPlan sh p -> goMany k (replicate (shapeNumel sh) p)
+      TuplePlan a b -> goMany k [a, b]
+      EitherPlan a b -> let (s, k') = goMany k [a, b] in (MockConst 0.5 : s, k')
+      Discretes _ _ -> let n = getSize plan in (replicate n (MockConst (1 / fromIntegral n)), k)
+      ADTPlan _ cs ->
+        let nf = adtFlagSlots cs
+            (s, k') = goMany k (concatMap snd cs)
+        in (replicate nf (MockConst (1 / fromIntegral nf)) ++ s, k')
+    goMany k [] = ([], k)
+    goMany k (p : ps) = let (s, k1) = go k p
+                            (rest, k2) = goMany k1 ps
+                        in (s ++ rest, k2)
+
+-- | The plan-aware mock's sigma, @1/sqrt(2 pi)@: a Gaussian element's density
+-- at its mean is then exactly 1, so a trajectory's density stays of order 1 in
+-- any dimension, where sigma 1 gives @(2 pi)^(-d T / 2)@ -- below the corpus's
+-- absolute tolerance already at @d = 4@, @T = 3@. A deviation @delta@ costs a
+-- factor @exp(-pi delta^2)@.
+mockSigma :: Double
+mockSigma = 1 / sqrt (2 * pi)
+
+-- | 'planAwareMockSlots' evaluated on an input value.
+planAwareMockLogits :: RType -> PartitionPlan -> IRValue -> [Double]
+planAwareMockLogits inputTy plan v = map pick (planAwareMockSlots plan)
+  where
+    flat = flattenMockInput inputTy v
+    pick (FromInput i) = if i < length flat then flat !! i else 0.0
+    pick (MockConst c) = c
 
 -- | The shaped-input mock: the input flattened in its packing order
 -- ('SPLL.AutoNeural.inputSlots': element-major, tuple fields left to right,
@@ -136,6 +204,9 @@ randomMockNN Continuous = do
   mu <- getRandom
   sigmaRaw <- getRandom
   return $ constructVList [VFloat mu, VFloat (abs sigmaRaw + 0.1)]
+randomMockNN (TensorPlan sh p) = do
+  elems <- mapM (const (randomMockNN p)) [1 .. shapeNumel sh]
+  return (constructVList (concatMap mockLogits elems))
 randomMockNN (ADTPlan _ constrs) = do
   let cntConstrs = adtFlagSlots constrs
   selectors <- randomList cntConstrs
@@ -168,6 +239,9 @@ spikingMockNN (TuplePlan planF planS) (VTuple fVal sVal) = do
   fMock <- spikingMockNN planF fVal
   sMock <- spikingMockNN planS sVal
   return $ constructVList (mockLogits fMock ++ mockLogits sMock)
+spikingMockNN (TensorPlan sh p) (VTensor sh' xs) | sh == sh' = do
+  elems <- mapM (spikingMockNN p) xs
+  return (constructVList (concatMap mockLogits elems))
 spikingMockNN (EitherPlan planL planR) (VEither v) = do
   case v of
         Left l -> do

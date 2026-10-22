@@ -403,7 +403,7 @@ unaryFs = [
   ]
 
 pValue :: MonadParser m => m Value
-pValue = choice [pBool, try pFloat, pIntVal, try pUnitVal, try pTupleVal, pEither, pAny, pList <&> constructVList, pThetaTree <&> VThetaTree, pADTVal]
+pValue = choice [pBool, try pFloat, pIntVal, try pUnitVal, try pTupleVal, pEither, pAny, pTensorVal, pList <&> constructVList, pThetaTree <&> VThetaTree, pADTVal]
 
 -- | An ADT value: a constructor name applied to its field values, written by
 -- juxtaposition as in the expression syntax -- @Leaf@, @Node Leaf Leaf@,
@@ -437,6 +437,7 @@ pValueAtom = choice
   [ pBool, try pFloat, pIntVal
   , try pUnitVal, try pTupleVal, parens pValue
   , pAny
+  , pTensorVal
   , pList <&> constructVList
   , pThetaTree <&> VThetaTree
   , VADT <$> pConstructorName <*> pure []
@@ -600,6 +601,19 @@ pUnitType = do
   _ <- symbol "("
   _ <- symbol ")"
   return TUnit
+
+-- | A rank-1 tensor value, @[| v1, ..., vn |]@ (the literal spelling of design
+-- tensors-in-core-language, D8): what a query or a @.tst@ row names a
+-- @Tensor[n] t@ value with (task tensor-gaussian-heads-rd-diffusion). A value
+-- only -- the expression literal is slice S3's. Rank 0 is not a shape, so it
+-- is never empty.
+pTensorVal :: MonadParser m => m Value
+pTensorVal = do
+  _ <- try (symbol "[|")
+  values <- pCSV
+  _ <- symbol "|]"
+  when (null values) (fail "a tensor value has at least one element: rank 0 is not a shape")
+  return (VTensor [EFixed (length values)] values)
 
 pList :: MonadParser m => m [Value]
 pList = do

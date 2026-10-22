@@ -4456,6 +4456,11 @@ compareValueExpr _ TSymbol _ _ = IRError symbolCdfMessage
 -- concrete closure, which no CDF is defined over (task
 -- function-value-compared-in-probability-mode).
 compareValueExpr sr (TArrow _ _) _ sample = anyBoundsNothing sr sample (IRError functionCdfMessage)
+-- A tensor has no CDF here either: its order would be the componentwise one,
+-- which nothing compiles (task tensor-gaussian-heads-rd-diffusion). Built
+-- routinely -- a trajectory of tensors gets an integrate variant like any list
+-- -- so it is a runtime error that fires only when a cdf() reaches it.
+compareValueExpr sr (TTensor _ _) _ sample = anyBoundsNothing sr sample (IRError tensorCdfMessage)
 
 -- Invariant, not a refusal (task static-refusals-become-absent-variants): a CDF comparison is only built for first-order result types.
 compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
@@ -4489,6 +4494,11 @@ containsArrow (TVarR _)   = False
 containsArrow SPLL.Typing.RType.NotSetYet = False
 
 -- | The runtime diagnostic for a cdf() query that reaches a Symbol-valued node.
+tensorCdfMessage :: String
+tensorCdfMessage =
+  "cdf(): no cumulative distribution is defined over a tensor value -- its "
+  ++ "componentwise order is not compiled. Use p() for a point query on this value."
+
 symbolCdfMessage :: String
 symbolCdfMessage =
   "cdf(): no cumulative distribution is defined over a Symbol -- symbols carry "

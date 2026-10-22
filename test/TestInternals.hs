@@ -24,8 +24,9 @@ import SPLL.Typing.ForwardChaining (WorldsShape(..))
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
-import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlot(..), inputSlots, inputWidth, inputLayoutString)
-import MockNN (flattenMockInput, mockInputFor, shapedMockLogits)
+import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlot(..), inputSlots, inputWidth, inputLayoutString, planLayoutString)
+import qualified SPLL.AutoNeural
+import MockNN (flattenMockInput, mockInputFor, shapedMockLogits, planAwareMockLogits)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IRGatherPass (gatherPassExpr)
@@ -6099,6 +6100,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   [ testProperties "properties" $(allProperties)
   , testGroup "tensor builtins" tensorBuiltinTests
   , shapedNeuralInputTests
+  , tensorGaussianHeadTests
   , categoricalIndexTests
   , gatherPassTests
   , untaggedShortCircuit
@@ -6798,4 +6800,44 @@ shapedNeuralInputTests = testGroup "shaped neural inputs"
       conforms t3 (VTensor [EFixed 3] (map VInt [1, 2, 3])) @?= Right (VBool False)
       conforms (TTensor [EFixed 3, EFixed 1] TFloat) (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool False)
       conforms t3 (VFloat 1) @?= Right (VBool False)
+  ]
+
+-- | Task tensor-gaussian-heads-rd-diffusion: a tensor-valued Gaussian head's
+-- plan, its element-major layout, the plan-aware mock, and the reader's emitted
+-- size, which must not grow with the tensor's.
+tensorGaussianHeadTests :: TestTree
+tensorGaussianHeadTests = testGroup "tensor Gaussian heads"
+  [ testCase "a Tensor[n] Float plans as n Gaussian elements, 2n logits" $ do
+      let plan = makePartitionPlan [] (TTensor [EFixed 3] TFloat) Nothing
+      plan @?= TensorPlan [EFixed 3] Continuous
+      SPLL.AutoNeural.getSize plan @?= 6
+  , testCase "a tensor's layout is element-major, the layout of its tuple spelling" $ do
+      -- D6: [mu_1, sigma_1, mu_2, sigma_2]; the tuple twin is laid out the same
+      let layout = planLayoutString (makePartitionPlan [] (TTensor [EFixed 2] TFloat) Nothing)
+      assertBool ("expected the element-major row in:\n" ++ layout)
+        ("mu at 0 + 2k, sigma (> 0) at 1 + 2k" `isInfixOf` layout)
+      SPLL.AutoNeural.getSize (makePartitionPlan [] (Tuple TFloat TFloat) Nothing) @?= 4
+  , testCase "the plan-aware mock reads mu off input slot k, sigma 1/sqrt(2 pi), pads with 0" $ do
+      let s = 1 / sqrt (2 * pi)
+          plan = makePartitionPlan [] (TTensor [EFixed 2] TFloat) Nothing
+      planAwareMockLogits (Tuple (TTensor [EFixed 2] TFloat) TFloat) plan
+        (VTuple (VTensor [EFixed 2] [VFloat 3, VFloat 4]) (VFloat 9)) @?= [3, s, 4, s]
+      planAwareMockLogits TFloat plan (VFloat 0.5) @?= [0.5, s, 0, s]
+  , testCase "the emitted reader is O(1) in the tensor's size" $ do
+      -- d = 4 and d = 64 differ only in the digits of the extent: the reader is
+      -- one map over the element axis, not d inlined Gaussians
+      let src d = unlines
+            [ "neural mu :: ((Tensor[" ++ show d ++ "] Float, Float) -> Tensor[" ++ show d ++ "] Float)"
+            , "neural prior :: (Float -> Tensor[" ++ show d ++ "] Float)"
+            , "step t x = if t < 0.5 then [x] else x : step (t - 1.0) (mu (x, t))"
+            , "main = step 100.0 (prior 0.0)" ]
+          size d = case tryParseProgram "<test>" (src (d :: Int)) of
+            Left err -> assertFailure ("parse failed: " ++ show err) >> return 0
+            Right prog -> case compile defaultCompilerConfig prog of
+              Left err -> assertFailure ("compile failed: " ++ show err) >> return 0
+              Right env -> return (length (unlines (SPLL.CodeGenPyTorch.generateFunctions True env)))
+      s4 <- size 4
+      s64 <- size 64
+      assertBool ("emitted Python grew from " ++ show s4 ++ " to " ++ show s64 ++ " bytes")
+        (s4 > 0 && abs (s64 - s4) < 200)
   ]

@@ -1,0 +1,3 @@
+neural mu :: (Float -> Float)
+step t x = if t < 0.5 then [x] else x : step (t - 1.0) (mu t)
+main = step 2.0 Normal

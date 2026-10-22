@@ -13,10 +13,10 @@ at runtime.
 (task `tensor-type-shaped-neural-inputs`, slice S1 of the docs-repo design
 `tensors-in-core-language`). `Lang.isNeuralInputType` is the gate,
 `neuralInputType`/`neuralValueType` read a declaration's two sides, and
-`Validator.validateNeuralShape` refuses any other input, the reverse
-`(source -> Symbol)` shape, and a tensor anywhere in the *output* (tensor
-heads are slice S2). `Symbol` stays a first-class opaque handle beside
-`Tensor` permanently.
+`Validator.validateNeuralShape` refuses any other input and the reverse
+`(source -> Symbol)` shape. Which tensor *outputs* are admitted is the next
+section's. `Symbol` stays a first-class opaque handle beside `Tensor`
+permanently.
 
 - **The type.** `TTensor Shape RType` over `RType.hs`'s `Shape`/`Extent` (the
   IR tensor's). The element is a scalar (`isTensorElemType`: Float, Int, Bool,
@@ -32,7 +32,10 @@ heads are slice S2). `Symbol` stays a first-class opaque handle beside
 - **Input layout.** `AutoNeural.inputSlots` is the flat packing order:
   element-major, tuple fields left to right, tensor elements row-major.
   `makeForwardDecl` prints it (`inputLayoutString`) above the output layout in
-  every read-logits group's doc comment.
+  every read-logits group's doc comment. It is the *mocks'* packing order, not
+  a contract on a real network: the emitted code passes the input
+  structurally (in Python today as the runtime's tuple `T`), so a denoiser
+  receives `(x_t, t)` apart.
 - **The `ReadNN` modality rule reads its input.** A read keeps its Gaussian /
   enumerable verdict only when its input is a point (`ModalityInfer.inputIsPoint`:
   `Exact`, or `IWit` witnessed, field by field through a product); otherwise it
@@ -62,6 +65,51 @@ heads are slice S2). `Symbol` stays a first-class opaque handle beside
   backends render only rank-1 tensor values (`pyVal`/`juliaVal`); a rank-2
   input program is interpreter-only in the corpus
   (`neural/tensorInputRank2Discrete`).
+
+**A network's output may be a Float tensor: a diagonal Gaussian head** (task
+`tensor-gaussian-heads-rd-diffusion`, slice S2 of `tensors-in-core-language`).
+
+- **What is admitted.** `Validator.validateNeuralTarget`: a rank-1
+  `Tensor[n] Float`, as the whole output or a tuple field of it. A tensor over
+  any other element is refused (only Float tensors are probabilistic outputs,
+  decision C), as are rank above 1 (the text backends render rank 1 only) and
+  a tensor under an `Either`, a list or an ADT field.
+- **The plan** is `TensorPlan sh Continuous`, `getSize = numel * 2`. Its logit
+  layout is element-major, elements row-major: `[mu_1, sigma_1, mu_2, sigma_2,
+  ...]` (D6). That is the layout of the nested-tuple spelling, so a network
+  trained against the tuple program reads the tensor program unchanged
+  (`neural/tensorHeadLayout` and its tuple twin pin the same numbers). The
+  layout is a wire format: changing it is a retraining event
+  (`planLayoutString`'s documentation). The layout table prints one row for
+  the whole tensor.
+- **The reader and the sampler** are one `BMap` over `BIota sh`, the tensor of
+  element positions: element k reads its slots at `ix + 2k`, so the emitted
+  code is O(1) in the tensor's size (Python module 26170 bytes at d = 4 and
+  26209 at d = 64, the difference being the digits in the comments;
+  `Internals."tensor Gaussian heads"`). The density sums per-element
+  log-densities and, under the linear semiring, exponentiates (`BReduce` has
+  no product operator). A tensor has no CDF (`IRCompiler.compareValueExpr`'s
+  `TTensor` case is a runtime error) and no writeLogits (`requiredNormalFns`
+  names a normal function no compile generates).
+- **The plan-aware mock.** A shaped network whose output holds a tensor is
+  mocked by `MockNN.planAwareMockSlots`: the k-th Gaussian leaf reads its mu
+  off input slot k (0.0 past the input's end), with sigma `1/sqrt(2 pi)`, so
+  an element's density at its mean is 1 and a trajectory's density stays of
+  order 1 in any dimension; discrete regions are uniform. Every other shaped
+  network keeps the projection mock. The harness mocks carry the same recipe
+  (`NetMock.netMockRecipe`). A query names a tensor value as `[| v1, ..., vn |]`
+  (`Parser.pTensorVal`; values only, the expression literal is slice S3's).
+- **The diffusion trajectory** `step t x = if t < 0.5 then [x] else x : step
+  (t - 1.0) (mu (x, t))` with `main = step T (prior 0.0)` is tractable: every
+  state is in the output, so every network input is witnessed
+  (`neural/tensorDiffusionTrajectory`, d = 4, T = 3, interpreter, Python,
+  Julia and batched). The initial state is a network read at a constant, an
+  iid Gaussian tensor without new syntax. This needed `ModalityInfer` to pass
+  the observation into the arms of an observed `if` under a deterministic
+  condition: the recursive call sits in the else arm, and seeded at the
+  declaration root the witness question for its parameter was answered no
+  (`neural/neuralTrajectoryScalar`). The marginal of the final state is
+  `Bottom` (`Rejection.TensorTypes`).
 
 **No `of` is `of _`, and every read is tagged** (task
 `of-annotation-and-auto-derived-enumeration-divergence`). `Prelude.compile`

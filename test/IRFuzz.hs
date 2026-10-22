@@ -686,6 +686,8 @@ genExpr sc t n
                  f <- funcOf s a
                  IRBuiltin BMap . (\te -> [f, te]) <$> genExpr sc (ITTensor sh s) half)
         ] ++
+        -- The element positions a tensor plan's reader maps over ('BIota').
+        [ (2, return (IRBuiltin (BIota sh) [])) | a == ITInt ] ++
         [ (3, do (op, operandTy) <- liftG (elements zs)
                  s <- operandTy
                  IRBuiltin (BZip op) <$> sequence [genExpr sc (ITTensor sh s) half, genExpr sc (ITTensor sh s) half])
@@ -2568,13 +2570,13 @@ accessorLabels = map (\a -> "Accessor:" ++ takeWhile (/= ' ') (show (accessorWit
 -- drawn with. A complete match, as above.
 builtinLabels :: [String]
 builtinLabels = map ("Builtin:" ++) $
-  [ "BTensor", "BMap", "BIndex", "BMapList", "BListIndex", "BCategoricalIndex" ]
+  [ "BTensor", "BMap", "BIndex", "BMapList", "BListIndex", "BCategoricalIndex", "BIota" ]
   ++ [ "BReduce " ++ show op | op <- [ROpAdd, ROpLogSumExp, ROpMax] ]
   ++ [ "BZip " ++ show op | op <- [OpPlus, OpMult, OpSub, OpDiv, OpMax, OpAnd, OpOr, OpApprox, OpLessThan, OpGreaterThan, OpEq] ]
   where
     _complete b = case b of
       BTensor _ -> (); BMap -> (); BReduce _ _ -> (); BIndex _ -> (); BZip _ -> ()
-      BMapList -> (); BListIndex -> (); BCategoricalIndex _ _ -> ()
+      BMapList -> (); BListIndex -> (); BCategoricalIndex _ _ -> (); BIota _ -> ()
 
 -- | The function-group and ADT shapes a case reaches (M3), for the coverage
 -- check.

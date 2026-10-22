@@ -356,6 +356,13 @@ data Builtin
   -- and which re-sums a suffix of the weights at each level, so O(n^2) text.
   -- This node is O(n) work and O(1) text and nesting in every backend.
   | BCategoricalIndex Int Int
+  -- | @BIota sh []@ -- the tensor of shape @sh@ whose element at flat
+  -- row-major position @k@ is the integer @k@ (task
+  -- tensor-gaussian-heads-rd-diffusion). The element axis a tensor-valued
+  -- neural read is lowered over: a 'BMap' over it reads element @k@'s logit
+  -- slots at an offset computed from @k@, so the emitted text is O(1) in the
+  -- tensor's size where a 'BTensor' of the indices would be O(numel).
+  | BIota Shape
   deriving (Show, Eq)
 
 -- | The argument count each 'Builtin' takes, or 'Nothing' for the variadic
@@ -372,6 +379,7 @@ builtinArity (BZip _)      = Just 2
 builtinArity BMapList      = Just 2
 builtinArity BListIndex    = Just 2
 builtinArity (BCategoricalIndex _ _) = Just 2
+builtinArity (BIota _)     = Just 0
 
 -- | Check an 'IRBuiltin'\'s argument list against 'builtinArity' -- and, for
 -- 'BTensor', against its shape -- failing loudly with the offending node.

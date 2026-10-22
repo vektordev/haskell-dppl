@@ -542,6 +542,9 @@ inferExpr ctx expr = case expr of
           unify expr xs (ITList r)
           unify expr k ITInt
           return r
+        (BIota sh, []) -> do
+          when (null sh) $ failAt expr "BIota: a tensor has rank at least 1"
+          return (ITTensor sh ITInt)
         (BCategoricalIndex _ n, [u, w]) -> do
           when (n < 1) $ failAt expr "BCategoricalIndex: needs at least one weight"
           unify expr u ITFloat

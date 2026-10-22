@@ -43,7 +43,7 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (constructVList)
 import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, planLayoutString, PartitionPlan(..), adtFlagSlots, stripDeadSlotFills)
 import SPLL.IntermediateRepresentation
-import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.RType (RType(..), shapeNumel)
 import IRInterpreter (generateDet)
 import MockNN (evaluateMockNN)
 import TestCaseParser (TestCase(..), Backend(..))
@@ -652,6 +652,7 @@ liveSlotMask plan0 v0 = fst (go True plan0 v0)
       Discretes _ (MultiDiscretes vals) -> leaf (length vals)
       Discretes _ _                     -> error "liveSlotMask: Discretes without an enumeration"
       Continuous                        -> leaf 2
+      TensorPlan _ _                    -> leaf (getSize p)
       TuplePlan a b ->
         let (ma, r1) = go live a xs; (mb, r2) = go live b r1 in (ma ++ mb, r2)
       EitherPlan a b ->
@@ -685,6 +686,7 @@ planViolations plan0 v0 =
       Continuous -> case xs of
         (_ : (i, sigma) : t) -> ([ "sigma slot " ++ show i ++ " is not positive: " ++ show sigma | not (sigma > 0) ], t)
         _ -> (["vector too short for a Continuous slot"], [])
+      TensorPlan sh e -> foldl (\(acc, rest) _ -> let (e', rest') = go e rest in (acc ++ e', rest')) ([], xs) [1 .. shapeNumel sh]
       TuplePlan a b -> let (ea, r1) = go a xs; (eb, r2) = go b r1 in (ea ++ eb, r2)
       EitherPlan a b -> case xs of
         ((i, f) : t) ->
