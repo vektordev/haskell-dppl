@@ -9583,10 +9583,21 @@ measurePlanWorlds sr raws worlds
       -- its structural guards fails (the world's own, or the point
       -- constraint's membership/image guards: an observation outside a
       -- peeled step's image, `exp leaf == -1.0`).
+      -- A world's own branch count is read only when it is the sole world:
+      -- 'mixP' replaces its operands' counts with 'branchSum'. Carrying
+      -- 'branchSum' (every world's guard chain) on each of several worlds is
+      -- dead there, but a world with a factor binds its whole result
+      -- ('guardedResult'), branch count included, so it was emitted and
+      -- evaluated once per world: quadratic in the world count, compounding
+      -- through nested plan factors (task
+      -- plan-world-binds-dead-branch-sum-per-world).
+      let worldBranches = case worlds of
+            [_] -> branchSum
+            _   -> const0
       ws <- forM worlds $ \w -> do
               base <- if planWorldDim w == 0
-                        then onBranches (const branchSum) <$> opaqueMass sr (worldMass w) branchSum
-                        else return (mkPResult (sealP (worldMass w)) (dimC (planWorldDim w)) branchSum (guardsFail w))
+                        then onBranches (const worldBranches) <$> opaqueMass sr (worldMass w) worldBranches
+                        else return (mkPResult (sealP (worldMass w)) (dimC (planWorldDim w)) worldBranches (guardsFail w))
               -- Independent sub-inference factors multiply in. The world's
               -- guards are already baked into 'worldMass', but a factor is a
               -- whole compiled block that must not be evaluated when they
