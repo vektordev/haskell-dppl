@@ -365,6 +365,12 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpEq a b) = do
           | n1 /= n2 -> return False
           | otherwise -> and <$> mapM (\(v1, v2) -> if v1 == VAny || v2 == VAny then return True else cmp v1 v2) (zip vs1 vs2)
         (VUnit, VUnit) -> return True
+        -- Same shape and every element equal, an ANY element a wildcard as a
+        -- tuple field's is (task tensor-gaussian-heads-rd-diffusion: a
+        -- trajectory's witnessed state is checked against its list slot).
+        (VTensor sh1 xs, VTensor sh2 ys)
+          | sh1 /= sh2 -> return False
+          | otherwise -> and <$> mapM (\(x, y) -> if x == VAny || y == VAny then return True else cmp x y) (zip xs ys)
         -- Any is not equal to anything
         (VAny, _) -> return False
         (_, VAny) -> return False
@@ -600,6 +606,9 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin (BTensor sh) el
     then return $ VTensor sh vals
     else failWith f ("BTensor: shape " ++ show sh ++ " needs " ++ show (shapeNumel sh)
                 ++ " elements, got " ++ show (length vals))
+-- The flat row-major position of every element, as an integer.
+generate _ _ _ _ _ _ _ (IRBuiltin (BIota sh) []) =
+  return $ VTensor sh (map VInt [0 .. shapeNumel sh - 1])
 generate f neurals' registry adts' globalEnv env args (IRBuiltin BMap [fExpr, tExpr]) = do
   tVal <- generate f neurals' registry adts' globalEnv env args tExpr
   case tVal of

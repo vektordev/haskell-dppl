@@ -686,6 +686,8 @@ genExpr sc t n
                  f <- funcOf s a
                  IRBuiltin BMap . (\te -> [f, te]) <$> genExpr sc (ITTensor sh s) half)
         ] ++
+        -- The element positions a tensor plan's reader maps over ('BIota').
+        [ (2, return (IRBuiltin (BIota sh) [])) | a == ITInt ] ++
         [ (3, do (op, operandTy) <- liftG (elements zs)
                  s <- operandTy
                  IRBuiltin (BZip op) <$> sequence [genExpr sc (ITTensor sh s) half, genExpr sc (ITTensor sh s) half])
@@ -1655,6 +1657,20 @@ knownDisagreements =
       (repro [] ITFloat
          (IRLetIn "g" (IRApply (IRLambda "x" (IRLambda "y" (IROp OpPlus (IRVar "x") (IRVar "y")))) (IRConst (VFloat 1)))
             (IRApply (IRVar "g") (IRConst (VFloat 2)))) [])
+  -- The batched backend uncurries the same way (its 'IRLambda' case merges
+  -- nested lambdas), shown by a partial application under a type test in a
+  -- max-product probability body; the let-bound repro above does not raise on
+  -- batched, so it cannot show it. Found by
+  -- prop_Fuzz_IRBackendsAgree (--quickcheck-replay=299099) on 2026-10-22,
+  -- shrunk.
+  , KnownFamily "text-backends-uncurry-lambdas-and-application-chains" ["python", "julia", "batched"]
+      (ByAnswer (\_ o a -> isValue o && (  (raisedWith "TypeError" a && raisedWith "positional argument" a)
+                                        || (raisedWith "MethodError: no method matching" a
+                                            && (raisedWith "var\"#" a || raisedWith "_normal(" a || raisedWith "_gen(" a)))))
+      (IRCase ProbBody (Just (SRMaxLog, True)) [("a0", ITFloat), ("a1", ITFloat)] (ITTuple ITFloat (ITTuple ITInt ITBool)) []
+         (IRConstruct TgTuple [IRConst (VFloat 0.0), IRConstruct TgTuple [IRConst (VInt 0),
+            IRUnaryOp OpIsAny (IRApply (IRLambda "p0" (IRLambda "f1" (IRConst VUnit))) (IRConst (VEither (Left (VFloat 0.0)))))]])
+         [[VFloat 800.0, VFloat (-2.5)]] [] [] ([], []))
   -- M4 (generate bodies, judged by replaying the backend's draws).
   --
   -- Both text backends lower a type-tag check by repeating its operand
@@ -2568,13 +2584,13 @@ accessorLabels = map (\a -> "Accessor:" ++ takeWhile (/= ' ') (show (accessorWit
 -- drawn with. A complete match, as above.
 builtinLabels :: [String]
 builtinLabels = map ("Builtin:" ++) $
-  [ "BTensor", "BMap", "BIndex", "BMapList", "BListIndex", "BCategoricalIndex" ]
+  [ "BTensor", "BMap", "BIndex", "BMapList", "BListIndex", "BCategoricalIndex", "BIota" ]
   ++ [ "BReduce " ++ show op | op <- [ROpAdd, ROpLogSumExp, ROpMax] ]
   ++ [ "BZip " ++ show op | op <- [OpPlus, OpMult, OpSub, OpDiv, OpMax, OpAnd, OpOr, OpApprox, OpLessThan, OpGreaterThan, OpEq] ]
   where
     _complete b = case b of
       BTensor _ -> (); BMap -> (); BReduce _ _ -> (); BIndex _ -> (); BZip _ -> ()
-      BMapList -> (); BListIndex -> (); BCategoricalIndex _ _ -> ()
+      BMapList -> (); BListIndex -> (); BCategoricalIndex _ _ -> (); BIota _ -> ()
 
 -- | The function-group and ADT shapes a case reaches (M3), for the coverage
 -- check.

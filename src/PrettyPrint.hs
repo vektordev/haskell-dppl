@@ -91,6 +91,7 @@ pPrintIRExpr (IRBuiltin BListIndex [e1, e2]) n = "(" ++ pPrintIRExpr e1 (n + 1) 
 pPrintIRExpr (IRBuiltin (BTensor sh) args) n =
   "<" ++ intercalate "x" (map (show . extentSize) sh) ++ ":"
       ++ intercalate ", " (map (`pPrintIRExpr` (n + 1)) args) ++ ">"
+pPrintIRExpr (IRBuiltin (BIota sh) []) _ = "iota<" ++ intercalate "x" (map (show . extentSize) sh) ++ ">"
 pPrintIRExpr (IRBuiltin BMap [f, t]) n = "map (" ++ pPrintIRExpr f (n + 1) ++ ") over (" ++ pPrintIRExpr t (n + 1) ++ ")"
 pPrintIRExpr (IRBuiltin (BReduce op ax) [t]) n =
   "reduce " ++ reduceOpName op ++ "/" ++ show ax ++ " (" ++ pPrintIRExpr t (n + 1) ++ ")"

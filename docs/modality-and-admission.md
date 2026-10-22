@@ -66,6 +66,19 @@ twin was declined. `projectNode` now recurses down the arrow spine, as it
 already did for a `Var` referencing the function; IRCompiler's `pt` and
 `ptUnderLambdas` therefore agree.
 
+**An observed `if` under a deterministic condition passes the observation to
+its arms** (task `tensor-gaussian-heads-rd-diffusion`). The witness question
+of a binding (`isWitnessedLambda`) is seeded at the context's observed node
+(`icObs`), the declaration root. When that root is an `if` whose condition's
+law is `Exact`, each arm is inferred with `icObs` set to the arm: whichever
+arm runs, its value is the observation, and IRCompiler compiles each arm
+against the same sample. Without it, the recursive call in
+`step t x = if t < 0.5 then [x] else x : step (t - 1.0) (mu x)` bound its
+parameter unwitnessed (the observation could not reach the else arm through
+the `if`), so the inner `mu x` read a random input and the trajectory was
+`Bottom`. Arithmetic steps such as `distributions/ouChainRecursive` never
+showed it: an unwitnessed Gaussian argument still gives a Gaussian.
+
 ## Recovered variables are re-inferred, not re-typed
 
 Once an engine fixes a variable's value -- the point-witness fold recovering it

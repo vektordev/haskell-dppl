@@ -3,7 +3,7 @@ module SPLL.Validator (
 ) where
 import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl, NeuralDecl, MultiValue, ADTDecl(..))
 import SPLL.Lang.Lang (Expr(..), ExprF(..), getSubExprs, getFunctionNames, InjFName(..), isNeuralInputType, containsTensor, prettyRType)
-import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.RType (RType(..), shapeRank)
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
 import Data.List (intersect, groupBy, sortOn, nub, intercalate)
@@ -45,8 +45,8 @@ validateWriteLogitsDecls decls = mapM_ checkGroup grouped
 -- second, external network (NN2) with no SPLL call site; that role has been removed, and
 -- the logit-vector bridge it tried to host now lives on the value-producing SPLL function
 -- instead. Reject the reverse shape with a pointer at the registry syntax that covers the
--- only job it still had (registering a type's logit layout). A tensor-typed /output/ is
--- slice S2 of tensors-in-core-language (tensor Gaussian heads) and refused until then.
+-- only job it still had (registering a type's logit layout). Which tensor-typed /outputs/
+-- are admitted is 'validateNeuralTarget''s call.
 validateNeuralShape :: [ADTDecl] -> NeuralDecl -> Either String ()
 validateNeuralShape decls (name, TArrow TSymbol target, _) = validateNeuralTarget decls name target
 validateNeuralShape _ (name, TArrow _ TSymbol, _) =
@@ -64,15 +64,39 @@ validateNeuralShape _ (name, ty, _) =
   Left ("Compiler Error: neural declaration '" ++ name ++ "' has type " ++ show ty
         ++ ", but neural declarations must have the form (input -> target).")
 
--- | A tensor reached through an ADT field counts too, so the field types are
--- resolved against the program's @data@ declarations.
+-- | The tensors a neural output may hold (task tensor-gaussian-heads-rd-diffusion):
+-- a rank-1 @Tensor[n] Float@, a diagonal Gaussian head, as the whole output or
+-- a tuple field of it. Refused, each with its own diagnostic:
+--
+-- * a tensor over any other element type: only a Float tensor is a
+--   probabilistic output (decision C of design tensors-in-core-language); an
+--   @Int@/@Bool@ tensor would otherwise be planned as @numel@ enumerations.
+-- * a tensor of rank above 1: the text backends render rank-1 tensor values
+--   only (task tensor-values-beyond-rank1-in-text-backends).
+-- * a tensor under an @Either@, a list or an ADT field (resolved against the
+--   program's @data@ declarations): the sum-type plans, their writeLogits and
+--   the plan-guided engines have no tensor case.
 validateNeuralTarget :: [ADTDecl] -> String -> RType -> Either String ()
-validateNeuralTarget decls name target
-  | containsTensor decls target =
-      Left ("Compiler Error: neural declaration '" ++ name ++ "' has the output type "
-            ++ prettyRType target ++ "; tensor-typed neural outputs are not supported yet "
-            ++ "(a tensor may only be a network's input).")
-  | otherwise = Right ()
+validateNeuralTarget decls name target = go target
+  where
+    go (Tuple a b) = go a >> go b
+    go t@(TTensor sh e)
+      | e /= TFloat =
+          Left ("Compiler Error: neural declaration '" ++ name ++ "' has the output type "
+                ++ prettyRType target ++ "; a tensor-valued neural output must be a Float tensor "
+                ++ "(a diagonal Gaussian head), but " ++ prettyRType t ++ " has " ++ prettyRType e
+                ++ " elements. Only Float tensors are probabilistic outputs.")
+      | shapeRank sh /= 1 =
+          Left ("Compiler Error: neural declaration '" ++ name ++ "' has the output type "
+                ++ prettyRType target ++ "; a tensor-valued neural output must have rank 1, but "
+                ++ prettyRType t ++ " has rank " ++ show (shapeRank sh) ++ ".")
+      | otherwise = Right ()
+    go t
+      | containsTensor decls t =
+          Left ("Compiler Error: neural declaration '" ++ name ++ "' has the output type "
+                ++ prettyRType target ++ "; a tensor-valued neural output may only be the whole "
+                ++ "output or a tuple field of it, not inside an Either, a list or an ADT field.")
+      | otherwise = Right ()
 
 -- A program must declare a "main" function, as it is the entry point compiled
 -- to the generate/probability/integrate functions invoked by runGen/runProb/runInteg.

@@ -848,6 +848,7 @@ forceAnyCheck _ (IRSample _) = IRConst $ VBool False
 forceAnyCheck _ (IRBuiltin (BTensor _) _) = IRConst $ VBool False
 forceAnyCheck _ (IRBuiltin BMap _) = IRConst $ VBool False
 forceAnyCheck _ (IRBuiltin (BReduce _ _) _) = IRConst $ VBool False
+forceAnyCheck _ (IRBuiltin (BIota _) _) = IRConst $ VBool False
 -- Push the check through the binding forms, so a scalar body above can decide
 -- it. Only kept when it actually decided: otherwise this would just relocate
 -- the test (and, for an if, duplicate it).

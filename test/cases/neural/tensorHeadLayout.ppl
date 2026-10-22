@@ -1,0 +1,2 @@
+neural h :: (Symbol -> Tensor[2] Float)
+main sym = h sym

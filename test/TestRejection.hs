@@ -2051,10 +2051,30 @@ tensorTypeTests =testGroup "TensorTypes"
           Left ex -> assertFailure ("compile crashed: " ++ show ex)
           Right _ -> assertBool "compile refused" (not (isLeft (compile defaultCompilerConfig prog)))
 
-  , testCase "a tensor-typed neural output is refused (tensors S2)" $ do
-      msg <- validationRefusal "neural n :: (Symbol -> Tensor[3] Float)\nmain s = n s\n"
-      assertBool ("expected the tensor-output refusal in: " ++ msg)
-        ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+  -- Tensors S2 (task tensor-gaussian-heads-rd-diffusion): a rank-1 Float
+  -- tensor is a diagonal Gaussian head, as the whole output or a tuple field.
+  , testCase "a Float tensor neural output is admitted, whole or in a tuple field" $
+      forM_ [ "neural n :: (Symbol -> Tensor[3] Float)\nmain s = n s\n"
+            , "neural n :: (Symbol -> (Tensor[3] Float, Bool))\nmain s = n s\n" ] $ \src ->
+        withParsed src $ \prog -> assertEqual src (Right ()) (validateProgram prog)
+
+  , testCase "a Tensor[3] Bool neural output is refused: only Float tensors are probabilistic" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> Tensor[3] Bool)\nmain s = n s\n"
+      assertBool ("expected the element-type refusal in: " ++ msg)
+        ("Tensor[3] Bool has Bool elements. Only Float tensors are probabilistic outputs" `isInfixOf` msg)
+
+  , testCase "a Tensor[3] Int neural output is refused, inside a tuple too" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> (Float, Tensor[3] Int))\nmain s = n s\n"
+      assertBool ("expected the element-type refusal in: " ++ msg)
+        ("Only Float tensors are probabilistic outputs" `isInfixOf` msg)
+
+  , testCase "a rank-2 tensor neural output is refused" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> Tensor[2, 2] Float)\nmain s = n s\n"
+      assertBool ("expected the rank refusal in: " ++ msg) ("must have rank 1" `isInfixOf` msg)
+
+  , testCase "a tensor under an Either of a neural output is refused" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> Either Tensor[2] Float Float)\nmain s = n s\n"
+      assertBool ("expected the placement refusal in: " ++ msg) (tensorPlacement `isInfixOf` msg)
 
   -- neural-output-tensor-check-misses-adt-fields: the output check looked
   -- through tuples and lists but not ADT fields, so a tensor field crashed
@@ -2063,16 +2083,16 @@ tensorTypeTests =testGroup "TensorTypes"
       [ testCase "with an of clause" $ do
           msg <- validationRefusal (tensorAdtSrc " of {Img Real}")
           assertBool ("expected the tensor-output refusal in: " ++ msg)
-            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+            (tensorPlacement `isInfixOf` msg)
       , testCase "without an of clause" $ do
           msg <- validationRefusal (tensorAdtSrc "")
           assertBool ("expected the tensor-output refusal in: " ++ msg)
-            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+            (tensorPlacement `isInfixOf` msg)
       , testCase "through mutually recursive ADTs" $ do
           msg <- validationRefusal
             "data A = A0 | A1 b::B\ndata B = B0 | B1 a::A, t::Tensor[2] Float\nneural n :: (Symbol -> A)\nmain s = n s\n"
           assertBool ("expected the tensor-output refusal in: " ++ msg)
-            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+            (tensorPlacement `isInfixOf` msg)
       , testCase "a recursive ADT without a tensor field is still accepted" $
           withParsed "data Chain = End | Link hd::Float, tl::Chain\nneural n :: (Symbol -> Chain)\nmain s = n s\n" $ \prog ->
             assertEqual "" (Right ()) (validateProgram prog)
@@ -2105,6 +2125,37 @@ tensorTypeTests =testGroup "TensorTypes"
                 VFloat _ -> return ()
                 v -> assertFailure ("generate returned a non-float: " ++ show v)
       ]
+
+  -- The marginal of the final state of an R^d diffusion: no state is in the
+  -- output, so every network input is random and unwitnessed and each read is
+  -- a continuous mixture with no closed form (task
+  -- tensor-gaussian-heads-rd-diffusion). Its trajectory twin is
+  -- neural/tensorDiffusionTrajectory.
+  , testGroup "the marginal of a diffusion's final state is sample-only"
+      [ testCase "probability is a missing variant" $
+          withParsed diffusionMarginalSrc $ \prog -> do
+            res <- forcedProb prog (VTensor [EFixed 4] (map VFloat [0, 0, 0, 0]))
+            case res of
+              Left ex -> assertFailure ("crashed the compiler: " ++ show ex)
+              Right (Left e) -> assertBool
+                ("expected the missing-variant answer, got: " ++ e)
+                ("has no compiled probability function" `isInfixOf` e)
+              Right (Right v) -> assertFailure ("compiled to a probability function (" ++ show v ++ ")")
+      , testCase "generate still draws a Tensor[4] Float" $
+          withParsed diffusionMarginalSrc $ \prog ->
+            case runGen defaultCompilerConfig prog [] of
+              Left e -> assertFailure ("generate refused: " ++ e)
+              Right r -> case evalRand r (mkStdGen 1) of
+                VTensor [EFixed 4] xs | all isFloat xs -> return ()
+                v -> assertFailure ("generate returned something else: " ++ show v)
+      ]
   ]
   where
+    isFloat v = case v of { VFloat _ -> True; _ -> False }
+    tensorPlacement = "may only be the whole output or a tuple field of it"
+    diffusionMarginalSrc = unlines
+      [ "neural mu :: ((Tensor[4] Float, Float) -> Tensor[4] Float)"
+      , "neural prior :: (Float -> Tensor[4] Float)"
+      , "step t x = if t < 0.5 then x else step (t - 1.0) (mu (x, t))"
+      , "main = step 3.0 (prior 0.0)" ]
     sampleOnlyReadSrc = "neural mu :: (Float -> Float)\nmain = mu Normal\n"
