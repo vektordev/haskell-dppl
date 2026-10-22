@@ -54,7 +54,7 @@ import Data.Char (isAlphaNum)
 import Test.Tasty.QuickCheck (testProperties, testProperty)
 import System.Random (StdGen, mkStdGen)
 import Control.Monad.Random (Rand, evalRand)
-import Control.Monad (forM, forM_, when)
+import Control.Monad (forM, forM_, replicateM, when)
 import Data.Number.Erf (erf)
 import Utils (splitByString, reflexiveEq)
 import Data.Maybe (isJust)
@@ -6101,6 +6101,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , testGroup "tensor builtins" tensorBuiltinTests
   , shapedNeuralInputTests
   , tensorGaussianHeadTests
+  , scalarDiffusionSamplerTest
   , categoricalIndexTests
   , gatherPassTests
   , untaggedShortCircuit
@@ -6647,7 +6648,7 @@ reservedNameTests = testGroup "reserved names"
       -- p_ob<n>: the AST-level check must not refuse what the parser built.
       let src = unlines [ "isPos v = v > 0.0"
                         , "main = draw h : t = [1.0, 2.0] in observe (h + Normal) isPos" ]
-      prog <- either (\e -> assertFailure (show e) >> undefined) return (tryParseProgram "<test>" src)
+      prog <- either (\e -> assertFailure (show e)) return (tryParseProgram "<test>" src)
       assertEqual "validation" (Right ()) (validateProgram prog)
       -- Probability mode cannot invert through a named predicate (see
       -- SPLL.Parser.pObserve), so only the generate variant is compiled.
@@ -6801,6 +6802,42 @@ shapedNeuralInputTests = testGroup "shaped neural inputs"
       conforms (TTensor [EFixed 3, EFixed 1] TFloat) (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool False)
       conforms t3 (VFloat 1) @?= Right (VBool False)
   ]
+
+-- | Design diffusion-models-wishlist, M2: the toy 1-D diffusion's ancestral
+-- sampler draws the trajectories whose density neural/diffusionToy1D pins.
+-- The shaped-input mock makes mu (x, t) N(x, t), so the increments
+-- x0, x1 - x0, x2 - x1 are independent N(0, 1), N(0, 2), N(0, 1). The corpus
+-- sampling sweep does not reach this program (it is neural, of dimension 3).
+scalarDiffusionSamplerTest :: TestTree
+scalarDiffusionSamplerTest = testCase "the toy 1-D diffusion samples the trajectory its density describes" $ do
+  src <- readFile "test/cases/neural/diffusionToy1D.ppl"
+  prog <- either (\e -> assertFailure ("parse failed: " ++ show e)) return (tryParseProgram "<diffusionToy1D>" src)
+  gen <- either (\e -> assertFailure ("generate refused: " ++ show e)) return
+           (runGen defaultCompilerConfig prog [] :: Either CompilerError (Rand StdGen IRValue))
+  let n = 4000 :: Int
+      draws = evalRand (replicateM n gen) (mkStdGen 7)
+      asStates v = case v of
+        VList (ListCont (VFloat a) (ListCont (VFloat b) (ListCont (VFloat c) EmptyList))) -> Just (a, b, c)
+        _ -> Nothing
+  states <- case mapM asStates draws of
+    Just ss -> return ss
+    Nothing -> assertFailure ("a draw is not a three-state trajectory: " ++ show (take 3 draws))
+  let mean xs = sum xs / fromIntegral (length xs)
+      variance xs = let m = mean xs in mean [(x - m) ^ (2 :: Int) | x <- xs]
+      corr xs ys = let mx = mean xs; my = mean ys
+                   in mean (zipWith (\x y -> (x - mx) * (y - my)) xs ys) / sqrt (variance xs * variance ys)
+      d0 = [a | (a, _, _) <- states]
+      d1 = [b - a | (a, b, _) <- states]
+      d2 = [c - b | (_, b, c) <- states]
+      checkInc name xs sd = do
+        assertBool (name ++ " mean " ++ show (mean xs)) (abs (mean xs) < 4 * sd / sqrt (fromIntegral n))
+        assertBool (name ++ " variance " ++ show (variance xs) ++ ", expected " ++ show (sd * sd))
+          (abs (variance xs / (sd * sd) - 1) < 0.1)
+  checkInc "x0" d0 1
+  checkInc "x1 - x0" d1 2
+  checkInc "x2 - x1" d2 1
+  assertBool ("x1 - x0 correlates with x0: " ++ show (corr d0 d1)) (abs (corr d0 d1) < 0.08)
+  assertBool ("x2 - x1 correlates with x1: " ++ show (corr [b | (_, b, _) <- states] d2)) (abs (corr [b | (_, b, _) <- states] d2) < 0.08)
 
 -- | Task tensor-gaussian-heads-rd-diffusion: a tensor-valued Gaussian head's
 -- plan, its element-major layout, the plan-aware mock, and the reader's emitted
