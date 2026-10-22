@@ -40,7 +40,7 @@ module SPLL.Semiring (
   Semiring(..), mkSemiring, linearSemiring, logSemiring, semiringGroupInfix,
   maxLinearSemiring, maxLogSemiring,
   semiringSuffix,
-  negInfIR, logSumExpIR, logSubExpIR, maskSR, fromLinearSR, measureDiffSR, sumAllSR,
+  negInfIR, logSumExpIR, logSubExpIR, maskSR, fromLinearSR, toLinearSR, measureDiffSR, sumAllSR,
   distDensity, distCumulative, scaledNormalDensity, upperTailComplement, complementWhen,
   -- * IR boolean/constant helpers
   const0, const1, dim0, dim1, constTrueIR, constFalseIR, notIR, orIR, andIR,
@@ -542,6 +542,13 @@ maskSR sr cond = IRIf cond (srOne sr) (srZero sr)
 -- 'scaledNormalDensity') prefer it, since it keeps a deep tail's precision.
 fromLinearSR :: Semiring -> IRExpr -> IRExpr
 fromLinearSR sr x = if srLogSpace sr then IRUnaryOp OpLog x else x
+
+-- | The inverse of 'fromLinearSR': a semiring value as a linear probability,
+-- for a site that does arithmetic with it as a number rather than combining
+-- it as a probability (the mixture weights of a moment match,
+-- 'IRCompiler.momentsOf').
+toLinearSR :: Semiring -> IRExpr -> IRExpr
+toLinearSR sr x = if srLogSpace sr then IRUnaryOp OpExp x else x
 
 -- | The measure of a set difference @a \ b@ with @b@ inside @a@ -- a CDF
 -- difference @F(hi) - F(lo)@. Deliberately not 'srMinus': that is the

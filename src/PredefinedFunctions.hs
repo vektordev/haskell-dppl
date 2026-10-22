@@ -21,7 +21,9 @@ getFunctionParamIdx,
 renameDecl,
 templateLocal,
 isTemplateLocal,
-anyOfType
+anyOfType,
+collapseName,
+isCollapse
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..), ClassConstraint(..))
@@ -122,6 +124,27 @@ inversionFor name v inversions = case [d | d <- inversions, outputVars d == [v]]
                 ++ " inversions solving for '" ++ v ++ "'; exactly one is required")
 
 -- ============================ UNARY ARITHMETIC ============================
+
+-- | @collapse x@: the Gaussian with @x@'s mean and variance (task
+-- encode-07-collapse-operator). The one sanctioned way to fit a non-Gaussian
+-- continuous value -- an @if@ mixture of Gaussians, say -- into a Gaussian
+-- slot (a writeLogits @Continuous@ slot): the approximation is written in the
+-- source, not done silently.
+--
+-- It is not a pointwise function of its operand's value, so the forward body
+-- below is only its Dirac case (the moment match of a point mass is that
+-- point), which is all the generic InjF machinery ever evaluates: a random
+-- operand is typed Gaussian by its own modality rule, and compiled from the
+-- operand's moments ('IRCompiler.momentsOf') in every mode. Declared
+-- forward-only: no observation of the result recovers the operand.
+collapseName :: String
+collapseName = "collapse"
+
+isCollapse :: String -> Bool
+isCollapse = (== collapseName)
+
+collapseFwd :: FDecl
+collapseFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRVar "a") (IRConst (VBool True)) False [("a", IRConst $ VFloat 1)]
 
 doubleFwd :: FDecl
 doubleFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpMult (IRVar "a") (IRConst $ VFloat 2)) (IRConst (VBool True)) False [("a", IRConst $ VFloat 2)]
@@ -509,6 +532,7 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("gt", FPair gtFwd []),
               ("lt", FPair ltFwd []),
               ("max", FPair maxFwd []),
+              (collapseName, FPair collapseFwd []),
               ("eq", FPair eqFwd [eqInv1, eqInv2]),
               ("Cons", FPair consFwd [consInvHead, consInvTail]),
               ("TCons", FPair tConsFwd [tConsInvFst, tConsInvSnd]),

@@ -1,0 +1,2 @@
+-- collapse of a Gaussian is a no-op (task encode-07-collapse-operator).
+main = collapse (Normal * 2.0 + 1.0)

@@ -1,0 +1,3 @@
+-- collapse of a product of independent random factors: mu = 0,
+-- sigma^2 = (1 + 0)(1 + 1) - 0 = 2. The sum outside adds a Normal: sigma^2 = 3.
+main = collapse (Normal * (Normal + 1.0)) + Normal + 1.0
