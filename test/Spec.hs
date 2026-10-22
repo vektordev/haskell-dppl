@@ -51,6 +51,7 @@ import Data.List (isInfixOf)
 import Control.Exception (finally)
 import ImpactManifest (openManifest, flushManifest, fullTestsRequested, manifestFile)
 import TestImpactManifest (impactManifestTests)
+import TestDuplicationCensus (duplicationCensusUnitTests, duplicationGrowthTests)
 import CorpusSweep (loadCorpus, timeWholeRun, reportSweeps)
 
 
@@ -628,6 +629,8 @@ main = do
     , knownIssues
     , scalingCheckTests
     , performancePinHarnessTests
+    , duplicationCensusUnitTests
+    , duplicationGrowthTests
     , rewriteTests
     , impactManifestTests
     , e2e

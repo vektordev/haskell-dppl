@@ -1,0 +1,238 @@
+# Duplication-census pins (design ir-duplication-census; test/TestDuplicationCensus.hs).
+#
+# One line per corpus program with a function body whose M -- the copy count of
+# its most-copied subtree of >= 30 nodes in the -O0 IR, binders up to renaming --
+# exceeds 2. Every body listed is checked for exactly its M; every body not
+# listed must stay at <= 2. Pins only go down, in the commit of the fix that
+# lowers them; raising one, or adding a line, is a reviewed change. The failing
+# test prints the line to use. `--duplicationCensus` prints the same census for
+# one program, with its most-copied subtrees and their fresh-name tags.
+#
+# Baseline taken at haskell-dppl 360fd08 (dev, 2026-10-22), after
+# presult-blocks-shared-by-construction.
+#
+# program  group.variant=M ...
+absNTopLevelSetWitness absN.integ=6 absN.prob=6
+accumulatedPosition main.prob=5
+adtCoin main.integ=6 main.prob=8
+adtConstructorNamedRuntimeTest main.integ=4 main.prob=4
+adtConstructorTestNamedRuntimeTest main.integ=6 main.prob=8
+adtNeuralCountingAccum addTerm.prob=3
+adtNeuralCountingFlat countRed.prob=4
+affineChainEndpoint main.integ=7 main.prob=5
+affineChainPartial main__m10.prob=5
+aliasedDrawScaledChain main.prob=10 main__m100.prob=4
+aliasedDrawScaledSibling main.integ=8 main.prob=7
+aliasedDrawThroughScalingHelper main.integ=6 main.prob=6
+aliasReadTwice main.prob=6 main__m10.prob=6 main__m11.prob=4
+applyEnumComparison selF.prob=3
+applyEnumForwardOnly notB.prob=3
+applyEnumOperandPair sel.prob=3
+arrowApplyCurriedIfSelected main.integ=9 main.prob=6
+arrowApplyIfSelected main.prob=4
+arrowApplyRandomFunctionNormalArg main.prob=4
+call distr.integ=3 distr.prob=3
+clevrEqualLargeMetalSphere level2.prob=4 level3.prob=4
+clevrEqualLargeMetalSphereNatural main.integ=4 main.prob=4 total.prob=4
+clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
+comparisonSiblingJacobian main.prob=6
+crossLatentSideOperandJacobian main.prob=12 main__m10.prob=7
+ctorTestOverTransformedDraw main.integ=24 main.prob=24
+ctorTestOverTransformedField main.integ=16 main.prob=16
+curriedHelperEnumArg match.integ=3 match.prob=3
+curriedTupleBodyBothProbabilistic main.integ=3 main.prob=4
+defineDestructured main.integ=8 main.prob=10
+diffusionToy1D main.prob=9 step.prob=18
+doubleAliasedDrawParameterScaledSibling main.prob=5 main__m01.prob=3 main__m11.prob=4
+drawBoundAffineStep main.integ=10 main.prob=7
+drawBoundIntChainMixedSignsCdf main.integ=32 main.prob=8
+drawBoundIntPlusThenNegativeCdf main.integ=20 main.prob=8
+drawBoundIntTimesNegative main.integ=20 main.prob=8
+drawBoundIntTimesPositiveCdf main.integ=20 main.prob=8
+drawBoundListElementGuardsEmptyTail main.prob=6
+drawBoundScaledWitness main__m11.prob=4
+drawBoundSceneIntermediate main.integ=3 main.prob=3 main.writeLogits=10
+drawDestructuredAgreementArmLet main.integ=3 main.prob=3
+drawDestructuredAgreementHelperArm pair.integ=8 pair.prob=8
+drawDestructuredShared main.prob=14
+drawProductReadPerField20 main.integ=5 main.prob=5
+drawProductReadPerField4 main.integ=3 main.prob=3
+drawProductReadPerField main.integ=3 main.prob=3
+drawProductReadUnderBinding main.integ=8 main.prob=4
+either_arith_inv main.integ=15 main.prob=22
+either_both_cont main.integ=4 main.prob=4
+either_branch_disc main.integ=4 main.prob=8
+eitherIfDeconstructObserve main.prob=3
+eitherIntegral main.integ=8 main.prob=8
+either_isleft main.integ=6 main.prob=8
+either_map_any main.integ=15 main.prob=26
+either_mixed_arms main.integ=4 main.prob=8
+either_param main.integ=3 main.prob=3
+enumDeadLetFreshDrawTuple main.integ=3 main.prob=7
+enumLetGatesFreshDrawCondition main.prob=5
+enumLetGatesFreshDrawTwoObs main__m011.prob=7
+enumNeuralDeadBranchFreshDraw main.prob=4
+equalsCoin main.prob=3
+equals oneOfThree.integ=4 oneOfThree.prob=4
+fieldDiscardsComparedDraw main.integ=11 main.prob=8
+fstOfPairWrapperNestedStructuredDraw main.prob=20 main__m01.prob=4
+fstOfPairWrapperStructuredDraw main.prob=20 main__m01.prob=4
+fuzzLetWitnessSetValuedFst main.prob=3
+gaussianTrajectory4 main.prob=20 main__m0110.prob=5 main__m1100.prob=5 main__m1101.prob=5 main__m1110.prob=5
+gaussianTrajectory8 main.prob=20
+guardSelectOverTupleResult main.integ=5 main.prob=5
+headOfArmDependentListLength main.integ=3 main.prob=3
+headTail main.integ=8 main.prob=8
+helperParamNonzeroTimesUniform h.integ=3 h.prob=3
+helperParamShadowsEnumeratedDraw h.prob=3
+helperParamZeroTimesIntChoice h.integ=36 h.prob=3
+helperParamZeroTimesUniform h.integ=3 h.prob=3
+helperParamZeroTimesUniformShifted h.integ=3 h.prob=3
+hoNestedLambdas main.integ=3 main.prob=3
+if main.integ=4 main.prob=4
+ifSelectNormalDet main.integ=8 main.prob=8
+injDouble main.prob=3
+intMultKnownFactor main.integ=48 main.prob=4
+intTimesNegativeInlineCdf main.integ=48 main.prob=4
+isNullFalse main.prob=4
+isNullTrue main.prob=4
+letAliasRandomBinding main.prob=5
+letBoundEitherDestructure main.prob=15
+letChainNormalVarTuple main.prob=6 main__m10.prob=4
+letInProbChainedMults main.integ=11 main.prob=8
+letThreadEnumerable contrib.prob=3
+letTwoUniformIndirect main.prob=20 main__m01.prob=6
+letTwoUniform main.integ=3 main.prob=4
+letWitnessedChain main.prob=6 main__m011.prob=4 main__m111.prob=4
+letWitnessedEitherFpUlp main.prob=18 main__m001.prob=11 main__m010.prob=14 main__m100.prob=16
+letWitnessedSharedLatent main__m11.prob=4
+letWitnessedSharedLatentMult main__m11.prob=4
+letWitnessedTupleFpUlp main.prob=12 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
+mapEither main.integ=15 main.prob=18
+map main.prob=3
+mapMultList main.prob=3
+maskComplementSlot main__m10.prob=4
+maskIndependentLatents main.integ=3 main.prob=4
+maskShiftedWitness main.integ=8 main.prob=7 main__m1.prob=4
+maskSummedSlot main.prob=12 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
+maskSwappedWrapper f__m10.prob=4 main.prob=14 main__m10.prob=6
+maybeFromLeftNested main.integ=5 main.prob=10
+maybeFromLeftNormalization main.integ=5 main.prob=5
+maybeFromRightNormalization main.integ=5 main.prob=5
+multExp main.integ=10 main.prob=7
+namedHelperReturnsSelectedLambda main.prob=7
+nanConstantMixture main.integ=3 main.prob=4
+negDiscreteAtomCdf main.integ=4 main.prob=4
+nestedTupleAccessorCompilesFast main.integ=4 main.prob=4
+nestedTupleAnyUnderHeadOfIf main.prob=4
+nestedTupleAnyUnderSndHead main.prob=5
+neuralTrajectoryScalar main.prob=12 step.prob=18
+noisyIfFoldOfReads toF.integ=3 toF.prob=3
+noisyProductOfReads toF.integ=3 toF.prob=3
+noisyReadPlusFreshCoin toF.integ=3 toF.prob=3
+noisyScaleOfRead toF.integ=3 toF.prob=3
+observeContinuousEqualsLetfree main.integ=4 main.prob=4
+observeDisjointTails main.prob=3
+observeKeywordTruncated main.prob=3
+observeMaybePayloadRightAny main.prob=3
+observeNegatedContinuousEqualsLetfree main.integ=4 main.prob=4
+observePredicateParameterLambda main.prob=3
+observeTwoSidedIntervalAnd main.prob=6
+observeTwoSidedInterval main.prob=6
+ofRealLeafCountingCurriedThreshold match.integ=4 match.prob=4
+ofRealLeafCountingReadsPosition match.integ=4 match.prob=4
+ofRealLeafCountingSharedPredicate match.integ=4 match.prob=4
+orWithDeterministicOperand main.integ=8 main.prob=16
+ouChainRecursive main.prob=9 step.prob=12
+ouChainUnrolled main.prob=38 main__m001.prob=18 main__m010.prob=28 main__m100.prob=28 main__m101.prob=6 main__m110.prob=20
+overDeterminedSharedLatent main.prob=18 main__m001.prob=15 main__m010.prob=15 main__m011.prob=4
+ownDrawSlotsSelfContained main.integ=3 main.prob=3
+partialInjFMapPlus main.prob=3
+planCrossSlotConditionalAllAny main.writeLogits=3 main__m11.integ=13 main__m11.prob=6
+planCtorFieldPartialAny main.prob=18
+planEnumContFree existsRed.integ=4 existsRed.prob=4
+planEnumRecChain existsRed.integ=4 existsRed.prob=4 goOne.integ=4 goOne.prob=4
+planEnumRecChainMaterialized existsRed.integ=4 existsRed.prob=4 goOne.integ=4 goOne.prob=4
+planEnumRecCount numRed.prob=4
+planEnumRecCountOfLazy main.integ=3 main.prob=3 numRed.prob=4
+planEnumRecCountOfLazyNested main.integ=3 main.prob=3 numRed.prob=4
+planEnumRecCountOfLazyNestedReadsOuter main.integ=3 main.prob=3 numRed.prob=4
+planEnumRecDeepCount main.integ=8 main.prob=8 numRed.prob=4
+planEnumRecDeepScan existsRed.integ=4 existsRed.prob=4
+planEnumRecJointStateSeparate existsRed.integ=4 existsRed.prob=4 goL.integ=4 goL.prob=4
+planEnumRecNilCtor existsRed.integ=4 existsRed.prob=4
+planEnumRecNilCtorMaterialized existsRed.integ=4 existsRed.prob=4
+planEnumRecScan existsRed.integ=4 existsRed.prob=4
+planEnumRecThreaded goOne.integ=4 goOne.prob=4
+planMultiReaderInnerDraw numRed.prob=4
+planMultiReaderPlusIf numRed.prob=4
+planMultiReaderTuplePair numRed.prob=4
+planOverBudgetInnerDraw main.integ=3 main.prob=3 numRed.prob=4
+planOverBudgetList main.prob=3 numRed.prob=4
+planOverBudgetLocalLambda main.integ=3 main.prob=3 numRed.prob=4
+planOverBudgetMult main.integ=3 main.prob=3 numRed.prob=4
+planOverBudgetPlus main.integ=3 main.prob=3 numRed.prob=4
+planOverBudgetTupleConst main.prob=3 numRed.prob=4
+planOverBudgetTupleOuter main.integ=3 main.prob=3 main__m1.prob=3 numRed.prob=4
+planRecursiveHelperOnDrawnRead main.integ=4 main.prob=4
+planRecursiveHelperOnInlineRead main.integ=4 main.prob=4
+planSceneFloatPassthroughFactored main.prob=18
+planSceneFloatPassthroughSharedSlot main.prob=105 main__m01.prob=18 main__m10.prob=18
+planSceneRebuildPerFieldDraws main.prob=18
+planSceneRebuildShiftedFloatLeaf main.prob=6
+planSlicePartialAny main.prob=18
+planSumWithSunkDiscreteDraw main.integ=3 main.prob=3 numRed.prob=4
+readme main.integ=4 main.prob=4
+rewriteProbeHelperIfGate f.integ=6 f.prob=6
+rewriteProbeHelperTwoArgs main.prob=4
+runtimeNameBinders g.integ=3 g.prob=3
+sceneCountConditionalEdit main.writeLogits=8
+setWitnessEqFalseInTupleArmApplied main.prob=4
+setWitnessEqualityThroughExpOffImage main.integ=14 main.prob=14
+setWitnessExceptInteriorPoint main.prob=4
+setWitnessNegatedComparisonBoundary main.prob=4
+setWitnessNestedLetObserve main.prob=3
+setWitnessSiblingBoolAny main.prob=3
+setWitnessSiblingEither main.prob=3
+setWitnessSiblingFresh main.prob=3
+setWitnessSiblingNestedLet main.prob=3
+setWitnessThroughStepDecreasing main.prob=6
+setWitnessTupleDisjointFields main.prob=4
+sharedFieldAcrossList main.integ=3 main.prob=3
+sharedLatentCallChain inner.prob=3
+sharedLatentNestedLet contrib.prob=3
+sharedLatentOneSideOnly contrib.prob=3
+sharedLatentPerSlotHoisted match.integ=3 match.prob=3
+sharedLatentPerSlot match.integ=3 match.prob=3
+sharedLatentPlusFresh contrib.prob=3
+sharedLatentThreeUses contrib.prob=3
+sharedLatentTupleSlot contrib.prob=3
+showcase_either_branch main.integ=4 main.prob=8
+showcase_either_isLeft_det main.integ=6 main.prob=8
+showcase_either_marginal_continuous main.integ=4 main.prob=8
+showcase_either_marginal_injf main.integ=4 main.prob=4
+showcase_observe_inequality main.prob=3
+showcase_poe_with_prior prior.integ=4 prior.prob=4
+sndOfPairWrapperStructuredDraw main.prob=20 main__m10.prob=8
+structuredDrawHelperProjectsField main.prob=20
+tensorDiffusionTrajectory main.prob=12 step.prob=13
+topKComplementAnyExcept main.prob=3
+topKComplementCdfFlip main.integ=4 main.prob=4
+tupleCtorTestOfSharedDraw main.prob=5 main__m01.prob=18
+tupleDiscreteDistrib main.integ=5 main.prob=5
+tupleOfEithersAny main.integ=5 main.prob=10
+tupleRoundtrip main.prob=25 main__m01.prob=4 main__m10.prob=4
+twiceApplication main.integ=22 main.prob=13
+twiceApplicationTop main.integ=8 main.prob=5
+twoIsLeftSplitsInOneBatch main.integ=8 main.prob=10
+uniformIf main.integ=4 main.prob=4
+uniformNeg main.prob=3
+witnessThroughDetIfElse main.prob=10
+witnessThroughDetIfNamed f.integ=6 f.prob=6 main.prob=12
+witnessThroughDetIfNamedLast f.integ=6 f.prob=6 main.prob=12
+witnessThroughDetIfScalar main.prob=5
+witnessThroughDetIfThen main.prob=10
+wrappedHoAdt main.prob=4
+writeLogits_continuous_under_sum side.integ=4 side.prob=8
+writeLogits_dead_arm side.integ=3 side.prob=6
+writeLogits_read_passthrough guarded.prob=18 main.prob=18 swap.prob=18

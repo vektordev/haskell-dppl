@@ -15,6 +15,7 @@ module SPLL.IROptimizer (
 , deterministicGens
 , distributeIf
 , headHash
+, hashMix
 , allNamesIR
 ) where
 

@@ -131,6 +131,7 @@ tests:
     - ImpactManifest
     - CertifiedCensus
     - Rewrites
+    - TestDuplicationCensus
     ghc-options:
     - -threaded
     - -rtsopts
