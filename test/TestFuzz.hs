@@ -96,7 +96,8 @@ import SPLL.IRCompiler (generateBackedSites)
 import SPLL.Prelude
 import SPLL.Validator (validateProgram)
 import PredefinedFunctions (globalFEnv, parameterCount, FPair(..), applicability)
-import SPLL.Lang.Lang (toStub, getTypeInfo, prettyRType)
+import SPLL.Lang.Lang (toStub, getTypeInfo, prettyRType, getSubExprs)
+import SPLL.DuplicationCensus (censusEnv, defaultMinSize, maxCopies, renderCensus)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.Infer (addTypeInfo)
@@ -731,6 +732,41 @@ prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess (fuzzCases 3000) $
         []  -> property True
         bad -> counterexample ("GENERATE-BACKED: " ++ show bad ++ "\nPROGRAM: " ++ show p) False
       _ -> property True
+
+-- | The duplication census as a fuzz property (design ir-duplication-census,
+-- "SPLL.DuplicationCensus"): in a program's -O0 IR, no subtree of at least
+-- 'defaultMinSize' nodes occurs more than 'duplicationPerSourceNode' times per
+-- node of the program's source. A construct copied b times per nesting level
+-- appears b^d times at depth d, so a new exponential fan-out breaks this
+-- bound long before it shows as compile time, and shrinking hands back a
+-- minimal program with the copied subtree. Needs no backend: one -O0 compile
+-- per draw.
+prop_Fuzz_DuplicationLinearInSize :: Property
+prop_Fuzz_DuplicationLinearInSize = withMaxSuccess (fuzzCases 300) $
+  forAllShrink (resize fuzzSize genAgreementProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_DuplicationLinearInSize" $ do
+    r <- trySync (evaluate (forceShow (compile defaultCompilerConfig { optimizerLevel = 0 } p)))
+    return $ case r of
+      Right (Right irEnv) ->
+        let size = sum [ exprNodes b | (_, b) <- functions p ]
+            worst = [ c | c <- censusEnv defaultMinSize irEnv, maxCopies c > duplicationPerSourceNode * size ]
+        in case worst of
+          [] -> property True
+          (c : _) -> counterexample ("DUPLICATION: " ++ show (maxCopies c) ++ " copies in a program of " ++ show size
+                                     ++ " source nodes (bound " ++ show (duplicationPerSourceNode * size) ++ ")\n"
+                                     ++ renderCensus defaultMinSize 1 [c] ++ "PROGRAM:\n" ++ pPrintProg p) False
+      _ -> property True
+  where
+    exprNodes e = 1 + sum (map exprNodes (getSubExprs e))
+
+-- | Copies of one large subtree allowed per source node. Set from the corpus
+-- at 360fd08, where the highest M per source node is 6: the integrate body of
+-- @main = 6 * (if Uniform < 0.5 then 1 else 0)@ (intMultKnownFactor,
+-- intTimesNegativeInlineCdf) holds 48 copies of the 79-node integer-division
+-- bound of an Int product's CDF, in an 8-node program. That is a constant
+-- (48 at every depth of a nested product), not a fan-out, so it sets the
+-- bound rather than failing it.
+duplicationPerSourceNode :: Int
+duplicationPerSourceNode = 6
 
 -- | The admission contract (task @admission-totality-property@): every
 -- top-level function the modality engine admits compiles to probability and

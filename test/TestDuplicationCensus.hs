@@ -79,9 +79,19 @@ mainProbCopies src = case tryParseProgram "census" src of
       [c] -> return (maxCopies c)
       _ -> assertFailure "no main probability body" >> return 0
 
--- | The three families of the repeated-computation audit. Each had a point
--- fix; reverting any one of them must turn its row red. A row's bounds are
--- today's values (or just above), so a new fan-out on these shapes fails too.
+-- | The three families of the repeated-computation audit, each with a point
+-- fix. A row's bounds are today's values, so a new fan-out on these shapes
+-- fails too. Checked once by reverting each fix (on 360fd08):
+--
+-- * the acc_imposs binding (field-constructor-prune-guard-exponential-in-width):
+--   M = 6 / 30 / 126 at N = 2 / 4 / 6, this row red, and 27 corpus programs;
+-- * the constant ANY arm (anyexcept-any-arm-compiled-instead-of-constant):
+--   M = 2 / 3 / 9 at d = 2 / 3 / 4, this row red, and 6 corpus programs;
+-- * the shared open body (witness-fold-open-body-copied-per-field): 22 corpus
+--   programs red, but not this row. Its M is set by the still-open
+--   witness-fold-wildcard-body-compiled-twice (4 / 44 / 258 at K = 2 / 3 / 4,
+--   copies of a 33-node closed ANY test), which the revert barely moves
+--   (4 / 40 / 250). Lower the bound when that task lands.
 duplicationGrowthTests :: TestTree
 duplicationGrowthTests = testGroup "DuplicationGrowth"
   [ family "independent single-use lets (witness-fold-open-body-copied-per-field)" indepLets [(2, 4), (3, 44)]
