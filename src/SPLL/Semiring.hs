@@ -1,3 +1,4 @@
+{-# LANGUAGE DerivingStrategies, GeneralizedNewtypeDeriving #-}
 -- | The probability-arithmetic core factored out of 'SPLL.IRCompiler' (task
 -- semiring-discipline-enforcement): the 'Semiring' abstraction that lets a
 -- probability be computed as either a linear value or a log-probability
@@ -46,12 +47,15 @@ module SPLL.Semiring (
   outsideUnitInterval, anyGuardedDim,
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
-  prodP, onProb, onDim, onBranches, mapResult, guardP, zipResult, zip3Result,
-  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, shareResult, guardedResult, shareUnlessLeaf,
+  prodP, onProb, onDim, onBranches, underLambdas, substResult, errorWhen, constantResult, guardP, zipResult, zip3Result,
+  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, closeResult, guardedResult, shareUnlessLeaf,
   packResult, unpackResult, packedProb, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
-  CompilerMonad, CompilerM, refuse, runCompilerMonad, mkVariable, setVariables, generateLetInExpr, wrapBlockIfRead, mentionsAny
+  CompilerMonad, CompilerM, refuse, runCompilerMonad, mkVariable, setVariables, generateLetInExpr,
+  -- * Scopes
+  Open, scoped, openWith, openValue, closeExpr, inline, splitOpen, openNames, openReads, openIterates, openNests,
+  openIsEmpty, openBlockSize, unsafeDistributeBlock
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -59,40 +63,161 @@ import SPLL.ReservedNames (sumProductGroupTag, maxProductGroupTag, countingGroup
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (multiValueToValueList)
 import Utils
-import Control.Monad.Writer.Lazy
-import Control.Monad.Except (ExceptT, runExceptT, throwError)
+import Control.Monad.Writer.Lazy (WriterT, runWriterT, tell, lift)
+import Control.Monad.State (MonadState)
+import Control.Monad.Except (ExceptT, MonadError, runExceptT, throwError)
 import qualified Data.Set as Set
 
--- | The compiler monad: fresh names ('Supply'), emitted let-bindings (the
+-- | The compiler monad: fresh names ('Supply'), emitted let-bindings (a
 -- writer), and one refusal channel (task static-refusals-become-absent-variants).
 --
--- The 'ExceptT' sits /under/ the writer on purpose. @runWriterT@ of a
--- 'CompilerMonad' action is then an @ExceptT VariantRefusal Supply@ action, so the
--- module's many "compile this in its own writer scope" sites
--- (@lift (runWriterT ...)@) keep their shape and a refusal inside such a scope
--- propagates through them untouched; and the name supply, beneath both, is
--- never rewound by a refusal.
-type CompilerM = WriterT [(String, IRExpr)] (ExceptT VariantRefusal Supply)
+-- A newtype, so that its writer is NOT reachable from outside this module
+-- (design presult-blocks-shared-by-construction). A sub-compile that wants its
+-- own bindings runs under 'scoped' and gets an 'Open' back, whose bindings can
+-- only leave through the functions below; no caller can hold a scope's
+-- bindings as a list and wrap them around each field of a 'PResult' -- the
+-- one move behind most of this compiler's exponential compile times (see
+-- 'unpackResult').
+--
+-- The 'ExceptT' sits /under/ the writer on purpose: a refusal inside a scope
+-- propagates through 'scoped' untouched, and the name supply, beneath both, is
+-- never rewound by a refusal. The supply ('MonadState' 'Int') and the refusal
+-- channel ('MonadError') are exported; neither can move a binding.
+newtype CompilerM a = CompilerM (WriterT [(String, IRExpr)] (ExceptT VariantRefusal Supply) a)
+  deriving newtype (Functor, Applicative, Monad, MonadState Int, MonadError VariantRefusal)
 type CompilerMonad a = CompilerM a
+
+unCompilerM :: CompilerM a -> WriterT [(String, IRExpr)] (ExceptT VariantRefusal Supply) a
+unCompilerM (CompilerM m) = m
 
 -- | Decline to compile the current variant: an unsupported shape, not an
 -- internal invariant (those stay 'error'). The whole variant becomes absent
 -- with this reason recorded on its 'IRFunGroup'; see 'VariantRefusal'. The first
 -- argument is the chain name of the refusing node ("" when there is none).
 refuse :: String -> String -> CompilerMonad a
-refuse cn why = lift (throwError (VariantRefusal why cn))
+refuse cn why = throwError (VariantRefusal why cn)
 
--- | Run a compilation from a fresh name supply.
-runCompilerMonad :: CompilerMonad a -> Either VariantRefusal (a, [(String, IRExpr)])
-runCompilerMonad m = evalSupply (runExceptT (runWriterT m))
+-- | Run a compilation from a fresh name supply. The top-level bindings come
+-- back as an 'Open', closed by the caller like any other scope.
+runCompilerMonad :: CompilerMonad a -> Either VariantRefusal (Open a)
+runCompilerMonad m = uncurry Open <$> evalSupply (runExceptT (runWriterT (unCompilerM m)))
 
 mkVariable :: String -> CompilerMonad Varname
 mkVariable suffix = do
   varID <- demandUniqueNumber
   return ("l_" ++ show varID ++ "_" ++ suffix)
 
+-- | Emit let-bindings into the current scope.
 setVariables :: [(String, IRExpr)] -> CompilerMonad ()
-setVariables = tell
+setVariables = CompilerM . tell
+
+-- ===== Scopes =====
+
+-- | A value together with the let-bindings its scope emitted ('scoped'). The
+-- value may read those bindings, so it is only meaningful under them.
+--
+-- The constructor and the bindings are NOT exported (design
+-- presult-blocks-shared-by-construction). The ways out each put the block in
+-- one place:
+--
+--   * 'closeExpr': around one expression built from the value (a lambda or
+--     loop body, a packed result);
+--   * 'closeResult' (and its variants 'guardedResult', 'shareUnlessLeaf',
+--     'anySafeShared'): back into a 'PResult', bound once and projected,
+--     inline when at most one field reads it;
+--   * 'inline': re-emitted into the enclosing scope;
+--   * 'unsafeDistributeBlock': the named escape hatch that copies the block
+--     into each reading field, for a block that cannot compound.
+--
+-- 'openValue' drops the bindings: for a scope run only for its structure
+-- (a probe), whose value's variables then name nothing.
+data Open a = Open a [(Varname, IRExpr)]
+
+instance Functor Open where
+  fmap f (Open a binds) = Open (f a) binds
+
+-- | Scopes combine by concatenating their blocks, left first: @(,) <$> a <*>
+-- b@ is the scope that emits @a@'s bindings, then @b@'s.
+instance Applicative Open where
+  pure a = Open a []
+  Open f fb <*> Open a ab = Open (f a) (fb ++ ab)
+
+-- | Run a sub-compile in its own scope: its bindings are captured instead of
+-- emitted.
+scoped :: CompilerM a -> CompilerM (Open a)
+scoped (CompilerM m) = CompilerM (lift (uncurry Open <$> runWriterT m))
+
+-- | A scope built from bindings already in hand: @openWith binds a@ is
+-- @scoped (setVariables binds >> return a)@.
+openWith :: [(Varname, IRExpr)] -> a -> Open a
+openWith binds a = Open a binds
+
+-- | The value without its bindings. Only for a scope run to inspect its
+-- result's structure: the value's variables name bindings that are dropped.
+openValue :: Open a -> a
+openValue (Open a _) = a
+
+-- | Wrap the block around ONE expression built from the value: one copy.
+closeExpr :: Open a -> (a -> IRExpr) -> IRExpr
+closeExpr (Open a binds) f = generateLetInExpr binds (f a)
+
+-- | Re-emit the scope's bindings into the enclosing scope and return the
+-- value. This makes them eager there, so it is only for scopes opened to
+-- inspect (a trial compile kept, a size measured) -- never for one opened to
+-- keep a guarded arm lazy, whose guard exists to skip what the block computes
+-- (a recursive call, a deconstructing inverse on the wrong arm). Guarded
+-- sites close through 'closeResult', which puts the guards into the bound
+-- value.
+inline :: Open a -> CompilerM a
+inline (Open a binds) = setVariables binds >> return a
+
+-- | Split a scope's block in two by a partition of its bindings: the first
+-- part as a scope of its own (to be emitted with 'inline', e.g. bindings
+-- hoisted out of a loop or a guard), the rest still holding the value. The
+-- partition must return a split of its argument (each binding exactly once),
+-- order kept.
+splitOpen :: ([(Varname, IRExpr)] -> ([(Varname, IRExpr)], [(Varname, IRExpr)]))
+          -> Open a -> (Open (), Open a)
+splitOpen part (Open a binds) = let (out, stay) = part binds in (Open () out, Open a stay)
+
+-- | The names the scope binds (no values: a name alone copies nothing).
+openNames :: Open a -> [Varname]
+openNames (Open _ binds) = map fst binds
+
+-- | Does this expression read a binding of the scope?
+openReads :: Open a -> IRExpr -> Bool
+openReads (Open _ binds) = mentionsAny (map fst binds)
+
+-- | Does the block hold a loop or a call ('blockIterates')?
+openIterates :: Open a -> Bool
+openIterates (Open _ binds) = any (blockIterates . snd) binds
+
+-- | Would copying the block per field compound ('blockNests')?
+openNests :: Open a -> Bool
+openNests (Open _ binds) = any (blockNests . snd) binds
+
+-- | Did the scope emit no bindings?
+openIsEmpty :: Open a -> Bool
+openIsEmpty (Open _ binds) = null binds
+
+-- | The sum of a measure over the block's bound values (a size budget).
+openBlockSize :: (IRExpr -> Int) -> Open a -> Int
+openBlockSize count (Open _ binds) = sum (map (count . snd) binds)
+
+-- | The escape hatch: copy the block into each field of the result that reads
+-- it. Every use carries a comment giving its reason -- a block known not to
+-- compound, so that its copies fold with the constants a shared tuple would
+-- hide. @grep unsafeDistributeBlock@ is the audit of every place a block is
+-- copied into a result's fields.
+unsafeDistributeBlock :: Open PResult -> PResult
+unsafeDistributeBlock (Open (PResult p d bc imp) binds) =
+  PResult (P (wrap (unP p))) (wrap d) (wrap bc) (wrapFlag imp)
+  where
+    wrap = wrapBlockIfRead binds
+    -- A statically constant flag reads nothing; skipping it outright keeps
+    -- the common case from even testing it.
+    wrapFlag f | f == constFalseIR || f == constTrueIR = f
+               | otherwise                             = wrap f
 
 -- | A probability value known to live in whatever space (linear or log) the
 -- ambient 'Semiring' picked -- see the module header. Constructor
@@ -563,21 +688,37 @@ onDim f r = r { rDim = f (rDim r) }
 onBranches :: (IRExpr -> IRExpr) -> PResult -> PResult
 onBranches f r = r { rBranches = f (rBranches r) }
 
--- | Apply the same wrapper to every field, e.g. re-binding a let-in block
--- around a whole result. @f@ must be type-preserving, since it is applied to
--- the Bool impossibility flag as well as the three numeric fields -- a guard
--- that forces the numbers to zero is 'guardP', not this.
-mapResult :: (IRExpr -> IRExpr) -> PResult -> PResult
-mapResult f (PResult p d bc imp) = PResult (P (f (unP p))) (f d) (f bc) (mapFlag f imp)
+-- There is deliberately no general "apply @f@ to every field": its main use
+-- was re-wrapping a let-in block around each field, the copy 'Open' exists to
+-- make unwritable. The per-field transforms that remain are named for what
+-- they do, and none of them adds a binding.
 
--- | Wrappers are applied to the flag like any other field, EXCEPT when it is
--- statically constant -- which it is for most results. Since @f@ here is
--- typically a let-in block being re-wrapped around each field, skipping the
--- constant case is what keeps the flag from costing a fourth copy of every
--- block (and the optimizer a fourth copy to fold away).
-mapFlag :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
-mapFlag f imp | imp == constFalseIR || imp == constTrueIR = imp
-              | otherwise                                 = f imp
+-- | Close every field over the same lambda parameters (a result compiled
+-- inside a closure). A statically constant flag stays bare.
+underLambdas :: [Varname] -> PResult -> PResult
+underLambdas vars = eachField (\e -> foldr IRLambda e vars)
+
+-- | Apply a variable substitution (a renaming) to every field.
+substResult :: (IRExpr -> IRExpr) -> PResult -> PResult
+substResult = eachField
+
+-- | Every field raises @err@ when @cond@ holds (a runtime refusal); a
+-- statically constant flag is left as it is.
+errorWhen :: IRExpr -> IRExpr -> PResult -> PResult
+errorWhen cond err = eachField (IRIf cond err)
+
+-- | A result whose every numeric field is @e@ (an 'IRError' standing for the
+-- whole result), flagged possible.
+constantResult :: IRExpr -> PResult
+constantResult e = PResult (P e) e e constFalseIR
+
+-- | The shared body of the per-field transforms above. Not exported. A
+-- statically constant flag is skipped, as it always was.
+eachField :: (IRExpr -> IRExpr) -> PResult -> PResult
+eachField f (PResult p d bc imp) = PResult (P (f (unP p))) (f d) (f bc) flag
+  where flag | imp == constFalseIR || imp == constTrueIR = imp
+             | otherwise                                 = f imp
+
 
 -- | Force a result to zero unless @cond@ holds -- the InjF applicability test,
 -- the deconstructing-inverse domain guard, a world's guard conjunction. A
@@ -688,16 +829,17 @@ anySafe sr sample wrap (PResult p d bc imp) = PResult
 -- at 189 KB, 16% of its emitted Python -- and, being evaluated rather than
 -- merely printed, twice the work at run time.
 --
--- The sharing rule is 'shareResult's, for 'shareResult's reasons: bind the
+-- The sharing rule is 'closeResult's, for 'closeResult's reasons: bind the
 -- packed result once, and project out of it only the fields that actually read
 -- the block, so a statically-known dim or flag stays the constant it is
 -- instead of being routed through an opaque tuple where folding cannot see it.
-anySafeShared :: Semiring -> IRExpr -> [(Varname, IRExpr)] -> PResult
-              -> CompilerMonad PResult
-anySafeShared sr sample binds (PResult p d bc imp)
+anySafeShared :: Semiring -> IRExpr -> Open PResult -> CompilerMonad PResult
+anySafeShared sr sample (Open (PResult p d bc imp) binds)
   -- Below two readers there is no duplication to remove, and the tuple is not
-  -- free; 'shareResult' declines on the same test. The second condition is the
-  -- nesting test documented at 'blockNests'.
+  -- free; 'closeResult' declines on the same test. The second condition is the
+  -- nesting test documented at 'blockNests'. Declining copies the block into
+  -- each reading field ('unsafeDistributeBlock''s move, under 'anySafe''s
+  -- guards): at most once, or a leaf block that cannot compound.
   | length readers <= 1 || not (any (blockNests . snd) binds) =
       return (anySafe sr sample (wrapBlockIfRead binds) (PResult p d bc imp))
   | otherwise = do
@@ -709,7 +851,7 @@ anySafeShared sr sample binds (PResult p d bc imp)
           -- non-reading one keeps 'anySafe''s own guarded form and stays out of
           -- the tuple entirely, so a statically-known dim or flag remains the
           -- constant it is rather than being routed through an opaque tuple
-          -- where folding cannot see it ('shareResult' makes the same split).
+          -- where folding cannot see it ('closeResult' makes the same split).
           field i e dflt = case lookup i (zip [j | (j, _, _) <- readers] [0 ..]) of
             Just k  -> projMany k (length readers) (IRVar v)
             Nothing -> IRIf isAnySample dflt e
@@ -741,7 +883,7 @@ anySafeShared sr sample binds (PResult p d bc imp)
 -- projections, and the per-arm split-and-rebuild the optimizer does to a tuple
 -- binding. A field that is not the same constant on every arm of the shared
 -- tuple stays hidden from constant folding ('IROptimizer.foldConstProjections'
--- recovers the ones that are), which is the pessimization 'shareResult'
+-- recovers the ones that are), which is the pessimization 'closeResult'
 -- documents. What a leaf block does NOT survive is nesting: the second half of
 -- the gate.
 --
@@ -775,7 +917,7 @@ anySafeShared sr sample binds (PResult p d bc imp)
 -- applicability test). 'IRCompiler.guardedSubInference' is the fix for that
 -- half: every call site below 'toIRInferenceSave' that follows it with such
 -- a guard now isolates the sub-inference's own bindings and re-threads them
--- through 'shareResult' with that same guard, so the two changes are a
+-- through 'closeResult' with that same guard, so the two changes are a
 -- matched pair.
 -- | Would copying this block per field compound? The gate on
 -- 'anySafeShared' (task presult-unbound-block-copied-per-field, settling
@@ -996,10 +1138,13 @@ opaqueMass sr p bc = do
   setVariables [(s, p)]
   return (PResult (P (IRVar s)) dim0 bc (IROp OpEq (IRVar s) (srZero sr)))
 
--- | Bind a sub-result's let-in block ONCE, under @guards@, and hand back
--- projections off that single binding.
+-- | Close a scope back into a result: bind its let-in block ONCE, under
+-- @guards@, and hand back projections off that single binding. The single
+-- place (with its variants below) that decides how a result is shared with its
+-- block (design presult-blocks-shared-by-construction).
 --
--- The alternative -- 'mapResult' (@generateLetInExpr binds@) -- re-wraps the
+-- The alternative -- wrapping the block around each field, which
+-- 'unsafeDistributeBlock' still does on request -- re-wraps the
 -- whole block around each of the four fields, so every binding the sub-result
 -- floated is duplicated four times at every nesting level. That is exponential
 -- in nesting depth (measured base ~3.18 per level, ~2.16 before the
@@ -1019,8 +1164,8 @@ opaqueMass sr p bc = do
 -- constant through an opaque tuple hides it from constant folding: doing that to
 -- every field made the -O2 OUTPUT 2.7x larger even as the -O0 input shrank 400x,
 -- with 'mixWith's dim comparisons left as runtime tests that used to fold away.
-shareResult :: Semiring -> String -> [IRExpr] -> [(Varname, IRExpr)] -> PResult -> CompilerMonad PResult
-shareResult sr tag guards binds r
+closeResult :: Semiring -> String -> [IRExpr] -> Open PResult -> CompilerMonad PResult
+closeResult sr tag guards (Open r binds)
   -- Sharing only pays when two or more fields would each carry a copy of the
   -- block; below two there is no duplication to remove, and the tuple is not
   -- free: packing and projecting costs assignments per arm, the failed-guard
@@ -1052,7 +1197,7 @@ shareResult sr tag guards binds r
     -- Guards nest as IRIf, never OpOr/OpAnd -- see 'guardP'.
     guarded orElse e = foldr (\g acc -> IRIf g acc orElse) e guards
 
--- | Re-attach a sub-result's let-in block: bound once ('shareResult', under
+-- | Re-attach a sub-result's let-in block: bound once ('closeResult', under
 -- @guards@) when copying it could compound, inline in each reading field when
 -- it cannot. The one sanctioned exception to binding every block (task
 -- presult-unbound-block-copied-per-field), and the same nesting test
@@ -1064,36 +1209,39 @@ shareResult sr tag guards binds r
 -- A leaf block is a bounded copy -- it holds no sub-result, so at most four
 -- copies of a few bindings that typically fold to constants, and folded inline
 -- a statically-known dim or flag stays visible where a shared tuple may hide it
--- ('shareResult' records the -O2 cost of that). The guards are applied only to
+-- ('closeResult' records the -O2 cost of that). The guards are applied only to
 -- the shared binding, where they are what keeps the block unevaluated; the
 -- inline form leaves the fields unguarded, so a caller must guard the result
 -- field-wise itself (as 'guardP' does) whenever the block may not be
 -- evaluated outside them.
-shareUnlessLeaf :: Semiring -> String -> Bool -> [IRExpr] -> [(Varname, IRExpr)] -> PResult -> CompilerMonad PResult
-shareUnlessLeaf sr tag nests guards binds r
-  | nests || any (blockNests . snd) binds = shareResult sr tag guards binds r
-  | otherwise = return (mapResult (wrapBlockIfRead binds) r)
+shareUnlessLeaf :: Semiring -> String -> Bool -> [IRExpr] -> Open PResult -> CompilerMonad PResult
+shareUnlessLeaf sr tag nests guards o
+  | nests || openNests o = closeResult sr tag guards o
+  -- A leaf block holds no sub-result, so its copies cannot compound; copied,
+  -- its constant dim and flag fold where a shared tuple would hide them.
+  | otherwise = return (unsafeDistributeBlock o)
 
 -- | 'guardP' over a sub-result whose let-in block is re-attached to it: the
--- form @guardP sr guards (mapResult (generateLetInExpr binds) r)@ takes,
+-- form @guardP sr guards (unsafeDistributeBlock o)@ takes,
 -- without copying the block into each field (task
 -- presult-unbound-block-copied-per-field).
 --
 -- When at most one field reads the block, that field gets it inline and the
 -- result is exactly 'guardP''s. Otherwise the block is bound once under the
--- guards ('shareResult'), and a field that does not read it is guarded as
--- 'guardP' guards it -- the branch count included, which 'shareResult' leaves
+-- guards ('closeResult'), and a field that does not read it is guarded as
+-- 'guardP' guards it -- the branch count included, which 'closeResult' leaves
 -- unguarded -- so the two forms agree field by field.
-guardedResult :: Semiring -> String -> [IRExpr] -> [(Varname, IRExpr)] -> PResult -> CompilerMonad PResult
-guardedResult sr tag guards binds r
+guardedResult :: Semiring -> String -> [IRExpr] -> Open PResult -> CompilerMonad PResult
+guardedResult sr tag guards o@(Open r _)
+  -- At most one field reads the block, so distributing it copies it once.
   | length (filter reads' fields) <= 1 =
-      return (guardP sr guards (mapResult (wrapBlockIfRead binds) r))
+      return (guardP sr guards (unsafeDistributeBlock o))
   | otherwise = do
-      s <- shareResult sr tag guards binds r
+      s <- closeResult sr tag guards o
       return (if reads' (rBranches r) then s
                 else s { rBranches = foldr (\g acc -> IRIf g acc const0) (rBranches r) guards })
   where
-    reads' = mentionsAny (map fst binds)
+    reads' = openReads o
     fields = [unP (rProb r), rDim r, rBranches r, rImposs r]
 
 -- | Wrap a let-in block around an expression only if the expression actually
@@ -1101,7 +1249,7 @@ guardedResult sr tag guards binds r
 -- statically-known dim of 0, a branch count of 0, a constant flag -- otherwise
 -- drags a full copy of the block behind a value it never looks at, which for a
 -- body containing an enumerated sum means a duplicate of the single most
--- expensive node in the program per field per nesting level. 'shareResult'
+-- expensive node in the program per field per nesting level. 'closeResult'
 -- already applies this rule to its own fields; 'anySafe' takes it as its @wrap@.
 wrapBlockIfRead :: [(Varname, IRExpr)] -> IRExpr -> IRExpr
 wrapBlockIfRead binds e
@@ -1136,7 +1284,7 @@ packResult (PResult p d bc imp) =
 -- expression holds a sub-result built the same way the copies multiply per
 -- nesting level -- the cause of most of this compiler's exponential compile
 -- times, each one introduced by a fix that looked local. Bind the block
--- ('mkVariable' + 'setVariables', a 'WFactor''s bindings, or 'shareResult',
+-- ('mkVariable' + 'setVariables', a 'WFactor''s bindings, or 'closeResult',
 -- which also places guards), then unpack the variable. A caller that needs
 -- only the probability of a packed expression reads it once with 'packedProb'.
 unpackResult :: Varname -> PResult

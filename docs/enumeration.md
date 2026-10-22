@@ -329,7 +329,7 @@ for the product and 48 s -> 0.03 s for the fold at `N = 3`. A materialized
 table for `f` keeps the value loop (a long sum chain is cheaper as a
 convolution than per cell), and so does any other operand shape: a leaf that
 draws fresh randomness (an `if` over a random condition, a random leaf with
-no draw of its own) declines the attempt, which is built in a writer scope of
+no draw of its own) declines the attempt, which is built in a scope of
 its own and discarded, as does a draw name the continuous operand also reads.
 
 The leaf test is the generated IR's purity (`randomDrawSites`, as

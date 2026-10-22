@@ -198,7 +198,7 @@ each arm's own closure at that argument (`unpackResult (IRApply armClosure z)`,
 let-bound once each to avoid `unpackResult`'s four-way destructuring
 duplicating a possibly-expensive call) and runs the *ordinary* scalar
 `weighByCond`/`mixP` combinators on the opened, scalar results --
-`mix(p_c, t, g) == \z -> mix(p_c, unpack(t z), unpack(g z))`. `shareResult`'s
+`mix(p_c, t, g) == \z -> mix(p_c, unpack(t z), unpack(g z))`. `closeResult`'s
 existing dead-arm guard carries over unchanged, so an arm whose condition
 cannot hold is still never evaluated. topK pruning is not implemented on this
 path (it always computes the exact, unpruned mixture -- a valid refinement of

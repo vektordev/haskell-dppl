@@ -490,7 +490,7 @@ hasTupleLeaf e = case e of
 -- position.
 --
 -- This is what keeps a shared 'PResult' from costing its constants (task
--- presult-unbound-block-copied-per-field). 'Semiring.shareResult' and
+-- presult-unbound-block-copied-per-field). 'Semiring.closeResult' and
 -- 'Semiring.anySafeShared' bind a sub-result once as a packed tuple, usually
 -- @if isAny(s) then <defaults> else (let .. in <fields>)@, and project its
 -- fields off that one binding. A field that is the same constant on every arm

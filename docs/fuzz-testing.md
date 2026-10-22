@@ -994,7 +994,7 @@ emits, this property draws `IREnv`s directly, within the IR type contract
 - **A `PResult` case** (M2, half the draws) is a probability or integrate
   body returning a packed `PResult`. It is drawn as a plan, a tree of
   `SPLL.Semiring` combinator names (`density`, `indicatorP`, `prodP`, `mixP`,
-  `mixSubP`, `guardP`, `scaleCoV`, `anySafeShared`, `shareResult`,
+  `mixSubP`, `guardP`, `scaleCoV`, `anySafeShared`, `closeResult`,
   `enumSumP`, `enumMixP`, `sumAllSR`, `measureDiffSR`, `complementWhen`, ...),
   whose leaves' operands are value expressions. The plan is built by those
   combinators in a drawn semiring: linear or log-space sum-product, or one of
