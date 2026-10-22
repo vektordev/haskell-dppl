@@ -500,6 +500,7 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
       assertEqual "Python: math re-export" "pi_" (pyMangle "pi")
       assertEqual "Python: builtin" "len_" (pyMangle "len")
       assertEqual "Julia: Base function emitted code calls" "randn_" (juliaMangle "randn")
+      assertEqual "Julia: Base function rank-1 tensor heads call" "collect_" (juliaMangle "collect")
       assertEqual "Julia: juliaLib export" "head_" (juliaMangle "head")
       assertEqual "Python: family shifts along" ["randn_", "randn__", "randn___"]
                   (map pyMangle ["randn", "randn_", "randn__"])

@@ -120,7 +120,7 @@ that is the keywords, `self` (every method's receiver), the runtime's classes
 and `math`'s re-exports `exp`, `pi`, `e`, `factorial`, ...), and **all** of
 Python's builtins (`pythonBuiltinNames`). For Julia (`juliaReservedIdentifiers`)
 it is the keywords, `juliaLib`'s export list, and the `Base` names codegen
-emits (`juliaBaseNames`: `randn`, `rand`, `sum`, `string`, ...; a curated
+emits (`juliaBaseNames`: `randn`, `rand`, `sum`, `string`, `collect`, ...; a curated
 subset, since all of `Base` is too big). A parameter `randn` used to capture the
 body's `Normal` draw in both backends, and a definition `randn` replaced the
 Python runtime's at module scope (task `python-runtime-name-shadowing`).

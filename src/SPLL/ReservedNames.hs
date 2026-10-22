@@ -556,7 +556,7 @@ juliaBaseNames :: [String]
 juliaBaseNames =
   [ "exp", "abs", "sign", "sum", "maximum", "max", "map", "all", "rand"
   , "randn", "throw", "string", "typeof", "Inf", "NaN", "nothing"
-  , "AbstractFloat", "Bool", "Integer", "Real"
+  , "AbstractFloat", "AbstractVector", "Bool", "Integer", "Real", "collect"
     -- The module names every Julia module has in scope. Emitted code never
     -- refers to them, but a constructor @Base@ emitted @struct Base@, which
     -- Julia refuses as "invalid redefinition of constant Base" (at top level
