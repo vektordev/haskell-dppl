@@ -341,7 +341,8 @@ value is re-inferred only over the recovered names it reads
 (`reinferReading`; none for a neural read of an argument). The fold's
 probability variant now compiles in 48 s against 114 s before.
 Corpus: `neural/noisyProductOfReads`, `noisyIfFoldOfReads`,
-`noisyScaleOfRead`; cost pin: `Internals.noisyProductOfReadsPerCell`.
+`noisyScaleOfRead` (`mult`'s atom), `noisyReadPlusFreshCoin` (declines: a
+fresh coin in the operand); cost pin: `Internals.noisyProductOfReadsPerCell`.
 
 ## The dense-enumeration budget gate
 
