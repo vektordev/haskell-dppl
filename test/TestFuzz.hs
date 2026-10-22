@@ -868,6 +868,12 @@ knownOverPromises =
     -- function-value-compared-in-probability-mode turned its crash into this
     -- refusal; the lattice still admits the enclosing function).
   , ("yields a value containing a function", "fuzz-admission-over-promises")
+    -- The joint affine engine (design affine-gaussian-forms M2): the lattice
+    -- admits a tuple whose fields share Gaussian latents, but cannot see
+    -- coefficients (a singular covariance) or that the joint CDF of
+    -- correlated fields has no closed form.
+  , ("with a singular covariance", "affine-gaussian-rank-deficient-joint-law")
+  , ("cannot compute a cumulative distribution of correlated Gaussian tuple fields", "ptype-density-integral-split-per-variant-admission")
   ]
 
 
