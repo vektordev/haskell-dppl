@@ -784,24 +784,33 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
       , testCase "a scale by a constant keeps the form; a product of two latents has none" $ do
           assertEqual "" 1 (latentCount (justAt [] "main = Normal * 3.0"))
           assertEqual "" "unjustified" (justAt [] "main = Normal * Normal")
-      , testCase "fields sharing a marginal latent: no engine applies to the binding, and the tuple is Bottom" $ do
-          -- The affine collapse needs one consumer, and there are two. Since
-          -- engine-applicability-as-data the let rule finds no engine and binds
-          -- x sample-only, which comes before the tuple's shared-latent
-          -- certificate ('JSharedLatent', which the multivariate density of
-          -- affine-gaussian-forms M2 is to consume) is reached.
+      , testCase "fields sharing a marginal latent: the joint affine engine applies, and the tuple is Integrate" $ do
+          -- The affine collapse needs one consumer, and there are two. The
+          -- joint affine engine (design affine-gaussian-forms M2) measures both
+          -- fields as one bivariate Gaussian, so the latent x draws is 'Joint'
+          -- in the body and its sharing does not floor ('JSharedLatent').
           let src = "main = draw x = Normal in (x + Normal, x + Normal)"
-          assertEqual "" "binding: no engine (sample-only)" (justAt [0] src)
-          assertEqual "" Bottom (mainPType src)
-      , testCase "two uses of one sum share both its latents" $
-          assertEqual "" Bottom (mainPType "main = draw x = Normal in draw y = Normal in (x + y, x + y)")
+          assertEqual "" "binding: joint affine marginalisation" (justAt [0] src)
+          assertBool "x's latent not joint" (" joint" `isInfixOf` justAt [0, 0, 0] src)
+          assertBool "spurious shared-latent certificate" (not ("sharing latent" `isInfixOf` justAt [] src))
+          assertEqual "" Integrate (mainPType src)
+      , testCase "two uses of one sum share both its latents: admitted, though the covariance is singular" $
+          -- The certificate carries no coefficients, so the lattice cannot see
+          -- that [[2,2],[2,2]] is singular; the compiler declines it (task
+          -- affine-gaussian-rank-deficient-joint-law, a known over-promise).
+          assertEqual "" Integrate (mainPType "main = draw x = Normal in draw y = Normal in (x + y, x + y)")
       , testCase "a latent the observation recovers correlates nothing: (x, x + Normal) stays Integrate" $ do
           let src = "main = draw x = Normal in (x, x + Normal)"
           assertBool "x not recovered" ("recovered" `isInfixOf` justAt [0, 0] src)
           assertBool "spurious shared-latent certificate" (not ("sharing latent" `isInfixOf` justAt [] src))
           assertEqual "" Integrate (mainPType src)
-      , testCase "two witnessed bindings whose densities integrate one latent: (a, b) is Bottom" $
-          assertEqual "" Bottom (mainPType "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)")
+      , testCase "two witnessed bindings whose densities integrate one joint latent: (a, b) is Integrate" $
+          assertEqual "" Integrate (mainPType "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)")
+      , testCase "a latent shared outside the joint engine's body still floors" $
+          -- x is read by the first field and, through z, by the second: no
+          -- engine takes x's binding as a whole, and z's joint certificate
+          -- marks only the latent z's own argument draws.
+          assertEqual "" Bottom (mainPType "main = draw x = Normal in (x + Normal, draw z = x + Normal in (z + Normal, z + Normal))")
       , testCase "a witnessed binding is one recovered latent downstream: a chain observed past an unwitnessed step stays Integrate" $
           -- s2 integrates s1's latent, and s3 reads s2 as a point, so the two
           -- density factors share nothing.

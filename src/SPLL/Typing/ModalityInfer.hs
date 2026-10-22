@@ -51,6 +51,7 @@ module SPLL.Typing.ModalityInfer
   , LawTable
   , Env
   , renderJustification
+  , jointAffineMaxSlots
   , lawValue
   , inferProgram
   , bindingLawEnv
@@ -446,7 +447,13 @@ data AffineCert = AffineCert
 -- binding is one 'Recovered' latent to everything that reads it
 -- ('bindParam'). Only a 'Marginal' latent has to be integrated out, so only
 -- those can correlate two density factors ('JSharedLatent').
-data Recovery = Marginal | Recovered
+--
+-- A 'Joint' latent is integrated out too, but by the joint affine engine of
+-- the binding that drew it ('jointAffineBindingCert'; design
+-- affine-gaussian-forms M2), which measures every density leaf reading it as
+-- one multivariate Gaussian. Two factors sharing it are therefore correlated
+-- on purpose, and not a reason to floor ('marginalsOf' leaves it out).
+data Recovery = Marginal | Joint | Recovered
   deriving (Eq, Ord, Show)
 
 constantCert :: AffineCert
@@ -489,6 +496,11 @@ data EngineCert
   | CertAffine AffineCert
     -- ^ Affine marginalisation: the argument's affine Gaussian form, every use
     -- of which flows into one affine consumer ('affineBindingCert').
+  | CertJointAffine AffineCert
+    -- ^ Joint affine marginalisation: the argument's affine Gaussian form,
+    -- read by a let spine of affine bindings ending in a tuple, whose affine
+    -- fields are measured as one multivariate Gaussian
+    -- ('jointAffineBindingCert').
   | CertWorlds WorldsShape
     -- ^ Set-valued witnesses: how the observation inverts onto the variable
     -- ('SPLL.Typing.ForwardChaining.worldsShape').
@@ -500,6 +512,7 @@ engineName c = case c of
   CertPlan n       -> "plan " ++ n
   CertWitnessed w  -> "point inversion" ++ (if wcAtRoot w then " (witnessed)" else "")
   CertAffine _     -> "affine marginalisation"
+  CertJointAffine _ -> "joint affine marginalisation"
   CertWorlds _     -> "set-valued witnesses"
 
 -- | One line per law, for the @-d@ dump and for tests.
@@ -523,7 +536,11 @@ renderJustification j = case j of
         renderValue (VBool b)  = show b
         renderValue v          = show v
         latents (AffineCert m _) = "(" ++ intercalate ", "
-          [ k ++ (if r == Recovered then " recovered" else "") | (k, r) <- Map.toList m ] ++ ")"
+          [ k ++ recovery r | (k, r) <- Map.toList m ] ++ ")"
+        recovery r = case r of
+          Marginal  -> ""
+          Joint     -> " joint"
+          Recovered -> " recovered"
 
 -- | The per-node certificates of a program, keyed by chain name: what
 -- 'inferProgram' concluded at every node of the program as written (not at
@@ -1007,10 +1024,21 @@ planReadCNs prog = Set.fromList [ cnOf e | (_, b) <- functions prog, e <- univer
 letBinding :: ICtx -> Env -> TypeInfo -> String -> Expr -> Expr -> Law -> (Env, Maybe [EngineCert], (Law, Expr, GAcc))
 letBinding ctx env lti x body arg argLaw
   | needsEngine, null certs = (floored, Just certs, inferE ctx floored body)
+  | needsEngine, (CertJointAffine _ : _) <- certs = (jointEnv, Just certs, inferE ctx jointEnv body)
   | needsEngine = (env1, Just certs, inferred)
   | otherwise = (env1, Nothing, inferred)
   where
     env1 = bindParam ctx (chainName lti) x arg argLaw env
+    -- The joint affine engine answers the binding: the latents the argument
+    -- draws itself are integrated by it ('Joint'). Those it reads through
+    -- another variable keep their recovery, so a sharing outside this body
+    -- is still seen.
+    jointEnv = Map.adjust jointLatents x env1
+    outerLatents = Set.unions [ Map.keysSet (acLatents c) | v <- Set.toList (freeVarsExpr arg)
+                                                          , Just (Law _ (JAffine c)) <- [Map.lookup v env] ]
+    jointLatents (Law m (JAffine c)) =
+      Law m (JAffine c { acLatents = Map.mapWithKey (\k r -> if r == Marginal && not (k `Set.member` outerLatents) then Joint else r) (acLatents c) })
+    jointLatents l = l
     inferred@(bodyLaw, body', _) = inferE ctx env1 body
     needsEngine = gCap (outerI (lawMod argLaw)) /= Exact
                && not (isArrow (rType (getTypeInfo arg)))
@@ -1040,8 +1068,8 @@ determinedByWitnesses env arg = not (hasRandomLeaf arg) && all pinned (Set.toLis
 -- | The certificates of the engines that apply to a random binding: the
 -- literal lambda @lam@ (its body annotated) applied to @arg@, of law
 -- @argLaw@. In IRCompiler's dispatch order: enumeration, plan-guided
--- enumeration, point inversion, affine marginalisation, set-valued
--- witnesses. Lazy, so asking whether any applies evaluates the predicates
+-- enumeration, point inversion, affine marginalisation, joint affine
+-- marginalisation, set-valued witnesses. Lazy, so asking whether any applies evaluates the predicates
 -- only up to the first that does.
 bindingCerts :: ICtx -> Expr -> Expr -> Law -> [EngineCert]
 bindingCerts ctx lam arg argLaw = catMaybes
@@ -1049,6 +1077,7 @@ bindingCerts ctx lam arg argLaw = catMaybes
   , (\(n, _, _, _) -> CertPlan n) <$> planProjectedReadOf prog arg
   , CertWitnessed <$> pointWitnessCert fc (icADTs ctx) (icObs ctx) lamCN
   , CertAffine <$> affineBindingCert x arg argLaw body
+  , CertJointAffine <$> jointAffineBindingCert x arg argLaw body
   , CertWorlds <$> worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) permissiveDet) occs body
   ]
   where
@@ -1093,6 +1122,59 @@ affineBindingCert x arg argLaw body = case affineOf (cnOf arg) argLaw of
           _ -> False
     isArrow (TArrow _ _) = True
     isArrow _ = False
+
+-- | The joint affine engine's certificate for binding @x@ to @arg@ over
+-- @body@ (design affine-gaussian-forms M2): the argument's affine form, when
+-- it has latents and the body is a let spine of affine bindings ending in a
+-- field tree of tuples. Every binding on the spine whose value reads a
+-- variable of the spine (@x@ included) must be affine over them, as must
+-- every tuple field that reads one; at most 'jointAffineMaxSlots' fields do.
+-- The fields that read none are independent factors, measured as usual. The
+-- engine integrates the spine's latents once, as one multivariate Gaussian
+-- over the affine fields, which is what makes two fields sharing a latent
+-- correlated rather than a reason to floor: 'letBinding' rebinds the
+-- argument's fresh latents 'Joint'. @IRCompiler.jointAffineApplicable@ is the
+-- compiler's twin; keep the two in step.
+jointAffineBindingCert :: String -> Expr -> Law -> Expr -> Maybe AffineCert
+jointAffineBindingCert x arg argLaw body = case affineOf (cnOf arg) argLaw of
+  Just c | not (Map.null (acLatents c)), not (isArrow (rType (getTypeInfo body)))
+         , spine (Set.singleton x) (freeVarsExpr arg) body -> Just c
+  _ -> Nothing
+  where
+    -- @bound@: the free variables of the values met so far, which a later
+    -- binder must not shadow (their forms are read at the fields).
+    spine names bound (Expr _ (Apply (Expr _ (Lambda y inner)) val))
+      | y `Set.member` names || y `Set.member` bound = False
+      | otherwise = shaped names val
+          && spine (Set.insert y names) (bound `Set.union` freeVarsExpr val) inner
+    spine names _ t =
+      let affine = filter (readsAny names) (tupleFields t)
+      in not (null affine) && length affine <= jointAffineMaxSlots && all (shaped names) affine
+    tupleFields (Expr _ (InjF (Named "TCons") [a, b])) = tupleFields a ++ tupleFields b
+    tupleFields t = [t]
+    readsAny names e = not (Set.null (freeVarsExpr e `Set.intersection` names))
+    constant names e = not (readsAny names e) && (pType (getTypeInfo e) == Deterministic || not (hasRandomLeaf e))
+    shaped names e
+      | not (readsAny names e) = pType (getTypeInfo e) `elem` [Deterministic, PNormal] || not (hasRandomLeaf e)
+      | otherwise = case e of
+          Expr _ (Var n) -> n `Set.member` names
+          Expr _ (Apply _ _) -> isCall e
+          Expr _ (InjF (Named "plus") [a, b]) -> shaped names a && shaped names b
+          Expr _ (InjF (Named "mult") [a, b]) -> (constant names a && shaped names b) || (constant names b && shaped names a)
+          Expr _ (InjF (Named "neg") [a]) -> shaped names a
+          _ -> False
+    isCall (Expr _ (Apply f _)) = isCall f
+    isCall (Expr _ (Var _)) = True
+    isCall _ = False
+    isArrow (TArrow _ _) = True
+    isArrow _ = False
+
+-- | The most tuple fields the joint affine engine measures as one
+-- multivariate Gaussian (design affine-gaussian-forms §6, "Rank"). Each
+-- field may be observed or @ANY@, and the engine compiles one density per
+-- observed subset, so the emitted code grows as @2^n@.
+jointAffineMaxSlots :: Int
+jointAffineMaxSlots = 3
 
 -- | The law a free-standing lambda binds its parameter to: the representative
 -- of the parameter's type. Shared with 'envAt'.

@@ -1465,53 +1465,25 @@ stepTwoReadersSrc =
   "main = draw x = Normal in (if x < 0.0 then 0.0 - x else x) * (if x < 0.0 then 0.0 - x else x)"
 
 -- ----------------------------------------------------------------------------
--- A shared Gaussian latent: design pipeline-coherence's F2 row, still open
+-- A shared Gaussian latent: the joint affine engine (design affine-gaussian-forms M2)
 -- ----------------------------------------------------------------------------
 
--- These two pin a *defect*, not a contract, and they are here so that the
--- remaining half of task @unwitnessed-gaussian-let-chain-admitted-but-crashes@
--- has an executable instance rather than only prose in the docs repo. Its
--- single-use half (@let x = Normal in let y = x + Normal in y@) was briefly
--- closed at @003f933@ by a substitution pass, @SPLL.Typing.LetInline@, which
--- has since been reverted: substitution answers the single-use shape only, and
--- the multi-use shape below is the same defect with the remedy removed. Both
--- halves are now owned by @affine-gaussian-forms@, which represents the latent
--- rather than rewriting it away. The multi-use half is also filed as
--- @correlated-gaussian-let-shares-latent@.
+-- These pinned a defect for as long as nothing in the compiler represented a
+-- bivariate Gaussian (task correlated-gaussian-let-shares-latent): first a
+-- compile-time crash, then, after affine-form-as-law-certificate, a missing
+-- variant ('JSharedLatent'). Design affine-gaussian-forms M2's joint affine
+-- engine answers the first program for real: @(a, b)@ is bivariate normal
+-- with covariance @[[2,1],[1,2]]@, so at the origin the density is the
+-- correlated @1/(2*pi*sqrt 3) = 0.0918882@, never the decorrelated
+-- @1/(4*pi) = 0.0795775@ a rewrite substituting @x@ at each use would give.
+-- (The corpus pins the same number, @let-bindings/correlatedGaussianLetSharesLatent@.)
 --
--- Each sum is Gaussian (it has an affine form), and no engine compiles them:
--- @x@ has two uses, so substitution is unavailable — it would replace one
--- shared draw with two independent ones and silently decorrelate the output —
--- and the honest density is a *bivariate* Gaussian (covariance @[[2,1],[1,2]]@
--- for the first program) that nothing in the compiler represents.
---
--- __When these fail, read them before changing them.__ Three landings move
--- them, and each wants a different edit. The first two have landed:
---
--- * [[static-refusals-become-absent-variants]] (P1) makes a static refusal an
---   absent variant. The refusal then arrives as @Right (Left …)@ and the whole
---   compile survives, so 'assertSharedLatentRefusal' moves to the declined
---   branch and the third case below inverts: @compile@ succeeds and @generate@
---   works. That is the fix landing, and the cases must be updated, not deleted.
--- * The affine form as a law certificate (law-carrying-modality M4,
---   [[affine-form-as-law-certificate]]) types these @Bottom@: the tuple's
---   fields share a marginal latent, and its certificate says so
---   ('JSharedLatent'). The probability variant is a missing variant, and
---   @generate@ is unaffected. ([[engine-applicability-as-data]] (P3) would
---   have had the same effect.)
--- * A multivariate-Gaussian capability (@affine-gaussian-forms@) answers them
---   for real. Then they stop
---   being rejection cases and become corpus cases pinning the correlated
---   density — at a point where it differs from the decorrelated one, which for
---   @(a, b)@ at @(0, 0)@ is @1/(2*pi*sqrt 3) = 0.0918882@ against
---   @1/(4*pi) = 0.0795775@. A rewrite that decorrelates them passes any weaker
---   check.
---
--- What must never happen is one of these quietly starting to return a number
--- without one of those three landing: that is the decorrelated answer, and it
--- is wrong by 15% at the origin.
+-- The second shares the sum itself: @(x + y, x + y)@ has the singular
+-- covariance @[[2,2],[2,2]]@, a degenerate law the engine does not measure
+-- (the rank is milestone M4). It must stay a recorded refusal, with generate
+-- intact, rather than a number from a covariance it cannot invert.
 
--- Two sums over one latent. Both slots recover the same @x@, correlating them.
+-- Two sums over one latent. Both slots read the same @x@, correlating them.
 sharedLatentTwoSumsSrc :: String
 sharedLatentTwoSumsSrc =
   "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)"
@@ -1523,38 +1495,35 @@ sharedLatentTwoUsesSrc =
 
 setWitnessSharedLatentTests :: TestTree
 setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
-  [ testCase "two sums over one latent are a missing variant, never silently decorrelated" $
+  [ testCase "two sums over one latent answer the correlated density, never the decorrelated one" $
       withParsed sharedLatentTwoSumsSrc $ \prog -> do
         res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
-        assertSharedLatentRefusal "two sums over one latent" res
-  , testCase "two uses of one sum are a missing variant, never silently decorrelated" $
+        case res of
+          Left ex -> assertFailure ("two sums over one latent crashed: " ++ show ex)
+          Right (Left e) -> assertFailure ("two sums over one latent were refused: " ++ e)
+          Right (Right (VTuple (VFloat p) (VTuple (VInt d) _))) -> do
+            assertBool ("expected the correlated 1/(2 pi sqrt 3) = 0.0918882 at the origin, got " ++ show p
+                        ++ (if abs (p - 1 / (4 * pi)) < 1e-6 then " -- the decorrelated answer" else ""))
+              (abs (p - 1 / (2 * pi * sqrt 3)) < 1e-9)
+            assertEqual "dimension of a bivariate density" 2 d
+          Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
+  , testCase "two uses of one sum are a recorded refusal (singular covariance), never a number" $
       withParsed sharedLatentTwoUsesSrc $ \prog -> do
         res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
-        assertSharedLatentRefusal "two uses of one sum" res
-  , testCase "generate survives the absent probability variant" $
-      -- Inverted by static-refusals-become-absent-variants: the refusal used to
-      -- be a compile-time 'error' that took 'generate' down with it. Since
-      -- affine-form-as-law-certificate the variant is not compiled at all.
-      withParsed sharedLatentTwoSumsSrc $ \prog -> do
+        case res of
+          Right (Left e) -> assertBool ("expected the singular-covariance refusal, got: " ++ e)
+            ("has no compiled probability function" `isInfixOf` e && "singular covariance" `isInfixOf` e)
+          Left ex -> assertFailure ("two uses of one sum crashed instead of recording a refusal: " ++ show ex)
+          Right (Right v) -> assertFailure ("two uses of one sum were ACCEPTED, returning " ++ show v
+                                            ++ " -- the covariance [[2,2],[2,2]] is singular")
+  , testCase "generate survives the refused probability variant" $
+      withParsed sharedLatentTwoUsesSrc $ \prog -> do
         let compiled = compile defaultCompilerConfig prog
-        assertBool "the probability variant of a shared-latent tuple was compiled"
+        assertBool "the probability variant of a singular shared-latent tuple was compiled"
           (either (const False) (isNothing . probFun . lookupIREnv "main") compiled)
-        assertBool "generate was taken down with the absent probability variant"
+        assertBool "generate was taken down with the refused probability variant"
           (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   ]
-  where
-    -- The modality pass types the tuple Bottom, so the answer is the
-    -- missing-variant one, and no number comes back.
-    assertSharedLatentRefusal what res = case res of
-      Right (Left e) -> assertBool
-        ("expected the missing-variant answer for " ++ what ++ ", got: " ++ e)
-        ("has no compiled probability function" `isInfixOf` e)
-      Left ex -> assertFailure
-        (what ++ " crashed instead of recording a refusal: " ++ show ex)
-      Right (Right v) -> assertFailure
-        (what ++ " was ACCEPTED, returning " ++ show v ++ " -- a shared latent has a \
-         \bivariate density no engine implements, so a number here is the \
-         \decorrelated one (0.0795775 against the correct 0.0918882 at the origin)")
 
 -- Task set-witness-interval-partial-inverse: interval transport through a
 -- monotone InjF chain covers exactly 'ForwardChaining.stepMonotonicity's

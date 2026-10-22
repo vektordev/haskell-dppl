@@ -39,7 +39,7 @@ import SPLL.Analysis (getValuesFromExpr, enumerableDomain, enumerableApplication
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (partitionEithers)
-import Data.List (isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate)
+import Data.List (isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate, sort, partition)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural hiding (planReadOf, planProjectedReadOf)
@@ -51,7 +51,7 @@ import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
-import Control.Monad (foldM, forM, mfilter, when, zipWithM)
+import Control.Monad (foldM, forM, mfilter, when, zipWithM, (>=>))
 import Debug.Trace (traceM)
 import Control.Monad.State.Strict (StateT, runStateT, get, gets, put, modify)
 import Control.Monad.Except (catchError)
@@ -938,7 +938,8 @@ bindingWithoutEngine laws e@(Expr _ f) = case f of
       ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
       ++ ": its value is random and the body reads it, but it is not enumerable,"
       ++ " not a neural plan read, not point-invertible from the observation, has no"
-      ++ " affine Gaussian form flowing into one consumer, and the observation has no"
+      ++ " affine Gaussian form flowing into one consumer or jointly into at most "
+      ++ show ModalityInfer.jointAffineMaxSlots ++ " tuple fields, and the observation has no"
       ++ " set-valued inverse onto it. The binding is sample-only, and so is the function"
 
 -- | The operands of a comparison against a random enumerable bound, when the
@@ -2617,6 +2618,254 @@ affineMarginalisable meta rt b
       | otherwise = spineOK names x inner
     spineOK names x t = x `Set.member` freeVarsExpr t && consumer names t
     consumer names c = pType (getTypeInfo c) == PNormal && isAffineOver meta names c
+
+-- | The joint affine engine's plan for a binding (design affine-gaussian-forms
+-- M2; 'jointAffineApplicable').
+data JointAffine = JointAffine
+  { jaSpine  :: [(TypeInfo, String, Expr)]
+    -- ^ The bindings nested below the bound variable, outermost first: the
+    -- lambda's annotation, its variable and the value bound. Each is
+    -- marginalised as an affine form too, never given an engine of its own.
+  , jaFields :: [([Bool], Expr)]
+    -- ^ The terminal expression's tuple fields, each with its access path
+    -- into the sample (@False@ for @fst@, @True@ for @snd@). A terminal that
+    -- is not a tuple is one field at the empty path.
+  , jaNames  :: Set.Set String
+    -- ^ Every variable read through an affine form at the fields: the
+    -- enclosing 'affineEnv', the bound variable and the spine's.
+  }
+
+-- | When no single affine consumer takes a Gaussian binding
+-- ('affineMarginalisable'), it may still be integrated out analytically if
+-- its certificate is an affine form and its body is a let spine of affine
+-- bindings ending in a tuple: the fields reading the spine are then jointly
+-- Gaussian, with covariance the Gram matrix of their coefficient vectors
+-- (design affine-gaussian-forms §3), and the fields reading none of it are
+-- independent of them. The compiler's twin of
+-- 'ModalityInfer.jointAffineBindingCert'; keep the two in step. At most
+-- 'ModalityInfer.jointAffineMaxSlots' fields read the spine.
+jointAffineApplicable :: CompilerMetadata -> RType -> Binding -> Maybe JointAffine
+jointAffineApplicable meta rt b
+  | bindInline b
+  , not (isTArrowType rt)
+  , Just cert <- affineOf (chainName (getTypeInfo v)) (nodeLaw meta v)
+  , not (Map.null (acLatents cert))
+  , isAffineOver meta envNames v
+  = walk (Set.insert (bindVar b) envNames) (freeVarsExpr v) [] (bindBody b)
+  | otherwise = Nothing
+  where
+    v = bindArg b
+    envNames = Set.fromList (map fst (affineEnv meta))
+    -- @bound@ holds the free variables of the values met so far: their forms
+    -- are built in their own scope and read at the fields, so a binder in
+    -- between must not shadow one.
+    walk names bound acc (Expr _ (Apply (Expr lti (Lambda y inner)) val))
+      | y `Set.member` names || y `Set.member` bound = Nothing
+      | isAffineOver meta names val =
+          walk (Set.insert y names) (bound `Set.union` freeVarsExpr val) ((lti, y, val) : acc) inner
+      | otherwise = Nothing
+    walk names _ acc t
+      | not (null affine)
+      , length affine <= ModalityInfer.jointAffineMaxSlots
+      , all (isAffineOver meta names . snd) affine
+      = Just (JointAffine (reverse acc) fields names)
+      | otherwise = Nothing
+      where
+        fields = tupleFieldPaths t
+        affine = filter (readsAffine names . snd) fields
+
+-- | Does an expression read one of these variables?
+readsAffine :: Set.Set String -> Expr -> Bool
+readsAffine names e = not (Set.null (freeVarsExpr e `Set.intersection` names))
+
+-- | The fields of a tree of tuple constructors, each with its access path.
+tupleFieldPaths :: Expr -> [([Bool], Expr)]
+tupleFieldPaths (Expr _ (InjF (Named "TCons") [a, b])) =
+  [ (False : p, e) | (p, e) <- tupleFieldPaths a ] ++ [ (True : p, e) | (p, e) <- tupleFieldPaths b ]
+tupleFieldPaths e = [([], e)]
+
+-- | The sample of a tuple field, and whether it is @ANY@: the field's own
+-- sample or any tuple around it. The test reads each enclosing sample only
+-- once the one outside it is known not to be @ANY@, since an accessor on
+-- @ANY@ fails.
+fieldSampleAt :: IRExpr -> [Bool] -> (IRExpr, IRExpr)
+fieldSampleAt sample path = (foldl stepInto sample path, anyAlong sample path)
+  where
+    anyAlong s [] = IRUnaryOp OpIsAny s
+    anyAlong s (b : bs) = IRIf (IRUnaryOp OpIsAny s) constTrueIR (anyAlong (stepInto s b) bs)
+
+-- | Whether a tuple enclosing the field at this path is @ANY@ (the field's
+-- own sample excluded).
+anyOutsideField :: IRExpr -> [Bool] -> IRExpr
+anyOutsideField _ [] = constFalseIR
+anyOutsideField s [_] = IRUnaryOp OpIsAny s
+anyOutsideField s (b : bs) = IRIf (IRUnaryOp OpIsAny s) constTrueIR (anyOutsideField (stepInto s b) bs)
+
+stepInto :: IRExpr -> Bool -> IRExpr
+stepInto s b = IRDestruct (if b then AcSnd else AcFst) s
+
+-- | The joint affine engine ('jointAffineApplicable'). Every spine variable
+-- enters 'affineEnv' with its form. The fields reading the spine are grouped
+-- into classes that covary (a covariance links two fields unless it is a
+-- constant zero); a class of one is a scalar Gaussian leaf, and a larger one
+-- a multivariate Gaussian density ('jointGaussianDensity') over its observed
+-- fields. The other fields are independent factors, compiled as usual. A
+-- cumulative query of a class of two or more is refused: the joint CDF of
+-- correlated Gaussians has no closed form. A class whose covariance is a
+-- constant singular matrix is declined: its law is degenerate, and its
+-- measure needs the rank (affine-gaussian-forms M4).
+jointAffineApply :: CompilerMetadata -> Bool -> Binding -> JointAffine -> IRExpr -> CompilerMonad (Either (Maybe String) PResult)
+jointAffineApply meta cumulative binding ja sample = do
+  let sr = semiringOf meta
+      x = bindVar binding
+      cn = chainName (getTypeInfo (bindHead binding))
+  form0 <- affineFormOf meta (bindArg binding)
+  let meta0 = (withBindingLaw (extendMetaForLambda meta (getTypeInfo (bindHead binding)) x) binding x)
+                { affineEnv = (x, form0) : affineEnv meta }
+  meta' <- foldM (\m (lti, y, val) -> do
+                    f <- affineFormOf m val
+                    return ((extendMetaForLambda m lti y) { affineEnv = (y, f) : affineEnv m }))
+                 meta0 (jaSpine ja)
+  let (affine, indep) = partition (readsAffine (jaNames ja) . snd) (jaFields ja)
+  forms <- mapM (affineFormOf meta' . snd >=> shareForm) affine
+  covs <- sequence [ sequence [ covEntry fi fj | fj <- forms ] | fi <- forms ]
+  let n = length forms
+      linked i j = i /= j && not (staticZero (covs !! i !! j))
+      comps = stronglyConnComp [ (i, i, [ j | j <- [0 .. n - 1], linked i j ]) | i <- [0 .. n - 1] ]
+      classes = [ sort c | CyclicSCC c <- comps ] ++ [ [i] | AcyclicSCC i <- comps ]
+      covOf i j = fromMaybe const0 (covs !! i !! j)
+      fieldOf i = fieldSampleAt sample (fst (affine !! i))
+      staticCovOf c = mapM (\i -> mapM (\j -> maybe (Just 0) irConstFloat (covs !! i !! j)) c) c
+      singular c = maybe False (not . choleskyPositive) (staticCovOf c)
+      fieldNames c = intercalate ", " (map (showPath . fst . (affine !!)) c)
+  case (filter ((> 1) . length) classes, filter singular classes) of
+    (c : _, _) | cumulative ->
+      refuse cn ("cannot compute a cumulative distribution of correlated Gaussian tuple fields "
+                 ++ "(" ++ fieldNames c ++ ", sharing a latent through the binding of '" ++ x
+                 ++ "'): their joint CDF has no closed form (design affine-gaussian-forms)")
+    (_, c : _) -> return (Left (Just
+      ("the tuple fields " ++ fieldNames c ++ " share Gaussian latents through the binding of '" ++ x
+       ++ "' with a singular covariance: their joint law is degenerate, which the joint affine "
+       ++ "engine does not measure (design affine-gaussian-forms M4)")))
+    _ -> do
+      gaussians <- forM classes $ \c -> case c of
+        [i] -> do
+          let (s, anyS) = fieldOf i
+              form = forms !! i
+              resid sigma = IROp OpDiv (IROp OpSub s (afConst form)) sigma
+          r <- degenerateScaleGuard meta cumulative TFloat (afConst form) (snd (collapseAffine form)) s $ \sigma ->
+                 if cumulative
+                   then mass (distCumulative sr IRNormal (resid sigma))
+                   else mkPResult (sealP (scaledNormalDensity sr (resid sigma) [sigma])) dim1 const1 constFalseIR
+          return (zipResult (IRIf anyS) (detP (srOne sr)) r)
+        _ -> do
+          let guarded = isNothing (staticCovOf c)
+              -- One density per subset of observed fields, selected on which
+              -- are ANY: a Gaussian's marginal drops the unobserved rows.
+              observed chosen [] = case reverse chosen of
+                [] -> return (detP (srOne sr))
+                obs -> do
+                  let resid = [ IROp OpSub (fst (fieldOf i)) (afConst (forms !! i)) | i <- obs ]
+                  p <- jointGaussianDensity sr guarded resid (\a b -> covOf (obs !! a) (obs !! b))
+                  return (mkPResult (sealP p) (IRConst (VInt (length obs))) const1 constFalseIR)
+              observed chosen (i : rest) = do
+                whenObs <- observed (i : chosen) rest
+                whenAny <- observed chosen rest
+                return (zipResult (IRIf (snd (fieldOf i))) whenAny whenObs)
+          observed [] c
+      others <- forM indep $ \(path, e) -> do
+        let (s, _) = fieldSampleAt sample path
+            outer = anyOutsideField sample path
+        if outer == constFalseIR
+          then toIRInferenceSave meta' cumulative e s
+          else do
+            r <- guardedSubInference meta' [notIR outer] (toIRInferenceSave meta' cumulative e s)
+            return (zipResult (IRIf outer) (detP (srOne sr)) r)
+      return (Right (foldr1 (prodP sr) (gaussians ++ others)))
+  where
+    showPath [] = "the value"
+    showPath p = intercalate "." (map (\b -> if b then "snd" else "fst") p)
+    -- Each coefficient and constant is read by several covariances and
+    -- residuals: bound once, unless it is a literal.
+    shareForm (AffineForm c cs) = AffineForm <$> share "mean" c <*> traverse (share "coeff") cs
+    share name e
+      | Just d <- irConstFloat e = return (IRConst (VFloat d))
+      | otherwise = do
+          v <- mkVariable name
+          setVariables [(v, e)]
+          return (IRVar v)
+    -- The covariance of two fields: the dot product of their coefficient
+    -- vectors over the latents they share ('Nothing' when they share none).
+    covEntry fa fb = case Map.elems (Map.intersectionWith (IROp OpMult) (afCoeffs fa) (afCoeffs fb)) of
+      [] -> return Nothing
+      ps -> Just <$> share "cov" (foldr1 (IROp OpPlus) ps)
+    staticZero Nothing = True
+    staticZero (Just e) = irConstFloat e == Just 0
+
+-- | The density of a multivariate Gaussian at residual @r@ (sample minus
+-- mean), covariance entries @cov i j@, through its Cholesky factor @L@: with
+-- @z = L⁻¹ r@ the density is @∏ φ(zᵢ) / Lᵢᵢ@, a product of standard normal
+-- leaves the semiring multiplies, so log space keeps a deep tail's precision
+-- as the scalar leaf does. Unrolled into let-bindings local to the density,
+-- which is selected on which fields are ANY and must not be evaluated
+-- outside its arm. With @guarded@, a pivot that is not positive at run time
+-- (a covariance singular for these inputs) is an error rather than a NaN.
+jointGaussianDensity :: Semiring -> Bool -> [IRExpr] -> (Int -> Int -> IRExpr) -> CompilerMonad IRExpr
+jointGaussianDensity sr guarded resid cov = go 0 Map.empty Map.empty []
+  where
+    n = length resid
+    go i ls zs factors
+      | i == n = return (foldr1 (srTimes sr) (reverse factors))
+      | otherwise = do
+          -- The off-diagonal entries of row i of L, then its pivot.
+          (binds, ls') <- foldM (\(bs, m) j -> do
+                v <- mkVariable "chol"
+                let e = IROp OpDiv (IROp OpSub (cov i j) (sumOf [ IROp OpMult (m Map.! (i, k)) (m Map.! (j, k)) | k <- [0 .. j - 1] ]))
+                                   (m Map.! (j, j))
+                return (bs ++ [(v, e)], Map.insert (i, j) (IRVar v) m)) ([], ls) [0 .. i - 1]
+          pv <- mkVariable "pivot"
+          lv <- mkVariable "chol"
+          zv <- mkVariable "z"
+          let pivot = IROp OpSub (cov i i) (sumOf [ IROp OpMult (ls' Map.! (i, k)) (ls' Map.! (i, k)) | k <- [0 .. i - 1] ])
+              ls'' = Map.insert (i, i) (IRVar lv) ls'
+              z = IROp OpDiv (IROp OpSub (resid !! i) (sumOf [ IROp OpMult (ls'' Map.! (i, k)) (zs Map.! k) | k <- [0 .. i - 1] ])) (IRVar lv)
+              factor = scaledNormalDensity sr (IRVar zv) [IRVar lv]
+          rest <- go (i + 1) ls'' (Map.insert i (IRVar zv) zs) (factor : factors)
+          let pivoted = IRLetIn lv (irSqrt (IRVar pv)) (IRLetIn zv z rest)
+              checked
+                | guarded = IRIf (IROp OpGreaterThan (IRVar pv) const0) pivoted
+                    (IRError "joint Gaussian density: the covariance of the correlated tuple fields is singular for these inputs (design affine-gaussian-forms M4)")
+                | otherwise = pivoted
+          return (foldr (\(v, e) acc -> IRLetIn v e acc) (IRLetIn pv pivot checked) binds)
+    sumOf [] = const0
+    sumOf xs = foldr1 (IROp OpPlus) xs
+
+-- | Is a constant symmetric matrix positive definite? Its Cholesky pivots
+-- stay clear of zero, relative to the diagonal.
+choleskyPositive :: [[Double]] -> Bool
+choleskyPositive m = go 0 Map.empty
+  where
+    n = length m
+    at i j = m !! i !! j
+    go :: Int -> Map.Map (Int, Int) Double -> Bool
+    go i ls
+      | i == n = True
+      | otherwise =
+          let ls' = foldl (\acc j -> Map.insert (i, j) ((at i j - sum [ acc Map.! (i, k) * acc Map.! (j, k) | k <- [0 .. j - 1] ]) / acc Map.! (j, j)) acc) ls [0 .. i - 1]
+              pivot = at i i - sum [ (ls' Map.! (i, k)) ^ (2 :: Int) | k <- [0 .. i - 1] ]
+          in pivot > 1e-12 * max 1 (abs (at i i)) && go (i + 1) (Map.insert (i, i) (sqrt pivot) ls')
+
+-- | The value of an IR expression built from number literals by arithmetic.
+irConstFloat :: IRExpr -> Maybe Double
+irConstFloat e = case e of
+  IRConst (VFloat d) -> Just d
+  IRConst (VInt k) -> Just (fromIntegral k)
+  IROp OpPlus a b -> (+) <$> irConstFloat a <*> irConstFloat b
+  IROp OpSub a b -> (-) <$> irConstFloat a <*> irConstFloat b
+  IROp OpMult a b -> (*) <$> irConstFloat a <*> irConstFloat b
+  IRUnaryOp OpNeg a -> negate <$> irConstFloat a
+  IRUnaryOp OpAbs a -> abs <$> irConstFloat a
+  _ -> Nothing
 
 -- | A *saturated* call to a top-level function whose result is Normal-derived.
 -- Reuse the callee's own compiled @<name>_normal@ (which returns its (mu, sigma)
@@ -9953,6 +10202,8 @@ applyBinding meta cumulative rt binding sample = do
                 Nothing -> return (Left diag))
          , ("affine marginalisation", affineMarginalisable meta rt binding <&> \(x, lamBody) _ ->
               Right <$> affineCollapse x lamBody)
+         , ("joint affine marginalisation", jointAffineApplicable meta rt binding <&> \ja _ ->
+              jointAffineApply meta cumulative binding ja sample)
          , ("set-valued witnesses", setWitnessApplicable meta binding <&> \_ diag ->
               Right <$> setWitnessApply meta cumulative rt binding diag sample)
          ]

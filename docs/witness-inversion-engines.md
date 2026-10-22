@@ -487,10 +487,9 @@ latent (`draw x = Normal in x + x` is one latent). A witnessed binding is one
 the `Marginal` latents its argument integrates (`acFactors`). A field
 constructor's density is the product of those binding factors (each counted
 once) and each field's residual; where two factors integrate the same
-`Marginal` latent it is `JSharedLatent`, floored to sample-only:
-`draw x = Normal in (x + Normal, x + Normal)` and `draw x = Normal in draw a =
-x + Normal in draw b = x + Normal in (a, b)` type `Bottom`. Their joint law is
-a bivariate Gaussian, which needs the multivariate density (design M2).
+`Marginal` latent it is `JSharedLatent`, floored to sample-only. A latent
+the joint affine engine integrates (below) is `Joint` instead, and sharing it
+is not a reason to floor.
 
 **The compiler.** `CompilerMetadata.affineEnv` holds the IR of such a variable's
 form, `c + sum a_i * eps_i` over independent standard normals, keyed the same
@@ -514,8 +513,9 @@ keeps the scalar collapse sound. Otherwise the binding goes to
 `setWitnessApply`:
 
 - uses spread over two consumers: `(x + Normal, x + Normal)` needs a joint
-  density (design M2), and so does `draw y = x + Normal in x + y`, since `y`
-  may be witnessed and then `x`'s latents would be counted twice;
+  density, and so does `draw y = x + Normal in x + y`, since `y` may be
+  witnessed and then `x`'s latents would be counted twice. Those go to the
+  joint affine engine, next;
 - a binding whose body cannot be compiled inline (`bindInline`: a top-level
   callee's own body), or one returning a function;
 - anything non-Gaussian or gated -- a chain gated on its own state is `Bottom`
@@ -534,6 +534,47 @@ answers a partial observation like `(s1, s3)` of a three-step chain, as
 `N(s1) * N(s3 | s1)` with `s2` integrated out. Corpus
 `let-bindings/affineChain*`, `affineSelfSum`, `unwitnessedGaussianLetChain`,
 `higher-order/arrowApplySelfSum`.
+
+### Joint affine marginalisation: correlated Gaussian fields
+
+The fourth engine, tried after the single-consumer collapse and before
+set-valued witnesses (design `affine-gaussian-forms` M2). It applies when the
+binding's certificate is an affine form and the body is a let spine whose
+every binding is affine over the variables bound so far, ending in a tree of
+tuples (`jointAffineApplicable`, twin of `ModalityInfer.jointAffineBindingCert`).
+The engine does not dispatch the nested bindings: every spine variable enters
+`affineEnv` with its form. The fields reading the spine (at most
+`jointAffineMaxSlots` = 3) are jointly Gaussian, with means their constants
+and covariance the Gram matrix of their coefficient vectors. The other fields
+read none of it and are independent factors, compiled as usual.
+
+- **Classes.** Two fields covary unless their covariance is a constant zero
+  (no shared latent, or orthogonal coefficients). A class of one field is a
+  scalar Gaussian leaf, so `(x + y, x - y)` is two independent `N(0, √2)`,
+  with a CDF. A larger class is one multivariate density.
+- **The density** (`jointGaussianDensity`) is unrolled through the Cholesky
+  factor `L` of the class's covariance: `z = L⁻¹ r` for residual `r`, and the
+  density is `∏ φ(zᵢ) / Lᵢᵢ`, a product of standard normal leaves under
+  `srTimes`, so log space keeps a tail's precision. The coefficients and
+  covariances are let-bound once; the factor is local to its arm.
+- **`ANY` fields.** One density per subset of observed fields, selected on
+  each field's `ANY` test (the field's own sample, or a tuple around it): a
+  Gaussian's marginal drops the unobserved rows. The dimension is the number
+  of observed fields of the class.
+- **Refusals.** A constant singular covariance (`(x + y, x + y)`) declines:
+  the law is degenerate and needs its rank (M4, ticket
+  `affine-gaussian-rank-deficient-joint-law`). A covariance that is not
+  constant gets a run-time check on each pivot instead, an `IRError` if it is
+  singular for those inputs. A cumulative query of a class of two or more is
+  refused, since the joint CDF of correlated Gaussians has no closed form.
+  The lattice cannot see either (the certificate carries no coefficients), so
+  both are over-promises the admission oracle lists (`knownOverPromises`).
+
+In ModalityInfer, `letBinding` re-infers the body with the argument's own
+latents marked `Joint` when this engine is the first that applies. Latents
+the argument reads through another variable keep their recovery, so a
+sharing outside the body still floors. Corpus `let-bindings/correlatedGaussianLetSharesLatent`,
+`affineSharedLatent*`, `affineSumDifferenceDecorrelates`.
 
 ## One application rule: `Binding`
 
