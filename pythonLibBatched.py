@@ -269,6 +269,17 @@ def asmask(x):
   # constant) becomes a 0-d bool tensor that broadcasts against the arms.
   return x if torch.is_tensor(x) else torch.tensor(bool(x))
 
+def logical_not(x):
+  # The emitted form of a boolean `not` (CodeGenPyTorchBatched's OpNot). A
+  # batch-independent Python bool (a test of an enumeration loop variable)
+  # stays one, so the connectives and selects above it stay Python-level too;
+  # torch.logical_not(asmask(x)) would make a 0-d tensor of it, and that op
+  # and its allocation run once per enumerated world (task
+  # batched-enumeration-rereads-neural-leaf-per-world).
+  if isinstance(x, bool):
+    return not x
+  return torch.logical_not(asmask(x))
+
 def _dtype(x):
   return x.dtype if torch.is_tensor(x) else DTYPE
 
@@ -301,7 +312,50 @@ def where_anchored(c, t, f):
   if isinstance(t, T) and isinstance(f, T):
     m = asmask(c)
     return T(where_anchored(m, t.t1, f.t1), where_anchored(m, t.t2, f.t2))
+  if isinstance(c, bool):
+    picked = _pick_static(c, t, f)
+    if picked is not None:
+      return picked
   return torch.where(asmask(c), _anchor(t), _anchor(f))
+
+_KIND = {bool: 0, int: 1, float: 2}
+
+def _kind(x):
+  # bool < int < float, the order torch's type promotion widens along.
+  if torch.is_tensor(x):
+    if x.dtype == torch.bool:
+      return 0
+    return 2 if x.is_floating_point() else 1
+  return _KIND.get(type(x))
+
+def _pick_static(c, t, f):
+  # A Python-bool condition selects one arm for the whole batch, so the
+  # torch.where is only needed for the shape and dtype it would give the
+  # result. Return the picked arm itself where that is provably the same
+  # value torch.where(c, _anchor(t), _anchor(f)) gives, else None (and the
+  # caller falls back to the torch.where). Two cases are exact:
+  #   - both arms Python scalars of one kind: the result is _anchor(picked);
+  #   - the picked arm a tensor of rank >= 1 and the other arm a Python
+  #     scalar of no wider kind, or a tensor of the same shape and dtype:
+  #     a dimensioned tensor's dtype wins over a same-or-narrower-kind
+  #     0-d operand, and the result shape is the picked arm's.
+  a, o = (t, f) if c else (f, t)
+  ka, ko = _kind(a), _kind(o)
+  if ka is None or ko is None:
+    return None
+  if not torch.is_tensor(a):
+    if not torch.is_tensor(o):
+      return _anchor(a) if ka == ko else None
+    # A Python scalar against a dimensioned tensor of no narrower kind: the
+    # select is that scalar broadcast to the tensor's shape and dtype.
+    if o.dim() >= 1 and ka <= ko:
+      return torch.full_like(o, a)
+    return None
+  if a.dim() == 0:
+    return None
+  if torch.is_tensor(o):
+    return a if (o.shape == a.shape and o.dtype == a.dtype) else None
+  return a if ko <= ka else None
 
 def table_select(x, keys, vals, default):
   # A constant lookup table, the emitted form of a select chain
@@ -343,6 +397,13 @@ def table_select(x, keys, vals, default):
 # enclosing `where`, exactly like a masked `safe_log`.
 
 def nn_gather(out, idx):
+  # A Python-int index (an enumeration loop variable, or a literal) reads one
+  # column by basic indexing: a view, one op, where the tensor path below
+  # builds an index tensor, clamps it and gathers (task
+  # batched-enumeration-rereads-neural-leaf-per-world -- a leaf decode inside
+  # an enumeration loop runs once per world, so its constant cost multiplies).
+  if isinstance(idx, int):
+    return out[..., min(max(int(idx), 0), out.shape[-1] - 1)]
   idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
   idx_t = idx_t.clamp(0, out.shape[-1] - 1)
   if idx_t.dim() == 0:
@@ -368,6 +429,11 @@ def categorical_index(u, out, start, n):
 # in; vals is the compile-time-unrolled enumeration.
 
 def is_member(x, vals):
+  # A batch-independent x (a Python number: an enumeration loop variable or a
+  # literal) is a plain membership test, and its Python-bool answer lets
+  # where_anchored pick its arm without a torch.where (see nn_gather).
+  if isinstance(x, (bool, int, float)):
+    return x in vals
   xt = astensor(x)
   mask = torch.zeros_like(xt, dtype=torch.bool)
   for v in vals:
@@ -393,6 +459,8 @@ def _tensor_stack(xs):
   # partially-folded axis still stacks. So are 0-d tensors: an element that is
   # batch-independent (a map over an enumeration domain whose body reads only
   # the domain constant) is a 0-d tensor next to its siblings' [B] ones.
+  if _uniform(xs):
+    return torch.stack(xs)
   ts = [x for x in xs if torch.is_tensor(x)]
   if not ts:
     return torch.stack([astensor(x) for x in xs])
@@ -404,6 +472,21 @@ def _tensor_stack(xs):
   return torch.stack([x.to(dt).expand(shape) if torch.is_tensor(x)
                       else torch.full(shape, float(x), dtype=dt, device=ref.device)
                       for x in xs])
+
+def _uniform(xs):
+  # Every element a tensor of one shape and dtype: the common case (an axis of
+  # [B] masses), which stacks as it stands, without the per-element promote,
+  # broadcast and expand of the general path.
+  # A plain loop over isinstance: this runs once per enumerated world in
+  # tensor_index, so the per-element cost matters.
+  x0 = xs[0]
+  if not isinstance(x0, torch.Tensor):
+    return False
+  shape, dt = x0.shape, x0.dtype
+  for x in xs:
+    if not isinstance(x, torch.Tensor) or x.dtype != dt or x.shape != shape:
+      return False
+  return True
 
 def tensor_sum(xs):
   if not xs:
@@ -430,6 +513,13 @@ def tensor_index(xs, idx):
   # enclosing mask discards its value.
   if not xs:
     raise Exception("tensor_index on a zero-extent axis")
+  # A Python-int index (a batch-independent position, e.g. computed from an
+  # enumeration loop variable) over a uniform axis reads that element itself:
+  # the stack-and-gather below would give the same values, at the cost of a
+  # stack of the whole axis per read (task
+  # batched-enumeration-rereads-neural-leaf-per-world).
+  if isinstance(idx, int) and _uniform(xs):
+    return xs[min(max(int(idx), 0), len(xs) - 1)]
   stacked = _tensor_stack(xs)
   idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
   idx_t = idx_t.clamp(0, stacked.shape[0] - 1)

@@ -2209,7 +2209,7 @@ batchedSpillStatement env name e = batchedAssign env name e
 -- expression, rather than the tensor form 'batchedExpr' would give it. The
 -- value is a Python bool by construction (a bucket-uniform shape fact), and a
 -- Python @if@ should see it as one: @not(x) and not(y)@, not
--- @torch.logical_not(asmask(x)) & ...@, which would only work by 0-d tensor
+-- @logical_not(x) & ...@, which would only work by 0-d tensor
 -- truthiness. It also keeps the failure mode honest — if this ever runs on
 -- something that is secretly per-element, torch raises "Boolean value of Tensor
 -- with more than one element is ambiguous" instead of silently picking a branch
@@ -2245,7 +2245,7 @@ batchedExpr env (IROp OpIntDiv l r) = "safe_intdiv(" ++ batchedExpr env l ++ ", 
 batchedExpr env (IROp OpMod l r)    = "safe_mod(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
 batchedExpr env (IROp OpMax l r)    = "elem_max(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
 batchedExpr env (IROp op l r)       = "(" ++ batchedExpr env l ++ " " ++ batchedOp op ++ " " ++ batchedExpr env r ++ ")"
-batchedExpr env (IRUnaryOp OpNot e) = "torch.logical_not(asmask(" ++ batchedExpr env e ++ "))"
+batchedExpr env (IRUnaryOp OpNot e) = "logical_not(" ++ batchedExpr env e ++ ")"
 batchedExpr env (IRUnaryOp OpNeg e) = "(-(" ++ batchedExpr env e ++ "))"
 batchedExpr env (IRUnaryOp OpExp e) = "torch.exp(astensor(" ++ batchedExpr env e ++ "))"
 -- OpLog is gradient-unsafe (log of a non-positive value in a masked-away arm

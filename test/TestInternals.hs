@@ -30,6 +30,7 @@ import MockNN (flattenMockInput, mockInputFor, shapedMockLogits, planAwareMockLo
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IRGatherPass (gatherPassExpr)
+import SPLL.IRLeafTablePass (leafTablePassExpr)
 import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, prepBatchedBody, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
@@ -6184,6 +6185,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , scalarDiffusionSamplerTest
   , categoricalIndexTests
   , gatherPassTests
+  , leafTablePassTests
   , untaggedShortCircuit
   , annotationSpellingTests
   , structuralPropagation
@@ -6380,6 +6382,56 @@ categoricalIndexTests = testGroup "categorical index (neural-categorical-sampler
 -- contiguous key range becomes one range-guarded indexed read, and nothing
 -- else changes. The interpreter checks the rewrite is exact on keys inside,
 -- at the edges of and outside the range.
+-- | Task batched-enumeration-rereads-neural-leaf-per-world: under --batched a
+-- neural leaf decode that a nested enumeration loop reads at its own variable
+-- is computed once per domain value ahead of the outer loop, not once per
+-- world. The corpus pair neuralLeafTableAscending checks the values.
+leafTablePassTests :: TestTree
+leafTablePassTests = testGroup "neural leaf decode tabulated out of enumeration loops (batched-enumeration-rereads-neural-leaf-per-world)"
+  [ testCase "only the outermost draw is decoded inside a loop; y and z read a table" $
+      case tryParseProgram "" ascSrc of
+        Left err -> assertFailure (show err)
+        Right p -> case compile defaultCompilerConfig{batched = True} p >>= generateFunctionsBatched True of
+          Left err -> assertFailure err
+          Right ls -> do
+            let code = unlines (dropWhile (not . ("class Main" `isPrefixOf`)) ls)
+                args = decodeArgs code
+            assertBool ("no table in Main:\n" ++ code) ("l_leaftbl_" `isInfixOf` code)
+            assertBool ("a decode still runs at an inner loop variable: " ++ show args)
+              (not (null args) && all (\a -> a == "x" || "l_leafv_" `isPrefixOf` a) args)
+  , testCase "a single loop's decode at its own variable is left alone" $
+      let body = IRBuiltin (BReduce ROpAdd 0)
+                   [IRBuiltin BMap [IRLambda "x" (decode "x"), dom]]
+      in leafTablePassExpr decoders body @?= body
+  , testCase "a nested decode reading a raw output bound inside the outer loop is left alone" $
+      let body = IRBuiltin BMap [IRLambda "x" (IRLetIn "raw" (IRVar "x")
+                   (IRBuiltin BMap [IRLambda "y" (decode "y"), dom])), dom]
+      in leafTablePassExpr decoders body @?= body
+  , testCase "a nested decode becomes a table bound around the outer loop" $
+      let body = IRBuiltin BMap [IRLambda "x" (IRBuiltin BMap [IRLambda "y" (decode "y"), dom]), dom]
+      in leafTablePassExpr decoders body @?=
+           IRLetIn "l_leaftbl_0" (IRBuiltin BMap [IRLambda "l_leafv_1" (decode "l_leafv_1"), dom])
+             (IRBuiltin BMap [IRLambda "x" (IRBuiltin BMap [IRLambda "y"
+               (IRBuiltin (BIndex 0) [IRVar "l_leaftbl_0", IROp OpSub (IRVar "y") (IRConst (VInt 1))]), dom]), dom])
+  ]
+  where
+    ascSrc = unlines
+      [ "neural readDigit :: (Symbol -> Int) of [1, 2, 3]"
+      , "main a b c = draw x = readDigit(a) in draw y = readDigit(b) in draw z = readDigit(c) in"
+      , "  if x < y then (if y < z then True else False) else False" ]
+    decoders = Set.singleton "readDigit_auto_prob"
+    decode v = IRDestruct AcFst (IRApply (IRApply (IRVar "readDigit_auto_prob") (IRVar "raw")) (IRVar v))
+    dom = IRBuiltin (BTensor [EFixed 3]) (map (IRConst . VInt) [1, 2, 3])
+    -- The second argument of every emitted decode call.
+    decodeArgs s = case breakOn "readDigit_auto.forward(" s of
+      Nothing -> []
+      Just rest -> let afterComma = drop 2 (dropWhile (/= ',') rest)
+                   in takeWhile (\c -> isAlphaNum c || c == '_') afterComma : decodeArgs afterComma
+    breakOn pat str
+      | null str = Nothing
+      | pat `isPrefixOf` str = Just (drop (length pat) str)
+      | otherwise = breakOn pat (tail str)
+
 gatherPassTests :: TestTree
 gatherPassTests = testGroup "one-hot read as a gather (batched-mask-variant-neural-read-nests-v-deep)"
   [ testCase "a contiguous one-hot sum at a slot offset becomes one guarded read" $
