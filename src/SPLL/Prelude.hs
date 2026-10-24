@@ -129,6 +129,7 @@ import SPLL.IRCompiler
 import SPLL.IROptimizer (optimizeEnvWith)
 import SPLL.IRSelectPass (selectPassEnv)
 import SPLL.IRGatherPass (gatherPassEnv)
+import SPLL.IRLeafTablePass (leafTablePassEnv)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import qualified SPLL.CodeGenPyTorch
 import qualified SPLL.CodeGenJulia
@@ -555,7 +556,12 @@ compileRTypedS conf rtypedWithSigs = do
       -- key range becomes one guarded gather (task
       -- batched-mask-variant-neural-read-nests-v-deep). After the optimizer,
       -- so it sees the chains in their final form.
-      compiled = if batched conf then gatherPassEnv optimized else optimized
+      -- Batched only, likewise after the optimizer: a neural leaf decode an
+      -- enumeration loop re-evaluates once per world becomes one table read
+      -- (task batched-enumeration-rereads-neural-leaf-per-world).
+      compiled = if batched conf
+                   then leafTablePassEnv (Set.fromList [n | (n, _, _) <- neurals rtyped]) (gatherPassEnv optimized)
+                   else optimized
   printIfVerbose conf "\n=== Compiled Program ==="
   pPrintIfMoreVerbose conf compiled
   printIfVerbose conf (pPrintIREnv compiled)

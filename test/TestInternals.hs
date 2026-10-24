@@ -30,6 +30,7 @@ import MockNN (flattenMockInput, mockInputFor, shapedMockLogits, planAwareMockLo
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IRGatherPass (gatherPassExpr)
+import SPLL.IRLeafTablePass (leafTablePassExpr)
 import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, prepBatchedBody, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
@@ -2542,6 +2543,68 @@ compileAllocPoint name conf src n = do
     Right bytes -> Measured (fromInteger bytes)
   where
     cap = 4 * 10 ^ (9 :: Int) :: Integer
+
+-- | A count over an n-field product scene of all-discrete objects answers a
+-- point query in polynomial time (task
+-- product-scene-discrete-count-enumerates-slot-patterns). Draw sinking splits
+-- the draw per field, and every summand reads the entry's symbol parameter;
+-- the decomposability gate counted that parameter as a shared latent, so no
+-- level of the @+@ chain was tabulated and the query enumerated the C(n, k)
+-- slot-hit patterns (p(n/2) cost 0.002 s at n = 2 and 1.13 s at 12, ~4x per
+-- two slots, in emitted Python). The metric is the bytes one interpreted
+-- p(n/2) allocates on this thread (compile excluded); a slope over 2.5, or a
+-- point past the cap, is the slot-pattern enumeration being back. The n = 10
+-- answer is checked against the Poisson-binomial DP.
+test_productSceneDiscreteCountPolynomial :: TestTree
+test_productSceneDiscreteCountPolynomial = testCase "productSceneDiscreteCountPolynomial" $ do
+  verdict <- climb 2.5 [2, 4, 6, 8, 10] queryAlloc
+  case verdict of
+    WithinBound _ -> return ()
+    Exceeds why -> assertFailure ("p(n/2) on the n-slot discrete product-scene count grows faster than \
+                                  \n^2.5 in the bytes it allocates: " ++ why)
+    Unmeasurable why -> assertFailure why
+  (prog, env) <- compiled 10
+  let (p, d) = query prog env 10
+      oracle = foldl (\dist q -> zipWith (+) (map (* (1 - q)) dist ++ [0]) (0 : map (* q) dist))
+                     [1] (take 10 (zipWith (*) pObj pRed)) !! 5
+  assertBool ("n = 10: p(5) = " ++ show p ++ ", Poisson-binomial " ++ show oracle) (abs (p - oracle) < 1e-12)
+  assertEqual "n = 10 dimension" 0 d
+  where
+    cap = 4 * 10 ^ (9 :: Int) :: Integer
+    pObj = [0.8, 0.5, 0.9, 0.3, 0.6, 0.7, 0.4, 1.0, 0.2, 0.55] :: [Double]
+    pRed = [0.25, 0.6, 0.1, 0.5, 0.4, 0.3, 0.75, 0.2, 0.9, 0.45] :: [Double]
+    src :: Int -> String
+    src n = unlines
+      [ "data Color = Red | Blue"
+      , "data Object = Nil | Obj color::Color"
+      , "data Scene = Scene " ++ intercalate ", " [ "o" ++ show i ++ "::Object" | i <- [1 .. n] ]
+      , "neural readScene :: (Symbol -> Scene)"
+      , "hit o = if isNil o then 0 else (if isRed (color o) then 1 else 0)"
+      , "main s = draw sc = readScene s in " ++ intercalate " + " [ "hit (o" ++ show i ++ " sc)" | i <- [1 .. n] ] ]
+    -- Per slot: [Nil, Obj, Red, Blue].
+    logits n = VTuple (VInt 2) (VList (foldr (ListCont . VFloat) EmptyList
+                 (concat (take n (zipWith (\po pr -> [1 - po, po, pr, 1 - pr]) pObj pRed)))))
+    compiled n = do
+      prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+                (tryParseProgram "productSceneDiscreteCountPolynomial" (src n))
+      env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+               (compile defaultCompilerConfig prog)
+      _ <- evaluate (length (show env))
+      return (prog, env)
+    query prog env n = either (\e -> error ("prob query error: " ++ show e)) probDimOf
+                         (runProbC prog env [logits n] (VInt (n `div` 2)))
+    queryAlloc n = do
+      (prog, env) <- compiled n
+      r <- try $ flip finally disableAllocationLimit $ do
+        setAllocationCounter (fromInteger cap)
+        enableAllocationLimit
+        (p, d) <- evaluate (query prog env n)
+        _ <- evaluate (p + fromIntegral d)
+        remaining <- getAllocationCounter
+        return (cap - toInteger remaining)
+      return $ case r of
+        Left AllocationLimitExceeded -> Capped (show cap ++ " bytes allocated")
+        Right bytes -> Measured (fromInteger bytes)
 
 -- | A Gaussian observation of a product of K digit reads costs one term per
 -- digit cell (task noisy-observation-mixes-over-result-value-domain). The
@@ -6264,6 +6327,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , scalarDiffusionSamplerTest
   , categoricalIndexTests
   , gatherPassTests
+  , leafTablePassTests
   , untaggedShortCircuit
   , annotationSpellingTests
   , structuralPropagation
@@ -6341,6 +6405,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
+  , test_productSceneDiscreteCountPolynomial
   , test_sceneCountConditionalEditPolynomial
   , test_planSceneFloatPassthroughPolynomial
   , test_planEnumAccumulatorFoldPolynomial
@@ -6462,6 +6527,56 @@ categoricalIndexTests = testGroup "categorical index (neural-categorical-sampler
 -- contiguous key range becomes one range-guarded indexed read, and nothing
 -- else changes. The interpreter checks the rewrite is exact on keys inside,
 -- at the edges of and outside the range.
+-- | Task batched-enumeration-rereads-neural-leaf-per-world: under --batched a
+-- neural leaf decode that a nested enumeration loop reads at its own variable
+-- is computed once per domain value ahead of the outer loop, not once per
+-- world. The corpus pair neuralLeafTableAscending checks the values.
+leafTablePassTests :: TestTree
+leafTablePassTests = testGroup "neural leaf decode tabulated out of enumeration loops (batched-enumeration-rereads-neural-leaf-per-world)"
+  [ testCase "only the outermost draw is decoded inside a loop; y and z read a table" $
+      case tryParseProgram "" ascSrc of
+        Left err -> assertFailure (show err)
+        Right p -> case compile defaultCompilerConfig{batched = True} p >>= generateFunctionsBatched True of
+          Left err -> assertFailure err
+          Right ls -> do
+            let code = unlines (dropWhile (not . ("class Main" `isPrefixOf`)) ls)
+                args = decodeArgs code
+            assertBool ("no table in Main:\n" ++ code) ("l_leaftbl_" `isInfixOf` code)
+            assertBool ("a decode still runs at an inner loop variable: " ++ show args)
+              (not (null args) && all (\a -> a == "x" || "l_leafv_" `isPrefixOf` a) args)
+  , testCase "a single loop's decode at its own variable is left alone" $
+      let body = IRBuiltin (BReduce ROpAdd 0)
+                   [IRBuiltin BMap [IRLambda "x" (decode "x"), dom]]
+      in leafTablePassExpr decoders body @?= body
+  , testCase "a nested decode reading a raw output bound inside the outer loop is left alone" $
+      let body = IRBuiltin BMap [IRLambda "x" (IRLetIn "raw" (IRVar "x")
+                   (IRBuiltin BMap [IRLambda "y" (decode "y"), dom])), dom]
+      in leafTablePassExpr decoders body @?= body
+  , testCase "a nested decode becomes a table bound around the outer loop" $
+      let body = IRBuiltin BMap [IRLambda "x" (IRBuiltin BMap [IRLambda "y" (decode "y"), dom]), dom]
+      in leafTablePassExpr decoders body @?=
+           IRLetIn "l_leaftbl_0" (IRBuiltin BMap [IRLambda "l_leafv_1" (decode "l_leafv_1"), dom])
+             (IRBuiltin BMap [IRLambda "x" (IRBuiltin BMap [IRLambda "y"
+               (IRBuiltin (BIndex 0) [IRVar "l_leaftbl_0", IROp OpSub (IRVar "y") (IRConst (VInt 1))]), dom]), dom])
+  ]
+  where
+    ascSrc = unlines
+      [ "neural readDigit :: (Symbol -> Int) of [1, 2, 3]"
+      , "main a b c = draw x = readDigit(a) in draw y = readDigit(b) in draw z = readDigit(c) in"
+      , "  if x < y then (if y < z then True else False) else False" ]
+    decoders = Set.singleton "readDigit_auto_prob"
+    decode v = IRDestruct AcFst (IRApply (IRApply (IRVar "readDigit_auto_prob") (IRVar "raw")) (IRVar v))
+    dom = IRBuiltin (BTensor [EFixed 3]) (map (IRConst . VInt) [1, 2, 3])
+    -- The second argument of every emitted decode call.
+    decodeArgs s = case breakOn "readDigit_auto.forward(" s of
+      Nothing -> []
+      Just rest -> let afterComma = drop 2 (dropWhile (/= ',') rest)
+                   in takeWhile (\c -> isAlphaNum c || c == '_') afterComma : decodeArgs afterComma
+    breakOn pat str
+      | null str = Nothing
+      | pat `isPrefixOf` str = Just (drop (length pat) str)
+      | otherwise = breakOn pat (tail str)
+
 gatherPassTests :: TestTree
 gatherPassTests = testGroup "one-hot read as a gather (batched-mask-variant-neural-read-nests-v-deep)"
   [ testCase "a contiguous one-hot sum at a slot offset becomes one guarded read" $

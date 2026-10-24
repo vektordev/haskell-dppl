@@ -101,7 +101,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
   → RInfer (+ Monomorphize on failure) → Analysis (DiscreteValues) → DrawSinking
   → ForwardChaining → ModalityInfer
   → IRCompiler (generate / probability / integrate) → PerValue (install)
-  → IRSelectPass (batched only) → IROptimizer → IRGatherPass (batched only)
+  → IRSelectPass (batched only) → IROptimizer → IRGatherPass, IRLeafTablePass (batched only)
   → CodeGen{PyTorch,PyTorchBatched,Julia}
 ```
 
@@ -134,6 +134,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `IRTypeCheck` — the IR's type contract: `IRType` and an inference checker over an `IREnv`.
 - `IRSelectPass` — `IRIf` → `IRSelect` for batched mode.
 - `IRGatherPass` — batched only: a one-hot sum reading a logit tensor over a contiguous key range → one guarded `nn_gather`.
+- `IRLeafTablePass` — batched only: a neural leaf decode a nested enumeration loop reads per world → one table bound ahead of the outer loop.
 - `IROptimizer` — constant folding, CSE and let-in optimization.
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.
 - `PythonNesting` — CPython's per-line bracket and indentation limits, and the deep-line spill both Python backends share.

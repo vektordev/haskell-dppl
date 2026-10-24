@@ -174,11 +174,6 @@ knownSequenceDivergences =
   -- known-issues/listHelperReadBesideAffineSibling; reached by seed 20261016
   -- once the null-set-negation corpus additions moved what it draws.
   [ KnownSeq "witnessThroughDetIfNamed" [InjFIdentity, HelperExtract] "list-parameter-helper-read-beside-affine-sibling-impossible"
-  -- `v < 2` swapped to `2 > v` and bound by `draw z = ..` as the if
-  -- condition: p(Right 2) is 1.0 and p(Left ()) impossible. Pinned by
-  -- known-issues/drawBoundLiteralLeftComparisonCondition. Reached once the
-  -- fst-of-pair-wrapper corpus additions moved what seed 20261014 draws.
-  , KnownSeq "observeContinuousEqualsLetfree" [CompareFlip, DrawIntro] "draw-bound-literal-left-comparison-condition-wrong"
   -- The parameter aliased, the noise drawn into a binding and `+ 0.0` added:
   -- the (x, ANY) marginal loses the Uniform's dimension. Pinned by
   -- known-issues/aliasedParameterPlusZeroMarginalDim; reached by seed

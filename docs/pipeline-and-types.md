@@ -16,6 +16,7 @@ SPLL source (.spll/.ppl)
      Three compilation branches: generate, probability, integrate
   → IRSelectPass.hs (batched only) → IROptimizer.hs (const folding, CSE, let-in)
   → IRGatherPass.hs (batched only: one-hot neural reads become one gather)
+  → IRLeafTablePass.hs (batched only: a neural decode read inside nested enumeration loops becomes one table)
   → CodeGenPyTorch.hs, CodeGenPyTorchBatched.hs, or CodeGenJulia.hs
 ```
 

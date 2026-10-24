@@ -27,6 +27,28 @@ call and the module from 107 KB to 37 KB (task
 `neural/batchedMaskVariantNeuralReadChain`). Only a whole matching tree in
 the linear spelling is rewritten; all other IR passes through unchanged.
 
+`SPLL.IRLeafTablePass` runs after it. A program that draws several neural
+reads and branches on them enumerates them as nested loops, and each draw's
+decode `AcFst (f_auto_prob(raw)(x))` sits inside the loops of the draws
+before it, so it used to run once per enumerated world: 10^4 + 10^3 + 10^2 +
+10 decodes for four `[0..9]` reads, each a method call, a membership test, a
+gather and a select over the batch, and all eager. The pass binds
+`map (\v -> decode v) dom` once around the outermost loop the decode does
+not depend on and reads it by position (`v - lo`) inside. It matches only a
+decode at the variable of a strictly nested loop over a contiguous integer
+literal domain, reading a raw output bound outside the outer loop; a decode
+is pure and total on its domain, so evaluating it at every value is exact.
+The runtime's side of the same task gives the per-world ops a batch-
+independent fast path: `nn_gather`, `is_member` and `tensor_index` with a
+Python-int argument, `where_anchored` with a Python-bool condition (the
+picked arm, when that is provably what `torch.where` would give), and
+`logical_not` (the emitted form of `not`) on a Python bool. On the task's
+constraint programs at B = 512 (forward + backward) `--batched` went from
+8-29x slower than the scalar module run feature-major to 0.8-3x (the
+residual on the ~10 ms programs is the eager select evaluating both arms of
+the query's `sample` test, which the scalar code's Python `if` does not).
+Corpus `neural/neuralLeafTableAscending`.
+
 `IRSelectPass` retags by syntax, so it also retags a conditional whose guard
 is a shape probe the fragment admits: `sample == []`, a constructor-test
 predicate, or a CSE name bound to one (`let cse_0 = sample == [] in let

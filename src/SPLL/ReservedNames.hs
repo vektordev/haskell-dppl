@@ -411,7 +411,7 @@ pythonRuntimeValueNames =
   , "is_member", "isclose", "isfinite", "isinf", "isnan", "isqrt"
   , "itertools", "lcm", "ldexp", "lgamma", "listConcat", "listProd", "log", "log10"
   , "log1p", "log2", "log_cumulative_normal", "log_cumulative_uniform"
-  , "log_density_normal", "log_density_uniform", "logsumexp", "mapList"
+  , "log_density_normal", "log_density_uniform", "logical_not", "logsumexp", "mapList"
   , "math", "modf", "nan", "nextafter", "nn_gather", "perm", "pi", "poison"
   , "pow", "prod", "radians", "rand", "randn", "random", "remainder"
   , "safe_div", "safe_exp", "safe_intdiv", "safe_log", "safe_mod", "sign", "signature", "sin", "sinh"
