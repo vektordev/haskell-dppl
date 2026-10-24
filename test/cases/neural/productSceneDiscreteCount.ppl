@@ -1,0 +1,23 @@
+-- Counting red objects over a TEN-field product scene of all-discrete CLEVR
+-- objects (97 values each), by a flat `+` chain -- the order-independent
+-- per-object scene of experiments_nest clevr-per-object-encoder. Draw sinking
+-- splits the draw per field, so each summand is its own dense enumeration of
+-- one slot. Two things made the query cost C(10, k) at count k (46 s at k = 5,
+-- OOM at batch 64; task product-scene-discrete-count-enumerates-slot-patterns):
+-- the summands all read the symbol parameter `s`, which the decomposability
+-- gate counted as a shared latent, so no level of the chain was tabulated and
+-- every split re-descended into its prefix; and each slot's `hit sc_oi`
+-- re-enumerated the already-enumerated slot value, 97x per cell. Now the chain
+-- is a materialized Poisson-binomial DP, linear in the slot count.
+--
+-- ORACLE: Poisson-binomial over q_i = P(Obj_i) * P(Red_i), slot i's logits
+-- [Nil, Obj | Cube, Sphere, Cylinder | Small, Large | 8 colours | Rubber, Metal].
+data Shape = Cube | Sphere | Cylinder
+data Size = Small | Large
+data Color = Red | Blue | Green | Yellow | Grey | Brown | Cyan | Purple
+data Material = Rubber | Metal
+data Object = Nil | Obj shape::Shape, size::Size, color::Color, material::Material
+data Scene = Scene o1::Object, o2::Object, o3::Object, o4::Object, o5::Object, o6::Object, o7::Object, o8::Object, o9::Object, o10::Object
+neural readScene :: (Symbol -> Scene)
+hit o = if isNil o then 0 else (if isRed (color o) then 1 else 0)
+main s = draw sc = readScene s in hit (o1 sc) + hit (o2 sc) + hit (o3 sc) + hit (o4 sc) + hit (o5 sc) + hit (o6 sc) + hit (o7 sc) + hit (o8 sc) + hit (o9 sc) + hit (o10 sc)

@@ -184,6 +184,7 @@ planSceneRebuildPerFieldDraws main.prob=18
 planSceneRebuildShiftedFloatLeaf main.prob=6
 planSlicePartialAny main.prob=18
 planSumWithSunkDiscreteDraw main.integ=3 main.prob=3 numRed.prob=4
+productSceneDiscreteCount main.integ=19 main.prob=19
 readme main.integ=4 main.prob=4
 rewriteProbeHelperIfGate f.integ=6 f.prob=6
 rewriteProbeHelperTwoArgs main.prob=4

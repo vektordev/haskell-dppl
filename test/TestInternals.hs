@@ -2464,6 +2464,68 @@ test_wideProductSceneTopKQueryPolynomial = testCase "wideProductSceneTopKQueryPo
                >> error "unreachable")
             (\(p, d) -> p `seq` d `seq` return (p, d)) res
 
+-- | A count over an n-field product scene of all-discrete objects answers a
+-- point query in polynomial time (task
+-- product-scene-discrete-count-enumerates-slot-patterns). Draw sinking splits
+-- the draw per field, and every summand reads the entry's symbol parameter;
+-- the decomposability gate counted that parameter as a shared latent, so no
+-- level of the @+@ chain was tabulated and the query enumerated the C(n, k)
+-- slot-hit patterns (p(n/2) cost 0.002 s at n = 2 and 1.13 s at 12, ~4x per
+-- two slots, in emitted Python). The metric is the bytes one interpreted
+-- p(n/2) allocates on this thread (compile excluded); a slope over 2.5, or a
+-- point past the cap, is the slot-pattern enumeration being back. The n = 10
+-- answer is checked against the Poisson-binomial DP.
+test_productSceneDiscreteCountPolynomial :: TestTree
+test_productSceneDiscreteCountPolynomial = testCase "productSceneDiscreteCountPolynomial" $ do
+  verdict <- climb 2.5 [2, 4, 6, 8, 10] queryAlloc
+  case verdict of
+    WithinBound _ -> return ()
+    Exceeds why -> assertFailure ("p(n/2) on the n-slot discrete product-scene count grows faster than \
+                                  \n^2.5 in the bytes it allocates: " ++ why)
+    Unmeasurable why -> assertFailure why
+  (prog, env) <- compiled 10
+  let (p, d) = query prog env 10
+      oracle = foldl (\dist q -> zipWith (+) (map (* (1 - q)) dist ++ [0]) (0 : map (* q) dist))
+                     [1] (take 10 (zipWith (*) pObj pRed)) !! 5
+  assertBool ("n = 10: p(5) = " ++ show p ++ ", Poisson-binomial " ++ show oracle) (abs (p - oracle) < 1e-12)
+  assertEqual "n = 10 dimension" 0 d
+  where
+    cap = 4 * 10 ^ (9 :: Int) :: Integer
+    pObj = [0.8, 0.5, 0.9, 0.3, 0.6, 0.7, 0.4, 1.0, 0.2, 0.55] :: [Double]
+    pRed = [0.25, 0.6, 0.1, 0.5, 0.4, 0.3, 0.75, 0.2, 0.9, 0.45] :: [Double]
+    src :: Int -> String
+    src n = unlines
+      [ "data Color = Red | Blue"
+      , "data Object = Nil | Obj color::Color"
+      , "data Scene = Scene " ++ intercalate ", " [ "o" ++ show i ++ "::Object" | i <- [1 .. n] ]
+      , "neural readScene :: (Symbol -> Scene)"
+      , "hit o = if isNil o then 0 else (if isRed (color o) then 1 else 0)"
+      , "main s = draw sc = readScene s in " ++ intercalate " + " [ "hit (o" ++ show i ++ " sc)" | i <- [1 .. n] ] ]
+    -- Per slot: [Nil, Obj, Red, Blue].
+    logits n = VTuple (VInt 2) (VList (foldr (ListCont . VFloat) EmptyList
+                 (concat (take n (zipWith (\po pr -> [1 - po, po, pr, 1 - pr]) pObj pRed)))))
+    compiled n = do
+      prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+                (tryParseProgram "productSceneDiscreteCountPolynomial" (src n))
+      env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+               (compile defaultCompilerConfig prog)
+      _ <- evaluate (length (show env))
+      return (prog, env)
+    query prog env n = either (\e -> error ("prob query error: " ++ show e)) probDimOf
+                         (runProbC prog env [logits n] (VInt (n `div` 2)))
+    queryAlloc n = do
+      (prog, env) <- compiled n
+      r <- try $ flip finally disableAllocationLimit $ do
+        setAllocationCounter (fromInteger cap)
+        enableAllocationLimit
+        (p, d) <- evaluate (query prog env n)
+        _ <- evaluate (p + fromIntegral d)
+        remaining <- getAllocationCounter
+        return (cap - toInteger remaining)
+      return $ case r of
+        Left AllocationLimitExceeded -> Capped (show cap ++ " bytes allocated")
+        Right bytes -> Measured (fromInteger bytes)
+
 -- | A Gaussian observation of a product of K digit reads costs one term per
 -- digit cell (task noisy-observation-mixes-over-result-value-domain). The
 -- mixed enumerate-and-shift equation looped over the product's value domain
@@ -6261,6 +6323,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
+  , test_productSceneDiscreteCountPolynomial
   , test_sceneCountConditionalEditPolynomial
   , test_planSceneFloatPassthroughPolynomial
   , test_planEnumAccumulatorFoldPolynomial

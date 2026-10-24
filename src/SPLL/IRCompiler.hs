@@ -1229,13 +1229,35 @@ materializationScopes p = Map.fromList (concatMap (go [] . snd) (functions p))
 -- shared-enumerated-latent-loses-per-slot-factorization). A variable bound
 -- from @c@ inside the loop is fixed along with it, since the scope is rebuilt
 -- binder by binder rather than patched afterwards.
+--
+-- A lambda parameter is fixed along the same lines when every read of it the
+-- verdict can see -- in either operand or in an enclosing @let@'s right-hand
+-- side -- is 'Deterministic': it is then one value per call, an input rather
+-- than a latent, and two operands that both read it are independent given it.
+-- That is the shape draw sinking leaves for a product-ADT neural scene,
+-- @hit (o1 (readScene s)) + hit (o2 (readScene s)) + ..@, every slot reading
+-- the entry's symbol parameter (task
+-- product-scene-discrete-count-enumerates-slot-patterns: untabulated, the
+-- count enumerated the C(10, k) slot-hit patterns). Done here, not in
+-- 'bindLambdaParam', so the occurrence pTypes are forced only at a candidate
+-- node the whole-program verdict already flagged (see that function on why
+-- forcing them program-wide is not affordable).
 sharesLatentGiven :: Set.Set ChainName -> ([LatentBinder], Expr, Expr) -> Bool
 sharesLatentGiven fixed (binders, l, r) = sharesEnumeratedLatent (foldl bind Map.empty binders) l r
   where
     bind scope (LetBinder x v)
       | chainName (getTypeInfo v) `Set.member` fixed = Map.insert x (Just Set.empty) scope
       | otherwise = bindLatent scope x v
-    bind scope (ParamBinder cn x) = bindLambdaParam scope cn x
+    bind scope (ParamBinder cn x)
+      | all ((== Deterministic) . pType . getTypeInfo) (concatMap (varReads x) visible) =
+          Map.insert x (Just Set.empty) scope
+      | otherwise = bindLambdaParam scope cn x
+    visible = l : r : [v | LetBinder _ v <- binders]
+    -- Every 'Var' node named @x@, shadowing ignored: a shadowed read is one
+    -- more read to check, which can only keep the parameter's identity.
+    varReads x e = case node e of
+      Var y | y == x -> [e]
+      _ -> concatMap (varReads x) (getSubExprs e)
 
 -- | Shared implementation of the two walks above. @bindVars@ selects
 -- whether a bare 'Lambda' binds its parameter ('bindLambdaParam') or is
@@ -5615,13 +5637,24 @@ toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PRe
 -- calls 'toIRInference' on its own argument: the enclosing bound variables are
 -- already in 'typeEnv' as locals, so P(application = sample) there is exactly
 -- the conditional this equation would otherwise have enumerated.
+--
+-- Not for an argument that is itself a variable this enumeration already
+-- fixed (@hit x@ inside the loop over @x@): its measure is the indicator
+-- @o == x@, so enumerating it again walks the whole domain for the one value
+-- it keeps -- a 97-fold loop per cell on a CLEVR object slot (task
+-- product-scene-discrete-count-enumerates-slot-patterns). The application is
+-- deterministic given the loop, and the forward equations below compile it.
 toIREnumerate meta cumulative e@(Expr _ (Apply l v)) sample
-  | isEnumerableApplication meta l v =
+  | isEnumerableApplication meta l v
+  , not (isRecoveredVar v) =
   if not (enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)))
     then toIRInference meta cumulative (reinferRecovered meta (recoveredVars meta) e) sample
     else case agreementShape meta l v of
       Just ag -> enumerateAgreement meta cumulative ag sample
       Nothing -> enumerateAppliedLambda meta cumulative l v sample
+  where
+    isRecoveredVar (Expr _ (Var x)) = x `elem` recoveredVars meta
+    isRecoveredVar _ = False
 toIREnumerate meta cumulative (Expr TypeInfo{chainName=cn} (Var _)) sample = do
   let equivCN = equivalentChainName "toIREnumerate/Var" (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))
