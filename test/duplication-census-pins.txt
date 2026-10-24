@@ -218,6 +218,7 @@ showcase_observe_inequality main.prob=3
 showcase_poe_with_prior prior.integ=4 prior.prob=4
 sndOfPairWrapperStructuredDraw main.prob=20 main__m10.prob=8
 structuredDrawHelperProjectsField main.prob=20
+symbolSelectedByHelper nth.integ=3
 tensorDiffusionTrajectory main.prob=12 step.prob=13
 topKComplementAnyExcept main.prob=3
 topKComplementCdfFlip main.integ=4 main.prob=4
