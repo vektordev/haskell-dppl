@@ -961,6 +961,20 @@ bindingWithoutEngine laws e@(Expr _ f) = case f of
 -- product of the two operands' own laws. A local fixed by an enclosing
 -- enumeration or witness ('recoveredVars') is a value, not a law, and
 -- correlates nothing. The ModalityInfer counterpart is 'compareGround'.
+-- | The point at which the cumulative query must be asked when a comparison's
+-- True outcome is "the random side lies strictly below @b@". The cumulative
+-- query is inclusive (@P(X <= b)@), which is the strict mass for a continuous
+-- side (the boundary has measure zero) but not for an Int one, whose strict
+-- mass is @P(X <= b - 1)@. The other direction, @X > b@, is the complement of
+-- the inclusive CDF and needs no step. Without this, @x < y@ answered
+-- @P(x <= y)@ once @y@ was enumerated by a sibling operand (task
+-- strict-int-less-than-non-strict-when-operand-shared); 'comparisonWorlds'
+-- makes the same step on its interval endpoints.
+strictBelowBound :: Expr -> IRExpr -> IRExpr
+strictBelowBound side b
+  | rType (getTypeInfo side) == TInt = IROp OpSub b (IRConst (VInt 1))
+  | otherwise = b
+
 enumeratedBoundShape :: CompilerMetadata -> Expr -> Expr -> Maybe (Bool, Expr, Expr)
 enumeratedBoundShape meta l r
   | det l || det r = Nothing
@@ -3544,10 +3558,10 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     -- p(left < right) = p(diff < 0) = cdf(0)
     mass <$> complementWhen (semiringOf meta) (notIR sample) cdfAt0
 toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
-  | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
+  | pType (getTypeInfo left) == Deterministic = do --p(x | const > var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
-    setVariables [(var, l)]
+    setVariables [(var, strictBelowBound right l)]
     integ <- toIRInference (unpruned meta) True right (IRVar var)  -- complemented below, see 'unpruned'
     -- 'complementWhen' rather than a let-bound CDF and its complement, so a
     -- normal upper tail keeps its precision ('upperTailComplement')
@@ -3575,10 +3589,10 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     returnExpr <- complementWhen (semiringOf meta) sample (unP (rProb integ))
     -- A comparison's mass, not a structural choice: possible either way.
     return (mkPResult (sealP returnExpr) dim0 (rBranches integ) constFalseIR)
-  | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
+  | pType (getTypeInfo right) == Deterministic = do --p(x | var < const)
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
-    setVariables [(var, r)]
+    setVariables [(var, strictBelowBound left r)]
     integ <- toIRInference (unpruned meta) True left (IRVar var)  -- complemented below, see 'unpruned'
     -- 'complementWhen' rather than a let-bound CDF and its complement, so a
     -- normal upper tail keeps its precision ('upperTailComplement')
@@ -3612,7 +3626,8 @@ toIRInference meta False (Expr _ (InjF (Named cmp) [left, right])) sample
     mTbl <- materializeOperandTable meta enumE
     returnO <- scoped $ do
       pE <- operandProb meta mTbl enumE (IRVar bnd)
-      integ <- toIRInference (unpruned meta) True cdfE (IRVar bnd)  -- complemented below, see 'unpruned'
+      let cdfAt = if cdfBelow then strictBelowBound cdfE (IRVar bnd) else IRVar bnd
+      integ <- toIRInference (unpruned meta) True cdfE cdfAt  -- complemented below, see 'unpruned'
       pCmp <- complementWhen sr (if cdfBelow then notIR sample else sample) (unP (rProb integ))
       return (srTimes sr pE pCmp)
     let (outerBinds, body') = hoistInvariantBindings bnd (closeExpr returnO id)

@@ -1,0 +1,1 @@
+main = draw x = (if Uniform < 0.5 then 0 else 1) in draw y = (if Uniform < 0.5 then 0 else 1) in (y > x) && (y == 1)
