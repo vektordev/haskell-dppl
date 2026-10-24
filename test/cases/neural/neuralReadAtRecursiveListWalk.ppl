@@ -1,0 +1,8 @@
+neural readD :: (Float -> Int) of [0, 1]
+lastOf zs = if isNull (tail zs) then head zs else lastOf (tail zs)
+main = draw zs = [Normal, Normal, Normal] in (zs, readD (lastOf zs))
+-- The read's input is a recursive walk over the observed list: a point given
+-- the observation, so the read is the network's own categorical at it (docs
+-- ticket neural-read-at-recursive-walk-of-observed-list-no-code; it compiled
+-- generate-only). The mock's logits at input v are [v, 1.0], so class 0 reads
+-- the last element: p(([a, b, c], 0)) = N(a) N(b) N(c) c.

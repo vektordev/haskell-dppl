@@ -53,10 +53,8 @@ perValueTests = testGroup "PerValue"
 -- | The Guess-Who model at J = 20 attributes and 24 faces: the secret face is
 -- drawn from @pick@, the perceiver reads the chosen face's attributes with
 -- @see@, and the answers heard are the reading itself. The task's acceptance
--- program. The board is 24 face parameters selected by an @if@ chain: a
--- network applied to a value that depends on the enumerated face (@see (nth s
--- board)@) has no point query at this compiler, and the point query is what the
--- vector is checked against. 'guessWhoNthSrc' is that spelling.
+-- program. The board is 24 face parameters selected by an @if@ chain.
+-- 'guessWhoNthSrc' is the same model with the board as a list.
 guessWhoSrc :: String
 guessWhoSrc = guessWhoSrcN faces
 
@@ -81,11 +79,13 @@ guessWhoSrcN n = unlines
       | k == n - 1 = "see b" ++ show k
       | otherwise = "(if s == " ++ show k ++ " then see b" ++ show k ++ " else " ++ selectChain (k + 1) ++ ")"
 
--- | The same model with the board as a list read by a recursive helper. Its
--- point query is intractable (the network's input depends on the enumerated
--- face), but the fast path makes the face a parameter of the given part, where
--- the input is deterministic, so the per-value query answers it. Checked
--- against the closed form.
+-- | The same model with the board as a list read by a recursive helper. The
+-- network's input @nth s board@ is a point once the observed face @s@ is
+-- fixed, so @main@ has a point query (docs ticket
+-- neural-read-at-recursive-walk-of-observed-list-no-code; before it, only the
+-- per-value fast path answered this spelling). With the face unobserved the
+-- input is not a point, and @main@ answers no such mask; the per-value vector
+-- is checked element by element against the point query and the closed form.
 guessWhoNthSrc :: String
 guessWhoNthSrc = unlines
   [ faceDecl
@@ -359,15 +359,17 @@ semanticsTests = testGroup "elements are point queries, and sum to the ANY query
       -- The zero-probability transcript is zero at every face.
       r0 <- perValueQuery p env "posterior" guessWhoInterpArgs (VTuple VAny (face [Just False]))
       assertBool (show (pvProbs r0)) (all (== 0) (pvProbs r0) && and (pvImposs r0))
-  , testCase "Guess-Who with the board as a list: no point query, the fast path matches the closed form" $ do
+  , testCase "Guess-Who with the board as a list: the fast path matches the point query and the closed form" $ do
       p <- parseOrFail guessWhoNthSrc
       env <- compileOrFail noIntegConf p
-      assertBool "main has a point query after all; compare against it instead" (isNothing (groupNamed env "main" >>= probFun))
       forM_ heardPatterns $ \heard -> do
         r <- perValueQuery p env "posterior" guessWhoNthInterpArgs (VTuple VAny (face heard))
-        forM_ (zip [0 ..] (pvProbs r)) $ \(k, pr) ->
+        forM_ (zip [0 ..] (pvProbs r)) $ \(k, pr) -> do
           assertBool (show heard ++ ", face " ++ show k ++ ": " ++ show pr ++ " vs " ++ show (guessWhoReference heard k))
             (abs (pr - guessWhoReference heard k) <= 1e-15)
+          (pt, _, _) <- pointQuery p env "main" guessWhoNthInterpArgs (VTuple (VInt k) (face heard))
+          assertBool (show heard ++ ", face " ++ show k ++ ": point query " ++ show pt ++ " vs " ++ show pr)
+            (abs (pt - pr) <= elementTolerance)
   , corpusCase "tupleDiscreteDistrib: a slot computed by an if (fallback)" "tupleDiscreteDistrib"
       "pv :: (Enumerated Int, Bool)\npv = main" [SigFst] [VTuple VAny (VBool True), VTuple VAny (VBool False), VTuple VAny VAny]
   , corpusCase "tupleCtorTestOfSharedDraw: a computed slot sharing a latent with the rest (fallback)" "tupleCtorTestOfSharedDraw"

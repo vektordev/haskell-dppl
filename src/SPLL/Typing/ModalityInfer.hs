@@ -630,8 +630,9 @@ inferE ctx env expr = case expr of
   Expr ti (ReadNN name s) ->
     let (sl, s', sa) = inferE ctx env s
         given = tagFin ti (if rType ti == TFloat then gNormal else gIntegrate)
-        l | inputIsPoint (lawMod sl) = Law (IG given) (JLeaf ("neural " ++ name) [sl])
-          | otherwise                = bareLaw (IG (groundMod SampleOnly Infinite FamNone))
+        l | inputIsPoint (lawMod sl) || pointGivenWitnesses ctx env s
+                      = Law (IG given) (JLeaf ("neural " ++ name) [sl])
+          | otherwise = bareLaw (IG (groundMod SampleOnly Infinite FamNone))
     in doneL l (Expr (setPType ti (projectI (lawMod l))) (ReadNN name s')) sa
 
   -- gt/lt are forward-only InjFs (PredefinedFunctions), but their modality is
@@ -1126,6 +1127,27 @@ determinedByWitnesses env arg = not (hasRandomLeaf arg) && all pinned (Set.toLis
   where pinned v = case Map.lookup v env of
           Just (Law m _) -> inputIsPoint m
           Nothing -> True
+
+-- | Is a value a point once every witnessed variable it reads is fixed at
+-- its recovered value? 'IWit' marks only a deterministic image of /one/
+-- witnessed operand, so a value that combines witnessed operands --
+-- @head zs + head (tail zs)@, an @if@ whose condition reads them
+-- (@if isNull (tail zs) then head zs else ...@), a recursive helper walking a
+-- witnessed list (@lastOf zs@) -- is not marked witnessed, although the
+-- observation determines it. A neural read's input asks the stronger
+-- question: the value is re-inferred with each witnessed variable it reads
+-- bound to a point, and a Deterministic result is a point given the
+-- observation (task neural-read-at-recursive-walk-of-observed-list-no-code).
+-- Calls go through the callees' own summaries, so a helper that draws fresh
+-- randomness still answers random.
+pointGivenWitnesses :: ICtx -> Env -> Expr -> Bool
+pointGivenWitnesses ctx env e
+  | null wits = False
+  | otherwise = let (l, _, _) = inferE ctx pinnedEnv e in gCap (outerI (lawMod l)) == Exact
+  where
+    wits = [ v | v <- Set.toList (freeVarsExpr e)
+               , Just (Law m _) <- [Map.lookup v env], isWitI m ]
+    pinnedEnv = foldr (\v -> Map.insert v (bareLaw (IG gExact))) env wits
 
 -- | The certificates of the engines that apply to a random binding: the
 -- literal lambda @lam@ (its body annotated) applied to @arg@, of law
