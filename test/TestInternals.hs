@@ -2463,6 +2463,86 @@ test_wideProductSceneTopKQueryPolynomial = testCase "wideProductSceneTopKQueryPo
                >> error "unreachable")
             (\(p, d) -> p `seq` d `seq` return (p, d)) res
 
+-- | Compiling a program costs about linearly in its applications of a
+-- top-level helper (task noisy-operator-fold-compile-time-wall). Forward
+-- chaining and the modality engine each scanned the whole program per
+-- application: the witnessed-binding verdict solved the clause set afresh at
+-- every call (and the rescan solver was itself quadratic), the per-invocation
+-- copy rescanned every clause group per visited node, and the chain-name
+-- tables were association lists. A left max fold over N digit reads, each
+-- step reading @toF d_i@ twice, grew as about N^2.3 to N^2.8 in the bytes the
+-- generate-only compile allocates (25 s at N = 64); it is about N^1.3 to
+-- N^1.6 now. The experiment's noisy operator fold (whose @define@s copy each
+-- step's operand, so the program itself doubles per step) went from no
+-- compile within an hour at N = 4 to 8 s.
+test_helperApplicationsCompileLinear :: TestTree
+test_helperApplicationsCompileLinear = testCase "helperApplicationsCompileLinear" $ do
+  verdict <- climb 2.0 [8, 16, 32] (compileAllocPoint "helperApplicationsCompileLinear" conf src)
+  case verdict of
+    WithinBound _ -> return ()
+    Exceeds why -> assertFailure ("the generate-only compile of an N-step max fold of toF digit reads \
+                                  \grows faster than N^2 in the bytes it allocates (task \
+                                  \noisy-operator-fold-compile-time-wall): " ++ why)
+    Unmeasurable why -> assertFailure why
+  where
+    src n = unlines
+      [ "neural readMNist :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+      , "toF v = if v == 0 then 0.0 else if v == 1 then 1.0 else if v == 2 then 2.0 else 3.0"
+      , "main " ++ unwords [ "x" ++ show i | i <- [1 .. n] ]
+          ++ " = draw d1 = readMNist x1 in draw s1 = toF d1 in "
+          ++ concat [ "draw d" ++ show i ++ " = readMNist x" ++ show i ++ " in draw s" ++ show i
+                      ++ " = if toF d" ++ show i ++ " > s" ++ show (i - 1) ++ " then toF d" ++ show i
+                      ++ " else s" ++ show (i - 1) ++ " in " | i <- [2 .. n] ]
+          ++ "s" ++ show n ++ " + Normal" ]
+    conf = defaultCompilerConfig { noProbability = True, noIntegrate = True }
+
+-- | A Markov chain over N marks spelled with one literal recursive call per
+-- (prev, next) pair, its branch conditions comparing Uniform against a Float
+-- parameter, was known-issues/markovBranchRandomRateCompileGrowth (docs task
+-- markov-branch-random-rate-compile-exponential): 0.2 / 1.3 / 10 GB
+-- allocated at N = 2 / 3 / 4 (slopes 4.6, 7.0), 34 s at N = 4. The per-call
+-- forward-chaining scans that task noisy-operator-fold-compile-time-wall
+-- removed were its cost: 0.17 / 0.55 / 1.5 GB now (slopes 2.9, 3.5), 1.4 s.
+-- The program has N^2 call sites, so this is still about quadratic in its
+-- size; the bound admits that and fails on the old growth.
+test_markovBranchRandomRateCompilePolynomial :: TestTree
+test_markovBranchRandomRateCompilePolynomial = testCase "markovBranchRandomRateCompilePolynomial" $ do
+  verdict <- climb 4.0 [2, 3, 4] (compileAllocPoint "markovBranchRandomRateCompilePolynomial" defaultCompilerConfig src)
+  case verdict of
+    WithinBound _ -> return ()
+    Exceeds why -> assertFailure ("the N-mark Markov branch chain's compile grows faster than N^4 in the \
+                                  \bytes it allocates (task markov-branch-random-rate-compile-exponential): " ++ why)
+    Unmeasurable why -> assertFailure why
+  where
+    src n = unlines
+      [ "genSeq prev p = if Uniform < 0.1 then [] else "
+          ++ concat [ "if prev == " ++ show k ++ " then (" ++ arms n ++ ") else " | k <- [1 .. n - 1] ]
+          ++ "(" ++ arms n ++ ")"
+      , "main p = genSeq 1 p" ]
+    arms n = concat [ "if Uniform < p then (Normal, " ++ show j ++ ") : genSeq " ++ show j ++ " p else "
+                    | j <- [1 .. n - 1 :: Int] ]
+             ++ "(Normal, " ++ show n ++ ") : genSeq " ++ show n ++ " p"
+
+-- | The bytes a compile of the program @src n@ and its Python codegen
+-- allocate on this thread, under a 4 GB cap, as a 'climb' point.
+compileAllocPoint :: String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
+compileAllocPoint name conf src n = do
+  prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+            (tryParseProgram name (src n))
+  r <- try $ flip finally disableAllocationLimit $ do
+    setAllocationCounter (fromInteger cap)
+    enableAllocationLimit
+    env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+             (compile conf prog)
+    _ <- evaluate (length (concat (SPLL.CodeGenPyTorch.generateFunctions True env)))
+    remaining <- getAllocationCounter
+    return (cap - toInteger remaining)
+  return $ case r of
+    Left AllocationLimitExceeded -> Capped (show cap ++ " bytes allocated")
+    Right bytes -> Measured (fromInteger bytes)
+  where
+    cap = 4 * 10 ^ (9 :: Int) :: Integer
+
 -- | A Gaussian observation of a product of K digit reads costs one term per
 -- digit cell (task noisy-observation-mixes-over-result-value-domain). The
 -- mixed enumerate-and-shift equation looped over the product's value domain
@@ -6256,6 +6336,8 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_wideProductSceneBatchedCompilesFast
   , test_wideProductSceneCountNotBatched
   , test_wideProductSceneTopKQueryPolynomial
+  , test_helperApplicationsCompileLinear
+  , test_markovBranchRandomRateCompilePolynomial
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial

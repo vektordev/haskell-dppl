@@ -1765,7 +1765,7 @@ resolveBinding :: CompilerMetadata -> Expr -> Expr -> Binding
 resolveBinding meta l v = Binding
   { bindHead = l, bindArg = v, bindLambda = lamCN, bindVar = param
   , bindBodyCN = bodyCN, bindTag = tag
-  , bindOccs = fromMaybe [] (lookup lamCN (lambdaVarOccurrences (fcData meta)))
+  , bindOccs = fromMaybe [] (Map.lookup lamCN (lambdaVarOccurrences (fcData meta)))
   , bindBody = if null tag then reinferRecovered meta (recoveredVars meta) (exprWithCN meta bodyCN)
                              else exprWithCN meta bodyCN
   , bindOuterVars = snd (unwrapLambdas (fcData meta) bodyCN)
@@ -1907,7 +1907,7 @@ deadBindingBodyCN :: CompilerMetadata -> Expr -> Maybe ChainName
 deadBindingBodyCN meta l = do
   let fcd = fcData meta
   let cn = chainName (getTypeInfo l)
-  _ <- lookup cn (chainNameInfo fcd)
+  _ <- Map.lookup cn (chainNameInfo fcd)
   (resolvedCN, info, _) <- findEquivalentExpression fcd cn
   bodyCN <- case info of
     LambdaInfo _ b -> Just b
@@ -1918,7 +1918,7 @@ deadBindingBodyCN meta l = do
   -- that inner application binds and this scope never entered; compiling it
   -- here died on an unbound name (fuzz-admission-oracle-bugs item 7). Such a
   -- binding is left to the general arms.
-  if null (fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcd))) && readsOnlyScope meta [] (exprWithCN meta bodyCN)
+  if null (fromMaybe [] (Map.lookup resolvedCN (lambdaVarOccurrences fcd))) && readsOnlyScope meta [] (exprWithCN meta bodyCN)
     then Just bodyCN
     else Nothing
 
@@ -6675,7 +6675,7 @@ invertToWorldsStep meta occs exprBody target = do
             -- The lambda is literal, so its own chain name is the key (no
             -- 'equivalentLambda' resolution of a Var to a top-level function
             -- is involved).
-            let occsY = fromMaybe [] (lookup (chainName lamTI) (lambdaVarOccurrences (fcData meta)))
+            let occsY = fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences (fcData meta)))
             invertThroughBinding meta occs occsY b e target
       -- A call -- of a named function, a function parameter, a let-bound
       -- lambda -- is the same binding as a @let@ (task
@@ -6834,7 +6834,7 @@ callBindingAt meta occs callNode
           freshNames = [ fresh | (_, fresh, _) <- renames ]
           calleeBody' = reinferRecovered meta' freshNames
                     (foldr (\(p, fresh, _) -> renameFreeVar p fresh) calleeBody renames)
-          occsK = fromMaybe [] (lookup lamK (lambdaVarOccurrences (fcData meta)))
+          occsK = fromMaybe [] (Map.lookup lamK (lambdaVarOccurrences (fcData meta)))
       -- A later parameter of the same name shadows this one in the body.
       if pK `elem` [ p | (_, p) <- drop (k + 1) lams ] then return Nothing
         else return (Just (meta', occsK, calleeBody', args !! k))
@@ -6842,9 +6842,9 @@ callBindingAt meta occs callNode
   | Expr _ (Apply (Expr _ (Var g)) e) <- callNode
   , Just (Expr lamTI (Lambda y lamBody)) <- lookup g (boundLambdas meta)
   , readsOnlyScope meta [y] lamBody
-  = return (Just (meta, fromMaybe [] (lookup (chainName lamTI) (lambdaVarOccurrences (fcData meta))), lamBody, e))
+  = return (Just (meta, fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences (fcData meta))), lamBody, e))
   | Expr _ (Apply l e) <- callNode
-  , isJust (lookup (chainName (getTypeInfo l)) (chainNameInfo (fcData meta)))
+  , isJust (Map.lookup (chainName (getTypeInfo l)) (chainNameInfo (fcData meta)))
   , Just (_, LambdaInfo{}, _) <- findEquivalentExpression (fcData meta) (chainName (getTypeInfo l))
   , not (subtreeHasOcc occs l)
   , let b = resolveBinding meta l e
@@ -8883,7 +8883,7 @@ planOpenBinding meta env lam x b a = case planBetaReduce meta env x b a of
                   resolvedCN = case findEquivalentExpression fcd lamCN of
                     Just (rCN, LambdaInfo _ _, _) -> rCN
                     _ -> lamCN
-                  occs = fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcd))
+                  occs = fromMaybe [] (Map.lookup resolvedCN (lambdaVarOccurrences fcd))
               -- A projected read binds its slice, the accessors' constructor
               -- flags constraining every world of the body.
               return ((\(ref, cons) -> ((occs, PBPlan ref) : env, b, cons))
@@ -9471,7 +9471,7 @@ planResolveApplyWith meta env overrides planBodyExpr = case collectApply planBod
               Nothing -> return ()
             return (IRVar nm)
         return (occsOf pcn, PBDet pname v)
-    occsOf cn = fromMaybe [] (lookup cn (lambdaVarOccurrences (fcData meta)))
+    occsOf cn = fromMaybe [] (Map.lookup cn (lambdaVarOccurrences (fcData meta)))
 
 data ArgClass = ArgPlan PlanRef [PLeafCon] | ArgDet IRExpr
 

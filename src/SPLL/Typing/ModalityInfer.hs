@@ -573,11 +573,20 @@ data ICtx = ICtx
   , icProg :: Program
     -- | The chain names of the program's plan reads ('planReadCNs').
   , icPlanReads :: Set.Set ChainName
+    -- | 'isWitnessedLambda' seeded at 'icObs', partially applied once so
+    -- every application asked about shares one forward-chaining solve
+    -- ('withObs' keeps the two in step).
+  , icWitnessed :: ChainName -> Bool
   }
 
 -- | The inference context of the declaration observed at @obsCN@.
 mkICtx :: [ADTDecl] -> FCData -> ChainName -> Program -> ICtx
-mkICtx adtsDecls fcData obsCN prog = ICtx adtsDecls fcData obsCN prog (planReadCNs prog)
+mkICtx adtsDecls fcData obsCN prog =
+  ICtx adtsDecls fcData obsCN prog (planReadCNs prog) (isWitnessedLambda fcData adtsDecls obsCN)
+
+-- | The context with the observation moved to @obsCN@.
+withObs :: ICtx -> ChainName -> ICtx
+withObs ctx obsCN = ctx { icObs = obsCN, icWitnessed = isWitnessedLambda (icFC ctx) (icADTs ctx) obsCN }
 
 cnOf :: Expr -> ChainName
 cnOf = chainName . getTypeInfo
@@ -712,7 +721,7 @@ inferE ctx env expr = case expr of
         armEnv       = conditionEnv env c
         armCtx arm
           | fst (unwrapLambdas (icFC ctx) (icObs ctx)) == cnOf expr
-          , gCap (outerI (lawMod lc)) == Exact = ctx { icObs = cnOf arm }
+          , gCap (outerI (lawMod lc)) == Exact = withObs ctx (cnOf arm)
           | otherwise = ctx
         (lt, t', ta) = inferE (armCtx t) armEnv t
         (lf, f', fa) = inferE (armCtx f) armEnv f
@@ -1003,8 +1012,8 @@ lawValue _ = Nothing
 letBoundLaw :: ICtx -> ChainName -> Law -> Law
 letBoundLaw ctx headCN argLaw@(Law argMod j)
   | gCap (outerI argMod) /= Exact
-  , isJust (lookup headCN (chainNameInfo (icFC ctx)))
-  , isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) headCN = Law (iwit argMod) j
+  , isJust (Map.lookup headCN (chainNameInfo (icFC ctx)))
+  , icWitnessed ctx headCN = Law (iwit argMod) j
   | otherwise = argLaw
 
 -- | The one binder-environment extension of an application: the parameter
@@ -1140,7 +1149,7 @@ bindingCerts ctx lam arg argLaw = catMaybes
     (x, body) = case lam of
       Expr _ (Lambda v b) -> (v, b)
       _ -> error "bindingCerts: the head of a let is a lambda"
-    occs = maybe [] id (lookup lamCN (lambdaVarOccurrences fc))
+    occs = maybe [] id (Map.lookup lamCN (lambdaVarOccurrences fc))
 
 -- | The affine collapse's certificate for binding @x@ to @arg@ over @body@:
 -- the argument's affine form ('affineOf'), when it has latents and every

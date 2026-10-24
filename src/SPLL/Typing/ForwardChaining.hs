@@ -44,7 +44,8 @@ import SPLL.IntermediateRepresentation
 import Data.Functor ((<&>))
 import SPLL.Lang.Lang
 import PredefinedFunctions
-import Data.List (nub, intercalate)
+import Data.List (intercalate)
+import Data.Containers.ListUtils (nubOrd, nubOrdOn)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
@@ -62,7 +63,10 @@ import Control.Applicative ((<|>))
 
 data FCData = FCData
   { hornClauses :: [[HornClause]]
-  , chainNameInfo :: [(ChainName, ExprInfo)]
+  -- | What every node is, by chain name (the first entry 'progToChainNameInfo'
+  -- lists for a name). A 'Map', like the fields below: every query asks it
+  -- per node, and a list lookup made each query cost the program.
+  , chainNameInfo :: Map.Map ChainName ExprInfo
   -- | The determinism field's known-anchor set seeded into 'hornClauses'. Kept
   -- around so codegen (IRCompiler) can materialise the value of any non-constant
   -- anchor a forward-chaining inverse path lands on.
@@ -73,10 +77,13 @@ data FCData = FCData
   -- variables bound by unrelated lambdas elsewhere in the program, and anchor
   -- seeding can make those foreign occurrences solvable, yielding an inverse
   -- built from another function's material.
-  , lambdaVarOccurrences :: [(ChainName, [ChainName])]
+  , lambdaVarOccurrences :: Map.Map ChainName [ChainName]
   -- | Every if-then-else node, by its chain name: what the point inverse
   -- needs to split the observation over the two arms ('toInvExprMaybeWith').
   , fcIfConds :: Map.Map ChainName IfCond
+  -- | The equivalence clauses of 'hornClauses', by conclusion, in clause
+  -- order ('findEquivalentExpression' follows them per lookup).
+  , fcEquivByConclusion :: Map.Map ChainName [HornClause]
   }
 
 -- | An if-then-else node as the point inverse splits it: the chain names of
@@ -158,7 +165,7 @@ inversionSetup fcData lambdaCN = do
     -- If the lambda is applied multiple times, @tag@ uniquely identifies our
     -- application; it suffixes both the occurrences and the observed body.
     LambdaInfo toInvVarName lambdaBodyCN ->
-      case fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcData)) of
+      case fromMaybe [] (Map.lookup resolvedCN (lambdaVarOccurrences fcData)) of
         -- A dead binding (no occurrence of the bound variable) has nothing to
         -- invert through: not an invertible/witnessable lambda.
         []   -> Nothing
@@ -209,19 +216,27 @@ isInvertibleLambda fcData adtsDecls lambdaCN = case inversionSetup fcData lambda
 -- recoverable from the observation. Whether the residual fresh latents of the
 -- body are also single-witnessable is the modality engine's marginalize floor's
 -- concern (milestone 2), not this query's.
+--
+-- Partially applied up to @obsCN@, it solves the clause set seeded at the
+-- observation once and shares it across every lambda it is then asked about:
+-- the modality engine asks once per application, and a solve per ask was
+-- quadratic in the program (task noisy-operator-fold-compile-time-wall).
 isWitnessedLambda :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Bool
-isWitnessedLambda fcData adtsDecls obsCN lambdaCN = case inversionSetup fcData lambdaCN of
+isWitnessedLambda fcData adtsDecls obsCN = \lambdaCN -> case inversionSetup fcData lambdaCN of
   Just (_, toInvCNs, paramClause) ->
-    let (unwrappedObsCN, _) = unwrapLambdas fcData obsCN
-        obsClause = ParameterHornClause unwrappedObsCN
-        reached = isJust . toValueExpr (hornClauses fcData) [obsClause] adtsDecls
-    in any reached toInvCNs
+    any reached toInvCNs
        -- Through an if-then-else, which has no clauses to chain through: the
        -- observation reaches the lambda's body, and the body recovers the
-       -- variable arm by arm ('toInvExprMaybeWith').
+       -- variable arm by arm ('toInvExprMaybeWith'). The shared reach test
+       -- goes first: the inverse is seeded per application, so it is the
+       -- expensive conjunct.
        || (Map.member (untag (conclusion paramClause)) (fcIfConds fcData)
-           && isJust (toInvExprMaybe fcData adtsDecls lambdaCN) && reached (conclusion paramClause))
+           && reached (conclusion paramClause) && isJust (toInvExprMaybe fcData adtsDecls lambdaCN))
   Nothing -> False
+  where
+    (unwrappedObsCN, _) = unwrapLambdas fcData obsCN
+    obsClause = ParameterHornClause unwrappedObsCN
+    reached = isJust . toValueExpr (hornClauses fcData) [obsClause] adtsDecls
 
 -- ===== Engine applicability (law-carrying-modality M5) =====
 --
@@ -249,7 +264,7 @@ data WitnessCert = WitnessCert
 -- synthesized) has no certificate.
 pointWitnessCert :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe WitnessCert
 pointWitnessCert fcData adtsDecls obsCN headCN
-  | isNothing (lookup headCN (chainNameInfo fcData)) = Nothing
+  | isNothing (Map.lookup headCN (chainNameInfo fcData)) = Nothing
   | otherwise = do
       chain <- toInvExprMaybe fcData adtsDecls headCN
       Just (WitnessCert chain (isWitnessedLambda fcData adtsDecls obsCN headCN))
@@ -352,7 +367,7 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
       Expr _ (InjF (Named "not") [a]) -> WSConnective . (: []) <$> walk os a WTPoint
       Expr _ (Apply (Expr lamTI (Lambda _ b)) v)
         | hasOcc os v && not (hasOcc os b) ->
-            through os (fromMaybe [] (lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
+            through os (fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
         | otherwise -> Nothing
       Expr _ (Apply _ _) -> call os e tgt
       -- A projection of a literal pair is that field.
@@ -393,14 +408,14 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
           guard' (and [ det a | (i, a) <- zip [0 ..] args, i /= k ])
           let (lamK, pK) = lams !! k
           guard' (pK `notElem` map snd (drop (k + 1) lams))
-          through os (fromMaybe [] (lookup lamK (lambdaVarOccurrences fc))) (finalBody decl) (args !! k) tgt
+          through os (fromMaybe [] (Map.lookup lamK (lambdaVarOccurrences fc))) (finalBody decl) (args !! k) tgt
       | Expr _ (Apply (Expr _ (Var g)) _) <- e, isNothing (lookup g (wcDecls wc)) = Just WSOpaqueCall
       | Expr _ (Apply l v) <- e
-      , isJust (lookup (getChainName l) (chainNameInfo fc))
+      , isJust (Map.lookup (getChainName l) (chainNameInfo fc))
       , not (hasOcc os l)
       , Just (lamCN, LambdaInfo _ bodyCN, _) <- findEquivalentExpression fc (getChainName l)
       , Just b <- findInDecls (untag bodyCN)
-      = through os (fromMaybe [] (lookup lamCN (lambdaVarOccurrences fc))) b v tgt
+      = through os (fromMaybe [] (Map.lookup lamCN (lambdaVarOccurrences fc))) b v tgt
       | otherwise = Nothing
     guard' True = Just ()
     guard' False = Nothing
@@ -1008,7 +1023,7 @@ clauseApplicability _ _ = IRConst (VBool True)
 -- per occurrence.
 toValuePath :: [[HornClause]] -> [HornClause] -> ChainName -> Maybe [HornClause]
 toValuePath clauses paramClauses = \startCN ->
-  case findConcludingHornClause solvedClauses startCN of
+  case Map.lookup startCN concluding of
     -- Throw away superfluous clauses. Do this by sorting them by requirement
     -- and throwing away clauses after the clause that inferes the bound variable
     -- Also guarantees that the later generated letIns are in the correct order
@@ -1020,6 +1035,9 @@ toValuePath clauses paramClauses = \startCN ->
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
     sortedClauses = topSortDAG solvedClauses
+    -- 'findConcludingHornClause' (the first clause concluding a name),
+    -- indexed once for every start the partial application is asked about.
+    concluding = Map.fromListWith (\_later earlier -> earlier) [ (conclusion c, c) | c <- solvedClauses ]
 
 -- | Whether the inverse chain seed→occurrence is monotone increasing or
 -- decreasing, statically.
@@ -1174,7 +1192,7 @@ stepMonotonicity fcData c@(ExprHornClause pres _ (InjFInfo name) inv) | inv > 0 
       -- known statically only when it is a literal constant.
       parent <- spineParent (hornClauses fcData) c
       case filter (/= parent) pres of
-        [other] -> case lookup (untag other) (chainNameInfo fcData) of
+        [other] -> case Map.lookup (untag other) (chainNameInfo fcData) of
           Just (ConstantInfo (VFloat f))
             | f > 0 -> Just MonInc
             | f < 0 -> Just MonDec
@@ -1192,11 +1210,11 @@ stepMonotonicity _ _ = Nothing
 findEquivalentExpression :: FCData -> ChainName -> Maybe (ChainName, ExprInfo, String)
 findEquivalentExpression fcData startCN = go [startCN] startCN
   where
-    go visited cn = case lookup cn (chainNameInfo fcData) of
+    go visited cn = case Map.lookup cn (chainNameInfo fcData) of
       Nothing -> error $ "Could not find chainName in FCData " ++ cn
       Just x | isFinalExpr x -> Just (cn, x, "")
       Just _ -> do
-        let origClauses = getAllOriginatingEquivalenceHornClauses (hornClauses fcData) cn
+        let origClauses = Map.findWithDefault [] cn (fcEquivByConclusion fcData)
         case [hc | hc@EquivalenceHornClause{inversion = 1} <- origClauses] of
           [EquivalenceHornClause [pre] _ _ _] ->
             let next = untag pre in
@@ -1226,7 +1244,7 @@ progToLambdaVarOccurrences Program{functions=fs} = concatMap (go . snd) fs
 
 -- Strip the expression of all wrapping lambdas. Return the chain name of the resulting expression and all names of the bound variables stripped away
 unwrapLambdas :: FCData -> ChainName -> (ChainName, [String])
-unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
+unwrapLambdas fcData cn = case Map.lookup cn (chainNameInfo fcData) of
   Just (LambdaInfo name bodyName) ->
     let (lCN, names) = unwrapLambdas fcData bodyName in (lCN, name:names)
   Just _ -> (cn, [])
@@ -1351,8 +1369,6 @@ mergeExpr2 bindings c1 c2
     isWildcard _ = False
     universeIR e = e : concatMap universeIR (getIRSubExprs e)
 
-getAllOriginatingEquivalenceHornClauses :: [[HornClause]] -> ChainName -> [HornClause]
-getAllOriginatingEquivalenceHornClauses clauses cn = concatMap (filter (\hc -> isEquivalenceHornClause hc && conclusion hc == cn)) clauses
 
 -- Takes a list of Horn clauses and converts them to nested letIn expressions.
 -- We do this by declaring a new variable named after the conclusion of the clause
@@ -1444,12 +1460,17 @@ derivativeOfHornClause _ _ = IRConst (VFloat 1.0)
 progToFCData :: Set ChainName -> Program -> FCData
 progToFCData anchors prog =
   FCData { hornClauses = anchorClauses ++ baseClauses
-         , chainNameInfo = cnInfo
+         , chainNameInfo = firstWins cnInfo
          , fcAnchors = anchorInstances
-         , lambdaVarOccurrences = progToLambdaVarOccurrences prog
-         , fcIfConds = Map.unions [ ifConds e | (_, e) <- functions prog ] }
+         , lambdaVarOccurrences = firstWins (progToLambdaVarOccurrences prog)
+         , fcIfConds = Map.unions [ ifConds e | (_, e) <- functions prog ]
+         , fcEquivByConclusion = Map.fromListWith (flip (++))
+             [ (conclusion hc, [hc]) | g <- anchorClauses ++ baseClauses, hc <- g, isEquivalenceHornClause hc ] }
   where
     cnInfo = progToChainNameInfo prog
+    -- 'lookup' on the association lists these were found the first entry.
+    firstWins :: [(ChainName, a)] -> Map.Map ChainName a
+    firstWins = Map.fromListWith (\_later earlier -> earlier)
     baseClauses = progToHornClauses prog cnInfo
     -- Each known anchor is a self-sufficient (empty-premise) starting point for
     -- forward chaining, mirroring how @Constant@ already self-derives. This
@@ -1476,7 +1497,7 @@ progToFCData anchors prog =
 
 -- Every chain name appearing as a premise or conclusion anywhere in a clause set.
 allClauseChainNames :: [[HornClause]] -> [ChainName]
-allClauseChainNames = nub . concatMap (concatMap (\c -> conclusion c : premises c))
+allClauseChainNames = nubOrd . concatMap (concatMap (\c -> conclusion c : premises c))
 
 
 progToChainNameInfo :: Program -> [(ChainName, ExprInfo)]
@@ -1492,7 +1513,9 @@ exprToChainNameInfo e = (getChainName e, StubInfo (toStub e)):concatMap exprToCh
 
 -- Convert a Program to a set of groups of Horn clauses
 progToHornClauses :: Program -> [(ChainName, ExprInfo)] -> [[HornClause]]
-progToHornClauses Program{functions=fs, adts=adtsDecls} _ = nub $ initialRun ++ topEquivClauses ++ equivClauses
+-- Duplicate groups are dropped keyed on their rendering: 'HornClause' has no
+-- 'Ord', and the 'nub' this used to be was quadratic in the group count.
+progToHornClauses Program{functions=fs, adts=adtsDecls} _ = nubOrdOn show $ initialRun ++ topEquivClauses ++ equivClauses
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adtsDecls . snd) fs
@@ -1545,20 +1568,24 @@ constructInjFHornClause subst _ name decl inv = ExprHornClause (map lookupSubst 
 -- Find the chainName this a given chain name is equivalent to
 -- TODO: Can multiple equivalences happen? What then?
 getEquivCN :: [[HornClause]] -> ChainName -> ChainName
-getEquivCN clauses cn = fromMaybe (error $ "Found no equivalent chain name to: " ++ cn) (getEquivCNMaybe clauses cn)
+getEquivCN clauses = let look = getEquivCNMaybe clauses in
+  \cn -> fromMaybe (error $ "Found no equivalent chain name to: " ++ cn) (look cn)
 
 -- 'getEquivCN', recoverable: 'Nothing' where that errors with "no equivalent
 -- chain name" (a value with no single equivalence -- e.g. an if-selected
 -- mixture of closures, which has no ONE body an equivalence clause could name).
 -- Still errors on more than one candidate -- that is a genuine invariant
 -- violation elsewhere, not a shape this caller is meant to tolerate.
+--
+-- Partially applied to the clause set, it indexes the equivalences once.
 getEquivCNMaybe :: [[HornClause]] -> ChainName -> Maybe ChainName
-getEquivCNMaybe clauses cn = case [hc | hc@(EquivalenceHornClause [pre] _ _ _) <- equiv, pre == cn] of
-  [EquivalenceHornClause _ back _ _] -> Just back
-  []                                 -> Nothing
+getEquivCNMaybe clauses = \cn -> case Map.findWithDefault [] cn index of
+  [back] -> Just back
+  []     -> Nothing
   _ -> error $ "Found multiple equivalent chain name to: " ++ cn
   where
-    equiv = filter isEquivalenceHornClause (map head clauses)
+    index = Map.fromListWith (flip (++))
+      [ (pre, [back]) | EquivalenceHornClause [pre] back _ _ <- map head clauses ]
 
 -- Applies create two different types of quivalences in a program.
 -- 1. Bound variables are equivalent to the value of their binding apply
@@ -1576,9 +1603,10 @@ constructTopLevelEquivalenceClauses clauses decls = concatMap (constructTopLevel
 
 constructTopLevelEquivalenceClauses' :: [[HornClause]] -> [Expr] -> FnDecl -> [[HornClause]]
 constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (getTypeInfo expr) of
-  TArrow _ _ -> concat $ evalSupply $ mapM (\otherExpr -> do
-    let (_, bodyExpr) = asLambda "constructTopLevelEquivalenceClauses'" expr
-    let dependent = bodyDependentGroups clauses bodyExpr
+  TArrow _ _ ->
+   let (_, bodyExpr) = asLambda "constructTopLevelEquivalenceClauses'" expr
+       dependent = bodyDependentGroups clauses bodyExpr
+   in concat $ evalSupply $ mapM (\otherExpr -> do
     (varClauses, applyCnt) <- associateFunctionVariable name (getChainName expr) "" otherExpr
     let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
     return $ varClauses ++ taggedDependents) exprs
@@ -1586,71 +1614,86 @@ constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (ge
 
 -- Construct horn clauses for equivalences induced by Applies. See lambdasToHornClauses for more info
 constructEquivalenceClauses :: [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
-constructEquivalenceClauses clauses exprs (Expr TypeInfo{chainName=exCn} (Apply l v)) | not (isInClauseSet clauses exCn) && (isLambdaExpr l || isInClauseSet clauses (getChainName l)) = do
-    -- Find the declaration of the lambda on the left side of the Apply. Trivial if the lambda is directly there, else follow equivalences
-    let (_, lTag, lVar, lBody) = case l of
-          Expr TypeInfo{chainName=lCn'} (Lambda n bodyExpr) -> (lCn', "", n, bodyExpr)
-          _ ->
-            let appliedLambdaCn = getEquivCN clauses (getChainName l)
-                appliedLambdaTag = getTag appliedLambdaCn
-                (name, bodyExpr) = asLambda "constructEquivalenceClauses" (findExprWithCN exprs (untag appliedLambdaCn)) in
-                  (appliedLambdaCn, appliedLambdaTag, name, bodyExpr)
-    let lBodyCn = getChainName lBody ++ lTag
-    -- The Apply is equivalent to the body of the lambda it is applying
-    let appliedGroup = createEquivHornClauseGroup AppliedEquivalence exCn lBodyCn
-    -- The Var expressions are equivalent to the value bound to them
-    -- The following depends on whether the applied value is a function or a plain value
-    case rType (getTypeInfo v) of
-      -- If it is a function we have the problems if the function is invoked multiple times, because different invokations may have differrnt return values.
-      -- This is not possible, because we identify values by their chainName, which is the same for different invokations
-      -- Solve this by duplicating the sub-AST of the function and tagging each chainName with a tag unique for each invokation
-      TArrow _ _ ->
-        -- Find the lambda bound. A value that does not resolve to exactly one
-        -- lambda body -- e.g. an if-selected mixture of two different closures
-        -- (task arrow-lifted-mixture-for-function-values) -- has no single body
-        -- to tag per-invocation copies against: there is nothing to make the
-        -- multiple-invocation distinction FOR here, since there is no one
-        -- lambda whose sub-AST could be duplicated and tagged. Skip the
-        -- tagging (this Apply's own equivalence-to-its-body clause still
-        -- stands) rather than crash building a certificate that a mixture's
-        -- OWN compilation path (the pointwise-lifted mixture combinator in
-        -- IRCompiler) never consults anyway.
-        case resolveVLambdaCn of
-          Nothing -> [appliedGroup]
-          Just vLambdaCn -> do
-            let (_, vBody) = asLambda "constructEquivalenceClauses" (findExprWithCN exprs vLambdaCn)
-            -- Get all horn clauses, which corresspond to expressions in the sub-AST of the lambda
-            let dependent = bodyDependentGroups clauses vBody
-            -- Supply each invokation with a unique tag and create the corresponding clauses
-            let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable lVar vLambdaCn lTag lBody
-            -- Create a tagged copy of the dependent Hron clauses
-            let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
-            appliedGroup:varClauses ++ taggedDependents
-        where
-          resolveVLambdaCn = case v of
-            Expr TypeInfo{chainName = vlCn} (Lambda _ _) -> Just vlCn
-            _ -> do
-              cn <- getEquivCNMaybe clauses (getChainName v)
-              case findExprWithCN exprs cn of
-                Expr _ Lambda{} -> Just cn
-                _               -> Nothing
-      -- Easy if the applied value is no function, because it is constant across the program.
-      _ ->
-        -- We still need to create a tagged group if our original lambda was tagged
-        let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (bodyDependentGroups clauses lBody) in
-        appliedGroup:taggedGroups ++ associateVariable lVar (getChainName v) lTag lBody
+-- Partially applied to the clause set, the lookups below index it once and
+-- every Apply of the walk shares them: a scan per Apply was quadratic in the
+-- program (task noisy-operator-fold-compile-time-wall).
+constructEquivalenceClauses clauses exprs = go
   where
-    isLambdaExpr (Expr _ Lambda{}) = True
-    isLambdaExpr _ = False
-constructEquivalenceClauses clauses exprs ex = concatMap (constructEquivalenceClauses clauses exprs) (getSubExprs ex)
+    inClauseSet = isInClauseSet clauses
+    equivCN = getEquivCN clauses
+    equivCNMaybe = getEquivCNMaybe clauses
+    dependentGroups = bodyDependentGroups clauses
+    exprWithCN = indexExprsByCN exprs
+    go (Expr TypeInfo{chainName=exCn} (Apply l v)) | not (inClauseSet exCn) && (isLambdaExpr l || inClauseSet (getChainName l)) = do
+        -- Find the declaration of the lambda on the left side of the Apply. Trivial if the lambda is directly there, else follow equivalences
+        let (_, lTag, lVar, lBody) = case l of
+              Expr TypeInfo{chainName=lCn'} (Lambda n bodyExpr) -> (lCn', "", n, bodyExpr)
+              _ ->
+                let appliedLambdaCn = equivCN (getChainName l)
+                    appliedLambdaTag = getTag appliedLambdaCn
+                    (name, bodyExpr) = asLambda "constructEquivalenceClauses" (exprWithCN (untag appliedLambdaCn)) in
+                      (appliedLambdaCn, appliedLambdaTag, name, bodyExpr)
+        let lBodyCn = getChainName lBody ++ lTag
+        -- The Apply is equivalent to the body of the lambda it is applying
+        let appliedGroup = createEquivHornClauseGroup AppliedEquivalence exCn lBodyCn
+        -- The Var expressions are equivalent to the value bound to them
+        -- The following depends on whether the applied value is a function or a plain value
+        case rType (getTypeInfo v) of
+          -- If it is a function we have the problems if the function is invoked multiple times, because different invokations may have differrnt return values.
+          -- This is not possible, because we identify values by their chainName, which is the same for different invokations
+          -- Solve this by duplicating the sub-AST of the function and tagging each chainName with a tag unique for each invokation
+          TArrow _ _ ->
+            -- Find the lambda bound. A value that does not resolve to exactly one
+            -- lambda body -- e.g. an if-selected mixture of two different closures
+            -- (task arrow-lifted-mixture-for-function-values) -- has no single body
+            -- to tag per-invocation copies against: there is nothing to make the
+            -- multiple-invocation distinction FOR here, since there is no one
+            -- lambda whose sub-AST could be duplicated and tagged. Skip the
+            -- tagging (this Apply's own equivalence-to-its-body clause still
+            -- stands) rather than crash building a certificate that a mixture's
+            -- OWN compilation path (the pointwise-lifted mixture combinator in
+            -- IRCompiler) never consults anyway.
+            case resolveVLambdaCn of
+              Nothing -> [appliedGroup]
+              Just vLambdaCn -> do
+                let (_, vBody) = asLambda "constructEquivalenceClauses" (exprWithCN vLambdaCn)
+                -- Get all horn clauses, which corresspond to expressions in the sub-AST of the lambda
+                let dependent = dependentGroups vBody
+                -- Supply each invokation with a unique tag and create the corresponding clauses
+                let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable lVar vLambdaCn lTag lBody
+                -- Create a tagged copy of the dependent Hron clauses
+                let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
+                appliedGroup:varClauses ++ taggedDependents
+            where
+              resolveVLambdaCn = case v of
+                Expr TypeInfo{chainName = vlCn} (Lambda _ _) -> Just vlCn
+                _ -> do
+                  cn <- equivCNMaybe (getChainName v)
+                  case exprWithCN cn of
+                    Expr _ Lambda{} -> Just cn
+                    _               -> Nothing
+          -- Easy if the applied value is no function, because it is constant across the program.
+          _ ->
+            -- We still need to create a tagged group if our original lambda was tagged
+            let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (dependentGroups lBody) in
+            appliedGroup:taggedGroups ++ associateVariable lVar (getChainName v) lTag lBody
+      where
+        isLambdaExpr (Expr _ Lambda{}) = True
+        isLambdaExpr _ = False
+    go ex = concatMap go (getSubExprs ex)
 
 
 -- | The chain names of every node of an expression.
 subtreeChainNames :: Expr -> Set ChainName
 subtreeChainNames e = Set.insert (getChainName e) (Set.unions (map subtreeChainNames (getSubExprs e)))
 
+--
+-- Partially applied to the clause set, it indexes it once.
 isInClauseSet :: [[HornClause]] -> ChainName -> Bool
-isInClauseSet clauses cn = any (\cs -> isEquivalenceHornClause (head cs) && premises (getForwardClauseOfGroup cs) == [cn]) clauses
+isInClauseSet clauses = (`Set.member` index)
+  where
+    index = Set.fromList [ cn | cs <- clauses, isEquivalenceHornClause (head cs)
+                              , [cn] <- [premises (getForwardClauseOfGroup cs)] ]
 
 -- Creates Horn clauses implying an equivalence between a given chainName and all occurances of a given variable in an expression
 associateVariable :: String -> ChainName -> String -> Expr -> [[HornClause]]
@@ -1675,6 +1718,17 @@ findExprWithCN exprs cn = case mapMaybe (findExprWithCN' cn) exprs of
   [e] -> e
   [] -> error $ "Expression with given chain name not found " ++ cn
   _ -> error $ "Multiple expressions with the same chain name" ++ cn
+
+-- | 'findExprWithCN' for many lookups: partially applied to the expressions,
+-- it indexes every node by chain name once.
+indexExprsByCN :: [Expr] -> ChainName -> Expr
+indexExprsByCN exprs = \cn -> case Map.findWithDefault [] cn index of
+  [e] -> e
+  [] -> error $ "Expression with given chain name not found " ++ cn
+  _ -> error $ "Multiple expressions with the same chain name" ++ cn
+  where
+    index = Map.fromListWith (flip (++)) [ (getChainName e, [e]) | e <- concatMap nodes exprs ]
+    nodes e = e : concatMap nodes (getSubExprs e)
 
 findExprWithCN' :: ChainName -> Expr -> Maybe Expr
 findExprWithCN' cn expr | getChainName expr == cn = Just expr
@@ -1705,9 +1759,12 @@ tagHornClause tag (ParameterHornClause conc) = ParameterHornClause (conc ++ tag)
 
 -- | The clause groups of a function body that a per-invocation copy takes
 -- ('getDependentGroups'), from the body's root.
+--
+-- Partially applied to the clause set, it indexes it once ('dependencyIndex')
+-- and shares the index across every body it is then asked about.
 bodyDependentGroups :: [[HornClause]] -> Expr -> [[HornClause]]
-bodyDependentGroups clauses fnBody =
-  getDependentGroups (subtreeChainNames fnBody) (ifChildren fnBody) clauses (getChainName fnBody)
+bodyDependentGroups clauses = let idx = dependencyIndex clauses in \fnBody ->
+  getDependentGroups idx (subtreeChainNames fnBody) (ifChildren fnBody) (getChainName fnBody)
 
 -- | The arms of every if-then-else node of an expression whose condition
 -- draws no fresh randomness, by the node's chain name. An @if@ emits no
@@ -1719,7 +1776,8 @@ bodyDependentGroups clauses fnBody =
 -- can use is copied: the condition itself is bound by its caller, not
 -- chained, and an @if@ on fresh randomness is never split by it. Copying
 -- every arm of every @if@ made a recursive body's per-call copies whole, 5x
--- the compile time of known-issues/markovBranchRandomRateCompileGrowth.
+-- the compile time of the Markov branch-chain family (TestInternals
+-- markovBranchRandomRateCompilePolynomial).
 ifChildren :: Expr -> Map.Map ChainName [ChainName]
 ifChildren e = Map.unions (here : map ifChildren (getSubExprs e))
   where
@@ -1727,13 +1785,51 @@ ifChildren e = Map.unions (here : map ifChildren (getSubExprs e))
       Expr _ (IfThenElse c t f) | not (hasRandomLeaf c) -> Map.singleton (getChainName e) (map getChainName [t, f])
       _ -> Map.empty
 
-getDependentGroups :: Set ChainName -> Map.Map ChainName [ChainName] -> [[HornClause]] -> ChainName -> [[HornClause]]
-getDependentGroups scope ifKids clauses cn0 = fst (go Set.empty cn0)
+-- | The two lookups 'getDependentGroups' makes per visited chain name,
+-- indexed once over a clause set, each keeping the clause set's group order:
+-- the groups that depend on a chain name (their forward clause concludes it,
+-- or, for an inverse-only group, one of its inverses reads it alone), and
+-- the variable or application equivalences it is one end of, each with the
+-- other end. Scanning the clause set per visited name instead made every
+-- per-invocation copy cost the whole program (task
+-- noisy-operator-fold-compile-time-wall).
+data DependencyIndex = DependencyIndex
+  { diDependents   :: Map.Map ChainName [[HornClause]]
+  , diEquivalences :: Map.Map ChainName [([HornClause], ChainName)]
+  }
+
+dependencyIndex :: [[HornClause]] -> DependencyIndex
+dependencyIndex clauses = DependencyIndex
+  { diDependents = Map.fromListWith (flip (++)) [ (c, [g]) | g <- clauses, c <- dependedOn g ]
+  , diEquivalences = Map.fromListWith (flip (++))
+      [ (c, [(g, other)]) | g <- clauses, not (null g), all isEquivalenceHornClause g
+                          , (c, other) <- partners g ]
+  }
+  where
+    dependedOn g
+      | hasForwardClause g = [conclusion (getForwardClauseOfGroup g)]
+      -- Inverse-only (field constructor) group: it belongs to the container it
+      -- deconstructs. Skipping these used to drop every field of a list/tuple/ADT
+      -- constructor from a named function's per-invocation tagged copy, so its
+      -- parameter could not be recovered from e.g. the head of the returned list
+      -- (task named-function-list-head-witness-not-recovered).
+      | otherwise = nubOrd [ c | cl <- g, isExprHornClause cl, [c] <- [premises cl] ]
+    partners g = case [ hc | hc@(EquivalenceHornClause [_] _ _ 0) <- g ] of
+      [EquivalenceHornClause [a] b _ _]
+        | a == b -> [(a, b)]
+        | otherwise -> [(a, b), (b, a)]
+      _ -> []
+
+hasForwardClause :: [HornClause] -> Bool
+hasForwardClause = any ((== 0) . inversion)
+
+getDependentGroups :: DependencyIndex -> Set ChainName -> Map.Map ChainName [ChainName] -> ChainName -> [[HornClause]]
+getDependentGroups idx scope ifKids cn0 = fst (go Set.empty cn0)
   where
     go seen c
       | c `Set.member` seen = ([], seen)
       | otherwise =
-          let direct = filter (dependsOn c) clauses
+          let direct = Map.findWithDefault [] c (diDependents idx)
               -- An equivalence between two nodes of the copied body -- a
               -- @draw@'s value and its variable's occurrences, the
               -- application and the lambda body it reduces to -- is part of
@@ -1741,16 +1837,14 @@ getDependentGroups scope ifKids clauses cn0 = fst (go Set.empty cn0)
               -- binding-resolver-one-application-rule). One that leaves the
               -- body (a parameter bound at the call site, a call into another
               -- function) is not: that is the copy's own boundary.
-              local = [ (g, other) | c `Set.member` scope, g <- equivalenceGroups
-                                   , Just other <- [equivalencePartner c g], other `Set.member` scope ]
+              local = [ (g, other) | c `Set.member` scope
+                                   , (g, other) <- Map.findWithDefault [] c (diEquivalences idx)
+                                   , other `Set.member` scope ]
               nexts = concatMap forwardPremises direct ++ map snd local
                       ++ Map.findWithDefault [] c ifKids
               step (acc, sn) n = let (gs, sn') = go sn n in (acc ++ gs, sn')
               (rest, seen') = foldl step ([], Set.insert c seen) nexts
           in (direct ++ map fst local ++ rest, seen')
-    -- Variable equivalences work the other way around as other clauses
-    --forwardConclusion cs = let fc = getForwardClauseOfGroup cs in if isEquivalenceHornClause fc && isVariableEquivalence (equivalenceType fc) then head $ premises fc else conclusion fc
-    forwardConclusion = conclusion . getForwardClauseOfGroup
     -- We want to include the equivalence clauses in the dependent clauses, but don't want to follow their jumps
     forwardPremises cs
       | hasForwardClause cs = let fc = getForwardClauseOfGroup cs in if isEquivalenceHornClause fc then [] else premises fc
@@ -1758,21 +1852,6 @@ getDependentGroups scope ifKids clauses cn0 = fst (go Set.empty cn0)
       -- exprToHornClauses), each deconstructing the container into one field:
       -- the fields are that group's sub-expressions.
       | otherwise = map conclusion cs
-    dependsOn c cs
-      | hasForwardClause cs = forwardConclusion cs == c
-      -- Inverse-only (field constructor) group: it belongs to the container it
-      -- deconstructs. Skipping these used to drop every field of a list/tuple/ADT
-      -- constructor from a named function's per-invocation tagged copy, so its
-      -- parameter could not be recovered from e.g. the head of the returned list
-      -- (task named-function-list-head-witness-not-recovered).
-      | otherwise = any (\cl -> isExprHornClause cl && premises cl == [c]) cs
-    hasForwardClause = any ((== 0) . inversion)
-    equivalenceGroups = filter (\g -> not (null g) && all isEquivalenceHornClause g) clauses
-    equivalencePartner c g = case [ hc | hc@(EquivalenceHornClause [_] _ _ 0) <- g ] of
-      [EquivalenceHornClause [a] b _ _]
-        | a == c -> Just b
-        | b == c -> Just a
-      _ -> Nothing
 
 -- Some clause groups, like TCons, may not have a forward clause. You need to make sure this is not the case when incokink this function
 getForwardClauseOfGroup :: [HornClause] -> HornClause
@@ -1802,9 +1881,6 @@ annotateExpr = tMapM (\ex -> demandUniqueNumber <&> ("ast" ++) . show <&> setCha
 --
 -- Each clause group contributes at most one fulfilled clause: the first whose
 -- premises are all already known AND whose conclusion is not already derived.
--- We track used groups by index and known conclusions in 'Set's, so membership
--- tests are logarithmic rather than the linear list 'delete'/'elem' scans this
--- used to do (cleanup-forward-chaining).
 --
 -- The conclusion test is what keeps the fulfilled set ACYCLIC, and it is
 -- load-bearing rather than an optimisation. A chain name reachable by two
@@ -1820,18 +1896,39 @@ annotateExpr = tMapM (\ex -> demandUniqueNumber <&> ("ast" ++) . show <&> setCha
 -- carries no information; dropping it loses nothing, and the redundancy is
 -- still paid for where it belongs -- in the deterministic-slot consistency
 -- indicator IRCompiler emits for the observation as a whole.
+--
+-- Each step fires the lowest (group, position) clause that is eligible, without
+-- rescanning every group per step: each clause keeps a count of its
+-- distinct premises not yet derived, a newly derived name decrements the
+-- clauses waiting on it, and a clause whose count reaches zero enters an
+-- ordered ready set. Eligibility is monotone apart from the two exclusions
+-- (group used, conclusion derived), which never lapse, so a popped clause
+-- that has become excluded is dropped for good, and the clause fired is the
+-- one a rescan from the first group would pick. The rescan this replaced was
+-- quadratic in the clause count (task noisy-operator-fold-compile-time-wall).
 solveHCSet :: [[HornClause]] -> [HornClause]
-solveHCSet hcs = go Set.empty Set.empty []
+solveHCSet hcs = go initReady initPending Set.empty Set.empty []
   where
-    groups = zip [0 :: Int ..] hcs
-    go usedGroups detVars fulfilled =
-      case [ (i, c) | (i, g) <- groups
-                    , not (i `Set.member` usedGroups)
-                    , c <- g
-                    , all (`Set.member` detVars) (premises c)
-                    , not (conclusion c `Set.member` detVars) ] of
-        [] -> fulfilled
-        ((i, c):_) -> go (Set.insert i usedGroups) (Set.insert (conclusion c) detVars) (c : fulfilled)
+    keyed = [ ((i, j), c) | (i, g) <- zip [0 :: Int ..] hcs, (j, c) <- zip [0 :: Int ..] g ]
+    clauseAt = Map.fromList keyed
+    distinctPremises c = Set.toList (Set.fromList (premises c))
+    initPending = Map.fromList [ (k, length (distinctPremises c)) | (k, c) <- keyed ]
+    initReady = Set.fromList [ k | (k, c) <- keyed, null (premises c) ]
+    waiting = Map.fromListWith (flip (++)) [ (p, [k]) | (k, c) <- keyed, p <- distinctPremises c ]
+    go ready pending usedGroups detVars fulfilled =
+      case Set.minView ready of
+        Nothing -> fulfilled
+        Just (k@(i, _), ready')
+          | i `Set.member` usedGroups || conclusion c `Set.member` detVars ->
+              go ready' pending usedGroups detVars fulfilled
+          | otherwise ->
+              let (ready'', pending') = foldl' release (ready', pending)
+                                          (Map.findWithDefault [] (conclusion c) waiting)
+              in go ready'' pending' (Set.insert i usedGroups) (Set.insert (conclusion c) detVars) (c : fulfilled)
+          where c = clauseAt Map.! k
+    release (r, pend) k' =
+      let n = pend Map.! k' - 1
+      in (if n == 0 then Set.insert k' r else r, Map.insert k' n pend)
 
 -- Returns all elements that come before a given parameter in a list
 cutList :: Eq a => [a] -> a -> [a]

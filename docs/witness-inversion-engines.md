@@ -658,7 +658,7 @@ The per-invocation copy (`getDependentGroups`) steps into the arms of an
 `if` whose condition has no random leaf (`ifChildren`), and only into those
 arms. Before this, a callee whose body is an `if` had an empty copy. Copying
 every `if`'s arms and condition made the copies of a recursive body whole,
-which cost 5x on `known-issues/markovBranchRandomRateCompileGrowth`.
+which cost 5x on the Markov branch-chain family (now `TestInternals` `markovBranchRandomRateCompilePolynomial`).
 
 An `ANY` in the witnessing slot of an if-rooted program stays a runtime
 refusal: observation masks stop at an `if` root (`observation-masks.md`).
