@@ -1,0 +1,4 @@
+data Face = Face {{for i in 1..N sep ", "}}a{{i}}::Bool, b{{i}}::Bool{{end}}
+data Ans = Ans {{for i in 1..N sep ", "}}p{{i}}::Bool, q{{i}}::Bool, r{{i}}::Bool{{end}}
+neural see :: (Symbol -> Face)
+main img = draw f = see img in Ans{{for i in 1..N}} (a{{i}} f) (b{{i}} f) (a{{i}} f && b{{i}} f){{end}}

@@ -29,8 +29,8 @@ pkgs.mkShell {
     stack
     git
     cacert
-    # python3 + pyyaml so the NeST_internal_docs q.py frontmatter tool runs from this shell
-    (python3.withPackages (ps: [ ps.pyyaml ]))
+    # python3 + pyyaml + markdown so the `workdocs` tool runs from this shell
+    (python3.withPackages (ps: [ ps.pyyaml ps.markdown ]))
     julia
   ]);
 
