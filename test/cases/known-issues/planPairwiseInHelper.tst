@@ -6,4 +6,4 @@
 -- so its two family-free Integrate operands type SampleOnly. Residue of task
 -- comparison-closed-form-verdict-for-plan-leaves (the coarse per-declaration
 -- flag); found by design clevr-position-experiments' arm-A readiness probe.
-expect-failure: no-code
+expect-failure: no-code probability

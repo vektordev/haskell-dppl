@@ -29,7 +29,7 @@ import System.Timeout (timeout)
 import Text.Megaparsec (errorBundlePretty)
 import Control.Monad (filterM)
 import Data.List (foldl', intercalate, isInfixOf)
-import Data.Maybe (isNothing)
+import Data.Maybe (isJust)
 import System.Directory (doesDirectoryExist, getCurrentDirectory, listDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
@@ -50,7 +50,7 @@ import SPLL.Prelude (compile, runProbC, runIntegC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.CodeGenPyTorch (generateFunctions)
 import TestCaseParser
-  ( Backend(..), ExpectFailure(..), TestCase(..), Expectation(..), corpusRoot
+  ( Backend(..), ExpectFailure(..), CodeVariant(..), codeVariantName, TestCase(..), Expectation(..), corpusRoot
   , GrowthSpec(..), GrowthMetric(..), PointCap(..), CompileFlag(..), applyCompileFlags
   , defaultBackends, defaultPointCap
   , parseProgram, parseTestCasesFromString
@@ -197,7 +197,7 @@ checkExpectFailure name prog _ (ExpectRefused needle) _ = do
                            else intercalate "\n" reasons))
              (any (needle `isInfixOf`) reasons)
   where envGroups (IREnv gs _ _) = gs
-checkExpectFailure name prog _ ExpectNoCode _ = do
+checkExpectFailure name prog _ (ExpectNoCode variants) _ = do
   result <- forced (compile defaultCompilerConfig prog)
   case result of
     Left ex -> assertFailure (name ++ ": expected compile to succeed with a silently absent \
@@ -205,11 +205,27 @@ checkExpectFailure name prog _ ExpectNoCode _ = do
     Right _ -> case compile defaultCompilerConfig prog of
       Left err -> assertFailure (name ++ ": expected compile to succeed with a silently \
                                  \absent variant, but it was refused outright: " ++ err)
-      Right env ->
+      Right env -> do
         let m = lookupIREnv "main" env
-        in assertBool (name ++ ": expected at least one of generate/probability/integrate \
-                       \to be silently absent, but main compiled all three")
-             (isNothing (genFun m) || isNothing (probFun m) || isNothing (integFun m))
+            present v = case v of
+              GenerateCode    -> isJust (genFun m)
+              ProbabilityCode -> isJust (probFun m)
+              IntegrateCode   -> isJust (integFun m)
+            label v = case v of
+              GenerateCode    -> "gen"
+              ProbabilityCode -> "prob"
+              IntegrateCode   -> "integ"
+            compiled = [ codeVariantName v | v <- variants, present v ]
+            reasoned = [ codeVariantName v ++ ": " ++ showRefusal r
+                       | v <- variants, (lbl, r) <- refusedVariants m, lbl == label v ]
+        assertBool (name ++ ": expected main's " ++ unwords (map codeVariantName variants)
+                    ++ " to be silently absent, but main compiled " ++ unwords compiled
+                    ++ " -- the bug it pins may be fixed; if so, move or retire this known-issues case")
+          (null compiled)
+        assertBool (name ++ ": expected main's " ++ unwords (map codeVariantName variants)
+                    ++ " to be absent with no recorded reason, but the compiler now records one (an \
+                       \`expect-failure: refused` pin may fit): " ++ intercalate "\n" reasoned)
+          (null reasoned)
 -- The rows below the header pin the (known-wrong) value the compiled program
 -- produces today, on every backend the @backends:@ header declares that this
 -- harness can evaluate (see 'checkableBackends'). Each row must still match:

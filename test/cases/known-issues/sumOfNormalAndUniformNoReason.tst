@@ -7,4 +7,4 @@
 -- pin cannot see a reason being added (no-code only checks absence); move
 -- it to `refused "..."` once one is.
 -- Idealized density at 0.5: Phi(0.5) - Phi(-0.5) = 0.382925.
-expect-failure: no-code
+expect-failure: no-code probability

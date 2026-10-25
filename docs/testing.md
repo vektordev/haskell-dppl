@@ -273,13 +273,19 @@ checks each pair's `.tst` against its `expect-failure:` header instead:
 expect-failure: crash                          -- an uncaught exception, message unpinned
 expect-failure: diagnostic "some substring"    -- an uncaught exception whose message contains this
 expect-failure: refused "some substring"       -- compiles; some variant is absent with a recorded refusal reason containing this
-expect-failure: no-code                        -- compiles, but generate/probability/integrate is silently absent
+expect-failure: no-code probability            -- compiles, but main's named variant(s) are absent with no recorded reason
 expect-failure: wrong-result                   -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
 expect-failure: broken                         -- mechanism unpinned; the p()/cdf() rows below state the idealized value instead
 expect-failure: growth above polynomial 2      -- a performance wall: a templated family still grows faster than this
 expect-failure: code-size above 60 KB          -- the emitted Python is still larger than this
 expect-failure: hang                           -- the compile still runs into its cap instead of finishing
 ```
+
+A `no-code` pin names the variants the bug removes (`no-code probability`,
+`no-code probability integrate`), and fails once any of them compiles or gains
+a refusal reason. Name only what the bug takes away: a variant that is absent
+for an unrelated reason, such as integrate beside a neural read, would keep a
+bare "some variant is missing" check holding after the fix.
 
 `crash`/`diagnostic` are checked against an exception thrown while *forcing*
 `compile`'s result — a graceful `Left` (an intended, working refusal) does not

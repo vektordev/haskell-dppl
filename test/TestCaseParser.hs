@@ -11,6 +11,8 @@ module TestCaseParser (
   allBackends,
   defaultBackends,
   ExpectFailure(..),
+  CodeVariant(..),
+  codeVariantName,
   GrowthSpec(..),
   GrowthMetric(..),
   PointCap(..),
@@ -370,8 +372,12 @@ pSlowHeader = do
 --   graceful form of what used to be an 'ExpectDiagnostic' crash (task
 --   static-refusals-become-absent-variants): the missing capability is the
 --   open bug, and the recorded reason pins which mechanism declines it.
--- * 'ExpectNoCode' -- 'compile' succeeds, but the queried variant
---   (generate/probability/integrate) is silently absent rather than compiled.
+-- * 'ExpectNoCode' -- 'compile' succeeds, but each named variant of @main@
+--   (@no-code probability@, @no-code probability integrate@, ...) is silently
+--   absent: not compiled, and no refusal reason recorded. The pin names the
+--   variants the bug removes, so a variant that is absent for an unrelated,
+--   legitimate reason (integrate beside a neural read) cannot keep it holding
+--   once the bug is fixed.
 -- * 'ExpectWrongResult' -- compiles and runs, and the ordinary @p(...)@/
 --   @cdf(...)@ rows below pin the value the bug actually produces (which is
 --   known to be wrong). This shape needs no new assertion machinery -- the
@@ -395,7 +401,7 @@ data ExpectFailure
   = ExpectCrash
   | ExpectDiagnostic String
   | ExpectRefused String
-  | ExpectNoCode
+  | ExpectNoCode [CodeVariant]
   | ExpectWrongResult
   | ExpectBroken
   -- | A performance wall (task known-issues-performance-scaling-checks): over
@@ -411,6 +417,17 @@ data ExpectFailure
   -- changed shape, and fails too.
   | ExpectHang [CompileFlag] PointCap
   deriving (Show, Eq)
+
+-- | A compiled variant of a function, as an @expect-failure: no-code@ pin
+-- names it.
+data CodeVariant = GenerateCode | ProbabilityCode | IntegrateCode
+  deriving (Show, Eq, Ord, Enum, Bounded)
+
+-- | The pin's spelling of a variant.
+codeVariantName :: CodeVariant -> String
+codeVariantName GenerateCode    = "generate"
+codeVariantName ProbabilityCode = "probability"
+codeVariantName IntegrateCode   = "integrate"
 
 -- | One CLI compile flag, spelled exactly as on the command line, that a
 -- performance pin compiles under (a @flags:@ line). Only the flags that change
@@ -484,13 +501,19 @@ pExpectFailureHeader = do
     [ ExpectDiagnostic <$> (symbol "diagnostic" >> pQuotedString) <* pNewline
     , ExpectRefused <$> (symbol "refused" >> pQuotedString) <* pNewline
     , ExpectCrash <$ symbol "crash" <* pNewline
-    , ExpectNoCode <$ symbol "no-code" <* pNewline
+    , ExpectNoCode <$> (symbol "no-code" >> some pCodeVariant) <* pNewline
     , ExpectWrongResult <$ symbol "wrong-result" <* pNewline
     , ExpectBroken <$ symbol "broken" <* pNewline
     , pGrowthPin
     , pCodeSizePin
     , pHangPin
     ]
+
+-- | One variant name of a @no-code@ pin. At least one is required: a bare
+-- @no-code@ held while any variant was missing, which a legitimately absent
+-- one satisfied after the bug was fixed.
+pCodeVariant :: MonadParser m => m CodeVariant
+pCodeVariant = choice [ v <$ symbol (codeVariantName v) | v <- [minBound .. maxBound] ]
 
 -- | A follow-on line of a performance pin, read straight after its
 -- @expect-failure:@ line (in any order among themselves).

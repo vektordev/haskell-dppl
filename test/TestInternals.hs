@@ -46,7 +46,7 @@ import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet, generateRand)
-import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectationProb, expectationDim, defaultBackends,
+import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), CodeVariant(..), expectationProb, expectationDim, defaultBackends,
                         parseTestCasesFromString, corpusPplPath, corpusTstPath, TstFile(..), parseTstFileFromString)
 import CorpusSweep (Corpus, CorpusEntry(..), SweepSpec(..), Tier(..), SlowHeader(..), corpusSweepAll, sweepLoaderNames)
 import System.Directory (listDirectory)
@@ -1096,9 +1096,13 @@ test_tstExpectFailureHeader = testCase "tstExpectFailureHeader" $ do
     Right (_, _, ef, _) ->
       assertEqual "diagnostic shape carries its substring"
         (Just (ExpectDiagnostic "set-valued witness construction failed")) ef
-  case parse "expect-failure: no-code\n" of
+  case parse "expect-failure: no-code probability integrate\n" of
     Left err -> assertFailure err
-    Right (_, _, ef, _) -> assertEqual "no-code shape" (Just ExpectNoCode) ef
+    Right (_, _, ef, _) ->
+      assertEqual "no-code shape names its variants" (Just (ExpectNoCode [ProbabilityCode, IntegrateCode])) ef
+  case parse "expect-failure: no-code\n" of
+    Left _ -> return ()
+    Right (_, _, ef, _) -> assertFailure ("a no-code pin must name a variant, but parsed as " ++ show ef)
   case parse "expect-failure: wrong-result\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right (_, _, ef, tcs) -> do

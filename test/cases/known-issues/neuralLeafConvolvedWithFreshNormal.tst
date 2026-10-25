@@ -15,4 +15,4 @@
 -- gate, or downstream of a threshold on the leaf all compile exactly now;
 -- only the arithmetic combination pinned here remains.
 slow
-expect-failure: no-code
+expect-failure: no-code probability

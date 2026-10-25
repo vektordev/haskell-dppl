@@ -5,4 +5,4 @@
 -- ("no affine Gaussian form flowing into one consumer"). Found by the
 -- publication-exploration C1 pilot (W8). Verified at b16b4d9 on dev. Docs
 -- task bottom-verdict-records-no-refusal-reason.
-expect-failure: no-code
+expect-failure: no-code probability

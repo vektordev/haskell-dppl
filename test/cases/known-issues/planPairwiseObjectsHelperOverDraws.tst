@@ -8,4 +8,4 @@
 -- the plan engine (which would open both reads) is ever asked.
 -- Residue of task plan-pairwise-across-separate-neural-reads.
 slow
-expect-failure: no-code
+expect-failure: no-code probability

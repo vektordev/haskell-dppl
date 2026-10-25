@@ -1,7 +1,8 @@
 -- A two-argument helper applied straight to two independent neural reads.
--- Compiles, but main has only `generate`: probability and integrate are
--- silently absent, and -v's "Engine applicability" section records no
--- reason. The inline sum `readMNist x1 + readMNist x2` and the draw-bound
+-- Compiles, but main has only `generate`: probability is refused with
+-- "set-valued witness construction failed" for the helper's lambda binding
+-- (it was absent with no recorded reason when first pinned), and integrate is
+-- absent. The inline sum `readMNist x1 + readMNist x2` and the draw-bound
 -- spelling `draw a = readMNist x1 in draw b = readMNist x2 in add a b` both
 -- compile `forward`. The discrete, comparison-free sibling of
 -- planPairwiseReadsAsHelperArgs (whose residue "the leading argument is
@@ -9,4 +10,4 @@
 -- experiments_nest mnist-operator-sequence-induction. Docs task
 -- helper-on-two-inline-neural-reads-no-probability.
 -- Idealized: P(main = s) = sum_d p1(d) * p2(s - d).
-expect-failure: no-code
+expect-failure: refused "set-valued witness construction failed"
