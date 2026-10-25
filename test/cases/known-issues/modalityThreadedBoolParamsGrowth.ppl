@@ -1,0 +1,7 @@
+data Color = Red | Blue
+data Material = Rubber | Metal
+data Object = Nil | Object color::Color, material::Material
+data Scene = List hd::Object, tl::Scene | Empty depth 1
+neural extractCLEVR :: (Symbol -> Scene)
+main symbol = draw scene = extractCLEVR symbol in go scene{{for i in 1..N}} False{{end}}
+go scene{{for i in 1..N}} p{{i}}{{end}} = if isEmpty (tl scene) then (if p1 then 1 else 0) else (if isNil (hd scene) then go (tl scene){{for i in 1..N}} p{{i}}{{end}} else (if isRed (color (hd scene)) then go (tl scene) True{{for i in 2..N}} p{{i}}{{end}} else (if isMetal (material (hd scene)) then go (tl scene) False{{for i in 2..N}} p{{i}}{{end}} else go (tl scene){{for i in 1..N}} p{{i}}{{end}})))
