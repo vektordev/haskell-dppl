@@ -1,3 +1,0 @@
-neural readD :: (Float -> Int) of [0, 1]
-lastOf zs = if isNull (tail zs) then head zs else lastOf (tail zs)
-main = draw zs = [Normal, Normal] in (zs, readD (lastOf zs))
