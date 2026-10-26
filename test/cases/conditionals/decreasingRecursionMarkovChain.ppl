@@ -1,0 +1,7 @@
+trans fog = if fog then Uniform < 0.9 else Uniform < 0.2
+walk n fog = if n == 0 then fog else walk (n - 1) (trans fog)
+main = walk 3 False
+-- A random-state recursion with a decreasing step count: the self-call
+-- changes its first argument, so it is measured through walk_prob rather than
+-- refused (docs task decreasing-recursion-refused-as-generate-fallback).
+-- State distribution after three transitions from False: 0.2, 0.34, 0.438.

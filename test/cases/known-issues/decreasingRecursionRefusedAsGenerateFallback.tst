@@ -7,4 +7,12 @@
 -- p(0.5) = (0.3520653267642995, dim 1). Admission-oracle family 7 of
 -- fuzz-admission-over-promises; ticket
 -- decreasing-recursion-refused-as-generate-fallback.
-expect-failure: refused "reached a generate-backed fallback"
+-- Update (decreasing-recursion-refused-as-generate-fallback): the
+-- generate-backed refusal is gone, a decreasing self-call is measured through
+-- loop_prob. What remains is the separate limit
+-- enumerated-sum-over-density-body: the enumerated sum over the density-valued
+-- else branch fails at query time ("an enumerated sum over density-valued
+-- terms is not implemented"). The discrete twin is in the ordinary corpus
+-- (conditionals/decreasingRecursionEnumeratedArgument).
+expect-failure: broken
+p(0.5)=(0.3520653267642995, 1.0)
