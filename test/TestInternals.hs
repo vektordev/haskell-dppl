@@ -2559,6 +2559,30 @@ test_recordSharedFieldGroupsCodeSizePolynomial = testCase "recordSharedFieldGrou
       , "neural see :: (Symbol -> Face)"
       , "main img = draw f = see img in Ans" ++ concat [ concat [" (a", show i, " f) (b", show i, " f) (a", show i, " f && b", show i, " f)"] | i <- [1 .. n] ] ]
 
+-- | A list literal of N field reads of one neural read, @[x1 f, .., xN f]@,
+-- was known-issues/listOfFieldReadsCompileGrowth (docs task
+-- list-of-field-reads-compile-exponential): Analysis listed every cell's
+-- domain, 2^N lists at the outermost, and the compile took 0.2 / 0.9 / 4.1 s
+-- at N = 10 / 12 / 14, with the emitted module linear. A list cell whose
+-- domain exceeds Analysis's @listDomainBound@ (10^4) is now left untagged, so
+-- past N = 13 the cost stops growing. The knob sits past the bound, where the
+-- old shape grows ~4x per two elements (slope about 10) and the fixed one is
+-- flat; the bound admits linear growth.
+test_listOfFieldReadsCompileFlat :: TestTree
+test_listOfFieldReadsCompileFlat = testCase "listOfFieldReadsCompileFlat" $ do
+  verdict <- climb 1.5 [14, 16, 20] (compileAllocPoint "listOfFieldReadsCompileFlat" conf src)
+  case verdict of
+    WithinBound _ -> return ()
+    Exceeds why -> assertFailure ("compiling a list literal of N field reads of one neural read \
+                                  \grows faster than N (task list-of-field-reads-compile-exponential): " ++ why)
+    Unmeasurable why -> assertFailure why
+  where
+    conf = defaultCompilerConfig { noIntegrate = True }
+    src n = unlines
+      [ "data Face = Face " ++ intercalate ", " [ "x" ++ show i ++ "::Bool" | i <- [1 .. n :: Int] ]
+      , "neural see :: (Symbol -> Face)"
+      , "main img = draw f = see img in [" ++ intercalate ", " [ "x" ++ show i ++ " f" | i <- [1 .. n] ] ++ "]" ]
+
 -- | The bytes a compile of the program @src n@ and its Python codegen
 -- allocate on this thread, under a 4 GB cap, as a 'climb' point.
 compileAllocPoint :: String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
@@ -6438,6 +6462,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_helperApplicationsCompileLinear
   , test_markovBranchRandomRateCompilePolynomial
   , test_recordSharedFieldGroupsCodeSizePolynomial
+  , test_listOfFieldReadsCompileFlat
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial

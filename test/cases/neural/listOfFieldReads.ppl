@@ -1,0 +1,9 @@
+-- A list literal of fourteen field reads of one neural read. The list's
+-- domain is 2^14 values, past Analysis's list-domain bound, so its two
+-- outermost cells carry no DiscreteValues tag and the literal is only ever
+-- inverted per element. Listing that domain made the compile exponential in
+-- the length. no-normalization: sampling cannot cover a 2^14-value support.
+-- Task list-of-field-reads-compile-exponential.
+data Face = Face x1::Bool, x2::Bool, x3::Bool, x4::Bool, x5::Bool, x6::Bool, x7::Bool, x8::Bool, x9::Bool, x10::Bool, x11::Bool, x12::Bool, x13::Bool, x14::Bool
+neural see :: (Symbol -> Face)
+main img = draw f = see img in [x1 f, x2 f, x3 f, x4 f, x5 f, x6 f, x7 f, x8 f, x9 f, x10 f, x11 f, x12 f, x13 f, x14 f]

@@ -110,6 +110,7 @@ letWitnessedEitherFpUlp main.prob=18 main__m001.prob=11 main__m010.prob=14 main_
 letWitnessedSharedLatent main__m11.prob=4
 letWitnessedSharedLatentMult main__m11.prob=4
 letWitnessedTupleFpUlp main.prob=12 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
+listOfFieldReads main.integ=17 main.prob=4
 map main.prob=3
 mapEither main.integ=15 main.prob=18
 mapMultList main.prob=3

@@ -1,3 +1,0 @@
-data Face = Face {{for i in 1..N sep ", "}}x{{i}}::Bool{{end}}
-neural see :: (Symbol -> Face)
-main img = draw f = see img in [{{for i in 1..N sep ", "}}x{{i}} f{{end}}]

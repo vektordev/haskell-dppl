@@ -416,6 +416,15 @@ where the plan engine drops that value's mass (`Internals`'
 `planEnumStructuralPartial`, pinned at budget 0; docs task
 `dense-enumeration-crashes-on-partial-body`).
 
+**List domains are bounded at tagging time.** No `MultiValue` shape factors a
+list domain the way `MultiADT` factors a record's, so Analysis lists a `Cons`
+cell's domain, the product of its head's and tail's. Past `listDomainBound`
+(the *default* budget, 10^4, fixed: a raised `--materializationBudget` does not
+raise it) the cell is left untagged. A list literal of N two-valued reads was
+otherwise 2^N listed values per compile (task
+`list-of-field-reads-compile-exponential`; `Internals`'
+`listOfFieldReadsCompileFlat`, corpus `neural/listOfFieldReads`).
+
 **Known cost**: over budget, the plan traversal is the only route, so a body
 it does not cover is refused (an absent probability variant; `generate`
 survives) where dense enumeration used to compile it. Dense fallback was

@@ -25,6 +25,7 @@ import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import PredefinedFunctions
 import Utils
+import SPLL.IntermediateRepresentation (defaultMaterializationCardinality)
 import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN)
 
 type TagEnv = [(String, [Tag])]
@@ -144,6 +145,20 @@ discretesTags adtsParam funEnv visited env e = case e of
       -- its (identity) forward over a discrete operand would claim the operand's
       -- support for a continuous law.
       (Expr _ (InjF (Named name) _)) | isCollapse name -> Nothing
+      -- A list cell's domain is the product of its head's and its tail's, so a
+      -- list literal of N two-valued reads has 2^N values, and no structured
+      -- shape holds a list domain the way 'MultiADT' holds a record's: it has to
+      -- be listed. Past 'listDomainBound' it is left untagged ("no known
+      -- domain"), which the dense enumeration gate would refuse at that size
+      -- anyway; listing it cost exponential compile time on a literal that is
+      -- only ever inverted per element (task
+      -- list-of-field-reads-compile-exponential). Must precede the structural
+      -- case, whose Cons rule lists.
+      (Expr _ (InjF (Named "Cons") [h, t]))
+        | not (untagged h || untagged t)
+        , Just hv <- getValuesFromExpr h
+        , Just tv <- getValuesFromExpr t
+        , maybe True (> listDomainBound) ((*) <$> multiValueCardinality hv <*> multiValueCardinality tv) -> Nothing
       -- Structural InjFs (tuple/Either/ADT accessors, constructor tests and
       -- constructors) act on the operand's value set itself rather than on
       -- its listed elements ('structuralTag'), so the cross product a
@@ -229,6 +244,14 @@ structuralTag adtDecls name = fmap (\rule operands -> if all canonical operands 
   -- operand gives @left ()@.
   "fromLeft"         -> Just $ unary $ \case MultiEither l r -> Just (maybeOf (inhabited r) l); _ -> Nothing
   "fromRight"        -> Just $ unary $ \case MultiEither l r -> Just (maybeOf (inhabited l) r); _ -> Nothing
+  -- A list cell, one list per head value and tail list in listing's order,
+  -- built without the interpreter.
+  "Cons"             -> Just $ \case
+    [h, MultiDiscretes ts] | Just tls <- mapM listCells ts ->
+      Just $ case nubValues [VList (ListCont x tl) | x <- multiValueToValueList h, tl <- tls] of
+        [] -> Nothing
+        vals -> Just (MultiDiscretes vals)
+    _ -> Nothing
   "TCons"            -> Just $ \case [a, b] -> Just (keepIf (inhabited a && inhabited b) (MultiTuple a b)); _ -> Nothing
   "left"             -> Just $ \case [a] -> Just (keepIf (inhabited a) (MultiEither a (MultiDiscretes []))); _ -> Nothing
   "right"            -> Just $ \case [b] -> Just (keepIf (inhabited b) (MultiEither (MultiDiscretes []) b)); _ -> Nothing
@@ -251,6 +274,9 @@ structuralTag adtDecls name = fmap (\rule operands -> if all canonical operands 
     -- listing.
     unary f [mv] = f mv
     unary _ _ = Nothing
+    listCells v = case v of
+      VList l -> Just l
+      _ -> Nothing
     keepIf ok mv = if ok then Just mv else Nothing
     bools cases = case nubValues [VBool b | (True, b) <- cases] of
       [] -> Nothing
@@ -262,6 +288,12 @@ structuralTag adtDecls name = fmap (\rule operands -> if all canonical operands 
     constructorNames = [cn | adt <- adtDecls, (cn, _) <- constructors adt]
     ctorTests = [("is" ++ cn, cn) | adt <- adtDecls, (cn, _) <- constructors adt]
     accessors = [(fName, (cn, idx)) | adt <- adtDecls, (cn, fs) <- constructors adt, (idx, (fName, _)) <- zip [0..] fs]
+
+-- | The most values a list-valued node's tag may list (see the Cons case of
+-- 'discretesTags'): the default dense-enumeration budget, past which no list
+-- domain is enumerated densely.
+listDomainBound :: Integer
+listDomainBound = toInteger defaultMaterializationCardinality
 
 -- | Does a value set have at least one value? A continuous leaf does; an
 -- empty enumeration, and any product with an empty factor, does not.
