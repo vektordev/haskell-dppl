@@ -1,3 +1,0 @@
-neural glyph :: (Symbol -> Int) of [0, 1, 2]
-walk xs = if isNull xs then True else (draw t = glyph (head xs) in (if t == 1 then walk (tail xs) else False))
-main xs = walk xs

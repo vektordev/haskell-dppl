@@ -1397,7 +1397,8 @@ batchedAdmissionExceptions :: [(String, String)]
 batchedAdmissionExceptions =
   -- The batched compile succeeds; the harness's 'batchSymParamCols' cannot
   -- build a column for main's list-of-Symbols board parameter.
-  [ ("symbolSelectedByHelper", "batched-harness-list-of-symbol-parameters") ]
+  [ ("symbolSelectedByHelper", "batched-harness-list-of-symbol-parameters")
+  , ("neuralReadListWalkRecursion", "batched-harness-list-of-symbol-parameters") ]
 
 -- | Batched-eligible corpus programs whose batched kernel is unaffordable to
 -- run: the Slow group's topK differentials ('topKEntries') and its

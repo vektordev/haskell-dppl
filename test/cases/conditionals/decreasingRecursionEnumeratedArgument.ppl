@@ -1,0 +1,6 @@
+loop r = if r < 1 then 0 else if False then loop (r - 1) else fst (head [(7, 0)])
+main = loop (if Uniform < 0.5 then 2 else 1)
+-- The discrete twin of known-issues/decreasingRecursionRefusedAsGenerateFallback:
+-- an enumerated argument into a recursion whose call has a decreasing
+-- argument (loop (r - 1)). Both arguments take the final else, so main is 7.
+-- Docs task decreasing-recursion-refused-as-generate-fallback.

@@ -1,0 +1,9 @@
+neural glyph :: (Symbol -> Int) of [0, 1, 2]
+walk xs = if isNull xs then True else (draw t = glyph (head xs) in (if t == 1 then walk (tail xs) else False))
+main xs = walk xs
+-- A per-cell neural read on a structural walk down a list of Symbols: the
+-- recursion's argument (tail xs) changes, so walk's probability measures the
+-- self-call through walk_prob instead of refusing it as a generate-backed
+-- fallback (docs task decreasing-recursion-refused-as-generate-fallback).
+-- The shape of a recursive-descent parser over handwritten glyphs.
+-- p(True) = glyph(x0)[1] * glyph(x1)[1] = 0.5 * 0.6 = 0.3; the empty list is True with mass 1.

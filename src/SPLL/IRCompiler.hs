@@ -5805,7 +5805,7 @@ contiguousIntDomain mv = case multiValueToValueList mv of
 -- @generate-backed-inference-sweep@.
 requireDeterministicUnderEnum :: CompilerMetadata -> String -> Expr -> IRExpr -> CompilerMonad ()
 requireDeterministicUnderEnum meta what src ir =
-  case nub (recursiveDrawCalls (cyclicGenNames meta Set.\\ detGenNames meta) ir) of
+  case nub (recursiveDrawCalls (cyclicGenNames meta Set.\\ detGenNames meta) (enclosingFunction meta src) ir) of
     [] -> return ()
     gens -> refuse cn $ init $ unlines
       [ "probability-mode compilation reached a generate-backed fallback."
@@ -5815,18 +5815,52 @@ requireDeterministicUnderEnum meta what src ir =
       , "which does not terminate, and generating it forward instead would produce a probability"
       , "function that returns a different number on every call with the same query value."
       , "NeST does exact inference, so this is refused. This is the shape of an unbounded"
-      , "self-recursive branch (`... else main`) with no decreasing argument. Rewrite the"
-      , "recursion so it has a decreasing argument, or use the program in generate mode only."
+      , "self-recursive branch (`... else main`), or of a call through another function on the"
+      , "cycle, where no argument of a direct self-call changes. Rewrite the recursion so that"
+      , "it calls itself directly with a changed argument (a counter, `tail xs`), or use the"
+      , "program in generate mode only."
       , "(task self-recursive-prob-nondeterministic-fallback)" ]
   where cn = chainName (getTypeInfo src)
+
+-- | The function whose body contains the node, with its parameter names; the
+-- context 'recursiveDrawCalls' needs to tell a self-call that changes an
+-- argument from one that does not. 'Nothing' when no declaration contains it.
+enclosingFunction :: CompilerMetadata -> Expr -> Maybe (Varname, [Varname])
+enclosingFunction meta src =
+  listToMaybe [ (n ++ "_gen", params b)
+              | (n, b) <- functions (compilingProgram meta), contains b ]
+  where
+    cn = chainName (getTypeInfo src)
+    contains e = chainName (getTypeInfo e) == cn || any contains (getSubExprs e)
+    params (Expr _ (Lambda x rest)) = x : params rest
+    params _ = []
 
 -- | The random calls in a generate-mode IR expression that go to a function on
 -- a call cycle -- the subset of 'randomDrawSites' 'requireDeterministicUnderEnum'
 -- still refuses.
-recursiveDrawCalls :: Set.Set Varname -> IRExpr -> [String]
-recursiveDrawCalls cyc ir = case ir of
-  IRVar n | Set.member n cyc -> [n]
-  _ -> concatMap (recursiveDrawCalls cyc) (getIRSubExprs ir)
+--
+-- A direct self-call that changes an argument is not one of them (task
+-- decreasing-recursion-refused-as-generate-fallback): the call is made with a
+-- different argument than the enclosing invocation received (@loop (r - 1)@,
+-- @walk (tail xs)@), so its probability function is a different invocation,
+-- not the same enumeration re-entered, and the callee's own probability
+-- function measures it. What stays refused is a call whose every argument is
+-- the enclosing function's own parameter in its own position (@... else main@),
+-- any call to a different function on the cycle (mutual recursion: the
+-- argument comparison says nothing there), and a bare or partial reference.
+recursiveDrawCalls :: Set.Set Varname -> Maybe (Varname, [Varname]) -> IRExpr -> [String]
+recursiveDrawCalls cyc encl = go
+  where
+    go ir = case collectApplyChain ir of
+      (IRVar n, args)
+        | Set.member n cyc, not (null args) ->
+            [ n | not (changesArgument n args) ] ++ concatMap go args
+      (IRVar n, _) | Set.member n cyc -> [n]
+      _ -> concatMap go (getIRSubExprs ir)
+    changesArgument n args = case encl of
+      Just (self, ps) | self == n, length args == length ps ->
+        or (zipWith (\p a -> a /= IRVar p) ps args)
+      _ -> False
 
 -- | The randomness sources in a generate-mode IR expression, named for a
 -- diagnostic; empty exactly when 'isPureGiven' would call the expression pure.
