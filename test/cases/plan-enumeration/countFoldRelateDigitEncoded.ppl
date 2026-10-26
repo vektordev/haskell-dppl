@@ -1,0 +1,19 @@
+data Color = Red | Blue | Green
+data Shape = Cube | Sphere
+data Object = Nil | Obj color::Color, shape::Shape, xb::Int
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+neural readScene :: (Symbol -> Scene) of 3x.{Empty | SCons {Nil | Obj {Red | Blue | Green} {Cube | Sphere} [0,1,2,3,4]} x}
+hit g o = if isNil o then 0 else (if isBlue (color o) then (if isCube (shape o) then (if xb o == g then 11 else 121) else 0)
+                                  else (if isRed (color o) then (if xb o < g then 1 else 0) else 0))
+num g s = if isEmpty s then 0 else hit g (obj s) + num g (rest s)
+main sym = draw sc = readScene sym in num 2 sc
+-- "How many red things are left of the blue cube?" as one digit-encoded count
+-- fold over a one-read scene with an ordinal position per object (task
+-- count-fold-field-tested-in-two-branches-exponential, the CLEVR `relate`
+-- shape of exp-clevr-question-supervision-zeroshot). P(sum = 11 + c) for an
+-- anchor bin g is P(the blue cube is unique, sits at g, and c red things lie
+-- left of it). Anchor and target both read `xb`, under two branches of the
+-- `color` test, which used to clash and enumerate the scene ungrouped (OOM at
+-- 10 slots); at budget 0 it now compiles 10 slots in ~30 s with one world per
+-- distinct sum. The 30784-scene domain is over the default budget, so this
+-- runs on the plan engine either way.

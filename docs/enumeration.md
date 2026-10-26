@@ -474,6 +474,19 @@ are as large as the dense module (`planOverBudgetTuplePair`, 8.2MB; follow-up
 Corpus: `planEnumRecCountOfLazy*`, `planOverBudget*`; structural test
 `Internals.nestedEnumerationHonoursBudget`.
 
+Two clashes are settled locally before they reach that rerun (task
+`count-fold-field-tested-in-two-branches-exponential`). One is a branch of a
+plan-dependent `if` whose value group bakes a leaf the condition reads
+(`if isBlue (color o) then .. else (if isRed (color o) then .. else 0)`). That
+branch is retried with its own top level ungrouped (`planEnumValuesRaw`), so
+the enclosing group forms after the condition is in. The other is an
+arithmetic operand whose group bakes a leaf a sibling operand reads
+(`planEnumOperands`, e.g. `isA o + isT o` over one `color`). Only that operand
+is redone, under `planUngroupedLocally`. Either way the grouped attempt is
+discarded without trace. A count fold testing one field under two branches of
+another's test was ~6x per level and is now linear (corpus
+`plan-enumeration/countFold*`; `Internals.countFoldFieldTestedInTwoBranchesPolynomial`).
+
 **Field factoring of a constructed value** (task
 `scene-float-passthrough-edit-exponential`). A constructed value observed at a
 point (`Scene (f (o1 sc)) .. (f (oN sc))`, a tuple, a cons, an `Either`

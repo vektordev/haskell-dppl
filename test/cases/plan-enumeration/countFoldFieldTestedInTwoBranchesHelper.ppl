@@ -1,0 +1,17 @@
+data Color = Red | Blue | Green
+data Shape = Cube | Sphere
+data Object = Nil | Obj color::Color, shape::Shape
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+neural readScene :: (Symbol -> Scene)
+isA o = if isBlue (color o) then isCube (shape o) else False
+isT o = isRed (color o)
+hit o = if isNil o then 0 else (if isA o then 1 else 0) + (if isT o then 1 else 0)
+num s = if isEmpty s then 0 else hit (obj s) + num (rest s)
+main sym = draw sc = readScene sym in num sc
+-- countFoldFieldTestedInTwoBranches with the shape hidden in Bool helpers
+-- (task count-fold-field-tested-in-two-branches-exponential): `isA`'s False
+-- group bakes `color`, which the sibling operand `isT o` reads, so crossing
+-- the two operands of `+` clashed and reran the traversal ungrouped (~5x per
+-- level). Such an operand is now redone with its own grouping off. The
+-- default compile enumerates the 400 scenes densely; PlanEngineMatchesDense
+-- checks the plan engine against it.

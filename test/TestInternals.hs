@@ -2896,6 +2896,54 @@ test_sceneCountConditionalEditPolynomial = testCase "sceneCountConditionalEditPo
               ++ show s4 ++ " s7=" ++ show s7 ++ " ratio=" ++ show (fromIntegral s7 / fromIntegral s4 :: Double))
     (s7 < 3 * s4)
 
+-- | A count fold over a recursive scene whose summand tests one field under
+-- two branches of another field's test (task
+-- count-fold-field-tested-in-two-branches-exponential), in both spellings: a
+-- nested if, whose else branch's value group baked @color@ under the outer
+-- @isBlue (color o)@ test, and Bool helpers summed by @+@, where @isA@'s
+-- False group baked the @color@ that @isT@ reads. Either clash reran the
+-- whole traversal ungrouped, ~6x per level (1.1 MB of Python at depth 4, a
+-- timeout at 5). Now only the colliding branch or operand is ungrouped, and
+-- the fold is linear (~1.3x from 2 to 4). The pair (2, 4) fails in seconds if
+-- that regresses.
+test_countFoldFieldTestedInTwoBranchesPolynomial :: TestTree
+test_countFoldFieldTestedInTwoBranchesPolynomial = testCase "countFoldFieldTestedInTwoBranchesPolynomial" $ do
+  let nested n = unlines
+        [ "data Color = Red | Blue | Green"
+        , "data XB = X0 | X1 | X2 | X3"
+        , "data Object = Nil | Obj color::Color, xb::XB"
+        , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show (n :: Int)
+        , "neural readScene :: (Symbol -> Scene)"
+        , "hit o = if isNil o then 0 else (if isBlue (color o) then (if isX2 (xb o) then 1 else 0) else (if isRed (color o) then (if isX0 (xb o) then 1 else 0) else 0))"
+        , "num s = if isEmpty s then 0 else hit (obj s) + num (rest s)"
+        , "main sym = draw sc = readScene sym in num sc"
+        ]
+      helpers n = unlines
+        [ "data Color = Red | Blue | Green"
+        , "data Shape = Cube | Sphere"
+        , "data Object = Nil | Obj color::Color, shape::Shape"
+        , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show (n :: Int)
+        , "neural readScene :: (Symbol -> Scene)"
+        , "isA o = if isBlue (color o) then isCube (shape o) else False"
+        , "isT o = isRed (color o)"
+        , "hit o = if isNil o then 0 else (if isA o then 1 else 0) + (if isT o then 1 else 0)"
+        , "num s = if isEmpty s then 0 else hit (obj s) + num (rest s)"
+        , "main sym = draw sc = readScene sym in num sc"
+        ]
+  let sizeAt :: String -> (Int -> String) -> Int -> IO Int
+      sizeAt name prog n = case tryParseProgram name (prog n) of
+        Left e  -> assertFailure ("parse error (" ++ name ++ ") at depth " ++ show n ++ ": " ++ show e)
+        -- Budget 0: the plan engine's growth is what is pinned (see test_planFoldDisjunctionPolynomial).
+        Right p -> case compile noMaterializationConfig p of
+          Left e   -> assertFailure ("compile error (" ++ name ++ ") at depth " ++ show n ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  forM_ [("nested", nested), ("helpers", helpers)] $ \(name, prog) -> do
+    s2 <- sizeAt name prog 2
+    s4 <- sizeAt name prog 4
+    assertBool ("depth-4 count fold (" ++ name ++ ") is growing at the ungrouped rate: s2="
+                ++ show s2 ++ " s4=" ++ show s4 ++ " ratio=" ++ show (fromIntegral s4 / fromIntegral s2 :: Double))
+      (s4 < 2 * s2)
+
 -- | A per-slot edit rebuilding an N-slot product scene whose objects carry a
 -- Float leaf (task scene-float-passthrough-edit-exponential). Every field of
 -- the rebuilt Scene has several worlds, some with a point density, which the
@@ -6501,6 +6549,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_planFlatSumOverProductPolynomial
   , test_productSceneDiscreteCountPolynomial
   , test_sceneCountConditionalEditPolynomial
+  , test_countFoldFieldTestedInTwoBranchesPolynomial
   , test_planSceneFloatPassthroughPolynomial
   , test_planEnumAccumulatorFoldPolynomial
   , test_planEnumSubtractionAccumulatorFoldPolynomial

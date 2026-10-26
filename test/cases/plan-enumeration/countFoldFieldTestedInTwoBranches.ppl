@@ -1,0 +1,18 @@
+data Color = Red | Blue | Green
+data XB = X0 | X1 | X2 | X3
+data Object = Nil | Obj color::Color, xb::XB
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+neural readScene :: (Symbol -> Scene)
+hit o = if isNil o then 0 else (if isBlue (color o) then (if isX2 (xb o) then 1 else 0)
+                                else (if isRed (color o) then (if isX0 (xb o) then 1 else 0) else 0))
+num s = if isEmpty s then 0 else hit (obj s) + num (rest s)
+main sym = draw sc = readScene sym in num sc
+-- A count fold whose summand tests one field (`xb`) under two branches of
+-- another field's test (task count-fold-field-tested-in-two-branches-
+-- exponential). The else branch's value-0 group baked `color`, the outer
+-- `isBlue (color o)` condition re-constrained it, and the clash reran the
+-- whole plan traversal ungrouped: ~6x per level at budget 0 (1.1 MB at depth
+-- 4, a timeout at 5). Such a branch now enters ungrouped at its own top level,
+-- and the fold is linear. The default compile enumerates the 2380 scenes
+-- densely; PlanEngineMatchesDense checks the plan engine against it. Growth
+-- guard: Internals.countFoldFieldTestedInTwoBranchesPolynomial.
