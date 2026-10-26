@@ -42,8 +42,7 @@
 --
 -- Refused, as an absent probability variant with the reason recorded: a slot
 -- with no finite domain (a continuous slot, an @Int@ the compiler cannot
--- bound), a domain over 'materializationCardinality', and @--batched@. A
--- per-value function has no integrate variant and no @writeLogits@.
+-- bound) and a domain over 'materializationCardinality'. A per-value function has no integrate variant and no @writeLogits@.
 module SPLL.PerValue
   ( validateSignatures
   , expandPerValue
@@ -305,10 +304,7 @@ perValuePlans conf rtyped = mapMaybe plan (signatures rtyped)
           slotT = slotTypeAt path resultT
           fast = isJust (lookup (f ++ perValueGivenSuffix) (functions rtyped))
           what = "the Enumerated slot " ++ prettySlotPath path ++ " of '" ++ f ++ "' (" ++ prettyRType slotT ++ ")"
-          domain
-            | batched conf = Left ("per-value queries are not supported under --batched yet; "
-                                   ++ "compile without it to query " ++ what)
-            | otherwise = case lookup (f ++ perValueSlotSuffix) (functions tagged) of
+          domain = case lookup (f ++ perValueSlotSuffix) (functions tagged) of
                 Nothing -> Left ("the definition of '" ++ f ++ "' does not take every argument its signature declares as a parameter; "
                                  ++ "a per-value function needs them all, e.g. '" ++ f ++ " x = ...' or an alias '" ++ f ++ " = g'")
                 Just probe -> case finiteDomain probe slotT of

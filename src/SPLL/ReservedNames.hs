@@ -377,7 +377,7 @@ pythonRuntimeClassNames :: [String]
 pythonRuntimeClassNames =
   [ "Module", "Iterable", "T", "Left", "Right", "InferenceList"
   , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "EnumBatch"
-  , "MixedSplit" ]
+  , "MixedSplit", "MixedAnyUnsupported" ]
 
 -- | The non-class values the emitted Python module has in scope before any of
 -- its own definitions: everything @from pythonLib import *@ and
@@ -399,7 +399,7 @@ pythonRuntimeClassNames =
 -- the runtimes' actual surface and fails on any name missing here.
 pythonRuntimeValueNames :: [String]
 pythonRuntimeValueNames =
-  [ "DENSE_MIN_BATCH", "DTYPE", "acos", "acosh", "asin", "asinh", "asmask"
+  [ "DENSE_MIN_BATCH", "DTYPE", "acos", "acosh", "any_cond", "any_merge", "asin", "asinh", "asmask"
   , "astensor", "atan", "atan2", "atanh", "bucket_count", "bucketed"
   , "categorical_index", "cbrt", "ceil", "check_result", "comb", "copysign"
   , "cos", "cosh", "cumulative_normal", "cumulative_uniform", "degrees"
@@ -411,7 +411,7 @@ pythonRuntimeValueNames =
   , "is_member", "isclose", "isfinite", "isinf", "isnan", "isqrt"
   , "itertools", "lcm", "ldexp", "lgamma", "listConcat", "listProd", "log", "log10"
   , "log1p", "log2", "log_cumulative_normal", "log_cumulative_uniform"
-  , "log_density_normal", "log_density_uniform", "logical_not", "logsumexp", "mapList"
+  , "log_density_normal", "log_density_uniform", "logical_not", "logsumexp", "mapList", "mix_signature"
   , "math", "modf", "nan", "nextafter", "nn_gather", "perm", "pi", "poison"
   , "pow", "prod", "radians", "rand", "randn", "random", "remainder"
   , "safe_div", "safe_exp", "safe_intdiv", "safe_log", "safe_mod", "sign", "signature", "sin", "sinh"

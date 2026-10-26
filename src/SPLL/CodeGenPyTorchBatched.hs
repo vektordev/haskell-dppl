@@ -1394,7 +1394,9 @@ structural env e = case e of
   -- bucket the same way a list length or an Either tag is. Unconditional --
   -- unlike the tag test above, 'OpIsAny' needs no companion check on its
   -- argument, because every position ANY can occupy is already keyed into the
-  -- bucket signature by construction.
+  -- bucket signature by construction. The one exception, a scalar leaf that
+  -- @bucketed@ packed mixed, answers a mask; 'anyIfAssign' and the
+  -- @any_cond@ expression form emit a bare ANY test so that a mask works.
   IRUnaryOp OpIsAny _ -> True
   -- The float test of a type-variable leaf's comparison
   -- ('SPLL.IRCompiler.leafEqIR'): a slot's dtype is part of its tensor, so
@@ -2215,6 +2217,13 @@ blockM ctx env (IRLetIn name val body) =
 -- bucket its condition is a plain Python bool, so only one arm runs -- which is
 -- what makes structure-directed recursion terminate and what keeps an arm that
 -- is illegal for this shape (e.g. `head sample` on an empty list) unevaluated.
+blockM ctx env e@(IRIf c _ _) | Just _ <- anyTest c = do
+  -- An ANY test may answer a per-element mask ('anyIfAssign'), so both arms
+  -- may run: bind the result and return it, rather than returning from an arm.
+  n <- demandUniqueNumber
+  let r = "_ar" ++ show n
+  ss <- batchedAssign env r e
+  return (ss ++ [returnStmt ctx r])
 blockM ctx env (IRIf c t f) | structural env c = do
   ts <- blockM ctx env t
   fs <- blockM ctx env f
@@ -2240,6 +2249,8 @@ batchedAssign :: SEnv -> String -> IRExpr -> Supply [String]
 batchedAssign env name (IRLetIn innerName innerVal body) =
   (++) <$> batchedAssign env innerName innerVal
        <*> batchedAssign (bindS env innerName innerVal) name body
+batchedAssign env name (IRIf c t f)
+  | Just (e, pos) <- anyTest c = if pos then anyIfAssign env name e t f else anyIfAssign env name e f t
 batchedAssign env name (IRIf c t f) | structural env c = do
   ts <- batchedAssign env name t
   fs <- batchedAssign env name f
@@ -2251,6 +2262,54 @@ batchedAssign env name (IRConstruct TgTuple [f, s]) = do
 batchedAssign env name e = do
   (stmts, x) <- batchedLine env e
   return (stmts ++ [name ++ " = " ++ x])
+
+-- | An @if isAny(e)@ statement. Within a bucket an ANY test is a Python bool,
+-- except at a scalar leaf of the query that @bucketed@ packed as a /mixed/
+-- column, ANY in some rows and a value in the others
+-- (@pythonLibBatched.isAny@ then answers the per-element mask; task
+-- batched-compiles-compound-guesswho-posterior). That is how queries differing
+-- only in which slots are ANY share one call. So the arms are emitted in
+-- sequence, not as @if@/@else@: a Python-bool test runs the one arm it takes,
+-- exactly as before, and a mask runs both over the whole batch and merges
+-- them per element (@any_merge@):
+--
+-- > _amN = isAny(e)
+-- > if _amN is not False:
+-- >     <then arm into name>
+-- > if _amN is not True:
+-- >     if _amN is not False:
+-- >         _atN = name
+-- >     <else arm into name>
+-- >     if _amN is not False:
+-- >         name = any_merge(_amN, _atN, name)
+--
+-- Each arm appears once, so nesting does not grow the code. The else arm runs
+-- on the ANY rows at the value @bucketed@ filled them with (another row's
+-- value at that leaf, so in its domain), and the merge discards it there.
+anyIfAssign :: SEnv -> String -> IRExpr -> IRExpr -> IRExpr -> Supply [String]
+anyIfAssign env name e t f = do
+  n <- demandUniqueNumber
+  let m = "_am" ++ show n
+      saved = "_at" ++ show n
+  ts <- batchedAssign env name t
+  fs <- batchedAssign env name f
+  return ([m ++ " = isAny(" ++ batchedExpr env e ++ ")", "if " ++ m ++ " is not False:"] ++ indentOnce ts
+          ++ ["if " ++ m ++ " is not True:"]
+          ++ indentOnce ([ "if " ++ m ++ " is not False:" ] ++ indentOnce [saved ++ " = " ++ name]
+                         ++ fs
+                         ++ [ "if " ++ m ++ " is not False:" ] ++ indentOnce [name ++ " = " ++ anyMergeName ++ "(" ++ m ++ ", " ++ saved ++ ", " ++ name ++ ")"]))
+
+-- | A condition that is an ANY test, @isAny e@ or its negation: the operand,
+-- and whether the test is positive.
+anyTest :: IRExpr -> Maybe (IRExpr, Bool)
+anyTest (IRUnaryOp OpIsAny e) = Just (e, True)
+anyTest (IRUnaryOp OpNot c) = fmap not <$> anyTest c
+anyTest _ = Nothing
+
+-- | The runtime merge of an ANY test's two arms under a mask ('anyIfAssign').
+anyMergeName, anyCondName :: String
+anyMergeName = "any_merge"
+anyCondName = "any_cond"
 
 -- | Render one line's expression, as 'SPLL.CodeGenPyTorch.liftedLine' does for
 -- the scalar backend (task batched-enum-comprehension-exceeds-parser-nesting):
@@ -2393,6 +2452,14 @@ batchedExpr env (IRSelect c t f) = torchWhere env c t f
 -- domain constant, @isNil o@ is structural, and the else arm reads @color o@
 -- -- which, through an eager @torch.where@, raised the accessor's mismatch
 -- diagnostic on the @Nil@ term.
+-- An ANY test in expression position is 'anyIfAssign' as an expression: the
+-- arms are thunks, so a Python-bool test runs one and a mask runs both and
+-- merges them (@any_cond@), each arm written once.
+batchedExpr env (IRIf c t0 f0)
+  | Just (e, pos) <- anyTest c
+  , let (t, f) = if pos then (t0, f0) else (f0, t0) =
+  anyCondName ++ "(isAny(" ++ batchedExpr env e ++ "), (lambda: " ++ batchedExpr env t
+  ++ "), (lambda: " ++ batchedExpr env f ++ "))"
 batchedExpr env (IRIf c t f)
   | structural env c = "(" ++ batchedExpr env t ++ " if " ++ structuralCond env c
                        ++ " else " ++ batchedExpr env f ++ ")"

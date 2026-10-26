@@ -266,6 +266,27 @@ same trigger in a generate body. A runtime-key index (`nn_gather`,
 `data-structures/listIndexByRecursion`, `listIndexFromSample`; docs-repo
 task `batched-conditional-evaluates-a-partial-arm`.
 
+**ANY as data.** Shape bucketing keys ANY-ness, so queries that differ only
+in which answer slots are `ANY` used to be one kernel call each. `bucketed`
+(default `mix_any=True`) now groups by `mix_signature`, which keys an `ANY`
+scalar leaf like a value, and `_pack_mixed` packs a leaf that is `ANY` in
+some rows as a `[B]` column filled from a concrete row, with the per-element
+mask attached as the tensor attribute `any_mask`. A wildcard in place of a
+structure (a whole tuple, list or record) still keys apart. `isAny` answers
+the mask for such a leaf, and the backend emits every bare ANY test (`isAny e`
+or its negation) so a mask works: as a statement, the two arms run in
+sequence, each written once, and a mask runs both over the whole batch and
+merges them with `any_merge` (`anyIfAssign`); as an expression, `any_cond`
+takes the arms as thunks. A Python-bool test still runs one arm. An ANY test
+inside a compound shape condition (a mask variant's dispatcher, `isAny a and
+...`) cannot take a mask. Python's `bool()` raises on it, and `bucketed`
+re-runs the batch bucketed by full signature, which is exact because a kernel
+is pure. `_slice_batch` turns a half that is all `ANY` back into the wildcard.
+On the compound Guess-Who posterior (50 answer slots, 24 faces) 2 400 queries
+with 2 206 distinct masks run as one call, at about 1.7 ms per query against
+29 ms scalar. Docs-repo task `batched-compiles-compound-guesswho-posterior`;
+`TestPerValue` "BatchedPython: Guess-Who over a list board".
+
 A per-mask variant that still carries a `VAnyExcept` placeholder is retired
 to a runtime refusal of that one mask (`retireUnrenderableVariants`,
 rendered by `retiredMethod` as a `throw` of the shared message), as on the

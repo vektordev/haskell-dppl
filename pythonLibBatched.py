@@ -408,6 +408,10 @@ def nn_gather(out, idx):
   idx_t = idx_t.clamp(0, out.shape[-1] - 1)
   if idx_t.dim() == 0:
     return out[..., idx_t]
+  # A batch-shared output (one [V] vector, the network applied to a batch-
+  # uniform input) read at a per-element index.
+  if out.dim() == 1:
+    return out[idx_t]
   return out[torch.arange(out.shape[0]), idx_t]
 
 def categorical_index(u, out, start, n):
@@ -545,13 +549,52 @@ def tensor_index(xs, idx):
 # value renderer ('SPLL.CodeGenPyTorch.pyVal') is valid batched-sample syntax
 # unchanged: a bare wildcard is the string "ANY" (`pyVal VAny`), a wildcard
 # list is 'AnyInferenceList()' (`pyVal (VList AnyList)`).
+#
+# The one exception is a *mixed* scalar leaf (task batched-compiles-compound-
+# guesswho-posterior): `bucketed` merges samples whose signatures differ only
+# in which scalar leaves are ANY, and packs such a leaf as a [B] tensor whose
+# ANY rows hold another row's value, with the per-element mask attached as
+# `any_mask`. `isAny` answers that mask, and the compiler emits every ANY test
+# so that a mask runs both arms and merges them (`any_merge`).
 
 def isAny(x):
+  if torch.is_tensor(x):
+    m = getattr(x, 'any_mask', None)
+    return False if m is None else m
   if x == "ANY":
     return True
   if isinstance(x, AnyInferenceList):
     return True
   return False
+
+def any_merge(m, a, b):
+  # The two arms of an ANY test that answered the mask `m`, per element:
+  # the ANY arm `a` where m holds, the value arm `b` elsewhere. Both arms are
+  # the same structure (the IR's two arms have one type); a leaf of rank > 1
+  # (a [B, ...] value) broadcasts the mask over its trailing axes.
+  if isinstance(a, T) and isinstance(b, T):
+    return T(any_merge(m, a.t1, b.t1), any_merge(m, a.t2, b.t2))
+  if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+    return [any_merge(m, x, y) for x, y in zip(a, b)]
+  if a is None and b is None:
+    return None
+  ta, tb = _anchor(a), _anchor(b)
+  if not (torch.is_tensor(ta) and torch.is_tensor(tb)):
+    raise MixedAnyUnsupported("any_merge: arms of kind " + type(a).__name__ + ", " + type(b).__name__)
+  mm = m
+  rank = max(ta.dim(), tb.dim())
+  if rank > 1:
+    mm = m.reshape(m.shape + (1,) * (rank - 1))
+  return torch.where(mm, ta, tb)
+
+def any_cond(c, t, f):
+  # An ANY test in expression position, its arms as thunks: a Python bool
+  # runs the arm it takes, a mask runs both and merges them.
+  if c is True:
+    return t()
+  if c is False:
+    return f()
+  return any_merge(c, t(), f())
 
 def eq(o1, o2):
   # A nested ANY is a wildcard (matches anything at that position) -- the
@@ -559,9 +602,17 @@ def eq(o1, o2):
   # is never compared this way: it is intercepted by a structural isAny check
   # upstream (mirrors 'SPLL.IRCompiler.mkDeepAnyCheck'/'tolerateAny'), the same
   # invariant the scalar/interpreter backends already rely on.
-  if isAny(o1) or isAny(o2):
+  a1, a2 = isAny(o1), isAny(o2)
+  if a1 is True or a2 is True:
     return True
-  return o1 == o2
+  if a1 is False and a2 is False:
+    return o1 == o2
+  # A mixed leaf: the wildcard rows match, the others compare.
+  r = asmask(o1 == o2)
+  for a in (a1, a2):
+    if a is not False:
+      r = r | a
+  return r
 
 class T:
   def __init__(self, t1, t2):
@@ -876,6 +927,65 @@ def signature(v):
 def bucket_count(samples):
   return len(set(signature(s) for s in samples))
 
+def mix_signature(v):
+  # 'signature' with ANY-ness erased where it can be data: an ANY scalar leaf
+  # keys like a value ('x'), so samples that differ only in which scalar leaves
+  # are ANY share a bucket. A wildcard in place of a structure (a whole tuple,
+  # list or record) still keys apart from that structure, which is not 'x'.
+  if isAny(v):
+    return 'x'
+  if isinstance(v, InferenceList):
+    return ('L',) + tuple(mix_signature(x) for x in v)
+  if isinstance(v, T):
+    return ('T', mix_signature(v.t1), mix_signature(v.t2))
+  if isinstance(v, list):
+    return ('V',) + tuple(mix_signature(x) for x in v)
+  if isinstance(v, Left):
+    return ('L?', mix_signature(v.val))
+  if isinstance(v, Right):
+    return ('R?', mix_signature(v.val))
+  if _is_enum_value(v):
+    return ('E', type(v)._enum)
+  if hasattr(v, '_fields'):
+    return ('A', type(v).__name__) + tuple(mix_signature(f) for f in v._fields)
+  return signature(v)
+
+class MixedAnyUnsupported(Exception):
+  pass
+
+def _pack_mixed(vs):
+  # '_pack' over a bucket keyed by 'mix_signature': a position ANY in every
+  # row stays the wildcard, one ANY in none recurses as '_pack' does, and a
+  # mixed position (a scalar leaf, by the key) packs as a tensor with its
+  # ANY rows filled from the first concrete row, the mask attached.
+  anys = [isAny(v) for v in vs]
+  if all(anys):
+    return vs[0]
+  if any(anys):
+    fill = vs[anys.index(False)]
+    packed = _pack([fill if a else v for a, v in zip(anys, vs)])
+    if not torch.is_tensor(packed) or packed.dim() == 0:
+      raise MixedAnyUnsupported("a mixed ANY position is not a scalar leaf")
+    packed.any_mask = torch.tensor(anys)
+    return packed
+  head = vs[0]
+  if isinstance(head, InferenceList):
+    return toList([_pack_mixed([s[i] for s in vs]) for i in range(len(head))])
+  if isinstance(head, T):
+    return T(_pack_mixed([s.t1 for s in vs]), _pack_mixed([s.t2 for s in vs]))
+  if isinstance(head, list):
+    return [_pack_mixed([s[i] for s in vs]) for i in range(len(head))]
+  if _is_enum_value(head):
+    return _pack(vs)
+  if hasattr(head, '_fields'):
+    return type(head)(*[_pack_mixed([s._fields[i] for s in vs])
+                        for i in range(len(head._fields))])
+  if isinstance(head, Left):
+    return Left(_pack_mixed([s.val for s in vs]))
+  if isinstance(head, Right):
+    return Right(_pack_mixed([s.val for s in vs]))
+  return _pack(vs)
+
 def _pack(vs):
   # Structure-of-arrays pack: a homogeneous list of samples becomes one sample
   # whose leaves are stacked [B] tensors. An ANY-marked slot (M4) is bucket-
@@ -933,6 +1043,9 @@ def _scatter(parts, idxs, total):
              _scatter([p.t2 for p in parts], idxs, total))
   if isinstance(head, InferenceList):
     return toList([_scatter([p[i] for p in parts], idxs, total) for i in range(len(head))])
+  # A tensor value (a per-value query's vectors): a list of [B] columns.
+  if isinstance(head, list):
+    return [_scatter([p[i] for p in parts], idxs, total) for i in range(len(head))]
   if isinstance(head, (Left, Right)):
     return type(head)(_scatter([p.val for p in parts], idxs, total))
   if hasattr(head, '_fields'):
@@ -953,24 +1066,43 @@ def _scatter(parts, idxs, total):
     out[torch.tensor(idx)] = t.to(dt)
   return out
 
-def bucketed(fn, samples, *args):
-  samples = list(samples)
-  total = len(samples)
+def _group(samples, key):
   order = []
   for i, s in enumerate(samples):
-    sig = signature(s)
+    sig = key(s)
     for grp in order:
       if grp[0] == sig:
         grp[1].append(i)
         break
     else:
       order.append((sig, [i]))
-  parts, idxs = [], []
-  for _sig, idx in order:
-    packed = _pack([samples[i] for i in idx])
+  return [idx for _sig, idx in order]
+
+def _run_buckets(fn, samples, groups, pack, args):
+  total = len(samples)
+  parts = []
+  for idx in groups:
+    packed = pack([samples[i] for i in idx])
     parts.append(fn(packed, *[_slice_arg(a, idx, total) for a in args]))
-    idxs.append(idx)
-  return _scatter(parts, idxs, total)
+  return _scatter(parts, groups, total)
+
+def bucketed(fn, samples, *args, mix_any=True):
+  # With mix_any, samples whose signatures differ only in which scalar leaves
+  # are ANY share one call ('mix_signature', '_pack_mixed'). That relies on the
+  # kernel treating an ANY test's mask per element ('any_merge'); a kernel that
+  # cannot (an ANY test inside a compound shape condition, which Python's
+  # bool() then refuses as ambiguous) raises, and the batch re-runs bucketed
+  # by full signature. Kernels are pure, so the re-run is exact.
+  samples = list(samples)
+  groups = _group(samples, signature)
+  if mix_any:
+    mixed = _group(samples, mix_signature)
+    if len(mixed) < len(groups):
+      try:
+        return _run_buckets(fn, samples, mixed, _pack_mixed, args)
+      except Exception:
+        pass
+  return _run_buckets(fn, samples, groups, _pack, args)
 
 # --- per-structure split at a select (task batched-value-dependent-structure-
 # select) --------------------------------------------------------------------
@@ -1005,9 +1137,20 @@ def _slice_batch(v, idx, total):
   # One half of a packed (structure-of-arrays) argument: every [B] leaf indexed
   # by `idx`; structure, wildcards and shared values (a 0-d tensor, a python
   # number, a tensor not of the batch's length) pass through, as in _slice_arg.
-  if isAny(v) or v is None:
+  if v is None or (not torch.is_tensor(v) and isAny(v)):
     return v
   if torch.is_tensor(v):
+    m = getattr(v, 'any_mask', None)
+    if m is not None:
+      # A mixed leaf: a half that is all ANY is the wildcard again, one
+      # with none a plain column, and a still-mixed half keeps its mask.
+      mh = m[idx]
+      if bool(mh.all()):
+        return "ANY"
+      out = v[idx]
+      if bool(mh.any()):
+        out.any_mask = mh
+      return out
     return v[idx] if v.dim() > 0 and v.shape[0] == total else v
   if isinstance(v, T):
     return T(_slice_batch(v.t1, idx, total), _slice_batch(v.t2, idx, total))

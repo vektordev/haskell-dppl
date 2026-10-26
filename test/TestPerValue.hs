@@ -19,7 +19,8 @@ import SPLL.Prelude
 import SPLL.IntermediateRepresentation
 import qualified SPLL.CodeGenPyTorch
 import qualified SPLL.CodeGenJulia
-import End2EndTesting (qualifyConstructors, juliaTestFlags, pyMockDef, juliaMockDefs, networkMocks)
+import qualified SPLL.CodeGenPyTorchBatched
+import End2EndTesting (qualifyConstructors, juliaTestFlags, pyMockDef, juliaMockDefs, networkMocks, findTorchPython, noTorch)
 import TestCaseParser (corpusPplPath)
 import TestSupport (bcConf, topKConf)
 
@@ -424,9 +425,9 @@ refusalTests = testGroup "slots without a finite domain are refused, naming the 
   , refused "a domain over the materialization budget" defaultCompilerConfig { materializationCardinality = 2 }
       "pv :: Enumerated Int\npv = draw s = (if Uniform < 0.3 then 1 else (if Uniform < 0.5 then 2 else 3)) in s\nmain = 1"
       ["the Enumerated slot the whole result of 'pv' (Int)", "has 3 values, over the materialization budget of 2"]
-  , refused "--batched" defaultCompilerConfig { batched = True }
-      "pv :: (Enumerated Bool, Bool)\npv = draw c = Uniform < 0.3 in (c, c)\nmain = 1"
-      ["not supported under --batched"]
+  , refused "--batched: a continuous slot" defaultCompilerConfig { batched = True }
+      "pv :: (Enumerated Float, Bool)\npv = draw x = Uniform in (x, x < 0.5)\nmain = 1"
+      ["the Enumerated slot fst of 'pv' (Float)", "continuous"]
   , testCase "the refusal is what a query reports" $ do
       p <- parseOrFail "pv :: (Enumerated Float, Bool)\npv = draw x = Uniform in (x, x < 0.5)\nmain = 1"
       env <- compileOrFail defaultCompilerConfig p
@@ -545,6 +546,7 @@ backendTests = testGroup "the text backends agree with their own point queries"
       (p2, env2) <- sharedDraw
       julia [ (p, env, "posterior", "main", [SigFst], guessWhoBackendArgs, [ VTuple VAny h | h <- guessWhoHeard ])
             , (p2, env2, "pv", "pv__point", [SigFst], [], sharedDrawQueries) ]
+  , testCase "BatchedPython: Guess-Who over a list board, every ANY mask in one call" batchedGuessWho
   ]
   where
     sharedDraw = do
@@ -556,6 +558,58 @@ backendTests = testGroup "the text backends agree with their own point queries"
     -- variant the text backends retire (a VAnyExcept witness, see
     -- docs/observation-masks.md), which the interpreter-side tests cover.
     sharedDrawQueries = [ VTuple VAny (VADT "Face" [VBool True, VBool False]), VTuple VAny (VADT "Face" [VBool False, VBool True]) ]
+
+-- | The batched backend's per-value query (task
+-- batched-compiles-compound-guesswho-posterior), on the list-board model: its
+-- @nth@ recursion splits per element, and its queries, each a different
+-- pattern of ANY answers, share one kernel call (@pythonLibBatched.bucketed@
+-- merges signatures that differ only in which scalar leaves are ANY). Every
+-- vector is checked against the closed form, through the merged call alone
+-- (so a fallback to per-signature buckets cannot hide a failure) and through
+-- @bucketed@.
+batchedGuessWho :: Assertion
+batchedGuessWho = do
+  mpy <- findTorchPython
+  case mpy of
+    Nothing -> noTorch "PerValue BatchedPython" >>= maybe (return ()) assertFailure
+    Just py -> do
+      p <- parseOrFail guessWhoNthSrc
+      env <- compileOrFail defaultCompilerConfig { batched = True, noIntegrate = True } p
+      src <- either (\e -> assertFailure e >> error "unreachable") return
+               (SPLL.CodeGenPyTorchBatched.generateFunctionsBatched True env)
+      projectDir <- getCurrentDirectory
+      let patterns = heardPatterns ++ [ [ pick i j | j <- [0 .. attrs - 1] ] | i <- [0 .. 39 :: Int] ]
+          pick i j = case (i * 5 + j * 3 + i * j) `mod` 4 of
+            0 -> Just True
+            1 -> Just False
+            _ -> Nothing
+          queries = [ SPLL.CodeGenPyTorch.pyVal (VTuple VAny (face h)) | h <- patterns ]
+          expected = [ map (guessWhoReference h) [0 .. faces - 1] | h <- patterns ]
+          pyList xs = "[" ++ intercalate ", " xs ++ "]"
+          script = unlines $
+            [ "import sys", "sys.path.insert(0, " ++ show projectDir ++ ")" ] ++ src ++
+            [ "import pythonLibBatched as _pb"
+            , "see = lambda x: x"
+            , "pick = lambda x: x"
+            , "_prior = torch.tensor(" ++ show priorProbs ++ ", dtype=torch.float64)"
+            , "_board = toList([torch.tensor(v, dtype=torch.float64) for v in " ++ show (map seeLogits [0 .. faces - 1]) ++ "])"
+            , "_samples = " ++ pyList queries
+            , "_want = " ++ show expected
+            , "_groups = _pb._group(_samples, _pb.mix_signature)"
+            , "if len(_groups) != 1 or _pb.bucket_count(_samples) < 2:"
+            , "    raise ValueError('expected one merged bucket over several signatures, got ' + str(len(_groups)) + ' of ' + str(_pb.bucket_count(_samples)))"
+            , "for _how, _r in [('merged call', _pb._run_buckets(posterior.forward, _samples, _groups, _pb._pack_mixed, (_prior, _board))),"
+            , "                 ('bucketed', bucketed(posterior.forward, _samples, _prior, _board))]:"
+            , "    _probs = torch.stack([torch.as_tensor(c, dtype=torch.float64).expand(len(_samples)) for c in _r[0]], dim=1)"
+            , "    for _i, _w in enumerate(_want):"
+            , "        _err = max(abs(float(_probs[_i][_k]) - _w[_k]) for _k in range(len(_w)))"
+            , "        if _err > 1e-12:"
+            , "            raise ValueError(_how + ', query ' + str(_i) + ': off by ' + str(_err))" ]
+      (code, out, err) <- withSystemTempFile "per_value_batched.py" $ \path h -> do
+        hPutStr h script
+        hClose h
+        readProcessWithExitCode py [path] ""
+      when (code /= ExitSuccess) $ assertFailure ("batched per-value check failed:\n" ++ out ++ err)
 
 -- | Run one per-value function's checks in one python3 process: every element
 -- against the point query at that value, and the sum against the ANY query.

@@ -107,10 +107,15 @@ prior factor. That would not be the point query's pruning.
 - a continuous slot;
 - a slot with no finite domain the compiler can derive (an unbounded `Int`);
 - a domain over `materializationCardinality` (`--materializationBudget`);
-- `--batched`;
 - a definition that does not take every declared argument as a parameter.
 
 ## Things worth knowing
+
+- Under `--batched` the per-value body emits as a comprehension over the
+  domain, one batched call of `f__given` (or `f__point`) per value, and each
+  result field is a list of `[B]` columns, the batched spelling of a vector.
+  Queries that differ only in which answer slots are `ANY` share one call
+  (`docs/batched-mode-pytorch-tensorizer.md`, "ANY as data").
 
 - `-d`/`--marginals` show the helpers as ordinary functions. `f__point` and
   `f__given` get their own mask variants and dispatchers like any function.
