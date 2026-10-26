@@ -173,3 +173,14 @@ stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
 
 Design, task and investigation documents live in the separate
 `~/code/NeST_internal_docs` repository.
+
+## Work docs
+
+- docs: ~/code/NeST_internal_docs
+- code: ~/code/haskell-dppl
+- test: stack test
+- module-docs: ~/code/NeST_internal_docs/src-docs/ (refresh, in the docs repo: python3 tools/srcdocs.py gen && python3 tools/srcdocs.py check)
+
+NeST's own rules for those docs (topics, repros and known-issues pins, never rebase) are in `~/code/NeST_internal_docs/CLAUDE.md`. `workdocs.yaml` here only points the `workdocs` tool at the docs.
+
+@~/.local/share/workdocs/CONVENTIONS.md

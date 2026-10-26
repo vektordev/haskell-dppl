@@ -1,0 +1,3 @@
+# Pointer for the shared `workdocs` tool: this repo's work docs live in
+# NeST_internal_docs (see its workdocs.yaml and CLAUDE.md).
+docs_root: ~/code/NeST_internal_docs
