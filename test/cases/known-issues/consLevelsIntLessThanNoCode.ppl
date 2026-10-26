@@ -1,0 +1,6 @@
+data Shape = Cube | Sphere | Cylinder
+data Color = Red | Blue
+data Object = Nil | Obj shape::Shape, color::Color, xb::Int
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+neural extractCLEVR :: (Symbol -> Scene) of 3x.{Empty | SCons {Nil | Obj _ _ [0, 1, 2, 3]} x}
+main sym = draw sc = extractCLEVR sym in if xb (obj sc) < xb (obj (rest sc)) then 1 else 0
