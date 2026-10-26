@@ -38,6 +38,7 @@ clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
 collapseGivenParam main.prob=3
 collapseMixture main.integ=3 main.prob=4
 comparisonSiblingJacobian main.prob=6
+countFoldRelateDigitEncoded hit.integ=4 hit.prob=4 main.integ=10 main.prob=10
 crossLatentSideOperandJacobian main.prob=12 main__m10.prob=7
 ctorTestOverTransformedDraw main.integ=24 main.prob=24
 ctorTestOverTransformedField main.integ=16 main.prob=16

@@ -8989,15 +8989,19 @@ planInvertIfConj meta env c t e target = do
 -- discard it without trace (its bindings dropped, the plan state and name
 -- supply rewound) and answer Nothing.
 planAttempt :: PlanM (a, Bool) -> PlanM (Maybe a)
-planAttempt act = do
+planAttempt act = either (const Nothing) Just <$> planAttemptEither ((\(r, ok) -> if ok then Right r else Left ()) <$> act)
+
+-- | 'planAttempt' whose failure carries what the caller needs to retry: a
+-- 'Right' is kept, a 'Left' is discarded without trace and returned.
+planAttemptEither :: PlanM (Either e a) -> PlanM (Either e a)
+planAttemptEither act = do
   st0 <- get
   sup0 <- lift get
   o <- lift (scoped (runStateT act st0))
-  let ((r, ok), st1) = openValue o
-  when ok (void (lift (inline o)))
-  if ok
-    then put st1 >> return (Just r)
-    else lift (put sup0) >> put st0 >> return Nothing
+  let (r, st1) = openValue o
+  case r of
+    Right _ -> void (lift (inline o)) >> put st1 >> return r
+    Left _  -> lift (put sup0) >> put st0 >> return r
 
 -- | Worlds of one constructor component whose sub-observation @s@ may be a
 -- wildcard at run time (a partial-@ANY@ query such as @(ANY, 1.0)@): a world
@@ -9501,6 +9505,38 @@ planEnumValues meta env planBodyExpr = do
     Left why    -> return (Left why)
     Right pairs -> Right <$> planGroupValues pairs
 
+-- | The (value, world) pairs of an arithmetic node's operands, for the caller
+-- to cross. Each operand is grouped ('planEnumValues') unless that bakes a
+-- leaf a sibling operand also reads: in @(if isA o then 1 else 0) + (if isT o
+-- then 1 else 0)@ with @isA o = if isBlue (color o) then isCube (shape o) else
+-- False@ and @isT o = isRed (color o)@, @isA@'s False group bakes @color@,
+-- which @isT@ constrains. Crossing them used to clash and rerun the whole
+-- traversal ungrouped (task count-fold-field-tested-in-two-branches-
+-- exponential); now only such an operand is redone with its own grouping off
+-- ('planUngroupedLocally'), the grouped attempt discarded without trace
+-- ('planAttemptEither'). Operands that do not collide are enumerated exactly
+-- as before.
+planEnumOperands :: CompilerMetadata -> PlanEnv -> [Expr] -> PlanM (Either String [[(IRExpr, PlanWorld)]])
+planEnumOperands meta env args = do
+  r <- planAttemptEither $ do
+    vssE <- mapM (planEnumValues meta env) args
+    return $ case sequence vssE of
+      Left why -> Right (Left why)
+      Right vss -> case culprits vss of
+        [] -> Right (Right vss)
+        is -> Left is
+  case r of
+    Right vssE -> return vssE
+    Left is -> fmap sequence . forM (zip [0 :: Int ..] args) $ \(i, a) ->
+      (if i `elem` is then planUngroupedLocally else id) (planEnumValues meta env a)
+  where
+    -- operands with a live world whose baked leaves a sibling's world reads
+    culprits vss =
+      [ i | (i, ws) <- zip [0 :: Int ..] (map (map snd) vss)
+          , any (\(j, ws') -> i /= j && any (\w -> any (collides w) ws') ws) (zip [0 ..] (map (map snd) vss)) ]
+    collides w w' = not (null (pwBaked w)) && touchesBaked (pwBaked w) w'
+                    && not (pwUnsat (intersectPlanW w w'))
+
 planEnumValuesRaw :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(IRExpr, PlanWorld)])
 planEnumValuesRaw meta env bodyExpr
   | not (subtreeHasOcc occs bodyExpr) =
@@ -9540,8 +9576,8 @@ planEnumValuesNode meta env bodyExpr = case bodyExpr of
                 -- same dead-branch gating as in planInvert
                 let cts = filter (not . pwUnsat) cts0
                 let cfs = filter (not . pwUnsat) cfs0
-                vsT <- if null cts then return (Right []) else planEnumValues meta env t
-                vsE <- if null cfs then return (Right []) else planEnumValues meta env e
+                vsT <- if null cts then return (Right []) else branchValues cts t
+                vsE <- if null cfs then return (Right []) else branchValues cfs e
                 return $ do
                   ts <- vsT
                   es <- vsE
@@ -9549,15 +9585,14 @@ planEnumValuesNode meta env bodyExpr = case bodyExpr of
                        ++ livePairs [ (v, intersectPlanW cw w) | cw <- cfs, (v, w) <- es ])
         | otherwise -> return (Left "an if condition independent of the plan-bound variables draws fresh randomness")
       Expr _ (InjF (Named nm) [a, b]) | Just op <- arithOp nm -> do
-        vsA <- planEnumValues meta env a
-        vsB <- planEnumValues meta env b
-        return ((\as bs -> livePairs [ (IROp op va vb, intersectPlanW wa wb) | (va, wa) <- as, (vb, wb) <- bs ]) <$> vsA <*> vsB)
+        vsE <- planEnumOperands meta env [a, b]
+        return ((\vs -> livePairs [ (IROp op va vb, intersectPlanW wa wb) | [(va, wa), (vb, wb)] <- sequence vs ]) <$> vsE)
       -- The remaining arithmetic ('planArithOp'), combined the same way: the
       -- cross product of the operands' value worlds.
       Expr _ (InjF (Named nm) args) | Just f <- planArithOp nm (length args) -> do
-        vssE <- mapM (planEnumValues meta env) args
+        vssE <- planEnumOperands meta env args
         return (map (\combo -> (f (map fst combo), foldl1 intersectPlanW (map snd combo)))
-                  . filter (not . pwUnsat . foldl1 intersectPlanW . map snd) . sequence <$> sequence vssE)
+                  . filter (not . pwUnsat . foldl1 intersectPlanW . map snd) . sequence <$> vssE)
       Expr _ (Apply lam@(Expr _ (Lambda x b)) a) -> do
         opened <- planOpenBinding meta env lam x b a
         case opened of
@@ -9573,6 +9608,25 @@ planEnumValuesNode meta env bodyExpr = case bodyExpr of
     occs = planEnvOccs env
     arithOp n = lookup n [("plus", OpPlus), ("mult", OpMult)]
     livePairs = filter (not . pwUnsat . snd)
+    -- A branch's values under a plan-dependent condition. Grouped, a branch
+    -- may bake a leaf the condition's worlds constrain again: in
+    -- @if isBlue (color o) then .. else (if isRed (color o) then (if isX0 (xb
+    -- o) then 1 else 0) else 0)@ the else branch's value-0 group bakes
+    -- @color@, the outer condition's False worlds re-constrain it, and the
+    -- clash used to rerun the whole traversal ungrouped (exponential in a
+    -- count fold's depth; task count-fold-field-tested-in-two-branches-
+    -- exponential). Such a branch is taken with its own top level ungrouped
+    -- instead, so the enclosing grouping runs after the condition is in; the
+    -- grouped attempt is discarded without trace ('planAttempt'). A branch
+    -- that does not clash is enumerated as before.
+    branchValues cws b = do
+      r <- planAttempt (do
+             vs <- planEnumValues meta env b
+             return (vs, either (const True) (not . any (clashesWith cws . snd)) vs))
+      maybe (planEnumValuesRaw meta env b) return r
+    clashesWith cws w =
+      any (\cw -> let iw = intersectPlanW cw w
+                  in pwClash iw && not (pwClash cw || pwClash w || pwUnsat iw)) cws
     -- one case of the call's argument value split ('planResolveApply'): the
     -- callee's (value, world) pairs, each intersected with the case's world
     enumSpec (spec, splitW)
