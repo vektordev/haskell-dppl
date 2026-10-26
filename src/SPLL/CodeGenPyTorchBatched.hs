@@ -71,7 +71,7 @@ import Control.Monad (foldM)
 import Control.Monad.State (State, evalState, get, put)
 import qualified Data.Set as Set
 import SPLL.IROptimizer (deterministicGens, allNamesIR)
-import SPLL.PythonNesting (tooDeepForPython, spillDeep, renameFree, bindIterable)
+import SPLL.PythonNesting (tooDeepForPython, spillDeep, adtCallees, renameFree, bindIterable)
 import Utils (Supply, demandUniqueNumber, evalSupply)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
@@ -1301,6 +1301,9 @@ data SEnv = SEnv
     -- destructor or index, or a call to another such method -- by raw and by
     -- post-rename name ('partialMethods'): a call to one is partial too.
   , sPartialCalls :: [String]
+    -- | The ADT constructors, tests and accessors, which a spill may move
+    -- ('SPLL.PythonNesting.adtCallees').
+  , sAdtCalls     :: [String]
   }
 
 -- | The environment for one program: nothing bound yet, and the three name sets
@@ -1338,6 +1341,7 @@ adtEnvWith enums decls = SEnv
   , sAccessors    = [ pyMangle f | d <- decls, length (constructors d) > 1
                                  , (_, fields) <- constructors d, (f, _) <- fields ]
   , sPartialCalls = []
+  , sAdtCalls     = adtCallees pyMangle decls
   }
 
 -- | The collapsed enumerations whose @is\<Ctor\>@ tests this expression reads,
@@ -2330,7 +2334,7 @@ batchedLine :: SEnv -> IRExpr -> Supply ([String], String)
 batchedLine env e
   | not (tooDeepForPython rendered) = return ([], rendered)
   | otherwise = do
-      (binds, e') <- spillDeep (sNullaryCtors env ++ sNullaryCalls env ++ sGenNames env) e
+      (binds, e') <- spillDeep (sNullaryCtors env ++ sNullaryCalls env ++ sGenNames env) (sAdtCalls env) e
       if null binds
         -- Nothing strict and pure to cut out; emit as before.
         then return ([], rendered)

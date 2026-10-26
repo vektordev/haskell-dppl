@@ -12,6 +12,7 @@ module SPLL.PythonNesting
   , tooDeepForPython
   , spillable
   , spillDeep
+  , adtCallees
   , renameFree
   , pythonMaxIndent
   , blockIndent
@@ -20,6 +21,7 @@ module SPLL.PythonNesting
   ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.Lang.Types (ADTDecl (..))
 import Data.List (isSuffixOf)
 import Utils (Supply, demandUniqueNumber)
 
@@ -138,7 +140,8 @@ pythonNestingDepth = go 0 0
       | otherwise            = go d m cs
 
 -- | A subterm that may be evaluated ahead of its line: pure arithmetic over
--- names -- no random draw, no generator reference, no call, no lambda. (Tensor
+-- names -- no random draw, no generator reference, no call other than the
+-- admitted ones below, no lambda. (Tensor
 -- and list builtins such as an index are pure; one carrying a lambda is ruled
 -- out by the lambda.)
 --
@@ -164,13 +167,24 @@ pythonNestingDepth = go 0 0
 -- so the line evaluated it unconditionally anyway. The one thing a reorder can
 -- change is which of several failing cells raises first -- the line fails
 -- either way.
-spillable :: [String] -> IRExpr -> Bool
-spillable callables = go
+--
+-- The other admitted calls are the module-level functions an ADT declaration
+-- emits ('adtCallees'): its constructors, its @is\<Ctor\>@ tests and its field
+-- accessors. Each is a fixed, non-recursive Python function that draws
+-- nothing; the tests and accessors may raise (on an ANY, on a sibling
+-- constructor), which is the same objection as an inference method's failing
+-- cell. An answer record's guarded slots read their observations through
+-- them (@a0(sample)@), so refusing them kept a shared group's enumeration
+-- comprehension -- 91 slots of guard lets around 14 nested coin enumerations,
+-- 212 brackets deep -- from moving off its line (task
+-- answer-record-group-exceeds-python-paren-depth).
+spillable :: [String] -> [String] -> IRExpr -> Bool
+spillable callables pureCalls = go
   where
     go (IRSample _)   = False
     go e@(IRApply _ _) =
       let (f, args) = collectApplyChain e
-      in inferenceMethodCall f && all go args
+      in (inferenceMethodCall f || adtCall f) && all go args
     -- A comprehension whose body and list are pure. A bare lambda is
     -- refused below, which is right for one that stays a value, but a 'BMap'
     -- applies its lambda on the spot to every element, so moving the whole
@@ -191,6 +205,18 @@ spillable callables = go
     go (IRVar n)      = not (n `elem` callables || isEffectfulVar n
                              || ".generate" `isSuffixOf` n)
     go e              = all go (getIRSubExprs e)
+
+    adtCall (IRVar n) = n `elem` pureCalls && not (n `elem` callables)
+    adtCall _ = False
+
+-- | The names of the functions an ADT declaration emits in both Python
+-- backends, spelled through the given mangler: every constructor (a class),
+-- its @is\<Ctor\>@ test and every field accessor. What 'spillable' admits as
+-- a pure call besides an inference method.
+adtCallees :: (String -> String) -> [ADTDecl] -> [String]
+adtCallees mangle decls = concat
+  [ mangle c : ("is" ++ mangle c) : [ mangle f | (f, _) <- fields ]
+  | d <- decls, (c, fields) <- constructors d ]
 
 -- | The callee of a call 'spillable' admits: a function group's probability
 -- or cumulative method, as 'envToLUT' renamed it (@n.forward@ for @n_prob@,
@@ -264,8 +290,8 @@ nestingEstimate e = case getIRSubExprs e of
 -- bottom-up: at a node whose estimated nesting passes
 -- 'spillNestingThreshold', every compound, 'spillable' strict child is
 -- replaced by a fresh variable, so the node's depth starts over from one.
-spillDeep :: [String] -> IRExpr -> Supply ([(String, IRExpr)], IRExpr)
-spillDeep callables e0 = do
+spillDeep :: [String] -> [String] -> IRExpr -> Supply ([(String, IRExpr)], IRExpr)
+spillDeep callables pureCalls e0 = do
   (binds, e', _) <- go e0
   return (binds, e')
   where
@@ -286,7 +312,7 @@ spillDeep callables e0 = do
                 kids' = [k | (_, k, _) <- cut]
             return (binds, rebuild kids', 1 + maximum (lazyDepth : [d | (_, _, d) <- cut]))
     spillOne (b, k, d)
-      | compound k && spillable callables k = do
+      | compound k && spillable callables pureCalls k = do
           n <- demandUniqueNumber
           let tmp = "_s" ++ show n
           return (b ++ [(tmp, k)], IRVar tmp, 0)

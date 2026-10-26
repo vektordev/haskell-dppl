@@ -1992,6 +1992,9 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
       [ testProperty "24 nested noisy ifs over an enumerated draw import batched and match the idealized value" (once enumIfChainBatchedCase) ]
   , testProperty "a too-deep comprehension nested in another's body becomes nested loops, imports and evaluates" (once nestedComprehensionCase)
   , testProperty "a chain of 11 two-field answers under an enumerated latent imports and matches the idealized values" (once chainedAnswersCase)
+  , testProperty "91 AND-pair answer slots in one shared group over 14 coins import and match the idealized values" (once answerGroupCase)
+  , testGroup "BatchedPython"
+      [ testProperty "91 AND-pair answer slots in one shared group over 14 coins import batched" (once answerGroupBatchedCase) ]
   ]
   where
     x = IRVar "x"
@@ -2216,6 +2219,55 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
             | (q, want) <- rows ]
           return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
                      (code == ExitSuccess)
+    -- Task answer-record-group-exceeds-python-paren-depth (formerly the
+    -- known-issues pin answerRecordSharedGroupParenDepth): 14 coins and the
+    -- answer record of every AND-pair of them, 91 slots in one shared group.
+    -- The enumeration's comprehensions read the observed slots through the
+    -- record's field accessors (@a0(sample)@), which the spill did not admit
+    -- as pure calls, so the outermost one could not move and the line nested
+    -- 212 deep. 12 coins (66 slots, 158 deep) loaded before the fix. Values
+    -- idealized: a0 = x0 && x1; all True iff every coin is; all False iff at
+    -- most one coin is.
+    answerGroupCoins = 14 :: Int
+    answerGroupSlots = [ (i, j) | i <- [0 .. answerGroupCoins - 1], j <- [i + 1 .. answerGroupCoins - 1] ]
+    answerGroupProgram = unlines $
+      [ "data Ans = Ans " ++ intercalate ", " [ "a" ++ show k ++ "::Bool" | k <- [0 .. length answerGroupSlots - 1] ]
+      , "main =" ]
+      ++ [ "  draw x" ++ show i ++ " = Uniform < 0." ++ show (i `mod` 9 + 1) ++ " in" | i <- [0 .. answerGroupCoins - 1] ]
+      ++ [ "  Ans " ++ unwords [ "(x" ++ show i ++ " && x" ++ show j ++ ")" | (i, j) <- answerGroupSlots ] ]
+    answerGroupCase = ioProperty $ do
+      let n = length answerGroupSlots
+          rows = [ ("['ANY'] * " ++ show n, 1.0 :: Double)
+                 , ("[True] + ['ANY'] * " ++ show (n - 1), 0.02)
+                 , ("[True] * " ++ show n, 4.35456e-07)
+                 , ("[False] * " ++ show n, 0.001248016896) ]
+      case either (Left . show) Right (tryParseProgram "" answerGroupProgram) >>= compile defaultCompilerConfig of
+        Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
+        Right env -> do
+          (code, out, err) <- runPythonChecks "answer_group.py" (sourceOf env) $ concat
+            [ [ "got = main.forward(Ans(*(" ++ q ++ ")))[0]"
+              , "if abs(got - " ++ show want ++ ") > " ++ show probTolerance ++ ":"
+              , "    raise ValueError(" ++ show ("forward(" ++ q ++ ") = %r, expected " ++ show want) ++ " % got)" ]
+            | (q, want) <- rows ]
+          return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
+                     (code == ExitSuccess)
+    answerGroupBatchedCase = ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorchProperty "deep expression spill: batched answer group"
+        Just py ->
+          case either (Left . show) Right (tryParseProgram "" answerGroupProgram)
+                 >>= compile defaultCompilerConfig{batched = True} >>= generateFunctionsBatched True of
+            Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
+            Right srcLines -> do
+              cwd <- getCurrentDirectory
+              (code, out, err) <- withSystemTempFile "answer_group_batched.py" $ \tmpPath tmpHandle -> do
+                hPutStr tmpHandle $ unlines
+                  [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", unlines srcLines ]
+                hClose tmpHandle
+                readProcessWithExitCode py [tmpPath] ""
+              return $ counterexample ("the emitted batched module failed to import:\n" ++ out ++ err)
+                         (code == ExitSuccess)
 
 -- | The scalar Python module for an 'IREnv', with torch's @Module@ replaced by
 -- a stub so that a plain @python3@ can import it.

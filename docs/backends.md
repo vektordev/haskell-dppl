@@ -118,11 +118,14 @@ corpus when this landed).
 A subterm moves only if it sits in a **strict** position (operator operands,
 an `if`-expression's condition, constructor/accessor/builtin/call arguments --
 never an arm, the right operand of `and`/`or`, or anything under a binder) and
-is **pure arithmetic** (`spillable`: no draw, no generator reference, no call,
-no lambda). A whole conditional expression may move, intact with its guard.
-The no-call rule is the approved scope, and it is why `writeLogits`'s V-deep
-`ConsInferenceList(main.forward(..)[0], ...)` chain is still refused at V = 200
-(docs-repo task `writelogits-cons-chain-nests-v-deep`). The measurement, the
+is **pure arithmetic** (`spillable`: no draw, no generator reference, no
+lambda, and no call except two kinds that draw nothing: a function group's
+inference method, `f.forward`/`f.integrate`, which is what `writeLogits`'s
+V-deep `ConsInferenceList(main.forward(..)[0], ...)` chain is made of (docs-repo
+task `writelogits-cons-chain-nests-v-deep`), and the functions an ADT
+declaration emits -- constructors, `is<Ctor>` tests and field accessors
+(`adtCallees`)). A whole conditional expression may move, intact with its
+guard. The measurement, the
 walk and its admission rules live in `SPLL.PythonNesting`, shared with the
 batched emitter (below); the Julia emitter has no such pass and was not
 checked. Pinned by `End2End`'s
@@ -158,6 +161,13 @@ before, the inner comprehension counted as a lambda, the outer one was not
 pure, and the line stayed at 200+ brackets. Pinned by the `deep expression
 spill` group (a hand-built nested pair, and the 11-answer chain through the
 pipeline). Docs-repo task `chained-answers-exceed-python-paren-depth`.
+
+An answer record's guarded slots read their observations through the record's
+field accessors (`a0(sample)`), so before the ADT functions were admitted, the
+enumeration comprehension of a large shared answer group (91 AND-pair slots
+over 14 coins: 212 brackets) could not move at all. Pinned by the `deep
+expression spill` group, scalar and `BatchedPython`. Docs-repo task
+`answer-record-group-exceeds-python-paren-depth`.
 
 The batched emitter spills the same way (`CodeGenPyTorchBatched.batchedLine`,
 the counterpart of `liftedLine`, running `SPLL.PythonNesting.spillDeep`): its

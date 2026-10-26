@@ -18,7 +18,7 @@ module SPLL.CodeGenPyTorch (
 import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, pythonNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
-import SPLL.PythonNesting (tooDeepForPython, spillDeep, renameFree, pythonMaxIndent, blockIndent, bindIterable, hasAssignmentExpr)
+import SPLL.PythonNesting (tooDeepForPython, spillDeep, adtCallees, renameFree, pythonMaxIndent, blockIndent, bindIterable, hasAssignmentExpr)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
@@ -44,6 +44,9 @@ data CodegenState = CodegenState
   , stCallables :: [String]
     -- ^ names whose bare reference is a call (nullary functions and
     -- constructors)
+  , stAdtCalls :: [String]
+    -- ^ the ADT constructors, tests and accessors, which a spill may move
+    -- ('SPLL.PythonNesting.adtCallees')
   , stHoistDeeperThan :: Maybe Int
     -- ^ when set, a statement block nested deeper than this is hoisted into
     -- a local function ('hoistDeepBlock'). Set only while regenerating a
@@ -245,12 +248,12 @@ generateFunctions genBoil env0 =
       generateADTClasses adtsEnv ++
       map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
       (if null consts then [] else [""]) ++
-      concatMap (generateClass clsName lut callableNames) funcs ++
+      concatMap (generateClass clsName lut callableNames (adtCallees pyMangle adtsEnv)) funcs ++
       ["", "# Example Initialization"] ++
       generateInitializations env
     else
       map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
-      concatMap (generateClass clsName lut callableNames) funcs
+      concatMap (generateClass clsName lut callableNames (adtCallees pyMangle adtsEnv)) funcs
 
 
 stdLib :: [(String, String)]
@@ -357,8 +360,8 @@ generateADTAccessor fieldName ctorName =
                  ++ " + \" Got: \" + type(x).__name__)"
              , "return x." ++ pyMangle fieldName ]
 
-generateClass :: (String -> String) -> [(String, String)] -> [String] -> IRFunGroup -> [String]
-generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _ _ _) = let
+generateClass :: (String -> String) -> [(String, String)] -> [String] -> [String] -> IRFunGroup -> [String]
+generateClass clsName lut callableNames adtCalls (IRFunGroup name gen prob integ writeLogits normal doc _ _ _) = let
   funcStringFromMaybe fname func = case func of
     Just a -> generateFunction True (fname, replaceCallsDecl a)
     Nothing -> return []
@@ -368,7 +371,7 @@ generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLog
     g' <- funcStringFromMaybe "generate" gen
     e' <- funcStringFromMaybe "writeLogits" writeLogits
     n' <- funcStringFromMaybe "normal_params" normal
-    return (i', p', g', e', n')) (CodegenState [] callableNames Nothing [])
+    return (i', p', g', e', n')) (CodegenState [] callableNames adtCalls Nothing [])
   commentLines = map ("# " ++) (lines doc)
   initLine = "class " ++ clsName name ++ "(Module):"
   globalVarDecls = map (\(mv, varName)-> varName ++ " = " ++ pyMultiVal mv) globalVars
@@ -731,7 +734,8 @@ liftedLine e = do
     then return (stmts, rendered)
     else do
       callables <- gets stCallables
-      (binds, e') <- lift (spillDeep callables e)
+      adtCalls <- gets stAdtCalls
+      (binds, e') <- lift (spillDeep callables adtCalls e)
       if null binds
         -- Nothing strict and pure to cut out; emit as before rather than loop.
         then return (stmts, rendered)
