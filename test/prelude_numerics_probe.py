@@ -253,6 +253,30 @@ def batched_dtype():
     B.gen_branch(True, 2, then_arm, else_arm, v[:2], 1.0)
     if sorted(seen) != [("f", 2), ("t", 2)]:
       fail("pythonLibBatched.gen_branch ran an empty half: " + repr(seen))
+  if hasattr(B, "split_branch"):
+    # The forward/integrate split at a partial arm (task
+    # batched-conditional-evaluates-a-partial-arm): gen_branch without a batch
+    # size; an arm never sees an element that does not take it.
+    seen = []
+    def then_arm(_, v, w):
+      seen.append(("t", v.tolist()))
+      return v * w
+    def else_arm(_, v, w):
+      seen.append(("f", v.tolist()))
+      return -w
+    w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+    v = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+    r = B.split_branch(torch.tensor([True, False, True]), then_arm, else_arm, v, w)
+    if r.tolist() != [2.0, -2.0, 6.0] or sorted(seen) != [("f", [2.0]), ("t", [1.0, 3.0])]:
+      fail("pythonLibBatched.split_branch gave " + repr((r, seen)))
+    r.sum().backward()
+    if w.grad is None or float(w.grad) != 3.0:
+      fail("pythonLibBatched.split_branch lost the gradient: " + repr(w.grad))
+    seen.clear()
+    B.split_branch(torch.tensor([False, False]), then_arm, else_arm, v[:2], 1.0)
+    B.split_branch(True, then_arm, else_arm, v[:2], 1.0)
+    if sorted(seen) != [("f", [1.0, 2.0]), ("t", [1.0, 2.0])]:
+      fail("pythonLibBatched.split_branch ran an empty half: " + repr(seen))
   if hasattr(B, "table_select"):
     # The flat form of a constant select chain answers in the kind of its
     # values exactly as the chain's where_anchored would.

@@ -250,6 +250,22 @@ half. A recursive generate that builds a list keeps its
 `hoistStructural` does not hoist out of it. Docs-repo task
 `batched-value-dependent-recursion`.
 
+**Partial-arm split.** A value-dependent `if` whose arm can raise outside
+its domain (`head`/`tail`, `fromLeft`/`fromRight`, a field of a
+multi-constructor ADT, or a call to a method holding one, `partialArm`)
+is not a `torch.where` either: the arm would run on the elements that do
+not take it. `nth k xs = if k == 0 then head xs else nth (k - 1) (tail xs)`
+recursed past the end of the list that way and its `head` raised.
+`splitPartialBranches` (after the structure split, prob/integ only) emits
+`split_branch(c, \_batchN v.. -> t, \_batchN v.. -> f, v..)`, the
+`gen_branch` mechanism without a batch size: a uniform condition runs one
+arm, a mixed one runs each arm on its half and scatters. Nothing is re-run,
+so the arms cost what the eager select did. `splitGenRecursion` takes the
+same trigger in a generate body. A runtime-key index (`nn_gather`,
+`tensor_index`) clamps and is not partial. Corpus
+`data-structures/listIndexByRecursion`, `listIndexFromSample`; docs-repo
+task `batched-conditional-evaluates-a-partial-arm`.
+
 A per-mask variant that still carries a `VAnyExcept` placeholder is retired
 to a runtime refusal of that one mask (`retireUnrenderableVariants`,
 rendered by `retiredMethod` as a `throw` of the shared message), as on the

@@ -415,7 +415,7 @@ pythonRuntimeValueNames =
   , "math", "modf", "nan", "nextafter", "nn_gather", "perm", "pi", "poison"
   , "pow", "prod", "radians", "rand", "randn", "random", "remainder"
   , "safe_div", "safe_exp", "safe_intdiv", "safe_log", "safe_mod", "sign", "signature", "sin", "sinh"
-  , "split_retry", "split_uniform"
+  , "split_branch", "split_retry", "split_uniform"
   , "sqrt", "sumprod", "sys", "table_select", "tan", "tanh", "tau", "tensor_index"
   , "tensor_logsumexp", "tensor_sum", "throw", "toList", "torch", "trunc"
   , "ulp", "where_anchored"

@@ -19,7 +19,7 @@ import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..
 import ImpactManifest
 import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
                         batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs, lineSpillLabel, oneHotGatherLabel,
-                        selectDemotionLabel, pureCalleeLabel)
+                        selectDemotionLabel, pureCalleeLabel, partialSplitLabel)
 import End2EndTesting (interpreterKey, pythonKey, juliaKey, loadCorpusPair, networkMocks)
 import TestCaseParser (corpusPplPath, isProbTestCase, isCumulTestCase)
 
@@ -88,8 +88,15 @@ batchedCensusRouting = do
   -- A draw-bound list element: its witness guard is a select over the shape
   -- probe `sample == []`, which the batched backend emits as a Python if.
   demoted <- census <$> load "drawBoundListElementGuardsEmptyTail"
-  assertEqual "a demoted structural select is not certified" [selectDemotionLabel] (batchedUncertifiedConstructs demoted)
+  -- Its head arm is partial, so the branch the guard selects is split too.
+  assertEqual "a demoted structural select is not certified" [partialSplitLabel, selectDemotionLabel] (batchedUncertifiedConstructs demoted)
   assertBool "a module without one carries no demotion label" (selectDemotionLabel `notElem` plain)
+  -- A list index by recursion: the branch over the index has a partial arm
+  -- (task batched-conditional-evaluates-a-partial-arm), split per element.
+  indexed <- census <$> load "listIndexByRecursion"
+  assertBool ("a module with a partial-arm split is not certified: " ++ show indexed)
+    (partialSplitLabel `elem` batchedUncertifiedConstructs indexed)
+  assertBool "a module without one carries no partial-arm split label" (partialSplitLabel `notElem` plain)
   -- A prob path calling a recursive deterministic helper's evaluator, and
   -- one reading a helper's Gaussian parameters: the callee's method body is
   -- emitted code the fuzz arms (prob/integ bodies only) never ran.

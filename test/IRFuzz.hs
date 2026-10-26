@@ -1783,13 +1783,6 @@ knownDisagreements =
       (batchedRepro (IRIf (IROp OpEq (IRBuiltin (BCategoricalIndex 0 2) [IRConst (VFloat 0.5), IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat 1)]])
                                      (IRConst (VInt 0)))
                           (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
-  -- The batched backend evaluates both arms of a conditional it lowers to a
-  -- @torch.where@, so a partial destructor in the arm not taken raises.
-  , KnownFamily "batched-conditional-evaluates-a-partial-arm" ["batched"]
-      (ByAnswer (\c _ a -> any (`raisedWith` a) ["IndexError", "fromLeft", "fromRight", "Item is not a Left", "Item is not a Right"]
-                         && not (null [ () | x <- caseUniverse c, arms <- conditionalArms x, any partialExpr arms ])))
-      (batchedRepro (IRIf (IROp OpLessThan (IRVar "a0") (IRConst (VFloat 2))) (IRConst (VFloat 0.5))
-                          (IRUnaryOp OpAbs (IRLetIn "l" (IRDestruct AcHead (IRConst (VList EmptyList))) (IRVar "a0")))) (VFloat 1))
   ]
   where
     isValue (Interpreted _) = True
@@ -1812,10 +1805,6 @@ knownDisagreements =
       IRLetIn{} -> True
       IRIf{} -> True
       _ -> False
-    conditionalArms x = case x of
-      IRIf _ a b -> [[a, b]]
-      IRSelect _ a b -> [[a, b]]
-      _ -> []
     isSampled (Sampled _) = True
     isSampled _ = False
     linearUniform x = case x of

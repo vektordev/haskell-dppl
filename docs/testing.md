@@ -738,7 +738,7 @@ typed fuzzer's and the IR generator's, `docs/fuzz-testing.md`). That list is
 held exact by `Slow.BackendAgreementCoverage`. The check stays keyed with the
 torch fingerprint, and a stderr line says how many programs it certified and
 which constructs keep the rest (today `AcTheta` and `AcSubtree`, the theta
-trees, `Batched:structure split`, `Batched:structural select`, `Batched:deep line spill` and `Batched:one-hot gather`). `Batched:structure split` is not an IR
+trees, `Batched:structure split`, `Batched:partial-arm split`, `Batched:structural select`, `Batched:deep line spill` and `Batched:one-hot gather`). `Batched:structure split` (like `Batched:partial-arm split`, `usesPartialSplit`) is not an IR
 construct: the census adds it when the batched backend splits a body at a
 structure select (`usesStructureSplit`, `docs/batched-mode-pytorch-tensorizer.md`),
 runtime code the fuzz arms' construct count cannot see. It is never in the

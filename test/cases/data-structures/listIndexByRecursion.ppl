@@ -1,0 +1,2 @@
+nth k xs = if k == 0 then head xs else nth (k - 1) (tail xs)
+main = Uniform < nth 1 [0.2, 0.7, 0.9]

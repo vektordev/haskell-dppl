@@ -1068,6 +1068,31 @@ def gen_branch(c, n, then_arm, else_arm, *free):
                               + type(parts[0]).__name__ + ", " + type(parts[1]).__name__ + ")")
   return _scatter(parts, [idx.tolist() for idx in halves], total)
 
+# --- per-element branch at a partial arm (task batched-conditional-evaluates-
+# a-partial-arm) --------------------------------------------------------------
+# A value-dependent branch whose arm can raise outside its domain (`head xs`,
+# `fromLeft e`, a sibling constructor's field, a recursion past the end of a
+# list) cannot be an eager torch.where: the arm would run on the elements that
+# do not take it. The compiler emits the arms as closures `arm(None, *free)`
+# and this runs each on the half of the batch that takes it, scattering the
+# results back -- gen_branch for a forward/integrate body, which has no batch
+# size to thread (the placeholder first parameter is unused). A condition
+# that agrees across the call runs one arm on everything and slices nothing.
+
+def split_branch(c, then_arm, else_arm, *free):
+  if not torch.is_tensor(c) or c.dim() == 0:
+    return then_arm(None, *free) if bool(c) else else_arm(None, *free)
+  m = c.to(torch.bool)
+  if bool(m.all()):
+    return then_arm(None, *free)
+  if not bool(m.any()):
+    return else_arm(None, *free)
+  total = m.shape[0]
+  halves = [torch.nonzero(m).flatten(), torch.nonzero(~m).flatten()]
+  parts = [arm(None, *[_slice_batch(v, idx, total) for v in free])
+           for arm, idx in zip((then_arm, else_arm), halves)]
+  return _scatter(parts, [idx.tolist() for idx in halves], total)
+
 # --- dense enumeration mode (Component 2, M3) --------------------------------
 # When the *query* domain is finite -- the program returns one of V statically
 # known values -- batching query points is the wrong axis: evaluate the kernel

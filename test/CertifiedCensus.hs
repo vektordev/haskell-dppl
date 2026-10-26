@@ -40,6 +40,7 @@ module CertifiedCensus
   , batchedProgramCensus
   , batchedUncertifiedConstructs
   , structureSplitLabel
+  , partialSplitLabel
   , lineSpillLabel
   , oneHotGatherLabel
   , selectDemotionLabel
@@ -51,7 +52,7 @@ import Data.List (isPrefixOf, nub, sort, (\\))
 
 import SPLL.IntermediateRepresentation
 import SPLL.IRGatherPass (usesOneHotGather)
-import SPLL.CodeGenPyTorchBatched (usesStructureSplit, usesSelectDemotion, usesPureCallees, generateFunctionsBatched)
+import SPLL.CodeGenPyTorchBatched (usesStructureSplit, usesPartialSplit, usesSelectDemotion, usesPureCallees, generateFunctionsBatched)
 import SPLL.Lang.Types (GenericValue(..), GenericList(..))
 
 -- | Every IR construct a body uses, as a label naming its kind:
@@ -265,6 +266,10 @@ batchedReachedNotCompared =
 -- constructs alone, so the label is never in 'batchedCertifiedConstructs',
 -- and a program that splits always has its batched-vs-expected check.
 --
+-- Likewise 'partialSplitLabel' when the batched backend splits a body at a
+-- branch with a partial arm ('SPLL.CodeGenPyTorchBatched.usesPartialSplit'),
+-- running each arm as a closure on its half of the batch (@split_branch@).
+--
 -- Likewise 'selectDemotionLabel' when the batched backend turns a select back
 -- into a structural @if@ ('SPLL.CodeGenPyTorchBatched.usesSelectDemotion'):
 -- the census still counts an 'IRSelect' there, which the fuzz arms certify as
@@ -297,6 +302,7 @@ batchedProgramCensus :: Either e IREnv -> [String]
 batchedProgramCensus = either (const []) census
   where census env = sort (nub (irEnvConstructs inferenceBodies env
                                 ++ [ structureSplitLabel | usesStructureSplit env ]
+                                ++ [ partialSplitLabel | usesPartialSplit env ]
                                 ++ [ selectDemotionLabel | usesSelectDemotion env ]
                                 ++ [ pureCalleeLabel | usesPureCallees env ]
                                 ++ [ lineSpillLabel | spillsALine env ]
@@ -311,6 +317,11 @@ batchedProgramCensus = either (const []) census
 -- batched-value-dependent-structure-select).
 structureSplitLabel :: String
 structureSplitLabel = "Batched:structure split"
+
+-- | The batched census label of a per-element split at a branch with a
+-- partial arm (task batched-conditional-evaluates-a-partial-arm).
+partialSplitLabel :: String
+partialSplitLabel = "Batched:partial-arm split"
 
 -- | The batched census label of a select the batched backend demotes back to
 -- a structural @if@ (task batched-draw-bound-list-element-reads-empty-tail).

@@ -1,0 +1,7 @@
+-- A list index each element decides: nth walks floor(k / 0.25) cells, and k is
+-- the queried sample's first component, so the guard k < 0.25 is mixed across
+-- a batch. Batched mode splits the batch at it, since its head arm raises on
+-- the elements that walked past the end
+-- (task batched-conditional-evaluates-a-partial-arm).
+nth k xs = if k < 0.25 then head xs else nth (k - 0.25) (tail xs)
+main = draw k = Uniform in (k, nth k [0.2, 0.7, 0.9, 0.4] + Normal)

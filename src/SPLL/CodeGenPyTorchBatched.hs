@@ -42,6 +42,7 @@ module SPLL.CodeGenPyTorchBatched
   , batchedGuard
   , prepBatchedBody
   , usesStructureSplit
+  , usesPartialSplit
   , usesSelectDemotion
   , usesPureCallees
   , structural
@@ -152,9 +153,10 @@ emitBatched genBoil env0 = do
       -- uncollapsed backend's. At most k+1 attempts for k enums, and the
       -- fallback is never worse than the uncollapsed backend.
       let attempt enums = do
-            let env' = (adtEnvWith enums adts) { sGenNames = map fst genArities
-                                               , sMethodSCCs = methodSCCs lut pureNames methods
-                                               , sNullaryCalls = nullaryCalls }
+            let env' = withPartialCalls lut methods
+                         (adtEnvWith enums adts) { sGenNames = map fst genArities
+                                                 , sMethodSCCs = methodSCCs lut pureNames methods
+                                                 , sNullaryCalls = nullaryCalls }
             () <- checkCallGraph env' pureNames methods
             classes <- mapM (generateClass (groupClassName env) env' lut genArities genRaw pureNames evals) funcs
             return (enums, classes)
@@ -729,7 +731,7 @@ prepBody split env = go []
     go ps (IRLambda n b) = IRLambda n (go (n : ps) b)
     go ps e =
       hoistStructural env (distributeSelects env (splitIf ps (foldConst (demoteStructuralSelects env (stripRootGuard e)))))
-    splitIf ps | split     = splitStructureSelects env
+    splitIf ps | split     = splitPartialBranches env ps . splitStructureSelects env
                | otherwise = splitGenRecursion env ps
 
 -- | Turn back into an 'IRIf' every 'IRSelect' whose condition is 'structural'.
@@ -810,6 +812,14 @@ splitKernelName = "_split_kernel"
 usesStructureSplit :: IREnv -> Bool
 usesStructureSplit = anyInferenceBody (\senv body -> usesSplit (prepBatchedBody senv body))
 
+-- | Does the batched backend split any prob/integ body of this environment
+-- at a branch with a partial arm ('splitPartialBranches')? The impact census
+-- ('CertifiedCensus') keys on it, like 'usesStructureSplit': the IR carries an
+-- 'IRIf' there, and the module runs its arms as closures on halves of the
+-- batch (@split_branch@), which no IR construct names.
+usesPartialSplit :: IREnv -> Bool
+usesPartialSplit = anyInferenceBody (\senv body -> splitBranchName `elem` allVarNames (prepBatchedBody senv body))
+
 -- | Does the batched backend demote any select of a prob/integ body of this
 -- environment back to a structural @if@ ('demoteStructuralSelects')? The
 -- impact census ('CertifiedCensus') keys on it, like 'usesStructureSplit':
@@ -835,7 +845,7 @@ anyInferenceBody p env0 =
   or [ p (enterMethod n senv) body | (n, body) <- methods, isEmittedMethod n || n `elem` pureNames ]
   where
     BatchedProgram (IREnv _ adts _) _ pureNames methods = batchedProgram env0
-    senv = (adtEnv adts) { sMethodSCCs = methodSCCs [] pureNames methods }
+    senv = withPartialCalls [] methods (adtEnv adts) { sMethodSCCs = methodSCCs [] pureNames methods }
 
 -- | A program as the batched backend sees it: identifiers mangled, per-mask
 -- variants that cannot render retired, deterministic generators inlined or
@@ -926,9 +936,7 @@ genBranchName = "gen_branch"
 -- across the batch (a Python bool, @dice@'s @x == 1.0@) runs one arm and slices
 -- nothing.
 splitGenRecursion :: SEnv -> [String] -> IRExpr -> IRExpr
-splitGenRecursion env0 params e0
-  | null (sRecCallees env0) = e0
-  | otherwise = evalState (go env0 params e0) (0 :: Int)
+splitGenRecursion env0 params e0 = evalState (go env0 params e0) (0 :: Int)
   where
     go env locals e = case e of
       IRLambda n b  -> IRLambda n <$> go env (n : locals) b
@@ -937,7 +945,8 @@ splitGenRecursion env0 params e0
       IRIf c t f | not (structural env c) -> branch env locals c t f e
       _ -> irDescendM (go env locals) e
     branch env locals c t f orig
-      | undescendingRecCall env t || undescendingRecCall env f = do
+      | undescendingRecCall env t || undescendingRecCall env f
+          || partialArm env t || partialArm env f = do
           c' <- go env locals c
           t' <- go env locals t
           f' <- go env locals f
@@ -950,6 +959,93 @@ splitGenRecursion env0 params e0
           return (IRLetIn m c' (foldl IRApply (IRVar genBranchName)
                     ([IRVar m, IRVar batchNVar, arm t', arm f'] ++ map IRVar free)))
       | otherwise = irDescendM (go env locals) orig
+
+-- | The runtime function a prob/integ body's partial branch is emitted
+-- through (@pythonLibBatched.split_branch@, 'splitPartialBranches').
+splitBranchName :: String
+splitBranchName = "split_branch"
+
+-- | Split a prob/integ body's batch at every value-dependent branch with a
+-- /partial/ arm ('partialArm'): one that raises outside its domain, which an
+-- eager @torch.where@ would evaluate on the elements that do not take it,
+-- where the interpreter and both scalar backends never evaluate it (task
+-- batched-conditional-evaluates-a-partial-arm). @if k == 0 then head xs else
+-- nth (k - 1) (tail xs)@ is the shape every list index has: eagerly, the
+-- recursion runs past the end of the list and its @head@ raises.
+--
+-- The condition is evaluated once, and the arms become closures that
+-- 'splitBranchName' runs on the half of the batch that takes each, scattering
+-- the two results back -- 'splitGenRecursion's mechanism, which unlike
+-- 'splitStructureSelects' re-runs nothing, so a branch costs the same arm
+-- work the eager select did:
+--
+-- > if c then t else f
+-- >   ==>  split_branch(c, \_batchN v.. -> t, \_batchN v.. -> f, v..)
+--
+-- @v..@ are the arms' free local variables, each sliced to the half; the
+-- leading parameter is a placeholder (an IR lambda cannot be nullary) the
+-- runtime passes @None@ for. A condition that agrees across the call -- a
+-- Python bool, or a mask that is all one way -- runs the one arm it takes on
+-- the whole batch and slices nothing.
+--
+-- Runs after 'splitStructureSelects', so it only sees what that pass left:
+-- an arm choosing a structure is never split here (its dichotomy refusal, and
+-- the enum blame that retries it uncollapsed, stand). 'IRSelect' is left
+-- alone: the select pass only builds one over the tensor fragment, which has
+-- no partial node, and the IR contract forbids a partial select arm
+-- ('SPLL.IRTypeCheck.inferExpr'). A branch inside a 'BMap' body is left
+-- alone too, as in 'splitStructureSelects'.
+splitPartialBranches :: SEnv -> [String] -> IRExpr -> IRExpr
+splitPartialBranches env0 params e0 = evalState (go env0 params e0) (0 :: Int)
+  where
+    go env locals e = case e of
+      IRLambda n b  -> IRLambda n <$> go env (n : locals) b
+      IRLetIn n v b -> IRLetIn n <$> go env locals v <*> go (bindS env n v) (n : locals) b
+      IRBuiltin BMap [l@(IRLambda _ _), t] -> (\t' -> IRBuiltin BMap [l, t']) <$> go env locals t
+      IRIf c t f
+        | not (structural env c)
+        , partialArm env t || partialArm env f
+        , not (listValued env t || listValued env f)
+        , batchPure env c -> do
+            c' <- go env locals c
+            t' <- go env locals t
+            f' <- go env locals f
+            let free = [ v | v <- irFreeVars (IRConstruct TgTuple [t', f']), v `elem` locals ]
+                arm a = foldr IRLambda a (batchNVar : free)
+            return (foldl IRApply (IRVar splitBranchName) ([c', arm t', arm f'] ++ map IRVar free))
+      _ -> irDescendM (go env locals) e
+
+-- | Does evaluating this expression risk raising outside its domain? A list
+-- head or tail (an empty list), an @Either@ payload (the other arm), a field
+-- of a multi-constructor ADT ('sAccessors'), or a call to a method that holds
+-- one ('sPartialCalls'). Within a bucket the structure is uniform, but whether
+-- such a node raises can still depend on which elements reach it, through a
+-- recursion whose depth each element decides (@nth k xs@). An index at a
+-- runtime key is not partial here: @nn_gather@ and @tensor_index@ clamp it,
+-- for exactly this reason.
+--
+-- Conservative: a partial node under a guard of its own inside the arm still
+-- counts. Over-approximating costs only a split where the eager select was
+-- safe, never a wrong answer.
+partialArm :: SEnv -> IRExpr -> Bool
+partialArm env e = here || any (partialArm env) (getIRSubExprs e)
+  where
+    here = case e of
+      IRDestruct ac _ -> ac `elem` [AcHead, AcTail, AcFromLeft, AcFromRight]
+      IRVar n -> n `elem` sAccessors env || n `elem` sPartialCalls env
+      _ -> False
+
+-- | Record in 'sPartialCalls' the methods that may raise outside their domain
+-- ('partialArm' on the body, to a fixpoint over the call graph), by raw name
+-- and by their @lut@ rename.
+withPartialCalls :: [(String, String)] -> [(String, IRExpr)] -> SEnv -> SEnv
+withPartialCalls lut methods env = env { sPartialCalls = names ++ [ r | Just r <- map (`lookup` lut) names ] }
+  where
+    names = fixpoint []
+    fixpoint known =
+      let env' = env { sPartialCalls = known }
+          known' = [ m | (m, b) <- methods, m `elem` known || partialArm env' b ]
+      in if length known' == length known then known else fixpoint known'
 
 -- | Strip a root query-type guard @if (sample conforms) then body else error@,
 -- taking the conforming arm. Leaves a guard-less body untouched.
@@ -1197,6 +1293,14 @@ data SEnv = SEnv
     -- prob/integ path references one by a bare 'IRVar' (there is no nullary
     -- 'IRApply'), which 'batchedExpr' emits as a call.
   , sNullaryCalls :: [String]
+    -- | The field accessors of the ADTs with more than one constructor: a
+    -- read off a sibling constructor raises, so an arm holding one is
+    -- partial ('partialArm').
+  , sAccessors    :: [String]
+    -- | The methods whose bodies may raise outside their domain -- a partial
+    -- destructor or index, or a call to another such method -- by raw and by
+    -- post-rename name ('partialMethods'): a call to one is partial too.
+  , sPartialCalls :: [String]
   }
 
 -- | The environment for one program: nothing bound yet, and the three name sets
@@ -1231,6 +1335,9 @@ adtEnvWith enums decls = SEnv
   , sMethodSCCs   = []
   , sRecCallees   = []
   , sNullaryCalls = []
+  , sAccessors    = [ pyMangle f | d <- decls, length (constructors d) > 1
+                                 , (_, fields) <- constructors d, (f, _) <- fields ]
+  , sPartialCalls = []
   }
 
 -- | The collapsed enumerations whose @is\<Ctor\>@ tests this expression reads,
@@ -2304,6 +2411,19 @@ batchedExpr env (IRCumulative d Linear e) = "cumulative_" ++ batchedDist d ++ "(
 -- A call chain: the raw network invocation @net(sym)@ (returning a @[B, n]@
 -- logit tensor) or a cross-function read-logits call @readLogits.forward(logits, sample)@
 -- (the function name already rewritten to @class.method@ form by the LUT).
+-- A split branch ('splitPartialBranches', 'splitGenRecursion'): each arm is a
+-- closure re-binding the free variables it reads to their half of the batch.
+-- A half of a bucket has the bucket's structure, so a name the enclosing
+-- scope holds as structural ('sBound') stays structural inside the arm,
+-- unlike an ordinary lambda's parameters.
+batchedExpr env e@(IRApply _ _)
+  | (IRVar fn, args) <- collectApplyChain e
+  , fn == splitBranchName || fn == genBranchName =
+      fn ++ "(" ++ intercalate ", " (map armExpr args) ++ ")"
+  where
+    armExpr a@(IRLambda _ _) = let (names, rest) = unwrapLambdaNames a
+                               in "(lambda " ++ intercalate ", " names ++ ": " ++ batchedExpr env rest ++ ")"
+    armExpr a = batchedExpr env a
 batchedExpr env e@(IRApply _ _) =
   let (fn, args) = collectApplyChain e
   in batchedExpr env fn ++ "(" ++ intercalate ", " (map (batchedExpr env) args) ++ ")"
