@@ -5118,17 +5118,18 @@ packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
 -- the inner draws forward.
 enumerateAppliedLambda :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
 enumerateAppliedLambda meta cumulative l v sample =
-  enumerateBinding meta l v (\bodyMeta lBodyExpr -> toIREnumerate bodyMeta cumulative lBodyExpr sample)
+  enumerateBinding meta l v Nothing (\bodyMeta lBodyExpr -> toIREnumerate bodyMeta cumulative lBodyExpr sample)
 
 -- | 'enumerateAppliedLambda' with the body's compilation handed in: the sum
 -- over the argument's support of P(arg = value) times what @body@ returns,
 -- given the meta with the bound variable fixed and the lambda's body (renamed
 -- if its parameter clashed with a variable the argument reads).
 -- 'factoredDrawStack' passes a body of its own, the operands of one
--- independent component.
-enumerateBinding :: CompilerMetadata -> Expr -> Expr
+-- independent component, and may pass the argument's measure already
+-- tabulated ('drawMeasureTable').
+enumerateBinding :: CompilerMetadata -> Expr -> Expr -> Maybe MarginalTable
                  -> (CompilerMetadata -> Expr -> CompilerMonad PResult) -> CompilerMonad PResult
-enumerateBinding meta l v compileBody = do
+enumerateBinding meta l v preTable compileBody = do
   let lCn = chainName (getTypeInfo l)
   let (_, paramVar, bodyCn, _) = equivalentLambda "enumerateAppliedLambda" (fcData meta) lCn
   let fExprs = map snd (functions (compilingProgram meta))
@@ -5147,12 +5148,27 @@ enumerateBinding meta l v compileBody = do
       else return (paramVar, findExprWithCN fExprs bodyCn)
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
   let sr = semiringOf meta
+  let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
+  -- Inside an enclosing enumeration, the argument's measure is tabulated once
+  -- per domain value ahead of this loop rather than recomputed in it (task
+  -- split-read-field-leaf-rebuilt-per-world). The cells depend on this loop's
+  -- variable only through the constant key each is compiled at, so they land
+  -- in the enclosing scope, and every enclosing loop whose variable they do
+  -- not read hoists them out in turn ('hoistInvariantBindings'). A field read
+  -- of a split neural record at enumeration depth @k@ is then measured @2k@
+  -- times instead of @2^(k+1) - 2@. At the outermost loop the table would
+  -- only rearrange the same @|domain|@ measures, so it is not built there.
+  -- Under --batched, 'SPLL.IRLeafTablePass' tabulates a nested neural leaf
+  -- after optimization instead, as one gathered table ('nestedDrawTables').
+  table <- case preTable of
+    Just t -> return (Just t)
+    Nothing
+      | not (nestedDrawTables meta) -> return Nothing
+      | otherwise -> drawMeasureTable meta v
   irTuple <- scoped (do
-    -- The argument is measured with the enclosing enumerated latents fixed:
-    -- inside their loops each holds one value, and a curried helper call such
-    -- as @contrib u 1@ (u enumerated outside) is only measurable as a call
-    -- with deterministic arguments once @u@ reads as one.
-    pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
+    pBranch <- case table of
+      Just tbl -> return (lookupMarginal meta tbl (IRVar boundVar))
+      Nothing  -> (unP . rProb) <$> toIRInference meta False (drawMeasured meta v) (IRVar boundVar)
     -- Inside the loop the bound variable holds one fixed domain value, so it is
     -- recorded as recovered, exactly as 'residueFactor' records a variable fixed
     -- at its witness. Only a body that leaves the enumeration for 'toIRInference'
@@ -5163,10 +5179,29 @@ enumerateBinding meta l v compileBody = do
                        , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
     bodyRes <- compileBody bodyMeta lBodyExpr
     return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
-  let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
   enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+
+-- | A draw's argument as 'enumerateBinding' measures it: with the enclosing
+-- enumerated latents fixed. Inside their loops each holds one value, and a
+-- curried helper call such as @contrib u 1@ (u enumerated outside) is only
+-- measurable as a call with deterministic arguments once @u@ reads as one.
+drawMeasured :: CompilerMetadata -> Expr -> Expr
+drawMeasured meta v = reinferRecovered meta (recoveredVars meta) v
+
+-- | Whether 'enumerateBinding' tabulates a draw's measure ahead of its loop:
+-- inside an enclosing enumeration, and not under --batched.
+nestedDrawTables :: CompilerMetadata -> Bool
+nestedDrawTables meta = not (Set.null (fixedLatents meta)) && not (batched (compilerConfig meta))
+
+-- | The measure of a draw's argument at each value of its domain, one
+-- let-bound cell per value, bound in the current scope ('pointQueryTable',
+-- which declines a domain or a measure too large to unroll).
+drawMeasureTable :: CompilerMetadata -> Expr -> CompilerMonad (Maybe MarginalTable)
+drawMeasureTable meta v =
+  pointQueryTable meta (drawMeasured meta v)
+    (multiValueToValueList (head [x | DiscreteValues x <- tags (getTypeInfo v)]))
 
 -- | A stack of enumerable @draw@s directly over a field constructor, with its
 -- operands split into the groups that share nothing random (task
@@ -5277,9 +5312,22 @@ factoredDrawStack meta cumulative ds sample = do
       v <- mkVariable "applicable"
       setVariables [(v, conj)]
       return (IRVar v)
+  -- Nested in an enclosing enumeration, a draw whose value reads no other
+  -- draw of the stack is tabulated here, outside the guard below: inside it
+  -- the cells could not leave the guarded block, which reads the enclosing
+  -- loop's variable, and would be rebuilt at every enclosing world (task
+  -- split-read-field-leaf-rebuilt-per-world). Out here the enclosing loops
+  -- hoist them as they hoist any invariant binding. The cells read no part of
+  -- the sample, which is all the guard protects.
+  let stackVars = Set.fromList [ x | (Expr _ (Lambda x _), _) <- dsBinds ds ]
+  tables <- if not (nestedDrawTables meta) then return [] else
+    fmap catMaybes $ forM (zip [0 :: Int ..] (dsBinds ds)) $ \(j, (_, v)) ->
+      if Set.null (freeVarsExpr v `Set.intersection` stackVars)
+        then fmap (\t -> (j, t)) <$> drawMeasureTable meta v
+        else return Nothing
   groupRes <- forM (dsComps ds) $ \(bis, ois) ->
     guardedSubInference meta [applicable]
-      (group meta [ dsBinds ds !! j | j <- bis ] [ (ops !! i, fields !! i) | i <- ois ])
+      (group meta [ (dsBinds ds !! j, lookup j tables) | j <- bis ] [ (ops !! i, fields !! i) | i <- ois ])
   return (guardP sr [applicable] (foldl1 (prodP sr) groupRes))
   where
     sr = semiringOf meta
@@ -5287,7 +5335,7 @@ factoredDrawStack meta cumulative ds sample = do
                         (if decons then toIRInferenceSave else toIRInference) m cumulative op fs) opFs
     group m binds opFs = inLoops m binds opFs
     inLoops m [] opFs = productOf <$> mapM (\(op, (fs, _, _)) -> leaf m op fs) opFs
-    inLoops m ((l, v) : rest) opFs = enumerateBinding m l v (\bm _ -> inLoops bm rest opFs)
+    inLoops m (((l, v), tbl) : rest) opFs = enumerateBinding m l v tbl (\bm _ -> inLoops bm rest opFs)
     -- An ANY field matches anything, which the whole-constructor comparison
     -- this replaces got from comparing ADT values; the operand's own term is
     -- compiled only for a field that is not ANY.

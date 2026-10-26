@@ -227,6 +227,22 @@ shared fields, and an `ANY` slot still keeps its fields in the group. Pinned by
 `Internals.recordSharedFieldGroupsCodeSizePolynomial` and the
 `neural/recordSharedFieldGroups{,Noisy}` corpus pairs.
 
+**A nested draw's measure is tabulated ahead of its loop** (task
+`split-read-field-leaf-rebuilt-per-world`). Inside an enclosing enumeration,
+`enumerateBinding` compiles the argument's measure once per domain value
+(`drawMeasureTable`, through `pointQueryTable` and its size gates) instead of
+inside the loop, and the loop body reads a cell (`lookupMarginal`). The cells
+read the loop variable only as a constant key, so every enclosing loop they are
+invariant in hoists them. A field read of a split neural record at depth `k`
+then costs `2k` leaf reads instead of `2^(k+1) - 2` (126 against 12 per face on
+the exact-EIG Guess-Who model). `factoredDrawStack` builds the tables of a
+group's draws itself, outside its applicability guard, when it is nested: a
+table built inside the guard could not leave it. The outermost loop is not
+tabulated, since there the table would only reorder the same reads, and
+neither is `--batched` mode, where `IRLeafTablePass` tabulates nested neural
+leaves as one gathered table. Pinned by
+`Internals.splitReadFieldLeafTabulated` and `neural/splitReadFieldChain`.
+
 The per-slot chain is then tabulated by Tier 0 materialization *inside* the
 loop over `c`, which needed its decomposability gate to be retaken given the
 enclosing enumerated bindings (`sharesLatentGiven` over

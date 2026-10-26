@@ -513,6 +513,38 @@ test_nnHoistedOutOfNestedEnumSum = testCase "nnHoistedOutOfNestedEnumSum" $ do
           assertBool "neither operand's network call may sit inside an enumeration loop" $
             not (nnCallInsideEnumSum "n" probExpr)
 
+-- | Task split-read-field-leaf-rebuilt-per-world: a field read of a split
+-- neural record was measured inside every enclosing field's loop, so at
+-- enumeration depth k the leaf @see_auto_prob@ ran 2^(k+1) - 2 times per query
+-- where 2k suffice (126 against 12 per face on the exact-EIG Guess-Who model).
+-- Each nested field's measure is now tabulated once ahead of the loops. The
+-- check: no reader sits more than one enumeration loop deep (the outermost
+-- field's read stays in its own loop, which costs the same |domain| reads),
+-- while the loops themselves are still there. Corpus
+-- neural/splitReadFieldChain pins the values.
+test_splitReadFieldLeafTabulated :: TestTree
+test_splitReadFieldLeafTabulated = testCase "splitReadFieldLeafTabulated" $ do
+  path <- corpusPplPath "splitReadFieldChain"
+  src <- readFile path
+  prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+            (tryParseProgram path src)
+  irEnv <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+             (compile defaultCompilerConfig { noIntegrate = True } prog)
+  (probExpr, _) <- case probFun (lookupIREnv "main" irEnv) of
+    Just pf -> return pf
+    Nothing -> assertFailure "compiled main has no probability variant"
+  let depths = readerDepths 0 probExpr
+  assertBool "main's probability body should still enumerate the fields" (irAnyLoop probExpr)
+  assertBool "main's probability body should still read see_auto_prob" (not (null depths))
+  assertBool ("a field leaf read sits " ++ show (maximum depths)
+              ++ " enumeration loops deep; tabulated leaves sit at most one deep")
+    (maximum depths <= 1)
+  where
+    readerDepths :: Int -> IRExpr -> [Int]
+    readerDepths d (IRBuiltin BMap [IRLambda _ body, t]) = readerDepths (d + 1) body ++ readerDepths d t
+    readerDepths d e@(IRApply (IRVar v) _) | v == "see_auto_prob" = d : concatMap (readerDepths d) (getIRSubExprs e)
+    readerDepths d e = concatMap (readerDepths d) (getIRSubExprs e)
+
 -- | Saturated applications of the network @name@ anywhere in the expression.
 -- The reader @name_auto_prob (name sym) x@ is not one: its head is a
 -- different name, and only the inner @name sym@ is counted.
@@ -6413,6 +6445,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
       , test_writeLogitsBoolExactProbs
       , test_nnHoistedOutOfEnumSum
       , test_nnHoistedOutOfNestedEnumSum
+      , test_splitReadFieldLeafTabulated
       , test_repeatedNeuralReadShared
       , test_networkShareScoping
       , test_agreementFusesToElementwiseProduct

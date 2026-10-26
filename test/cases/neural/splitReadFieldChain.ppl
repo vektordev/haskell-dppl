@@ -1,0 +1,12 @@
+-- One split neural read whose fields a, b, c are each read by two slots or
+-- more, so they stay one group and are enumerated in nested loops, plus a
+-- field e read once. Each nested field's measure is tabulated once ahead of
+-- the loops instead of re-read inside every enclosing loop (task
+-- split-read-field-leaf-rebuilt-per-world; Internals
+-- splitReadFieldLeafTabulated checks the loop depth of the reads).
+data Face = Face a::Bool, b::Bool, c::Bool, e::Bool
+data Ans = Ans pa::Bool, pb::Bool, pc::Bool, pab::Bool, pbc::Bool, pac::Bool, pe::Bool
+neural see :: (Symbol -> Face)
+main img =
+  draw f = see img in
+  Ans (a f) (b f) (c f) (a f && b f) (b f || c f) (a f && c f) (e f)
