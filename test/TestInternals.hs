@@ -2528,6 +2528,37 @@ test_markovBranchRandomRateCompilePolynomial = testCase "markovBranchRandomRateC
                     | j <- [1 .. n - 1 :: Int] ]
              ++ "(Normal, " ++ show n ++ ") : genSeq " ++ show n ++ " p"
 
+-- | A record of answers over one split neural read, in N groups that share no
+-- field, was known-issues/recordSharedFieldGroupsGrowth (docs task
+-- answer-record-shared-fields-enumerated-jointly): every field read by two
+-- slots stayed above the whole constructor and the stack enumerated them
+-- jointly, 14 / 21 / 39 / 102 / 380 KB of Python at N = 2..6 (slopes 1.0,
+-- 2.2, 4.3, 7.2), and N = 7 ran past 6 GB. IRCompiler's @drawStack@ now takes
+-- the product over the groups: about 8 KB per group (slopes about 1). The
+-- bound admits quadratic growth and fails on the old shape.
+test_recordSharedFieldGroupsCodeSizePolynomial :: TestTree
+test_recordSharedFieldGroupsCodeSizePolynomial = testCase "recordSharedFieldGroupsCodeSizePolynomial" $ do
+  verdict <- climb 2.0 [2, 3, 4, 5, 6] point
+  case verdict of
+    WithinBound _ -> return ()
+    Exceeds why -> assertFailure ("the emitted Python of N disjoint answer groups over one neural read \
+                                  \grows faster than N^2 (task answer-record-shared-fields-enumerated-jointly): " ++ why)
+    Unmeasurable why -> assertFailure why
+  where
+    conf = defaultCompilerConfig { noIntegrate = True }
+    point n = do
+      prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+                (tryParseProgram "recordSharedFieldGroups" (src n))
+      env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+               (compile conf prog)
+      size <- evaluate (length (concat (SPLL.CodeGenPyTorch.generateFunctions True env)))
+      return (Measured (fromIntegral size))
+    src n = unlines
+      [ "data Face = Face " ++ intercalate ", " [ "a" ++ show i ++ "::Bool, b" ++ show i ++ "::Bool" | i <- [1 .. n :: Int] ]
+      , "data Ans = Ans " ++ intercalate ", " [ concat ["p", show i, "::Bool, q", show i, "::Bool, r", show i, "::Bool"] | i <- [1 .. n] ]
+      , "neural see :: (Symbol -> Face)"
+      , "main img = draw f = see img in Ans" ++ concat [ concat [" (a", show i, " f) (b", show i, " f) (a", show i, " f && b", show i, " f)"] | i <- [1 .. n] ] ]
+
 -- | The bytes a compile of the program @src n@ and its Python codegen
 -- allocate on this thread, under a 4 GB cap, as a 'climb' point.
 compileAllocPoint :: String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
@@ -6406,6 +6437,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_wideProductSceneTopKQueryPolynomial
   , test_helperApplicationsCompileLinear
   , test_markovBranchRandomRateCompilePolynomial
+  , test_recordSharedFieldGroupsCodeSizePolynomial
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial

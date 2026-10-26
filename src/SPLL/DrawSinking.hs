@@ -54,6 +54,7 @@ module SPLL.DrawSinking
   ( sinkEnumerableDraws
   ) where
 
+import Data.List (partition)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Set as Set
 
@@ -222,10 +223,51 @@ splitProductDraw adtDecls taken x v letTi b = do
         bindings = [ (n, fieldValue f) | (f, n) <- names ]
         withFields = foldr (\(n, rhs) inner -> bindAs letTi n rhs inner) body' bindings
         sinks (n, rhs) = sourceSinksAny source rhs && isJust (sinkDraw n rhs letTi body')
-    if not (any sinks bindings) then Nothing else
+        fieldVars = Set.fromList [ n | (n, rhs) <- bindings, sourceSinksAny source rhs ]
+    if not (any sinks bindings || splitsIntoGroups adtDecls fieldVars body') then Nothing else
       return (wrapArg withFields)
   where
     hasEnumerableTag ti = isJust (enumerableDomain (tags ti))
+
+-- | Does a split pay because the body is a constructor whose operands read the
+-- per-field draws in two independent groups or more (task
+-- answer-record-shared-fields-enumerated-jointly)? Such a draw is read by
+-- several operands and so sinks nowhere, but IRCompiler's @drawStack@ takes
+-- the product over the groups of a constructor under a stack of draws, which
+-- only per-field draws expose:
+--
+-- > draw f = see img in Ans (a1 f) (b1 f) (a1 f && b1 f) (a2 f) (b2 f) (a2 f && b2 f)
+--
+-- enumerates all of @f@ unsplit, and split, the groups @{a1, b1}@ and
+-- @{a2, b2}@ apart. The body is looked at through the bindings above the
+-- constructor, as the stack IRCompiler walks would be, and an operand reading
+-- one of those bindings reads what its value reads. This only estimates
+-- IRCompiler's grouping (which also links through random enclosing locals);
+-- an over-estimate only splits a draw IRCompiler then enumerates as before.
+splitsIntoGroups :: [ADTDecl] -> Set.Set String -> Expr -> Bool
+splitsIntoGroups adtDecls fieldVars = go []
+  where
+    go stack (Expr _ (Apply (Expr _ (Lambda y b)) v)) = go ((y, freeVarsExpr v) : stack) b
+    go stack (Expr _ (InjF (Named c) ops))
+      | [n] <- [ length fs | d <- adtDecls, (c', fs) <- constructors d, c' == c ], n >= 2 =
+          countGroups [ r | op <- ops, let r = closure stack (freeVarsExpr op)
+                          , not (Set.null (r `Set.intersection` fieldVars)) ] >= 2
+    go _ _ = False
+    -- what an operand reads, through the bindings between the split and the
+    -- constructor: a binding read brings in what its value reads
+    closure stack rs =
+      let step r = Set.unions (r : [ vs | (y, vs) <- stack, y `Set.member` r ])
+          r' = step rs
+      in if r' == rs then rs else closure stack r'
+    -- connected components of the operands, two linked when they read a
+    -- common field or binding
+    countGroups [] = 0 :: Int
+    countGroups (s : rest) =
+      let grow acc pending =
+            let (touch, others) = partition (not . Set.null . Set.intersection acc) pending
+            in if null touch then (acc, others) else grow (Set.unions (acc : touch)) others
+          (_, remaining) = grow s rest
+      in 1 + countGroups remaining
 
 -- | Where the fields of a split draw come from.
 data ProductSource

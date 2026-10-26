@@ -1,0 +1,18 @@
+-- A record of answers over one split neural read, in two groups that share no
+-- field: group 1 reads a1, b1 (each from two slots), group 2 reads a2, b2,
+-- and the last slot reads c alone. Given the read the groups are independent,
+-- so IRCompiler takes the product of the groups' own enumerations instead of
+-- enumerating a1, b1, a2, b2 jointly (2^4 worlds here, 2^(2N) at N groups).
+-- The rows pin the within-group correlation: a slot pair sharing a field is
+-- not the product of its marginals. Its support is too large for the
+-- Normalization sweep's 500 samples, so it is slow; recordSharedFieldGroups is
+-- the small one. Task answer-record-shared-fields-enumerated-jointly.
+data Face = Face a1::Bool, b1::Bool, a2::Bool, b2::Bool, c::Bool
+data Ans = Ans p1::Bool, q1::Bool, r1::Bool, p2::Bool, q2::Bool, r2::Bool, s::Bool
+neural see :: (Symbol -> Face)
+tells yes no truth = if truth then Uniform < yes else Uniform < no
+main img =
+  draw f = see img in
+  Ans (tells 0.9 0.2 (a1 f)) (tells 0.7 0.4 (b1 f)) (tells 0.8 0.3 (a1 f && b1 f))
+      (tells 0.9 0.2 (a2 f)) (tells 0.7 0.4 (b2 f)) (tells 0.8 0.3 (a2 f || b2 f))
+      (tells 0.6 0.1 (c f))

@@ -57,7 +57,7 @@ import Control.Monad.Except (catchError)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Char (isUpper)
-import Data.Graph (SCC(..), stronglyConnComp)
+import Data.Graph (SCC(..), stronglyConnComp, flattenSCC)
 import GHC.Stack (HasCallStack)
 
 -- | 'PResult', its combinator vocabulary, and the 'Semiring' abstraction that
@@ -3745,6 +3745,11 @@ toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (ge
 -- Since every read is tagged with its resolved annotation, written or not (task
 -- of-annotation-and-auto-derived-enumeration-divergence), this order -- dense
 -- first, plan above the budget -- holds for every neural read alike.
+-- A stack of enumerable draws over a field constructor whose operands fall
+-- into independent groups: the product of the groups' own enumerations
+-- ('drawStack'), instead of one joint loop over every draw.
+toIRInference meta cumulative e@(Expr _ (Apply _ _)) sample
+  | Just ds <- drawStack meta e = factoredDrawStack meta cumulative ds sample
 toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
   | isEnumerableApplication meta l v
   , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v))
@@ -5112,7 +5117,18 @@ packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
 -- (`let c = .. in let d = .. in ..`) enumerate at every level instead of generating
 -- the inner draws forward.
 enumerateAppliedLambda :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
-enumerateAppliedLambda meta cumulative l v sample = do
+enumerateAppliedLambda meta cumulative l v sample =
+  enumerateBinding meta l v (\bodyMeta lBodyExpr -> toIREnumerate bodyMeta cumulative lBodyExpr sample)
+
+-- | 'enumerateAppliedLambda' with the body's compilation handed in: the sum
+-- over the argument's support of P(arg = value) times what @body@ returns,
+-- given the meta with the bound variable fixed and the lambda's body (renamed
+-- if its parameter clashed with a variable the argument reads).
+-- 'factoredDrawStack' passes a body of its own, the operands of one
+-- independent component.
+enumerateBinding :: CompilerMetadata -> Expr -> Expr
+                 -> (CompilerMetadata -> Expr -> CompilerMonad PResult) -> CompilerMonad PResult
+enumerateBinding meta l v compileBody = do
   let lCn = chainName (getTypeInfo l)
   let (_, paramVar, bodyCn, _) = equivalentLambda "enumerateAppliedLambda" (fcData meta) lCn
   let fExprs = map snd (functions (compilingProgram meta))
@@ -5145,12 +5161,150 @@ enumerateAppliedLambda meta cumulative l v sample = do
     -- random binding shared across factors ('planFactorExternals').
     let bodyMeta = meta{ typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta
                        , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
-    bodyRes <- toIREnumerate bodyMeta cumulative lBodyExpr sample
+    bodyRes <- compileBody bodyMeta lBodyExpr
     return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
   enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+
+-- | A stack of enumerable @draw@s directly over a field constructor, with its
+-- operands split into the groups that share nothing random (task
+-- answer-record-shared-fields-enumerated-jointly).
+--
+-- > draw a1 = .. in draw b1 = .. in draw a2 = .. in draw b2 = .. in
+-- > Ans a1 b1 (a1 && b1) a2 b2 (a2 && b2)
+--
+-- is what 'SPLL.DrawSinking' leaves of a record of answers over one split
+-- neural read: @a1@ is read by two operands, so it cannot sink into either,
+-- and the stack enumerates every field jointly, @2^(2N)@ worlds at @N@ groups.
+-- Given the scope the stack sits in, a draw is an independent sample of the
+-- variables its value reads, and a constructor's probability is the product
+-- of its fields' ('isFieldConstructor'). So operands that share no draw,
+-- transitively through the draws' own values, and no random enclosing local,
+-- are independent, and the probability is the product over the groups of
+-- each group's own sum over its own draws: @N * 4@ worlds here.
+--
+-- A group is a component of the graph linking an operand to each stack draw
+-- it reads, a draw to each earlier draw its value reads, and anything that
+-- reads a random enclosing local to every other reader of it. A local counts
+-- as random unless an enclosing enumeration or witness fixed it
+-- ('recoveredVars') or every occurrence of it is typed 'Deterministic' (a
+-- query argument, @img@ above). Taken only when that yields two groups or
+-- more, and declined when a draw is read by no operand at all: such a draw is
+-- a factor of its own, which this would have to prove sums to one.
+data DrawStack = DrawStack
+  { dsBinds :: [(Expr, Expr)]
+    -- ^ each draw's lambda and value, outermost first
+  , dsCtor  :: (RType, String, [Expr])
+    -- ^ the constructor's type, name and operands
+  , dsComps :: [([Int], [Int])]
+    -- ^ per group, its draws (indices into 'dsBinds', in stack order) and its
+    -- operands (indices into the constructor's operands)
+  }
+
+drawStack :: CompilerMetadata -> Expr -> Maybe DrawStack
+drawStack meta e0 = do
+  (binds, (rt, c, ops)) <- peel e0
+  if null binds then Nothing else Just ()
+  let k = length binds
+      stackVars = Set.fromList [ x | (Expr _ (Lambda x _), _) <- binds ]
+      bindReads = [ freeVarsExpr v | (_, v) <- binds ]
+      opReads = map freeVarsExpr ops
+      nodeExprs = map snd binds ++ ops
+      nodeReads = bindReads ++ opReads
+      linkingOuter i = Set.toList (Set.filter isRandomLocal (randomReads (nodeExprs !! i)
+                                     `Set.intersection` (nodeReads !! i)))
+      isRandomLocal u = not (u `Set.member` stackVars) && u `notElem` recoveredVars meta
+                        && case lookup u (typeEnv meta) of
+                             Just (t, False) -> not (isTArrowType t)
+                             _ -> False
+      bindIdx = Map.fromList [ (x, j) | (j, (Expr _ (Lambda x _), _)) <- zip [0 :: Int ..] binds ]
+      outerNames = nub (concatMap linkingOuter [0 .. length nodeExprs - 1])
+      outerIdx u = length nodeExprs + fromJust (elemIndex u outerNames)
+      edges i = [ j | x <- Set.toList (nodeReads !! i), Just j <- [Map.lookup x bindIdx] ]
+                ++ map outerIdx (linkingOuter i)
+      directed = [ (i, j) | i <- [0 .. length nodeExprs - 1], j <- edges i ]
+      undirected = directed ++ [ (j, i) | (i, j) <- directed ]
+      allNodes = [0 .. length nodeExprs + length outerNames - 1]
+      graph = [ (n, n, [ j | (i, j) <- undirected, i == n ]) | n <- allNodes ]
+      comps = [ (sort [ n | n <- ns, n < k ], sort [ n - k | n <- ns, n >= k, n < k + length ops ])
+              | scc <- stronglyConnComp graph, let ns = flattenSCC scc ]
+      groups = filter (\(bs, os) -> not (null bs && null os)) comps
+  if length (filter (not . null . snd) groups) < 2 then Nothing else Just ()
+  if any (null . snd) groups then Nothing else Just ()
+  return (DrawStack binds (rt, c, ops) groups)
+  where
+    peel (Expr _ (Apply l@(Expr _ (Lambda x b)) v))
+      | isEnumerableApplication meta l v
+      , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v))
+      , calleeBodyInScope meta l
+      , isNothing (agreementShape meta l v)
+      , not (x `Set.member` freeVarsExpr v)
+      , not (isRecoveredVar v) = do
+          (rest, ctor) <- peel b
+          return ((l, v) : rest, ctor)
+    peel (Expr ti (InjF (Named c) ops))
+      | isFieldConstructor (adtDecls meta) c = Just ([], (rType ti, c, ops))
+    peel _ = Nothing
+    isRecoveredVar (Expr _ (Var x)) = x `elem` recoveredVars meta
+    isRecoveredVar _ = False
+    randomReads ex = Set.fromList [ n | Expr ti (Var n) <- subtreesOf ex, pType ti /= Deterministic ]
+    subtreesOf ex = ex : concatMap subtreesOf (getSubExprs ex)
+
+-- | The probability of a 'DrawStack': the product over its groups of each
+-- group's sum over its own draws, nested in stack order with
+-- 'enumerateBinding' exactly as 'enumerateAppliedLambda' nests them, of the
+-- product of its operands' fields. Inside the loops an operand is compiled as
+-- 'toIREnumerate' compiles the whole constructor (forward and compare, or
+-- handed to inference where it draws fresh randomness); a group without draws
+-- is plain inference, as in the field-constructor rule.
+factoredDrawStack :: CompilerMetadata -> Bool -> DrawStack -> IRExpr -> CompilerMonad PResult
+factoredDrawStack meta cumulative ds sample = do
+  let (rt, c, ops) = dsCtor ds
+      resolvedName = resolveInjF rt c
+  FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
+  let outV = soleOutputVar fwd
+      inlineSample = irMap (\e -> case e of IRVar n | n == outV -> sample; _ -> e)
+      fields = [ (inlineSample invBody, inlineSample appT, decons)
+               | inV <- inputVars fwd
+               , let FDecl {body=invBody, applicability=appT, deconstructing=decons} = inversionFor resolvedName inV inversions ]
+  -- The conjunction of the fields' applicability tests guards every group and
+  -- the product, so it is bound once rather than copied into each.
+  applicable <- case foldr1 (IROp OpAnd) [ a | (_, a, _) <- fields ] of
+    c'@(IRConst _) -> return c'
+    conj -> do
+      v <- mkVariable "applicable"
+      setVariables [(v, conj)]
+      return (IRVar v)
+  groupRes <- forM (dsComps ds) $ \(bis, ois) ->
+    guardedSubInference meta [applicable]
+      (group meta [ dsBinds ds !! j | j <- bis ] [ (ops !! i, fields !! i) | i <- ois ])
+  return (guardP sr [applicable] (foldl1 (prodP sr) groupRes))
+  where
+    sr = semiringOf meta
+    group m [] opFs = productOf <$> mapM (\(op, (fs, _, decons)) ->
+                        (if decons then toIRInferenceSave else toIRInference) m cumulative op fs) opFs
+    group m binds opFs = inLoops m binds opFs
+    inLoops m [] opFs = productOf <$> mapM (\(op, (fs, _, _)) -> leaf m op fs) opFs
+    inLoops m ((l, v) : rest) opFs = enumerateBinding m l v (\bm _ -> inLoops bm rest opFs)
+    -- An ANY field matches anything, which the whole-constructor comparison
+    -- this replaces got from comparing ADT values; the operand's own term is
+    -- compiled only for a field that is not ANY.
+    leaf m op fs = do
+      let anyField = IRUnaryOp OpIsAny fs
+      res <- guardedSubInference m [notIR anyField] (operandTerm m op fs)
+      return (zipResult (IRIf anyField) (detP (srOne sr)) res)
+    -- A bare draw: compare its value to the field.
+    operandTerm m op@(Expr _ (Var _)) fs = do
+      opIR <- toIRGenerate m op
+      let rt = rType (getTypeInfo op)
+      forwardOrInfer m cumulative op fs [("operand", op, opIR)] $ return $
+        if cumulative
+          then mass (compareValueExpr sr rt opIR fs)
+          else indicatorP sr (leafEqIR rt fs opIR)
+    operandTerm m op fs = toIREnumerate m cumulative op fs
+    productOf = foldl1 (prodP sr)
 
 
 -- | The enumerable @draw@s an expression reads through the shapes
@@ -5666,7 +5820,9 @@ toIREnumerate meta cumulative e@(Expr _ (Apply l v)) sample
     then toIRInference meta cumulative (reinferRecovered meta (recoveredVars meta) e) sample
     else case agreementShape meta l v of
       Just ag -> enumerateAgreement meta cumulative ag sample
-      Nothing -> enumerateAppliedLambda meta cumulative l v sample
+      Nothing
+        | Just ds <- drawStack meta e -> factoredDrawStack meta cumulative ds sample
+        | otherwise -> enumerateAppliedLambda meta cumulative l v sample
   where
     isRecoveredVar (Expr _ (Var x)) = x `elem` recoveredVars meta
     isRecoveredVar _ = False

@@ -208,6 +208,25 @@ same experiment is a Markov chain over a draw-bound count and pick, not a
 product, and stays refused (`known-issues/reservoirPickOverProductReadRefused`,
 docs task `reservoir-pick-over-product-read-refused`).
 
+**Draws that stay above a constructor are summed per independent group**
+(task `answer-record-shared-fields-enumerated-jointly`). A field read by two
+operands sinks into neither, so a record of answers over one read, `Ans (a1 f)
+(b1 f) (a1 f && b1 f) (a2 f) ..`, left every such field above the whole
+constructor and enumerated them jointly (`2^(2N)` worlds at `N` groups; 380 KB
+of Python at `N = 6`, past 6 GB at 7). IRCompiler's `drawStack` recognises a
+stack of enumerable draws directly over a field constructor and partitions the
+operands into groups linked by the draws they read (transitively through the
+draws' values, and through any random enclosing local); with two groups or
+more, `factoredDrawStack` takes the product over the groups of each group's own
+nested sum (`enumerateBinding`, the body-parametric core of
+`enumerateAppliedLambda`), in both the probability and the CDF variant. A draw
+no operand reads declines it. DrawSinking takes the per-field split when the
+body is such a constructor with two groups or more (`splitsIntoGroups`), even
+though no field then sinks. Within a group the cost is still exponential in its
+shared fields, and an `ANY` slot still keeps its fields in the group. Pinned by
+`Internals.recordSharedFieldGroupsCodeSizePolynomial` and the
+`neural/recordSharedFieldGroups{,Noisy}` corpus pairs.
+
 The per-slot chain is then tabulated by Tier 0 materialization *inside* the
 loop over `c`, which needed its decomposability gate to be retaken given the
 enclosing enumerated bindings (`sharesLatentGiven` over
