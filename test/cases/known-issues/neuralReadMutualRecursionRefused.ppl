@@ -1,0 +1,4 @@
+neural glyph :: (Symbol -> Int) of [0, 1, 2]
+wantA xs = if isNull xs then True else (draw t = glyph (head xs) in (if t == 1 then wantB (tail xs) else False))
+wantB xs = if isNull xs then False else (draw t = glyph (head xs) in (if t == 2 then wantA (tail xs) else False))
+main xs = wantA xs
