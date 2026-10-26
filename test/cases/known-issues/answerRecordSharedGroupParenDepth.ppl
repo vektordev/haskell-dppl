@@ -1,0 +1,25 @@
+-- Fourteen coins and the answer record of every AND-pair of them (91 slots,
+-- one shared group: every coin is read by 13 slots). Compiles with exit 0,
+-- but the scalar Python module fails to import: "SyntaxError: too many
+-- nested parentheses" (CPython's 200-bracket limit; the deepest line nests
+-- 212). Nesting grows with the slots of one group: 12 coins / 66 slots nest
+-- 158 and load. The Guess-Who compound pool hits it at 10 core attributes
+-- with AND/OR pairs, or 8 with triples. Found by experiments_nest
+-- exact-eig-question-asking; task answer-record-group-exceeds-python-paren-depth.
+data Ans = Ans a0::Bool, a1::Bool, a2::Bool, a3::Bool, a4::Bool, a5::Bool, a6::Bool, a7::Bool, a8::Bool, a9::Bool, a10::Bool, a11::Bool, a12::Bool, a13::Bool, a14::Bool, a15::Bool, a16::Bool, a17::Bool, a18::Bool, a19::Bool, a20::Bool, a21::Bool, a22::Bool, a23::Bool, a24::Bool, a25::Bool, a26::Bool, a27::Bool, a28::Bool, a29::Bool, a30::Bool, a31::Bool, a32::Bool, a33::Bool, a34::Bool, a35::Bool, a36::Bool, a37::Bool, a38::Bool, a39::Bool, a40::Bool, a41::Bool, a42::Bool, a43::Bool, a44::Bool, a45::Bool, a46::Bool, a47::Bool, a48::Bool, a49::Bool, a50::Bool, a51::Bool, a52::Bool, a53::Bool, a54::Bool, a55::Bool, a56::Bool, a57::Bool, a58::Bool, a59::Bool, a60::Bool, a61::Bool, a62::Bool, a63::Bool, a64::Bool, a65::Bool, a66::Bool, a67::Bool, a68::Bool, a69::Bool, a70::Bool, a71::Bool, a72::Bool, a73::Bool, a74::Bool, a75::Bool, a76::Bool, a77::Bool, a78::Bool, a79::Bool, a80::Bool, a81::Bool, a82::Bool, a83::Bool, a84::Bool, a85::Bool, a86::Bool, a87::Bool, a88::Bool, a89::Bool, a90::Bool
+main =
+  draw x0 = Uniform < 0.1 in
+  draw x1 = Uniform < 0.2 in
+  draw x2 = Uniform < 0.3 in
+  draw x3 = Uniform < 0.4 in
+  draw x4 = Uniform < 0.5 in
+  draw x5 = Uniform < 0.6 in
+  draw x6 = Uniform < 0.7 in
+  draw x7 = Uniform < 0.8 in
+  draw x8 = Uniform < 0.9 in
+  draw x9 = Uniform < 0.1 in
+  draw x10 = Uniform < 0.2 in
+  draw x11 = Uniform < 0.3 in
+  draw x12 = Uniform < 0.4 in
+  draw x13 = Uniform < 0.5 in
+  Ans (x0 && x1) (x0 && x2) (x0 && x3) (x0 && x4) (x0 && x5) (x0 && x6) (x0 && x7) (x0 && x8) (x0 && x9) (x0 && x10) (x0 && x11) (x0 && x12) (x0 && x13) (x1 && x2) (x1 && x3) (x1 && x4) (x1 && x5) (x1 && x6) (x1 && x7) (x1 && x8) (x1 && x9) (x1 && x10) (x1 && x11) (x1 && x12) (x1 && x13) (x2 && x3) (x2 && x4) (x2 && x5) (x2 && x6) (x2 && x7) (x2 && x8) (x2 && x9) (x2 && x10) (x2 && x11) (x2 && x12) (x2 && x13) (x3 && x4) (x3 && x5) (x3 && x6) (x3 && x7) (x3 && x8) (x3 && x9) (x3 && x10) (x3 && x11) (x3 && x12) (x3 && x13) (x4 && x5) (x4 && x6) (x4 && x7) (x4 && x8) (x4 && x9) (x4 && x10) (x4 && x11) (x4 && x12) (x4 && x13) (x5 && x6) (x5 && x7) (x5 && x8) (x5 && x9) (x5 && x10) (x5 && x11) (x5 && x12) (x5 && x13) (x6 && x7) (x6 && x8) (x6 && x9) (x6 && x10) (x6 && x11) (x6 && x12) (x6 && x13) (x7 && x8) (x7 && x9) (x7 && x10) (x7 && x11) (x7 && x12) (x7 && x13) (x8 && x9) (x8 && x10) (x8 && x11) (x8 && x12) (x8 && x13) (x9 && x10) (x9 && x11) (x9 && x12) (x9 && x13) (x10 && x11) (x10 && x12) (x10 && x13) (x11 && x12) (x11 && x13) (x12 && x13)
