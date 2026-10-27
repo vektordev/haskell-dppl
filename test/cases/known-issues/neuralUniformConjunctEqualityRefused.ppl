@@ -1,0 +1,2 @@
+neural lmAnti :: (Symbol -> Int) of [0, 1, 2, 3, 4]
+main ctxC cut t = draw c = lmAnti ctxC in (Uniform < cut) && (t == c)

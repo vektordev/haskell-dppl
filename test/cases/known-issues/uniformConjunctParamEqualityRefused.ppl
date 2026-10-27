@@ -1,0 +1,1 @@
+main t = draw c = (if Uniform < 0.5 then 0 else 1) in (Uniform < 0.5) && (t == c)
