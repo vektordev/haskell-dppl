@@ -1,0 +1,2 @@
+f a x1 x2 x3 = draw u1 = x1 + x2 + x3 in draw u2 = x2 + x3 in (u2 + x3, (u1, a*u1 + u2))
+main = draw x1 = Normal in draw x2 = Normal in draw x3 = Normal in f 0.7 x1 x2 x3
