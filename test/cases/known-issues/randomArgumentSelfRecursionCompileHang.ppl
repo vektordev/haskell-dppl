@@ -1,0 +1,2 @@
+gen s = if Uniform < 0.1 then [] else True : gen (Uniform < 0.5)
+main = gen True
