@@ -1,0 +1,12 @@
+-- A helper whose argument `a` scales a recovered binding (`a*u1`), where the
+-- binding it helps recover (`u2`) is then a side operand of another latent's
+-- recovery (`x3` from `u2 + x3`): main has no probability or integrate
+-- variant, and no recorded reason. The same body inlined in main answers
+-- exactly, with `a` the literal 0.7 or a top-level parameter (`-p 0.7`), and
+-- so does the helper with 0.7 written in its body. Shape: the unrolled
+-- permuted-LU (y = P L U x) written as a reusable helper with its
+-- coefficients as arguments. Idealized: x3 = 0.4 - (0.2 - 0.7*0.3),
+-- x2 = (0.2 - 0.21) - x3, x1 = 0.3 - x2 - x3; Jacobian 1, so
+-- p((0.4,(0.3,0.2))) = 0.0509396, dim 3. Docs task
+-- helper-param-scaled-side-operand-no-probability.
+expect-failure: no-code probability integrate
