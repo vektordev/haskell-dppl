@@ -1,0 +1,13 @@
+-- The per-value veto `(t, not (t == c))` over two V = 100 neural reads.
+-- posterior__given (and Main's joint point query, and Main__m01) compute
+-- P(c == t) / P(not (c == t)) for the known t as an unrolled V-term sum
+-- `raw[0] if 0 == t else 0.0 + ... + raw[V-1] if V-1 == t else 0.0` instead
+-- of one indexed read raw[t], so the per-value posterior costs O(V) per value,
+-- O(V^2) per token (2000 values: 0.28 s; indexed would be O(V)). The module is
+-- 68.2 KB at 3f3726a, 29.3 KB of it those sums (given 14.2, Main 9.7, m01
+-- 5.4); removing given's alone brings it to about 54 KB. The runtime itself
+-- has no pin shape (docs task known-issues-pin-for-emitted-code-runtime), so
+-- this pins the code those sums take. Docs task
+-- per-value-neural-equality-unrolled-sum (found by experiments_nest
+-- llm-decoding-operator-stack, row 4).
+expect-failure: code-size above 60 KB

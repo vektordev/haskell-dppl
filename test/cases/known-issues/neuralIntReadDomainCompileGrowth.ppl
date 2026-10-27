@@ -1,0 +1,3 @@
+neural lm :: (Symbol -> Int) of [{{for i in 1..V sep ", "}}{{i}}{{end}}]
+
+main ctx = lm ctx
