@@ -30,7 +30,7 @@ same style as `backends:`/`slow`) naming one of these shapes:
 ```
 expect-failure: crash                              -- an uncaught exception, message unpinned
 expect-failure: diagnostic "some substring"        -- an uncaught exception whose message contains this
-expect-failure: no-code                            -- compiles, but generate/probability/integrate is silently absent
+expect-failure: no-code probability integrate       -- compiles, but generate/probability/integrate is silently absent
 expect-failure: wrong-result                       -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
 expect-failure: broken                             -- mechanism unpinned; the p()/cdf() rows below state the idealized value instead
 expect-failure: refused "some substring"           -- compiles; some variant is absent with a refusal reason containing this
