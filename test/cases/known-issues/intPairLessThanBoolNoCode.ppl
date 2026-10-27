@@ -1,0 +1,2 @@
+neural rd :: (Symbol -> (Int, Int)) of ([0, 1, 2, 3], [0, 1, 2, 3])
+main sym = draw p = rd sym in fst p < snd p
