@@ -658,7 +658,7 @@ genExpr sc t n
                  IRConformsTo rt <$> genExpr sc s (n - 1))
         , (1, do s <- genTySuchThat 1 (isJust . domainShape)
                  dom <- liftG (genDomain s)
-                 IRIsPossible dom <$> genExpr sc s (n - 1))
+                 IRIsPossible (multiValueToIR dom) <$> genExpr sc s (n - 1))
         ] ++
         [ (1, do (c, _) <- liftG (elements (adtCtors ds (dataName d)))
                  IRApply (IRVar ("is" ++ c)) <$> genExpr sc (ITADT (dataName d)) (n - 1))

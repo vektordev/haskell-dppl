@@ -8,7 +8,7 @@ module StandardLibrary
   , standardEnv
   ) where
 import SPLL.IntermediateRepresentation (IRExpr(..), Operand (..), ConTag(..), Accessor(..))
-import SPLL.Lang.Types
+import SPLL.IR.Value (GenericValue(..), GenericList(..))
 
 data StandardFunction = StandardFunction {functionName :: String, parameterCount :: Int, functionBody :: IRExpr}
 

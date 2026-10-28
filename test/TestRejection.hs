@@ -18,7 +18,7 @@ module TestRejection (rejectionTests) where
 
 import Data.Char (isUpper)
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), GenericList(..), MultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), GenericList(..), GenericMultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
 import SPLL.Typing.RType (RType(..), Extent(..))
 import Control.Monad.Random (evalRand, mkStdGen)
 import SPLL.Examples

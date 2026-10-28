@@ -56,8 +56,8 @@ module SPLL.CodeGenPyTorchBatched
 
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(TFloat), shapeRank, shapeNumel)
-import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
-import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
+import SPLL.IR.Value (CompilerError, GenericValue(..), GenericList(..), GenericMultiValue(..), multiValueToValueList, multiValueCardinality)
+import SPLL.Lang.Types (ADTDecl(..))
 -- 'pyDouble' is shared with the scalar backend for the same reason
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
@@ -392,7 +392,7 @@ generateClass clsName env lut genArities genMethods pureNames evals decorators (
 
 -- | The class-level @DOMAIN@ constant, or @[]@ when there is no renderable
 -- finite domain, or when the domain is larger than 'denseDomainCap'.
-denseDomainLines :: Maybe MultiValue -> [String]
+denseDomainLines :: Maybe (GenericMultiValue IRExpr) -> [String]
 -- Deduplicated: a DiscreteValues tag may enumerate the same value by several
 -- routes (tupleDiscreteDistrib's tag lists each tuple 3x), and a repeated slot
 -- would cost kernel work for a column nothing distinct reads -- and inflate V,
@@ -428,7 +428,7 @@ denseDomainCap = 65536
 -- (it packs the leaves into @[B]@ tensors itself). Deliberately separate from
 -- 'batchedVal', which answers a different question -- what may appear as a
 -- constant *inside* a kernel body -- and must not silently gain cases here.
-domainVal :: Value -> Maybe String
+domainVal :: GenericValue IRExpr -> Maybe String
 domainVal (VFloat f) = Just (pyDouble f)
 domainVal (VInt i)   = Just (show i)
 domainVal (VBool b)  = Just (if b then "True" else "False")
@@ -2175,7 +2175,7 @@ batchedValOrDie v = fromMaybe
 -- (an Either/ADT-shaped read-logits network trips the Either tag test or the ADT-declaration bail
 -- first), so its positive control is the synthetic-IR row in
 -- @TestInternals.batchedRefusalUnitTests@ rather than a corpus program.
-scalarDiscreteMulti :: MultiValue -> Bool
+scalarDiscreteMulti :: GenericMultiValue IRExpr -> Bool
 scalarDiscreteMulti (MultiDiscretes vs) = not (null vs) && all isScalarV vs
   where isScalarV (VInt _)   = True
         isScalarV (VBool _)  = True

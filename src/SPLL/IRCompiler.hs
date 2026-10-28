@@ -600,7 +600,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
               Just (toNormalDecl name . cutoffBinding <$> compileNormalExpr (meta progTypeEnv) binding)
             else
               Nothing
-        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom, maskVariantOf=Nothing,
+        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=fmap multiValueToIR sampleDom, maskVariantOf=Nothing,
           integFun = presentVariant integE,
           probFun = presentVariant probE,
           genFun = presentVariant genE,
@@ -4542,7 +4542,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     -- evaluated before any membership test can run. Gating via 'IRIf' rather
     -- than 'OpAnd' matters here: both operands of an IR boolean op are
     -- evaluated, so an 'OpAnd' would still divide by zero.
-    let possibleExpr = IRIf appTest (IRIsPossible enumListR invExpr) (IRConst (VBool False))
+    let possibleExpr = IRIf appTest (IRIsPossible (multiValueToIR enumListR) invExpr) (IRConst (VBool False))
     -- Without topK, pLeft is read once, inside the 'possible' arm below, and the
     -- optimizer's let-inlining moves its bindings there: a cell whose inverted
     -- value lies outside the right-hand domain never descends into @left@.

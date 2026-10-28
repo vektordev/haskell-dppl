@@ -24,11 +24,11 @@ import Utils
 -- Expected format format of ThetaTrees:
 --    ThetaTree = ([Double], [ThetaTree])
 
-type GlobalStorage = StateT ([(MultiValue, String)], [String])
+type GlobalStorage = StateT ([(GenericMultiValue IRExpr, String)], [String])
 type VariableSupply = Supply
 type GlobalVariableSupply a = GlobalStorage VariableSupply a
 
-addOrGetFromGlobalStorage :: MultiValue -> GlobalVariableSupply String
+addOrGetFromGlobalStorage :: GenericMultiValue IRExpr -> GlobalVariableSupply String
 addOrGetFromGlobalStorage mv = do
   (globalStorage, callables) <- get
   case lookup mv globalStorage of
@@ -115,7 +115,7 @@ juliaVal v@(VAnyExcept _) = error (unlines
   , "generateFunctions without that guard."
   , "(task vanyexcept-unrenderable-in-text-backends)" ])
 juliaVal x = error ("unknown juliaVal for " ++ show x)
-juliaMultiVal :: MultiValue -> String
+juliaMultiVal :: GenericMultiValue IRExpr -> String
 juliaMultiVal MultiContinuous = "(\"C\", nothing)"
 juliaMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (juliaVal . valueToIR) vals) ++ "] )"
 juliaMultiVal (MultiTuple l r) = "(\"T\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"

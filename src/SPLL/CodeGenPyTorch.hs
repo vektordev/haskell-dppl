@@ -44,7 +44,7 @@ import Utils (Supply, demandUniqueNumber, evalSupply)
 
 -- | The state threaded through one class's code generation.
 data CodegenState = CodegenState
-  { stGlobalMultis :: [(MultiValue, String)]
+  { stGlobalMultis :: [(GenericMultiValue IRExpr, String)]
     -- ^ class-level constants, one per distinct 'MultiValue' an
     -- 'IRIsPossible' reads
   , stCallables :: [String]
@@ -65,7 +65,7 @@ type GlobalStorage = StateT CodegenState
 type VariableSupply = Supply
 type GlobalVariableSupply a = GlobalStorage VariableSupply a
 
-addOrGetFromGlobalStorage :: MultiValue -> GlobalVariableSupply String
+addOrGetFromGlobalStorage :: GenericMultiValue IRExpr -> GlobalVariableSupply String
 addOrGetFromGlobalStorage mv = do
   st <- get
   case lookup mv (stGlobalMultis st) of
@@ -164,7 +164,7 @@ pyVal v@(VAnyExcept _) = error (unlines
   , "(task vanyexcept-unrenderable-in-text-backends)" ])
 pyVal x = error ("unknown pyVal for " ++ show x)
 
-pyMultiVal :: MultiValue -> String
+pyMultiVal :: GenericMultiValue IRExpr -> String
 pyMultiVal MultiContinuous = "(\"C\", None)"
 pyMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (pyVal . valueToIR) vals) ++ "])"
 pyMultiVal (MultiTuple l r) = "(\"T\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"

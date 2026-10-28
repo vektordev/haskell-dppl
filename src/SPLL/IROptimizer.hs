@@ -31,7 +31,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Monad.State (State, runState, get, put, modify')
 import Debug.Trace (trace)
-import SPLL.Lang.Lang (floatApproxEqThresh)
+import SPLL.IR.Value (floatApproxEqThresh)
 
 
 optimizeEnv :: CompilerConfig -> IREnv -> IREnv

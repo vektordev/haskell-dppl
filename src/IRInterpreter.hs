@@ -9,7 +9,8 @@ generateReplay
 
 import Statistics.Distribution (quantile)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, valueInMultiValue, neuralValueType, neuralInputType)
+import SPLL.IR.Value (elementAt, floatApproxEqThresh, valueInMultiValue)
+import SPLL.Lang.Lang (lookupNeural, neuralValueType, neuralInputType)
 import StandardLibrary
 import MockNN
 import SPLL.AutoNeural
@@ -585,7 +586,7 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) =
     Nothing -> failWith f ("Variable " ++ name ++ " not declared")
 generate f neurals' registry adts' globalEnv env [] (IRIsPossible multiVal expr) = do
   val <- generate f neurals' registry adts' globalEnv env [] expr
-  return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))
+  return $ VBool (valueInMultiValue multiVal val)
 generate f neurals' registry adts' globalEnv env args (IRBuiltin BListIndex [lstExpr, idxExpr]) = do
   lst <- generate f neurals' registry adts' globalEnv env args lstExpr
   idx <- generate f neurals' registry adts' globalEnv env args idxExpr

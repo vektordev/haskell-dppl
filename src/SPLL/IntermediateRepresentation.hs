@@ -40,6 +40,7 @@ module SPLL.IntermediateRepresentation (
 , reduceIREnv
 , irPrintFlat
 , valueToIR
+, multiValueToIR
 , isLambda
 , pattern VProbDim
 , pattern VProbDimBC
@@ -54,7 +55,8 @@ module SPLL.IntermediateRepresentation (
 ) where
 
 import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..), Shape, Extent(..), shapeNumel)
+import SPLL.IR.Value
+import SPLL.Typing.RType (RType(..))
 import Data.Data()
 import Data.List (isSuffixOf, sort, group)
 import Data.Char (isAlpha, isAlphaNum)
@@ -521,7 +523,7 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- map with a boolean OR -- a reduction operator that exists for
               -- no other purpose, replacing an O(1)-looking library call with
               -- a materialised domain. It stays.
-              | IRIsPossible MultiValue IRExpr
+              | IRIsPossible (GenericMultiValue IRExpr) IRExpr
               -- | A named operation over a tensor (design ir-tensor-values).
               -- One constructor rather than a family:
               -- which operation, and any shape/operator/axis it is parameterised
@@ -592,7 +594,7 @@ data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFu
   -- heterogeneous-batch-inference M3), which evaluates the ordinary batched
   -- kernel once with this domain /as the batch/ to get the whole probability
   -- vector. Purely additive: every other backend ignores it.
-  sampleDomain::Maybe MultiValue,
+  sampleDomain::Maybe (GenericMultiValue IRExpr),
   -- | @Just f@ when this group is a per-mask inference variant of function
   -- @f@ (@f__m\<bits\>@; task per-mask-variants-by-pruning), reached only
   -- through @f@'s mask dispatcher. A variant is never a whole function of its
@@ -842,6 +844,11 @@ defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = N
 
 valueToIR :: GenericValue a -> GenericValue b
 valueToIR = fmap (error "Cannot convert VClosure to IR")
+
+-- | The lowering-boundary conversion of a value set: the expression parameter
+-- is replaced, as 'valueToIR' does for one value.
+multiValueToIR :: GenericMultiValue a -> GenericMultiValue b
+multiValueToIR = fmap (error "Cannot convert VClosure to IR")
 
 lookupIREnv :: String -> IREnv -> IRFunGroup
 lookupIREnv name (IREnv env _ _) =

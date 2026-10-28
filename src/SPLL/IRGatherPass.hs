@@ -39,7 +39,7 @@ module SPLL.IRGatherPass
 import Data.List (sort)
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types (GenericValue(..))
+import SPLL.IR.Value (GenericValue(..))
 
 -- | Run the rewrite over every variant of every function group.
 gatherPassEnv :: IREnv -> IREnv

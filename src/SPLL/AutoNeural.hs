@@ -108,7 +108,7 @@ makeReadLogitsFunGroup adtDecls conf name target tag fwdDecl =
     -- group's prob also takes the symbol, so the batched backend's arity rule
     -- keeps dense mode off them for now; recording it here is the truthful
     -- answer rather than a placeholder.
-    (listToMaybe $ filter multiValueIsFinite (maybeToList tag ++ [mv | Right mv <- [autoDeriveMultiValue adtDecls target]]))
+    (fmap multiValueToIR $ listToMaybe $ filter multiValueIsFinite (maybeToList tag ++ [mv | Right mv <- [autoDeriveMultiValue adtDecls target]]))
     Nothing
     where plan = makePartitionPlan adtDecls target tag
 
@@ -389,7 +389,7 @@ makeProbRec sr _adtDecls (Discretes _rty tag) ix sample = (noAny sr sample guard
     -- sample is impossible: the guard answers the semiring zero, from which
     -- 'makeProb' derives the impossibility flag (task
     -- neural-read-query-outside-domain-unchecked).
-    guarded = IRIf (IRIsPossible tag sample) p (srZero sr)
+    guarded = IRIf (IRIsPossible (multiValueToIR tag) sample) p (srZero sr)
     p = fromLinearSR sr (IRBuiltin BListIndex [IRVar vector, IROp OpPlus (indexOf tag sample) (IRConst (VInt ix))])
 makeProbRec sr _adtDecls Continuous ix sample = (noAny sr sample p, noAnyDim0 sample (IRConst (VInt 1)), IRConst (VFloat 0))
   where

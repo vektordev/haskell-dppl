@@ -18,47 +18,10 @@ module SPLL.Typing.RType
   , constraintTV
   ) where
 
-import Data.List (intercalate)
+import SPLL.IR.Value (Shape, Extent(..), extentSize, shapeNumel, shapeRank, dropAxis, prettyShape)
 
 newtype TVarR = TV String
   deriving (Show, Eq, Ord)
-
--- | The shape of a tensor: the extent of each axis, outermost first. The rank
--- is the length. Shared by the IR tensor value ('VTensor') and the surface
--- type @TTensor Shape RType@ (design tensors-in-core-language §2.2), so the
--- surface type lowers onto the IR value already carrying the shape, with
--- nothing to re-represent. Rank 0 is not a shape: the parser refuses
--- @Tensor[] τ@.
-type Shape = [Extent]
-
--- | The extent of one axis.
---
--- A sum type with a single constructor on purpose (design
--- tensors-in-core-language §2.2, and §7 on why restrictive choices are the
--- cheap ones to lift): shape /variables/ are deliberately out (decision B), and spelling this @type Shape = [Int]@ would make admitting an
--- @EVar@ later a change to the arity of every shape pattern in the compiler
--- rather than one new constructor.
-newtype Extent = EFixed Int
-  deriving (Show, Eq, Ord)
-
-extentSize :: Extent -> Int
-extentSize (EFixed n) = n
-
--- | The number of elements a shape holds -- the product of its extents. A
--- rank-0 shape has one element by this rule, but rank 0 is not an inhabited
--- shape (see the note on 'shapeRank').
-shapeNumel :: Shape -> Int
-shapeNumel = product . map extentSize
-
-shapeRank :: Shape -> Int
-shapeRank = length
-
--- | Drop one axis from a shape, as a reduction or an index along that axis
--- does. 'Nothing' when the axis is out of range.
-dropAxis :: Int -> Shape -> Maybe Shape
-dropAxis i sh
-  | i >= 0 && i < length sh = Just (take i sh ++ drop (i + 1) sh)
-  | otherwise = Nothing
 
 -- | The element types a 'TTensor' may carry: a scalar base type only
 -- (design tensors-in-core-language §2.3). Tensor-of-tuple/ADT raises a layout
@@ -67,9 +30,6 @@ dropAxis i sh
 isTensorElemType :: RType -> Bool
 isTensorElemType t = t `elem` [TFloat, TInt, TBool, TSymbol]
 
--- | A shape as the user writes it: @[3,4]@.
-prettyShape :: Shape -> String
-prettyShape sh = "[" ++ intercalate "," (map (show . extentSize) sh) ++ "]"
   
 data RType = TBool
            | TInt

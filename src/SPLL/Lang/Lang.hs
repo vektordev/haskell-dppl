@@ -62,6 +62,7 @@ module SPLL.Lang.Lang (
 ) where
 
 import SPLL.Lang.Types
+import SPLL.IR.Value
 import SPLL.Typing.PType (PType(Deterministic))
 import SPLL.Typing.RType
 import SPLL.Typing.AlgebraicDataTypes
@@ -71,7 +72,6 @@ import Data.Maybe
 import Data.List (nub, transpose, find, intercalate)
 import Control.Monad (zipWithM)
 import Data.Traversable (mapAccumL)
-import qualified Data.Bifunctor as Bifunctor
 
 toStub :: Expr -> ExprStub
 toStub expr = case node expr of
@@ -84,9 +84,6 @@ toStub expr = case node expr of
   Lambda {}      -> StubLambda
   Apply {}       -> StubApply
   ReadNN {}      -> StubReadNN
-
-floatApproxEqThresh :: Double
-floatApproxEqThresh = 1e-10
 
 predicateFlat :: (Expr -> Bool) -> Expr -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
@@ -218,27 +215,6 @@ getTypeInfo = ann
 setTypeInfo :: Expr -> TypeInfo -> Expr
 setTypeInfo expr t = expr { ann = t }
 
-constructVList :: [GenericValue a] -> GenericValue a
-constructVList xs = VList $ foldr ListCont EmptyList xs
-
-multiValueToValueList :: MultiValue -> [Value]
--- A continuous slot has no enumerable values: any composite containing it also has none.
-multiValueToValueList MultiContinuous = []
-multiValueToValueList MultiAuto = error "multiValueToValueList: unresolved auto-placeholder (_); this should have been resolved before discrete-value propagation"
-multiValueToValueList (MultiTypeRef n) = error ("multiValueToValueList: unresolved recursion reference to '" ++ n ++ "'; resolveMultiValueTypeDecl should have unrolled it")
-multiValueToValueList (MultiDiscretes vals) = vals
-multiValueToValueList (MultiEither ls rs) = map (VEither . Left) lVals ++ map (VEither . Right) rVals
-  where
-    lVals = multiValueToValueList ls
-    rVals = multiValueToValueList rs
-multiValueToValueList (MultiTuple as bs) = [VTuple aVal bVal | aVal <- aVals, bVal <- bVals]
-  where
-    aVals = multiValueToValueList as
-    bVals = multiValueToValueList bs
-multiValueToValueList (MultiADT constrs) = concatMap (\(cn, fieldCombos) -> map (VADT cn) fieldCombos) constrFieldCombinations
-  where allFieldCombinations = sequence . map multiValueToValueList
-        constrFieldCombinations = map (Bifunctor.second allFieldCombinations) constrs
-
 -- | True if the MultiValue has a continuous (Real) leaf anywhere. Such a value set
 -- has no finite enumeration: 'multiValueToValueList' would yield only its discrete
 -- residue, so enum-based inference must never be offered for it (the enum-annotation
@@ -276,33 +252,6 @@ multiValueIsFinite (MultiEither a b) = multiValueIsFinite a && multiValueIsFinit
 -- A nullary constructor has no fields, so @all _ []@ is vacuously true and the
 -- constructor contributes exactly one value -- which is what we want.
 multiValueIsFinite (MultiADT constrs) = not (null constrs) && all (all multiValueIsFinite . snd) constrs
-
--- | The number of values 'multiValueToValueList' would yield, computed
--- structurally WITHOUT building the list. 'Nothing' when the domain is not
--- statically finite (exactly when 'multiValueIsFinite' is 'False'), so a
--- caller gets "no answer" rather than a misleading count.
---
--- This exists because the count is the only thing a budget check needs, and
--- the list it counts can be astronomically large: a depth-unrolled recursive
--- ADT is a cross-product, so @length . 'multiValueToValueList'@ is itself the
--- blow-up a budget check is there to avoid paying. 'Integer' rather than
--- 'Int' for the same reason -- the product overflows a machine word long
--- before any caller would want to materialize it, and an overflowed count
--- that wraps to something small would wave through exactly the domain the
--- budget exists to refuse.
-multiValueCardinality :: MultiValue -> Maybe Integer
-multiValueCardinality MultiContinuous = Nothing
-multiValueCardinality MultiAuto = Nothing
-multiValueCardinality (MultiTypeRef _) = Nothing
-multiValueCardinality (MultiDiscretes vals) = if null vals then Nothing else Just (toInteger (length vals))
-multiValueCardinality (MultiTuple a b) = (*) <$> multiValueCardinality a <*> multiValueCardinality b
-multiValueCardinality (MultiEither a b) = (+) <$> multiValueCardinality a <*> multiValueCardinality b
--- Mirrors 'multiValueIsFinite'/'multiValueToValueList': a constructor's fields
--- multiply (the 'sequence' cross-product), constructors sum, and a nullary
--- constructor contributes the empty product, 1.
-multiValueCardinality (MultiADT constrs)
-  | null constrs = Nothing
-  | otherwise = sum <$> mapM (fmap product . mapM multiValueCardinality . snd) constrs
 
 -- | The value set a list of values describes, as a 'MultiValue' shaped after
 -- the values themselves (tuples split into their components, and so on).
@@ -416,21 +365,6 @@ valueKey (VEither (Left l)) = KLeft <$> valueKey l
 valueKey (VEither (Right r)) = KRight <$> valueKey r
 valueKey (VADT c fs) = KADT c <$> mapM valueKey fs
 valueKey _ = Nothing
-
-valueInMultiValue :: MultiValue -> Value -> Bool
-valueInMultiValue MultiContinuous (VFloat _) = True
-valueInMultiValue (MultiDiscretes d) x = x `elem` d
-valueInMultiValue (MultiEither ml _) (VEither (Left l)) = valueInMultiValue ml l
-valueInMultiValue (MultiEither _ mr) (VEither (Right r)) = valueInMultiValue mr r
-valueInMultiValue (MultiTuple mf ms) (VTuple f s) = valueInMultiValue mf f && valueInMultiValue ms s
-valueInMultiValue (MultiADT mConstrs) (VADT cName vals) = fromMaybe False (do
-  constr <- lookup cName mConstrs
-  return $ all (uncurry valueInMultiValue) (zip constr vals))
-valueInMultiValue MultiAuto _ = error "valueInMultiValue: unresolved auto-placeholder (_); resolveMultiAuto should have run first"
-valueInMultiValue (MultiTypeRef n) _ = error ("valueInMultiValue: unresolved recursion reference to '" ++ n ++ "'; resolveMultiValueTypeDecl should have unrolled it")
--- Any remaining pair is a value whose shape does not match the value set's, so
--- it is simply not a member.
-valueInMultiValue _ _ = False
 
 unionMultiValues :: MultiValue -> MultiValue -> MultiValue
 unionMultiValues MultiContinuous MultiContinuous = MultiContinuous
@@ -646,12 +580,6 @@ containsTensor decls = go Set.empty
                , (_, fields) <- cs, (_, ty) <- fields ]
     go _    _             = False
 
-
-elementAt :: ValueList a -> Int -> GenericValue a
-elementAt (ListCont x _) 0 = x
-elementAt (ListCont _ xs) i = elementAt xs (i-1)
-elementAt EmptyList _ = error "Index out of bounds"
-elementAt AnyList _ = error "Cannot iterate AnyLists"
 
 getRType :: Value -> RType
 getRType (VBool _) = TBool

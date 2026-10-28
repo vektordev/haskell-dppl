@@ -57,7 +57,7 @@ import qualified Data.Set as Set
 
 import SPLL.IntermediateRepresentation
 import SPLL.IROptimizer (allNamesIR)
-import SPLL.Lang.Types (GenericValue(..))
+import SPLL.IR.Value (GenericValue(..))
 import SPLL.ReservedNames (neuralReadLogitsSuffix)
 
 -- | Run the rewrite over the probability and integrate bodies of every
