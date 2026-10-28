@@ -516,26 +516,24 @@ variantUnitTests =
 
   , testCase "writeLogits of a correlated tuple marginalises each slot through the dispatcher" $ do
       -- makeWriteLogitsPlan queries each slot with ANY in the others, which is
-      -- exactly a masked query. (b, not b) shares b between its slots, so the
-      -- let-fold fallback refuses the per-slot marginal (b unobserved, but
-      -- read by the other slot); the variant answers it. The task's own
-      -- examples, N and B, are continuous Uniform tuples, which writeLogits
-      -- does not represent at all.
+      -- exactly a masked query. (b, not b) shares b between its slots. The
+      -- let-fold fallback used to refuse the per-slot marginal (b unobserved,
+      -- but read by the other slot); it now sums the ANY b over {True, False}
+      -- (task any-mark-passed-as-recursive-call-state), and the variant
+      -- answers it too. The task's own examples, N and B, are continuous
+      -- Uniform tuples, which writeLogits does not represent at all.
       prog <- parseOrFail "main = draw b = Uniform < 0.5 in (b, not b)"
       let written c = do
             r <- try (evaluate (either (Left . id) (Right . forceValue) (runWriteLogits c prog "main" [])))
             return (either (\(e :: SomeException) -> Left (show e)) id r)
-      fallback <- written defaultCompilerConfig { marginalSlots = 0 }
-      case fallback of
-        Left e -> assertBool ("the fallback refuses: " ++ e) ("cannot compute marginal" `isInfixOf` e)
-        Right v -> assertFailure ("the let-fold fallback was expected to refuse, got " ++ show v)
-      dispatched <- written defaultCompilerConfig
-      case dispatched of
-        Right (VList l) -> do
-          let xs = [ x | VFloat x <- foldr (:) [] l ]
-          assertEqual "four Bool logit slots" 4 (length xs)
-          forM_ xs $ \x -> assertBool ("every slot marginal is 0.5, got " ++ show xs) (abs (x - 0.5) < 1e-12)
-        other -> assertFailure ("writeLogits through the dispatcher: " ++ show other)
+      forM_ [("the let-fold fallback", defaultCompilerConfig { marginalSlots = 0 }), ("the dispatcher", defaultCompilerConfig)] $ \(what, c) -> do
+        res <- written c
+        case res of
+          Right (VList l) -> do
+            let xs = [ x | VFloat x <- foldr (:) [] l ]
+            assertEqual (what ++ ": four Bool logit slots") 4 (length xs)
+            forM_ xs $ \x -> assertBool (what ++ ": every slot marginal is 0.5, got " ++ show xs) (abs (x - 0.5) < 1e-12)
+          other -> assertFailure ("writeLogits through " ++ what ++ ": " ++ show other)
 
   ]
   where

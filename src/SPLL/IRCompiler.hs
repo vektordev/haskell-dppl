@@ -2092,6 +2092,84 @@ occursUnderFieldCtor adtDs x = go False
                                            | otherwise = any (go under) (getSubExprs e)
     go under e = any (go under) (getSubExprs e)
 
+-- | How many fixed witnesses 'applyBinding''s sum over the wildcard leaves of
+-- a point witness may take, the product of the leaves' domain sizes.
+wildcardLeafSumBound :: Int
+wildcardLeafSumBound = 64
+
+-- | One step into a tuple: its first or its second field.
+data FieldStep = FieldFst | FieldSnd deriving (Eq, Show)
+
+fieldStepIR :: FieldStep -> IRExpr -> IRExpr
+fieldStepIR FieldFst = IRDestruct AcFst
+fieldStepIR FieldSnd = IRDestruct AcSnd
+
+-- | @setFieldIR p k w@: the tuple @w@ with the field at path @p@ replaced by @k@.
+setFieldIR :: [FieldStep] -> IRExpr -> IRExpr -> IRExpr
+setFieldIR [] k _ = k
+setFieldIR (FieldFst : r) k w = IRConstruct TgTuple [setFieldIR r k (IRDestruct AcFst w), IRDestruct AcSnd w]
+setFieldIR (FieldSnd : r) k w = IRConstruct TgTuple [IRDestruct AcFst w, setFieldIR r k (IRDestruct AcSnd w)]
+
+-- | The paths to the leaves of a (nested) tuple type; a non-tuple is its own
+-- single leaf.
+tupleLeafPaths :: RType -> [[FieldStep]]
+tupleLeafPaths (Tuple a b) = map (FieldFst :) (tupleLeafPaths a) ++ map (FieldSnd :) (tupleLeafPaths b)
+tupleLeafPaths _ = [[]]
+
+-- | Each free occurrence of variable @x@ in @e@, as the tuple path its
+-- @fst@/@snd@ projections read, and whether it sits in an output position:
+-- reached from the root through field constructors, @if@ arms and let
+-- bodies only, so its value is compared against the observation (as a
+-- wildcard where the observation is one) rather than computed with. An
+-- occurrence aliased by a binder counts as a computing read of the whole.
+varFieldReads :: [ADTDecl] -> String -> Expr -> [(Bool, [FieldStep])]
+varFieldReads adtDs x = go True
+  where
+    go out e | Just (n, p) <- projectionOf e = [(out, p) | n == x]
+    go _ (Expr _ (Lambda n b)) = if n == x then [] else go False b
+    go out (Expr _ (Apply (Expr _ (Lambda y b)) arg))
+      | y == x = go False arg
+      | otherwise = go False arg ++ go out b
+    go out (Expr _ (IfThenElse c a b)) = go False c ++ go out a ++ go out b
+    go out (Expr _ (InjF (Named n) args)) | isFieldConstructor adtDs n = concatMap (go out) args
+    go _ e = concatMap (go False) (getSubExprs e)
+    projectionOf (Expr _ (Var n)) = Just (n, [])
+    projectionOf (Expr _ (InjF (Named "fst") [a])) = fmap (++ [FieldFst]) <$> projectionOf a
+    projectionOf (Expr _ (InjF (Named "snd") [a])) = fmap (++ [FieldSnd]) <$> projectionOf a
+    projectionOf _ = Nothing
+
+-- | The finite set of values the field at path @p@ of @e@'s value can take,
+-- where the program states one: the node's own enumerable domain, else
+-- through a tuple constructor, both arms of an @if@, a let body, or the body
+-- of a called top-level function (at most @fuel@ calls deep). A superset is
+-- sound for a sum over it (a value the field cannot take has no mass).
+fieldDomainOf :: Program -> Int -> Expr -> [FieldStep] -> Maybe [Value]
+fieldDomainOf prog = go
+  where
+    go fuel e path
+      | fuel <= (0 :: Int) = Nothing
+      | Just mv <- enumerableDomain (tags (getTypeInfo e)) = project mv path
+      | otherwise = case e of
+          Expr _ (InjF (Named "TCons") [a, b]) -> case path of
+            FieldFst : r -> go fuel a r
+            FieldSnd : r -> go fuel b r
+            [] -> Nothing
+          Expr _ (IfThenElse _ a b) -> (\xs ys -> nub (xs ++ ys)) <$> go fuel a path <*> go fuel b path
+          Expr _ (Apply (Expr _ (Lambda _ b)) _) -> go fuel b path
+          _ | (Expr _ (Var f), args@(_ : _)) <- flattenApplySpine e
+            , Just fBody <- lookup f (functions prog)
+            , Just b <- stripN (length args) fBody -> go (fuel - 1) b path
+          _ -> Nothing
+    project mv [] | multiValueIsFinite mv = Just (multiValueToValueList mv)
+                  | otherwise = Nothing
+    project (MultiTuple a _) (FieldFst : r) = project a r
+    project (MultiTuple _ b) (FieldSnd : r) = project b r
+    project _ _ = Nothing
+    stripN :: Int -> Expr -> Maybe Expr
+    stripN 0 b = Just b
+    stripN n (Expr _ (Lambda _ b)) = stripN (n - 1) b
+    stripN _ _ = Nothing
+
 -- | Re-annotate an expression for dispatch, given that the named variables
 -- have been recovered by enclosing constructs -- a witness fold, an
 -- enumeration loop, a residue factor (design law-carrying-modality §D,
@@ -10770,7 +10848,7 @@ applyBinding meta cumulative rt binding sample = do
           toIRInference bodyMeta cumulative lamBody sample
    -- Point inversion: the witness recovered by the inverse chain, the
    -- change of variables, and the body factor at the witness.
-   let pointInvert chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} = do
+   let pointInvertWith witnessOf chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} = do
         -- A cumulative query transports a bound, rounded at integer quotients
         -- (task cdf-through-discrete-inverse-wrong); a point query the point.
         let (invExprP0, invExprGuard0)
@@ -10806,7 +10884,9 @@ applyBinding meta cumulative rt binding sample = do
         invExprGuard    <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
         invExprReadsAny <- pruneDeadLetIns <$> materializeAnchors meta invExprReadsAny0
         let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
-        let lInv = IRLambda (boundVar ++ tag) invExprP
+        -- 'witnessOf' is 'id' except under 'pointInvert''s enumeration of a
+        -- wildcard leaf, which reads the inverse as a parameter instead.
+        let lInv = witnessOf (IRLambda (boundVar ++ tag) invExprP)
         -- Apply the sample to the inverse
         let appliedSample = IRApply lInv sample
         -- The inversion chain may pass through a deconstructing InjF whose inverse
@@ -11088,6 +11168,80 @@ applyBinding meta cumulative rt binding sample = do
                   | otherwise     = anyRefusal
             let guardAny ok whenAnySink whenUneval = IRIf anyW (whenAny whenAnySink whenUneval) ok
             return (underLambdas lambdaVars (guardedZero (zip3Result guardAny combined bodyRes unevaluable)))
+   -- A wildcard in a finite leaf of the witness that the body reads again
+   -- (task any-mark-passed-as-recursive-call-state). The witness is the
+   -- query slot itself, so an ANY there reaches every other read of the
+   -- bound variable as a value: @draw e = ev prev in e : gen (snd e)@ at
+   -- @[(0.0, ANY), ..]@ handed @gen@ the ANY as its state, every @prev == 0@
+   -- test answered False, and the marginal was the @prev = 1@ arm alone. The
+   -- slot is marginal, so it is summed out: where the leaf is ANY at run
+   -- time (and its enclosing tuples are not), the binding's result is the
+   -- mixture over the leaf's finite domain of the same result at the witness
+   -- with that leaf fixed. The observation compares the fixed leaf against
+   -- its ANY slot as a wildcard, the bound value's density is read at the
+   -- fixed witness, and the body's other reads see a value. Exact by the law
+   -- of total probability, whatever those reads do with it.
+   --
+   -- The result at a witness is compiled once, as a closure over the inverse
+   -- ('pointInvertWith'), and called per leaf value, so the binding is not
+   -- compiled once per value; the calls sit in the arm of the run-time test,
+   -- so a query without the wildcard makes exactly the one call it made
+   -- before. Only a leaf read by more than one occurrence, or by one that
+   -- computes with it ('varFieldReads'), with a domain the bound value
+   -- states ('fieldDomainOf'), qualifies; any other binding keeps its code.
+   -- A point query of a value-typed body only: a closure-valued result has no
+   -- mixture, and a cumulative one is left to the existing refusals.
+   let enumLeaves =
+         let occReads = varFieldReads (adtDecls meta) toInvCN (bindBody binding)
+             overlapping p = [ r | r@(_, q) <- occReads, q `isPrefixOf` p || p `isPrefixOf` q ]
+             readAgain p = let ov = overlapping p in length ov >= 2 || any (not . fst) ov
+             leaves = [ (p, vals)
+                      | p <- tupleLeafPaths (rType (getTypeInfo v)), readAgain p
+                      , Just vals <- [fieldDomainOf (compilingProgram meta) 8 v p], not (null vals) ]
+         -- At most 'wildcardLeafSumBound' witnesses per wildcard pattern. Not
+         -- the materialization budget: that is the dense tables' off switch,
+         -- and the sum is not a table.
+         in if length occReads >= 2 && product (map (length . snd) leaves) <= wildcardLeafSumBound
+              then leaves else []
+   let isArrowRT = case rt of TArrow _ _ -> True; _ -> False
+   let pointInvert chain
+         | cumulative || isArrowRT || not (null lambdaVars) || null enumLeaves = pointInvertWith id chain
+         | otherwise = do
+            let sr = semiringOf meta
+            invExprP <- pruneDeadLetIns <$> materializeAnchors meta (invValue chain)
+            invExprGuard <- pruneDeadLetIns <$> materializeAnchors meta (invGuard chain)
+            invExprReadsAny <- pruneDeadLetIns <$> materializeAnchors meta (invReadsAny chain)
+            let lInv = IRLambda (boundVar ++ tag) invExprP
+            let atSample e = IRApply (IRLambda (boundVar ++ tag) e) sample
+            -- Whether the witness may be evaluated at all: inside the
+            -- inverse's domain and not computed from a wildcard.
+            let evaluable = IRIf (atSample invExprReadsAny) constFalseIR (atSample invExprGuard)
+            inverseParam <- mkVariable "inverse"
+            atWitness <- mkVariable "at_witness"
+            resO <- scoped (pointInvertWith (const (IRVar inverseParam)) chain)
+            setVariables [(atWitness, IRLambda inverseParam (closeExpr resO packResult))]
+            argVar <- mkVariable "witness_arg"
+            -- The result at the witness 'fixLeaves' makes of the inverse's.
+            let callAt fixLeaves = do
+                  r <- mkVariable "at_w"
+                  setVariables [(r, IRApply (IRVar atWitness)
+                                   (IRLambda argVar (fixLeaves (IRApply lInv (IRVar argVar)))))]
+                  return (unpackResult r)
+            let leafIsAny w [] = IRUnaryOp OpIsAny w
+                leafIsAny w (st : rest) = IRIf (IRUnaryOp OpIsAny w) constFalseIR (leafIsAny (fieldStepIR st w) rest)
+            let go [] fixLeaves = callAt fixLeaves
+                go ((p, vals) : rest) fixLeaves = do
+                  let w = fixLeaves (IRApply lInv sample)
+                  summedO <- scoped $ do
+                    terms <- forM vals $ \k ->
+                      go rest (\x -> setFieldIR p (IRConst (valueToIR k)) (fixLeaves x))
+                    foldM (\a b -> mixP sr (IROp OpPlus (rBranches a) (rBranches b)) a b) (head terms) (tail terms)
+                  keptO <- scoped (go rest fixLeaves)
+                  r <- mkVariable "marginal_leaf"
+                  setVariables [(r, IRIf (IRIf evaluable (leafIsAny w p) constFalseIR)
+                                       (closeExpr summedO packResult) (closeExpr keptO packResult))]
+                  return (unpackResult r)
+            go enumLeaves id
    -- The engines of a probabilistic application, as data, in dispatch order
    -- (task engine-applicability-as-data): each entry's applicability is the
    -- predicate the modality engine's let rule reads too, and its
