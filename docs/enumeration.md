@@ -105,6 +105,18 @@ Two refusals remain, each answering "no tag":
 
 - **Recursion.** A function already being looked through is refused; unrolling
   has no termination story and the enclosing tag fixpoint would not converge.
+  The exception is a call whose arguments are all **closed constants**
+  (`rollout 3`, and inside it `rollout (3 - 1)`): `applyTags` substitutes the
+  constants for the parameters and annotates the body without marking the
+  function visited, and inside such an unrolled body a closed-constant
+  condition selects its arm (`liveArm`), so the base case ends the unrolling.
+  It is bounded twice: at most `unrollFuel` (64) calls deep, and only for a
+  callee with at most one call that can lead back into it
+  (`unrollableCallee`), so a tree recursion like `fib 5` is not unrolled.
+  Either bound falls back to the ordinary look-through. This is what gives
+  `len (rollout 3)` an enumerable argument (task
+  `recursive-consumer-of-recursive-random-list-refused`; corpus
+  `data-structures/recursive{LengthOfRecursiveList,CountOfRecursiveBoolList}`).
 - **An empty propagated domain.** No values at all is an *absence* of a domain,
   not an empty one; tagging it would make downstream inference sum over nothing
   and report probability zero.
