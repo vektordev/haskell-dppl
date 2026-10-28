@@ -58,6 +58,7 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (substituteVar, freeVarsExpr, autoDeriveMultiValue, multiValueIsFinite, multiValueToValueList, prettyRType)
 import SPLL.Typing.RType (RType(..))
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.ReservedNames (perValuePointSuffix, perValuePriorSuffix, perValueGivenSuffix, perValueSlotSuffix,
                            perValueHelperSuffixes, queryParamName, accProbParamName, topKCutoffParamName, probSuffix)
 import SPLL.Semiring (Semiring(..), mkSemiring, orIR)

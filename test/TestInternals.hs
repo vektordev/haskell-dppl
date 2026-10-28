@@ -29,10 +29,11 @@ import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlo
 import qualified SPLL.AutoNeural
 import MockNN (flattenMockInput, mockInputFor, shapedMockLogits, planAwareMockLogits)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IRGatherPass (gatherPassExpr)
 import SPLL.IRLeafTablePass (leafTablePassExpr)
-import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
+import SPLL.IROptimizer (defaultOptimizerConfig, postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, prepBatchedBody, structural)
 import SPLL.IR.ADT (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
@@ -2117,7 +2118,7 @@ test_foldConstProjectionsOffSharedTuple = testCase "foldConstProjectionsOffShare
       -- The second field is read twice, so the binding stays a binding.
       body = IRConstruct TgTuple [ IRDestruct AcFst (IRVar "v")
                                  , IROp OpMult (IRDestruct AcSnd (IRVar "v")) (IRDestruct AcSnd (IRVar "v")) ]
-      opt = postProcess defaultCompilerConfig (IRLambda "s" (IRLetIn "v" bound body))
+      opt = postProcess defaultOptimizerConfig (IRLambda "s" (IRLetIn "v" bound body))
       mentionsFstV e = e == IRDestruct AcFst (IRVar "v") || any mentionsFstV (getIRSubExprs e)
       mentionsSndV e = e == IRDestruct AcSnd (IRVar "v") || any mentionsSndV (getIRSubExprs e)
   assertBool ("the agreed-constant field was not folded: " ++ show opt) (not (mentionsFstV opt))
@@ -3524,14 +3525,14 @@ optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
   , testCase "optimizeLetIns keeps a multi-use generator binding shared" $ do
       let expr = IRLetIn "d" (IRVar "coin_gen")
                    (IROp OpPlus (IRVar "d") (IRVar "d"))
-          opt  = postProcess defaultCompilerConfig expr
+          opt  = postProcess defaultOptimizerConfig expr
       assertEqual "coin_gen sampled exactly once" 1 (countIRVar "coin_gen" opt)
   -- A pure bare-variable binding, by contrast, is copy-propagated into both uses
   -- (the binding disappears) -- the behaviour the old IRConst-only rule blocked.
   , testCase "optimizeLetIns copy-propagates a pure variable binding" $ do
       let expr = IRLetIn "d" (IRVar "x")
                    (IROp OpPlus (IRVar "d") (IRVar "x"))
-          opt  = postProcess defaultCompilerConfig expr
+          opt  = postProcess defaultOptimizerConfig expr
       assertEqual "d fully inlined" 0 (countIRVar "d" opt)
       assertEqual "x appears at both uses" 2 (countIRVar "x" opt)
   -- CSE must NOT collapse two occurrences of an expression built from a generator
@@ -3539,7 +3540,7 @@ optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
   , testCase "CSE does not share a repeated generator-referencing subexpression" $ do
       let sub  = IROp OpMult (IRVar "coin_gen") (IRConst (VFloat 2))
           expr = IROp OpPlus sub sub
-          opt  = postProcess defaultCompilerConfig expr
+          opt  = postProcess defaultOptimizerConfig expr
       assertEqual "both draws survive" 2 (countIRVar "coin_gen" opt)
   -- ...whereas a repeated pure subexpression is shared as usual (one binding, one
   -- occurrence of each pure leaf), confirming the refusal above is specific to
@@ -3547,7 +3548,7 @@ optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
   , testCase "CSE still shares a repeated pure subexpression" $ do
       let sub  = IROp OpMult (IRVar "x") (IRConst (VFloat 2))
           expr = IROp OpPlus sub sub
-          opt  = postProcess defaultCompilerConfig expr
+          opt  = postProcess defaultOptimizerConfig expr
       assertEqual "x read once through the shared binding" 1 (countIRVar "x" opt)
   ]
 
@@ -3669,7 +3670,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
     -- Optimize a whole environment (so 'deterministicGens' sees the call graph)
     -- and hand back the named group's generate body.
     optimizedGen n groups =
-      case optimizeEnv defaultCompilerConfig (IREnv groups [] []) of
+      case optimizeEnv defaultOptimizerConfig (IREnv groups [] []) of
         IREnv groups' _ _ ->
           case [b | g <- groups', groupName g == n, Just (b, _) <- [genFun g]] of
             (b:_) -> b
@@ -3733,7 +3734,7 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
   -- Repro 4: the condition re-tested as the first thing in its own branch.
   , testCase "an arm test is decided inside its own branches" $ do
       let c = IRDestruct AcIsLeft x
-      postProcess defaultCompilerConfig
+      postProcess defaultOptimizerConfig
         (IRIf c (IRIf c (IRVar "a") (IRVar "b")) (IRIf c (IRVar "d") (IRVar "e")))
         @?= IRIf c (IRVar "a") (IRVar "e")
   , testCase "a constructor test is decided inside its own branches" $ do
@@ -3744,7 +3745,7 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
   -- Repro 3: @if s: if not(not(s)) ...@ and @0.3 if not(s) else 0.0@ in the
   -- else arm.
   , testCase "a Bool variable is decided as a nested condition, through negations" $
-      postProcess defaultCompilerConfig
+      postProcess defaultOptimizerConfig
         (IRIf s (IRIf (IRUnaryOp OpNot (IRUnaryOp OpNot s)) (IRVar "a") (IRVar "b"))
                 (IRIf (IRUnaryOp OpNot s) (IRVar "d") (IRVar "e")))
         @?= IRIf s (IRVar "a") (IRVar "d")
@@ -4807,7 +4808,7 @@ materializationTests = testGroup "Tier 0 marginal materialization"
       -- node's own count either.
       prog <- loadCorpusProgram "mNistAdd3"
       forM_ [0 .. 4] $ \q -> do
-        let bcConf' c = c { SPLL.IntermediateRepresentation.countBranches = True }
+        let bcConf' c = c { SPLL.CompilerConfig.countBranches = True }
         matR <- return (runProb (bcConf' defaultCompilerConfig)   prog digits3 (VInt q))
         refR <- return (runProb (bcConf' noMaterializationConfig) prog digits3 (VInt q))
         case (matR, refR) of

@@ -15,7 +15,7 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.RInfer (addRTypeInfo)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (runGen)
-import SPLL.IntermediateRepresentation (defaultCompilerConfig)
+import SPLL.CompilerConfig (defaultCompilerConfig)
 import Control.Monad.Random.Lazy (evalRand, mkStdGen)
 
 import Data.List (isInfixOf, sort)

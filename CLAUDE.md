@@ -142,6 +142,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `AutoNeural` — generated readLogits/writeLogits functions and partition plans for neural declarations.
 - `CompileWarnings` — compile-time warnings (non-blocking diagnostics), computed by `Prelude.programWarnings`/`compiledWarnings`.
 - `ReservedNames` — the single registry of compiler-claimed and target-language names.
+- `CompilerConfig` — `CompilerConfig`, `SemiringFamily` and the defaults; `OptimizerProjection` projects it onto the IR optimizer's `OptimizerConfig`.
 - `Prelude` — `compile`, smart constructors and the `run*` query entry points.
 - `DuplicationCensus` — counts copies of large subtrees in unoptimized IR, the tripwire for exponential compile blowups (`docs/testing.md`, "Duplication census").
 - `StageDiff` — compiles two equivalent programs side by side and names the first stage that diverges (`docs/testing.md`, "Rewrite invariance").

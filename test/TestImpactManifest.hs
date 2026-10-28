@@ -15,7 +15,8 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, (@?=))
 
 import SPLL.Prelude (compile)
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv)
+import SPLL.IntermediateRepresentation (IREnv)
+import SPLL.CompilerConfig (defaultCompilerConfig, CompilerConfig(..))
 import ImpactManifest
 import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
                         batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs, lineSpillLabel, oneHotGatherLabel,

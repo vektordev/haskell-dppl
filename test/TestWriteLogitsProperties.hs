@@ -43,6 +43,7 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (constructVList)
 import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, planLayoutString, PartitionPlan(..), adtFlagSlots, stripDeadSlotFills)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Typing.RType (RType(..), shapeNumel)
 import IRInterpreter (generateDet)
 import MockNN (evaluateMockNN)

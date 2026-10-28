@@ -7,6 +7,7 @@ module TestIRTypeCheck (irTypeCheckTests) where
 -- that the checker accepts real compiler output.
 
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.IRTypeCheck
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))

@@ -59,6 +59,7 @@ module SPLL.Semiring (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.ReservedNames (sumProductGroupTag, maxProductGroupTag, countingGroupTag)
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (multiValueToValueList)

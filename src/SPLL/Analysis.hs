@@ -25,7 +25,7 @@ import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import PredefinedFunctions
 import Utils
-import SPLL.IntermediateRepresentation (defaultMaterializationCardinality)
+import SPLL.CompilerConfig (defaultMaterializationCardinality)
 import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN)
 
 type TagEnv = [(String, [Tag])]

@@ -52,7 +52,8 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (getSubExprs)
 import SPLL.Typing.RType (RType(..), TVarR(..))
 import qualified SPLL.Typing.PType as PT
-import SPLL.IntermediateRepresentation (IREnv(..), IRFunGroup(..), IRValue, CompilerConfig(..), pattern VProbDim)
+import SPLL.IntermediateRepresentation (IREnv(..), IRFunGroup(..), IRValue, pattern VProbDim)
+import SPLL.CompilerConfig (CompilerConfig(..))
 import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..))
 import SPLL.Prelude (compile, compileStages, runProbC, StageSnapshot(..), StageValue(..))
 

@@ -1,6 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module SPLL.IROptimizer (
-  optimizeEnv
+  OptimizerConfig(..)
+, defaultOptimizerConfig
+, optimizeEnv
 , optimizeEnvWith
 , shareNetworkCallsCounted
 , postProcess
@@ -34,12 +36,25 @@ import Debug.Trace (trace)
 import SPLL.IR.Value (floatApproxEqThresh)
 
 
-optimizeEnv :: CompilerConfig -> IREnv -> IREnv
+-- | What the optimizer reads of the compiler's configuration. A projection of
+-- 'SPLL.CompilerConfig.CompilerConfig' ('SPLL.OptimizerProjection.optimizerConfig'),
+-- so the IR side does not depend on the frontend's configuration type.
+data OptimizerConfig = OptimizerConfig
+  { optLevel :: Int            -- ^ @-O@ level, 0 to 2
+  , optPruneAnyChecks :: Bool  -- ^ run the any-check pruning stage
+  , optVerbose :: Int          -- ^ verbosity; 1 adds per-function rows to the telemetry
+  , optShowStats :: Bool       -- ^ collect and print @--optStats@ telemetry
+  } deriving (Show)
+
+defaultOptimizerConfig :: OptimizerConfig
+defaultOptimizerConfig = OptimizerConfig {optLevel = 2, optPruneAnyChecks = False, optVerbose = 0, optShowStats = False}
+
+optimizeEnv :: OptimizerConfig -> IREnv -> IREnv
 optimizeEnv conf = optimizeEnvWith conf Set.empty
 
 -- | 'optimizeEnv' told the program's declared network names, so it can share
 -- repeated calls of one network on one argument ('shareNetworkCallsCounted').
-optimizeEnvWith :: CompilerConfig -> Set.Set Varname -> IREnv -> IREnv
+optimizeEnvWith :: OptimizerConfig -> Set.Set Varname -> IREnv -> IREnv
 optimizeEnvWith conf neuralNames (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv funcs' adtsDecl consts)
   where
     optGroup :: IRFunGroup -> State [(String, OptStats)] IRFunGroup
@@ -60,7 +75,7 @@ optimizeEnvWith conf neuralNames (IREnv funcs adtsDecl consts) = reportStats con
       modify' ((label, st) :)
       return (Just (expr', doc))
 
-postProcess :: CompilerConfig -> IRExpr -> IRExpr
+postProcess :: OptimizerConfig -> IRExpr -> IRExpr
 --postProcess = id
 postProcess conf = fst . postProcessStats conf emptyOptEnv
 
@@ -87,7 +102,7 @@ postProcess conf = fst . postProcessStats conf emptyOptEnv
 -- therefore a fixed point of the same combined rule set as before -- the split
 -- changes the route, never the destination -- while the rare programs that need
 -- the extra rounds stay visible instead of being silently under-optimized.
-postProcessStats :: CompilerConfig -> OptEnv -> IRExpr -> (IRExpr, OptStats)
+postProcessStats :: OptimizerConfig -> OptEnv -> IRExpr -> (IRExpr, OptStats)
 postProcessStats conf det e0 = go 1 [] 0 AllStages e0
   where
     go n acc rechecks set e =
@@ -124,9 +139,9 @@ data OptStats = OptStats
 type Tally = Map.Map String Int
 
 -- | Emit the telemetry as a trace, then hand back the environment unchanged.
-reportStats :: CompilerConfig -> [(String, OptStats)] -> IREnv -> IREnv
+reportStats :: OptimizerConfig -> [(String, OptStats)] -> IREnv -> IREnv
 reportStats conf report env
-  | not (optStats conf) = env
+  | not (optShowStats conf) = env
   | otherwise           = trace (unlines (summary ++ detail)) env
   where
     entries = reverse report
@@ -134,7 +149,7 @@ reportStats conf report env
     rechecks = sum (map (statRechecks . snd) entries)
     total = Map.unionsWith (+) (concatMap (statPerIteration . snd) entries)
     summary =
-      [ "=== Optimizer telemetry (-O" ++ show (optimizerLevel conf) ++ ") ==="
+      [ "=== Optimizer telemetry (-O" ++ show (optLevel conf) ++ ") ==="
       , "  " ++ show (length entries) ++ " function bodies, "
           ++ show (sum iters) ++ " fixed-point iterations total"
           ++ (if null iters then "" else ", max " ++ show (maximum iters)
@@ -144,7 +159,7 @@ reportStats conf report env
                ++ intercalate ", " [l | (l, st) <- entries, statRechecks st > 0]
            | rechecks > 0 ]
     detail
-      | verbose conf < 1 = []
+      | optVerbose conf < 1 = []
       | otherwise = concatMap perFun entries
     perFun (label, OptStats n tallies _) =
       ("  " ++ label ++ ": " ++ show n ++ " iteration(s)")
@@ -253,10 +268,10 @@ data StageSet
   | OnceStagesOnly  -- ^ the post-loop idempotence check
   deriving (Eq)
 
-optimizeStats :: CompilerConfig -> OptEnv -> IRExpr -> (IRExpr, Tally)
+optimizeStats :: OptimizerConfig -> OptEnv -> IRExpr -> (IRExpr, Tally)
 optimizeStats conf det = optimizeStats' conf det AllStages
 
-optimizeStats' :: CompilerConfig -> OptEnv -> StageSet -> IRExpr -> (IRExpr, Tally)
+optimizeStats' :: OptimizerConfig -> OptEnv -> StageSet -> IRExpr -> (IRExpr, Tally)
 optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= networkShareStage >>= commonSubexprStage) Map.empty
   where
     nodeWise = irMapM (\e ->
@@ -270,7 +285,7 @@ optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= networkShareStage 
         >>= letInStage
         >>= assiciativityStage
         >>= applyConstStage)
-    oLvl = optimizerLevel conf
+    oLvl = optLevel conf
     -- A rule that has more to do once other rules have run: it stays in the loop.
     loopStage name enabled = mkStage name (enabled && stages /= OnceStagesOnly)
     -- A rule believed to reach its fixed point in the first pass. Runs in the
@@ -283,7 +298,7 @@ optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= networkShareStage 
     -- ever read by --optStats, so without it the rule just runs.
     mkStage name enabled f
       | not enabled    = return
-      | optStats conf  = counted name f
+      | optShowStats conf  = counted name f
       | otherwise      = return . f
     commonSubexprStage =
       if oLvl >= 2 && stages /= OnceStagesOnly
@@ -305,7 +320,7 @@ optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= networkShareStage 
     distributeConditionals = loopStage "distributeIf" (oLvl >= 2) (distributeIf det (oLvl >= 3))
     -- No telemetry either way (it only runs under --pruneAnyChecks), so it keeps
     -- the conservative placement.
-    pruneAnyCkecksStage = loopStage "pruneAnyChecks" (pruneAnyChecks conf) pruneAnyCkecksExpr
+    pruneAnyCkecksStage = loopStage "pruneAnyChecks" (optPruneAnyChecks conf) pruneAnyCkecksExpr
 
 -- | Run a rewrite and record whether it changed the node.
 counted :: String -> (IRExpr -> IRExpr) -> IRExpr -> State Tally IRExpr

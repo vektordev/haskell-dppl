@@ -104,6 +104,7 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC, runGenC, compile)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.ReservedNames (componentNormalName)

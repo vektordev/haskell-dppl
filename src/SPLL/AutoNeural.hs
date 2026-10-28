@@ -28,6 +28,7 @@ module SPLL.AutoNeural(
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Typing.RType
 import SPLL.Lang.Lang
 import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName)

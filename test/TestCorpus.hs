@@ -58,6 +58,7 @@ import qualified Data.Map.Strict as Map
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Validator
 import SPLL.Prelude
 import CorpusSweep

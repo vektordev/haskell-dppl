@@ -26,6 +26,7 @@ import SPLL.Parser (tryParseProgram)
 import TestCaseParser
 import TestTolerances (probTolerance, writeLogitsSlotTolerance, normalizationTolerance, samplingTolerance)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Typing.RType
 import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, topLevelWriteLogitsPlan, PartitionPlan, getSize, InputSlot(..), inputSlots, inputWidth)
 import SPLL.Typing.Infer (addTypeInfo)

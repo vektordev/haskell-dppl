@@ -17,6 +17,7 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import qualified SPLL.CodeGenPyTorch
 import qualified SPLL.CodeGenJulia
 import qualified SPLL.CodeGenPyTorchBatched

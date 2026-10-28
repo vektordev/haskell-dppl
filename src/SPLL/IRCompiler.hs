@@ -29,6 +29,8 @@ module SPLL.IRCompiler (
 
 import SPLL.ReservedNames (distributionPrimitiveNames, queryParamName, accProbParamName, topKCutoffName, topKCutoffParamName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
 import SPLL.IntermediateRepresentation
+import SPLL.OptimizerProjection (optimizerConfig)
+import SPLL.CompilerConfig
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
@@ -306,7 +308,7 @@ envToIR conf fcDat laws p
           -- Batched mode: retag elementwise ifs to selects before optimizing
           -- (design pytorch-tensorizer). Mirrors 'Prelude.compile'.
           selected = if batched conf then selectPassEnv stripped else stripped
-      in optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals p]) selected
+      in optimizeEnvWith (optimizerConfig conf) (Set.fromList [n | (n, _, _) <- neurals p]) selected
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).
@@ -1704,7 +1706,7 @@ pointQueryTable meta e dom@(v0 : vs) = do
   where
     inferAt v = toIRInference meta False e (IRConst (valueToIR v))
     compiledSize count o = count (unP (rProb (openValue o))) + openBlockSize count o
-    foldedSize o = irLogicNodeCount (postProcess (compilerConfig meta) (closeExpr o (unP . rProb)))
+    foldedSize o = irLogicNodeCount (postProcess (optimizerConfig (compilerConfig meta)) (closeExpr o (unP . rProb)))
     bindCell p = do
       cellName <- mkVariable "mat_leaf"
       setVariables [(cellName, p)]

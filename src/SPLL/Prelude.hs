@@ -116,6 +116,8 @@ import SPLL.MaskVariants
 import SPLL.AutoNeural (validateWriteLogitsGaussian, topLevelWriteLogitsPlan, fitPlanToSupport)
 import SPLL.CompileWarnings
 import SPLL.IntermediateRepresentation
+import SPLL.OptimizerProjection (optimizerConfig)
+import SPLL.CompilerConfig
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo, addModalityLaws)
 import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..), renderJustification, engineName)
@@ -554,7 +556,7 @@ compileRTypedS conf rtypedWithSigs = do
   let selected = if batched conf then selectPassEnv stripped else stripped
   stageIR conf "After Select Pass" selected
 
-  let optimized = optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
+  let optimized = optimizeEnvWith (optimizerConfig conf) (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
       -- Batched only: a one-hot sum reading a logit tensor at a contiguous
       -- key range becomes one guarded gather (task
       -- batched-mask-variant-neural-read-nests-v-deep). After the optimizer,
