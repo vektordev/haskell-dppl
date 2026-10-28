@@ -75,8 +75,19 @@ margTests = testGroup "marginalize"
       marginalize det densInf @?= densInf
   , testCase "marg with Dirac is free (right)" $
       marginalize densInf det @?= densInf
-  , testCase "dens(inf) * dens(inf) -> int(inf) (convolution)" $
-      marginalize densInf densInf @?= GroundMod IntegralOnly Infinite FamNone
+  , testCase "dens(inf) * dens(inf) -> sample-only(inf) (no closed CDF)" $
+      -- Task marginalize-keepi-overclaims-integral-for-generic-mult: a generic
+      -- combination of two infinite-support operands has neither a closed
+      -- density nor a trusted CDF (PType's Integrate means an O(1) CDF, not
+      -- quadrature), so only sampling survives. 'keepI' used to grant
+      -- 'IntegralOnly' here with no finiteness condition.
+      marginalize densInf densInf @?= GroundMod SampleOnly Infinite FamNone
+  , testCase "densint(inf) * densint(inf) -> sample-only(inf) (Uniform * Uniform)" $
+      marginalize (GroundMod DensInt Infinite FamNone) (GroundMod DensInt Infinite FamNone)
+        @?= GroundMod SampleOnly Infinite FamNone
+  , testCase "densint(fin) * dens(inf) keeps the integral (a finite sum of CDFs)" $
+      -- The other side of the new guard: one finite side still justifies it.
+      gCap (marginalize densIntFin densInf) @?= DensInt
   , testCase "densint(fin) * densint(fin) -> densint(fin) (finite stays computable)" $
       marginalize densIntFin densIntFin @?= GroundMod DensInt Finite FamNone
   , testCase "marg always drops family (generic combination)" $

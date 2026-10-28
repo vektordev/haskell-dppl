@@ -32,7 +32,10 @@ import SPLL.Typing.Determinism (knownAnchors)
 import SPLL.Typing.ModalityInfer (perNodeOuterGrounds, Law(..), LawTable, IMod(..), renderJustification, bindingLawEnv, reinferCtx)
 import qualified Data.Map.Strict as Map
 import SPLL.Typing.Modality (GroundMod(gCap), CapabilitySet(..))
-import TestCaseParser (corpusRoot)
+import SPLL.Prelude (compile)
+import SPLL.CompilerConfig (defaultCompilerConfig)
+import SPLL.IntermediateRepresentation (IREnv(..), IRFunGroup(..))
+import Data.Maybe (isJust, isNothing)
 import CorpusSweep
 
 -- | Run the modality pipeline on a source string and return the typed program.
@@ -204,8 +207,8 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
       , testCase "exp of a Normal is LogNormal" $
           assertEqual "" PLogNormal (mainPType "main = exp(Normal)")
       , testCase "sum of two continuous laws has no closed density (Bottom)" $
-          -- {S,I} (integral but no density) projects to Bottom, matching
-          -- PInfer2's resolvePlusCons.
+          -- Only sampling survives two infinite-support operands
+          -- ('marginalize'), matching PInfer2's resolvePlusCons.
           assertEqual "" Bottom (mainPType "main = Uniform + Normal")
       , testCase "an if-mixture with one continuous branch is not finite (Bottom)" $
           -- Regression, task @modality-mixture-fin-joins-not-meets@: 'meetI'
@@ -276,8 +279,8 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
       , testCase "comparison against a Bottom operand is Bottom, not Integrate" $
           -- Regression (found by TestFuzz's typed generator, 2026-07-20):
           -- 'compareGround's "both integral-ready" branch used to accept the
-          -- right operand's degenerate {S,I} ground (the same IntegralOnly
-          -- state the previous case shows projects to Bottom) via a
+          -- right operand's degenerate {S,I} ground (the IntegralOnly state
+          -- 'marginalize' then gave @Uniform + Normal@) via a
           -- reflexive 'leqCap IntegralOnly IntegralOnly' check that is
           -- trivially true, wrongly promoting the comparison to 'Integrate'
           -- (a claimed-but-nonexistent closed-form CDF) instead of 'Bottom'.
@@ -522,6 +525,31 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" Bottom (mainPType "main = draw z = Uniform + Normal in z")
       , testCase "product of two unobserved continuous laws" $
           assertEqual "" Bottom (mainPType "main = Uniform * Uniform")
+      , testCase "product of two continuous laws: outer ground is SampleOnly, \
+                 \generate-only compile" $ do
+          -- Task @marginalize-keepi-overclaims-integral-for-generic-mult@:
+          -- 'marginalize''s keepI granted 'CanIntegrate' to two Infinite-support
+          -- operands with no finiteness condition, so this node's raw ground was
+          -- 'IntegralOnly' -- a CDF claim nothing backs. 'projectGround' hid it
+          -- (both floor to Bottom), but a raw ground flows into enclosing
+          -- 'marginalize'/'joinGround' calls before any projection, so the raw
+          -- ground itself is pinned here.
+          let src = "main = Uniform * Uniform"
+              prog = either (error . show) id (tryParseProgram "<test>" src)
+              (chained, grounds) = srcOuterGrounds "<test>" prog
+              rootCn = maybe (error "no main") (chainName . getTypeInfo)
+                         (lookup "main" (functions chained))
+          assertEqual "main's outer ground" (Just SampleOnly) (gCap <$> lookup rootCn grounds)
+          assertEqual "no partial set anywhere" []
+            [ (cn, gCap g) | (cn, g) <- grounds, gCap g `elem` [DensityOnly, IntegralOnly] ]
+          case compile defaultCompilerConfig prog of
+            Left e -> assertFailure ("compile failed: " ++ show e)
+            Right (IREnv gs _ _) -> case [ g | g <- gs, groupName g == "main" ] of
+              [g] -> do
+                assertBool "generate is compiled" (isJust (genFun g))
+                assertBool "no probability function" (isNothing (probFun g))
+                assertBool "no integrate function" (isNothing (integFun g))
+              _ -> assertFailure "expected exactly one 'main' group"
       , testCase "a convolution component floors the whole tuple" $
           assertEqual "" Bottom (mainPType "main = (Uniform + Normal, Uniform)")
       , testCase "two residual latents in one observed slot cannot both be witnessed" $
@@ -579,23 +607,14 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
   -- silently losing precision to the floor (surfacing only as an unexplained
   -- 'Bottom' where 'Integrate' was expected).
   --
-  -- The "never occurs" claim turns out to be false in one well-understood,
-  -- narrow shape: 'test/cases/let-bindings/deadBindingIntractable.ppl' and
-  -- 'deadParamIntractable.ppl' (added 2026-08-30, investigation
-  -- 60_toIRInference-apply-gap -- after the diff harness was already deleted,
-  -- so its historical "0 partial-set flags" run never saw them, and that run
-  -- was itself vacuous: the harness's candidate side was still the PInfer2
-  -- stub for its whole lifetime, so the flag never fired against a real
-  -- 'Mod'-producing engine at all). Both deliberately combine two continuous,
-  -- non-family operands (@Uniform * Uniform@) inside a **dead** binding whose
-  -- result is never read. 'marginalize' drops 'CanDensity' whenever neither
-  -- side is 'Finite' (see its @keepD@ guard), so that node's outer ground truly
-  -- is 'IntegralOnly' -- not a bug, but the exact fail-safe path these two
-  -- programs exist to pin (the floor was what fixed the crash the comment in
-  -- each @.ppl@ describes). Excluded by name below rather than silently
-  -- dropped: the exclusion list is itself the record of every corpus program
-  -- known to legitimately hit this path, so it grows only on a fresh, examined
-  -- case, and a new unexplained hit still fails the test.
+  -- Two programs once broke the claim, 'test/cases/let-bindings/
+  -- deadBindingIntractable.ppl' and 'deadParamIntractable.ppl' (a dead
+  -- @Uniform * Uniform@ binding), along with the operand of
+  -- 'test/cases/distributions/collapseProduct.ppl' (a product of two
+  -- continuous draws). Each was 'marginalize''s @keepI@ granting an integral to
+  -- two Infinite-support operands; with that guard fixed (task
+  -- @marginalize-keepi-overclaims-integral-for-generic-mult@) they type
+  -- 'SampleOnly' and the sweep holds with no exceptions.
   , corpusPartialSet
 
   -- Task @modality-arrow-apply-crashes@: the arrow-space probe table of
@@ -849,40 +868,22 @@ justAt path src =
         descend []     e = e
         descend (i:is) e = descend is (getSubExprs e !! i)
 
--- | Corpus programs that legitimately reach a partial capability set (see the
--- comment above 'corpusPartialSetTests'). Both combine two continuous operands
--- inside a dead binding whose result is never read -- 'marginalize' correctly
--- reports 'IntegralOnly' for that node, and 'projectGround' floors it to
--- 'Bottom' exactly as designed. Not a soundness gap: this /is/ the fail-safe
--- path working. The third is the operand of a 'collapse': a product of two
--- continuous draws, which 'marginalize' types 'IntegralOnly' and nothing
--- measures -- the collapse reads only its moments (task
--- encode-07-collapse-operator).
-knownPartialSetExceptions :: [FilePath]
-knownPartialSetExceptions =
-  [ corpusRoot ++ "/let-bindings/deadBindingIntractable.ppl"
-  , corpusRoot ++ "/let-bindings/deadParamIntractable.ppl"
-  , corpusRoot ++ "/distributions/collapseProduct.ppl"
-  ]
-
--- | Every corpus @.ppl@ program under 'corpusRoot' (minus
--- 'knownPartialSetExceptions'), walked through the same callee normalization ->
+-- | Every corpus @.ppl@ program under 'corpusRoot', walked through the same callee normalization ->
 -- RType inference ->
 -- enum annotation -> chain naming -> FCData sequence 'SPLL.Prelude.compile'
 -- uses (deliberately NOT 'typeProg''s order above, which runs enum/chain
 -- annotation before RType inference for test convenience --
 -- 'perNodeOuterGrounds' needs the FCData built the production way, from the
 -- RType'd and chain-named program). Asserts 'perNodeOuterGrounds' never
--- reports a 'DensityOnly'/'IntegralOnly' ground for any node in any other
--- corpus program.
+-- reports a 'DensityOnly'/'IntegralOnly' ground for any node in any corpus
+-- program.
 corpusPartialSetTests :: Corpus -> IO TestTree
 corpusPartialSetTests corpus = corpusSweepAll corpus SweepSpec
   { sweepName = "ModalityInfer.corpus-wide partial-set invariant", sweepTier = Default, sweepSlow = IgnoreSlow
-  , sweepSelect = \e -> cePpl e `notElem` knownPartialSetExceptions
+  , sweepSelect = const True
   , sweepNote = "no node of any program reaches a DensityOnly/IntegralOnly outer ground" } $ \es ->
   return $ testGroup "corpus-wide partial-set invariant"
-    [ testCase "no corpus .ppl node (outside the known exceptions) lands \
-               \in DensityOnly/IntegralOnly" $ do
+    [ testCase "no corpus .ppl node lands in DensityOnly/IntegralOnly" $ do
         violations <- concat <$> mapM (\e -> filePartialSetViolations (cePpl e) (ceProgram e)) es
         assertBool (partialSetViolationsMessage violations) (null violations)
     ]
@@ -891,17 +892,23 @@ corpusPartialSetTests corpus = corpusSweepAll corpus SweepSpec
 -- found in one corpus program, keyed by the offending chain name.
 filePartialSetViolations :: FilePath -> Program -> IO [(FilePath, ChainName, CapabilitySet)]
 filePartialSetViolations fp p =
+  return [ (fp, cn, cap)
+         | (cn, g) <- snd (srcOuterGrounds fp p)
+         , let cap = gCap g
+         , cap == DensityOnly || cap == IntegralOnly ]
+
+-- | Every node's outer ground ('perNodeOuterGrounds'), computed through the
+-- production stage order (see 'corpusPartialSetTests'), beside the
+-- chain-named program they are keyed against.
+srcOuterGrounds :: FilePath -> Program -> (Program, [(ChainName, GroundMod)])
+srcOuterGrounds fp p =
   case normalizeAndInfer p of
     Left e -> error ("normalizeAndInfer failed on " ++ fp ++ ": " ++ e)
     Right rtyped ->
       let preAnnotated   = annotateEnumsProg rtyped
           forwardChained = annotateProg preAnnotated
           fcData         = progToFCData (knownAnchors forwardChained) forwardChained
-          grounds        = perNodeOuterGrounds fcData forwardChained
-      in return [ (fp, cn, cap)
-                | (cn, g) <- grounds
-                , let cap = gCap g
-                , cap == DensityOnly || cap == IntegralOnly ]
+      in (forwardChained, perNodeOuterGrounds fcData forwardChained)
 
 partialSetViolationsMessage :: [(FilePath, ChainName, CapabilitySet)] -> String
 partialSetViolationsMessage vs =

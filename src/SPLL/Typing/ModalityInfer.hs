@@ -1424,9 +1424,10 @@ compareGround plan enumA enumB indep a b
   | canSample a && canSample b         = groundMod SampleOnly   Finite FamNone
   | otherwise                          = groundMod Opaque       Finite FamNone
   -- 'DensInt'/'Exact' are the only ground states with a real, usable CDF here.
-  -- 'IntegralOnly' (bare {S,I}) is a degenerate byproduct of 'marginalize'
-  -- combining two infinite-support operands (no finite side to keep the
-  -- density) -- it is NOT a genuine "integral without density" capability;
+  -- 'IntegralOnly' (bare {S,I}) was a degenerate byproduct of 'marginalize'
+  -- combining two infinite-support operands (task
+  -- marginalize-keepi-overclaims-integral-for-generic-mult removed that
+  -- grant) -- it is NOT a genuine "integral without density" capability;
   -- 'projectGround' itself maps it to 'Bottom' for exactly this reason
   -- ("held unreachable, would overpromise"). A naive @leqCap IntegralOnly
   -- (gCap g)@ check is trivially true whenever @gCap g == IntegralOnly@
