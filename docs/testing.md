@@ -9,7 +9,11 @@ for unit tests). It is split across **two cabal test-suites**, each its own
 executable/OS process: `haskell-dppl-test` (`test/Spec.hs`, everything below
 except Corpus) and `haskell-dppl-test-corpus` (`test-corpus/SpecCorpus.hs`,
 just the `Corpus` group, module `TestCorpus`). `stack test` builds and runs
-both automatically; `--ta` patterns only reach whichever one you invoke
+both automatically, plus a third, `nest-ir:test:nest-ir-test`
+(`nest-ir/test`, the IR package's own suite: the IR type checker's constructs,
+builtins, rejections and environment rules, built from hand-written IR with no
+frontend; the main suite's `IRTypeCheck` group keeps the "accepts compiler
+output" checks). `--ta` patterns only reach whichever one you invoke
 directly (`stack test haskell-dppl:test:haskell-dppl-test-corpus --ta '-p ...'`), since each
 process gets its own tasty CLI. This split exists because `Corpus` compiles
 the whole `test/cases/` corpus 8 times over (once per config it needs to
