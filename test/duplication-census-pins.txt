@@ -44,6 +44,7 @@ ctorTestOverTransformedDraw main.integ=24 main.prob=24
 ctorTestOverTransformedField main.integ=16 main.prob=16
 curriedHelperEnumArg match.integ=3 match.prob=3
 curriedTupleBodyBothProbabilistic main.integ=3 main.prob=4
+decreasingRecursionEnumeratedArgumentDensity loop.prob=5 main.prob=5
 defineDestructured main.integ=8 main.prob=10
 diffusionToy1D main.prob=9 step.prob=18
 doubleAliasedDrawParameterScaledSibling main.prob=5 main__m01.prob=3 main__m11.prob=4

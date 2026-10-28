@@ -703,6 +703,26 @@ test_underflowedTailKeepsDimension = testCase "underflowedTailKeepsDimension" $ 
       assertEqual "and the result is not flagged impossible" (Just False) (resultImpossible res)
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
+-- Task enumerated-sum-over-density-body: an enumerated sum whose terms are
+-- densities of different dims reports the lowest dim among the possible terms
+-- and sums only the terms at that dim. Here the terms at (0, 3) are a dim-2
+-- density (b true: both slots Normal) and a dim-1 one (b false: the second
+-- slot is the atom 3.0), so the answer is the dim-1 term 0.5*phi(0). Pinned
+-- here because the corpus's sampling sweep cannot estimate a mixed
+-- atom/density point of a pair (corpus let-bindings/enumLetGatesFreshTupleDims
+-- holds the other rows).
+test_enumeratedSumLowestDimWins :: TestTree
+test_enumeratedSumLowestDimWins = testCase "enumeratedSumLowestDimWins" $ do
+  let src = "main = draw b = Uniform < 0.5 in if b then (Normal, Normal) else (Normal, 3.0)"
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  case runProb defaultCompilerConfig prog [] (VTuple (VFloat 0.0) (VFloat 3.0)) of
+    Right (VProbDim p d) -> do
+      assertEqual "the dim-1 term outvotes the dim-2 one" 1 d
+      assertBool ("expected 0.5*phi(0) = 0.19947, got " ++ show p) (abs (p - 0.5 / sqrt (2 * pi)) < 1.0e-9)
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
 -- Design mar-sum-types-observe §3: renormalising an observation needs no
 -- compiler feature of its own, because 'observe' keeps the result in Maybe --
 -- the conditional distribution p(v | Just) is the ratio of two ordinary
@@ -6690,6 +6710,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_listOfFieldReadsCompileFlat
   , test_neuralIntReadDomainCompileLinear
   , test_perValueVetoIndexedRead
+  , test_enumeratedSumLowestDimWins
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial

@@ -35,6 +35,20 @@ plan-sum-with-sunk-discrete-draw-reports-density; corpus
 `plan-enumeration/planSumWithSunkDiscreteDraw`,
 `arithmetic/plusEnumMixedAtomDensity`).
 
+`enumMinDimP` is the general form: terms of any dim up to a static bound
+`maxDim` (`IRCompiler.floatLeafBound` of the measured type, the number of
+`Float` leaves, the larger alternative of a sum type). The lowest possible dim
+is a ladder over `0 .. maxDim - 1`, one `ROpAdd` count of the possible terms
+per rung, so it also builds only from what batched emits. The enumerated sums
+over a `draw` (`IRCompiler.enumerateBinding`, `enumerateCurriedArgument`) use
+it through `enumTerm`/`enumSumTerms` whenever the body's dim is not literally
+0 (a forward-and-compare indicator's always is, so those sums emit what they
+did before), and mark a zero-weight value's term impossible so that it cannot
+outvote a density (task enumerated-sum-over-density-body). A type with no
+bound (a list of reals) keeps `enumSumP`, and `dimAwareEnum` tells
+`IRCompiler.forwardOrInfer` that its delegated body still needs the run-time
+density guard (`docs/enumeration.md`).
+
 `rProb` is a newtype `P` that only `SPLL.Semiring` can construct, so
 `IRCompiler.hs` must route probabilities through a Semiring-aware
 combinator or one of two escape hatches: `unsafeLinearP` (a deliberately

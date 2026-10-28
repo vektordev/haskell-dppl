@@ -1045,6 +1045,7 @@ data PPlan
   | PShare [IRExpr] PPlan                       -- ^ 'closeResult' under guards
   | PEnumSum Bool String MultiValue PPlan       -- ^ 'enumSumP', with or without branch counts
   | PEnumMix Bool IRExpr String MultiValue PPlan -- ^ 'enumMixP', with its density dim
+  | PEnumMinDim Bool Int String MultiValue PPlan -- ^ 'enumMinDimP', with its static dim bound
   deriving (Show)
 
 semiringFor :: SemiringChoice -> Semiring
@@ -1078,6 +1079,7 @@ planNodes pl = takeWhile (/= ' ') (show pl) : concatMap planNodes (subPlans pl)
       PShare _ a -> [a]
       PEnumSum _ _ _ a -> [a]
       PEnumMix _ _ _ _ a -> [a]
+      PEnumMinDim _ _ _ _ a -> [a]
       _ -> []
 
 -- | Every 'PPlan' constructor; 'PMixSub' is not drawn under max-product.
@@ -1085,7 +1087,7 @@ planLabels :: SemiringChoice -> [String]
 planLabels c =
   [ "PDensity", "PScaledNormal", "PCdf", "PMass", "PDet", "PIndicator", "PImpossible", "PMeasureDiff"
   , "PSumAll", "PImpossibleWhen", "PProd", "PGuard", "PScaleCoV", "PScaleCoVAtom", "PComplement"
-  , "PComplementWhen", "PAnySafe", "PAnySafeShared", "PMix", "PIf", "PLet", "PShare", "PEnumSum", "PEnumMix" ]
+  , "PComplementWhen", "PAnySafe", "PAnySafeShared", "PMix", "PIf", "PLet", "PShare", "PEnumSum", "PEnumMix", "PEnumMinDim" ]
   ++ [ "PMixSub" | not (isMaxProduct c) ]
 
 -- | The packed result the plan builds, its floated let-bindings around it.
@@ -1138,6 +1140,7 @@ buildPlan c plan = case runCompilerMonad (go plan) of
         closeResult sr "share" guards o
       PEnumSum bc v dom a -> packedOf a >>= enumSumP sr bc id v dom
       PEnumMix bc dd v dom a -> packedOf a >>= enumMixP sr bc id dd v dom
+      PEnumMinDim bc d v dom a -> packedOf a >>= enumMinDimP sr bc id d v dom
     -- The caller's branch count, as an 'IfThenElse' passes it: both arms'.
     mix f a b = do
       ra <- go a
@@ -1174,6 +1177,11 @@ genPlan c sc n
                                           dd <- liftG (elements [dim1, dim0])
                                           dd' <- frequency' [(1, return dd), (1, anyGuardedDim <$> float)]
                                           return (PEnumMix bc dd' v dom body)))
+      -- The bound is any upper bound on the body's dims; a plan's dims are
+      -- small, and a loose bound must give the same answer as a tight one.
+      , (1, enumerated (\v dom body -> do bc <- liftG arbitrary
+                                          d <- liftG (choose (1, 4))
+                                          return (PEnumMinDim bc d v dom body)))
       ]
       ++ [ (1, PMixSub <$> half <*> half) | not (isMaxProduct c) ]
   where

@@ -184,8 +184,8 @@ budgetZeroKnownDivergent = []
 budgetZeroKnownDivergentRows :: [(String, IRValue)]
 budgetZeroKnownDivergentRows =
   -- The default compile reports the `Right` rows' density at dim 0 where
-  -- budget 0 says dim 1 (task enumerated-sum-over-density-body: the default's
-  -- enumerated sum reports a mass). The letfree `Right ANY` also differs in
+  -- budget 0 says dim 1 (task enumerated-weight-density-reported-as-mass: the
+  -- default's enumerated sum drops the dim of each value's weight). The letfree `Right ANY` also differs in
   -- value: budget 0 answers impossible, because the letfree CDF of
   -- `if Normal == 0.5 then 1 else 2` at 1 is a possible zero mass at dim 0
   -- rather than the density (task letfree-cdf-density-atom-reports-zero-mass).

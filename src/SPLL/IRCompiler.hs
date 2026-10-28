@@ -5194,8 +5194,8 @@ enumerateBinding meta l v preTable compileBody = do
                        , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta)
                        , dimAwareEnum = keepsDims }
     bodyRes <- compileBody bodyMeta lBodyExpr
-    enumTerm meta dimBound pBranch bodyRes)
-  enumSumTerms meta boundVar discreteVVals irTuple
+    return (pBranch, bodyRes))
+  enumSumTerms meta dimBound boundVar discreteVVals irTuple
   where
     (keepsDims, dimBound) = enumSumDims meta (rType (getTypeInfo l))
 
@@ -5726,9 +5726,9 @@ enumerateCurriedArgument meta cumulative appTi l v sample = do
   irTuple <- scoped (do
     pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
     bodyRes <- toIREnumerate bodyMeta cumulative loopBody sample
-    enumTerm meta dimBound pBranch bodyRes)
+    return (pBranch, bodyRes))
   let discreteVVals = head [x | DiscreteValues x <- tags vTi]
-  enumSumTerms meta boundVar discreteVVals irTuple
+  enumSumTerms meta dimBound boundVar discreteVVals irTuple
 
 -- | How an enumerated sum whose body measures a value of type @rt@ combines
 -- its terms (task enumerated-sum-over-density-body). The first component is
@@ -5750,37 +5750,62 @@ enumSumDims meta rt = case floatLeafBound (adtDecls meta) (resultOf rt) of
     resultOf (TArrow _ b) = b
     resultOf t = t
 
--- | One term of an enumerated sum: the body's result weighted by the mass
--- @pBranch@ of the enumerated value, and the dim bound the sum must keep
--- ('enumSumDims'), or 'Nothing' for a plain mass sum. The dim-aware form is
--- used only where the body's dim is not literally 0 -- a forward-and-compare
--- indicator always is, so the emitted code of such sums is unchanged. A
--- value with no mass is then an impossible term rather than a possible zero:
--- the lowest possible dim decides the sum's dim, and a zero-weight atom must
--- not outvote a real density (the tag over-approximates the support).
-enumTerm :: CompilerMetadata -> Maybe Int -> IRExpr -> PResult -> CompilerMonad (PResult, Maybe Int)
-enumTerm meta dimBound pBranch bodyRes
-  | Just d <- dimBound, rDim bodyRes /= dim0 = do
-      w <- mkVariable "enum_weight"
-      setVariables [(w, pBranch)]
-      return ( impossibleWhen (IROp OpEq (IRVar w) (srZero sr)) (onProb (\p -> srTimes sr p (IRVar w)) bodyRes)
-             , Just d )
-  | otherwise = return (onProb (\p -> srTimes sr p pBranch) bodyRes, Nothing)
-  where sr = semiringOf meta
-
--- | Sum the scoped terms 'enumTerm' built over the enumerated variable's
--- domain: 'enumMinDimP' when a term may be a density, else the plain mass sum
--- 'enumSumP'.
-enumSumTerms :: CompilerMetadata -> Varname -> MultiValue -> Open (PResult, Maybe Int) -> CompilerMonad PResult
-enumSumTerms meta boundVar vals o = do
-  let irTuple = generateLetInBlock meta (fst <$> o)
-      (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
-      sr = semiringOf meta
+-- | Sum the scoped terms of an enumerated variable's domain, each the body's
+-- result and the mass @pBranch@ of its value, over the domain: the body
+-- weighted by that mass. With a dim bound ('enumSumDims') and a body whose
+-- dim is not statically 0 ('packedStaticDim') the sum keeps the terms' dims
+-- ('enumMinDimP'); otherwise it is the plain mass sum 'enumSumP'. A
+-- forward-and-compare indicator's dim is always statically 0, so those sums
+-- emit what they did before. In the dim-aware sum a value with no mass is an
+-- impossible term rather than a possible zero: the lowest possible dim
+-- decides the sum's dim, and a zero-weight atom must not outvote a real
+-- density (the tag over-approximates the support).
+enumSumTerms :: CompilerMetadata -> Maybe Int -> Varname -> MultiValue -> Open (IRExpr, PResult) -> CompilerMonad PResult
+enumSumTerms meta dimBound boundVar vals o = do
+  let sr = semiringOf meta
       bc = countBranches (compilerConfig meta)
-  setVariables outerBinds
-  case snd (openValue o) of
-    Just d -> enumMinDimP sr bc id d boundVar vals innerTuple
-    Nothing -> enumSumP sr bc id boundVar vals innerTuple
+      weighted (pBranch, r) = onProb (\p -> srTimes sr p pBranch) r
+      sumWith f o' = do
+        let irTuple = generateLetInBlock meta o'
+            (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+        setVariables outerBinds
+        f boundVar vals innerTuple
+  case dimBound of
+    Just d | packedStaticDim (generateLetInBlock meta (snd <$> o)) /= Just 0 -> do
+      o' <- scoped (do
+        (pBranch, r) <- inline o
+        w <- mkVariable "enum_weight"
+        setVariables [(w, pBranch)]
+        return (impossibleWhen (IROp OpEq (IRVar w) (srZero sr)) (weighted (IRVar w, r))))
+      sumWith (enumMinDimP sr bc id d) o'
+    _ -> sumWith (enumSumP sr bc id) (weighted <$> o)
+
+-- | The dim of a packed result ('packResult' under its let block) when it is
+-- a compile-time constant: read through the block's bindings, tuple
+-- projections of constructed tuples (and of both arms of a guarded block), an
+-- @if@ whose arms agree and a sum of dims. 'Nothing' when the dim depends on anything else (a run-time
+-- projection of a call, a binding outside the block, an @ANY@ test).
+packedStaticDim :: IRExpr -> Maybe Int
+packedStaticDim e = case flattenLetIns e of
+  (binds, IRConstruct TgTuple [_, IRConstruct TgTuple [d, _]]) -> staticInt (Map.fromList binds) d
+  _ -> Nothing
+  where
+    staticInt env x = case resolve env x of
+      IRConst (VInt n) -> Just n
+      IRIf _ a b -> do
+        n <- staticInt env a
+        m <- staticInt env b
+        if n == m then Just n else Nothing
+      IROp OpPlus a b -> (+) <$> staticInt env a <*> staticInt env b
+      _ -> Nothing
+    resolve env x = case x of
+      IRVar v | Just b <- Map.lookup v env -> resolve (Map.delete v env) b
+      IRLetIn v b rest -> resolve (Map.insert v b env) rest
+      IRDestruct AcFst t | IRConstruct TgTuple [a, _] <- resolve env t -> resolve env a
+      IRDestruct AcSnd t | IRConstruct TgTuple [_, b] <- resolve env t -> resolve env b
+      -- a projection of a guarded block ('closeResult'): project both arms
+      IRDestruct acc t | IRIf c a b <- resolve env t -> IRIf c (IRDestruct acc a) (IRDestruct acc b)
+      _ -> x
 
 
 -- ===== Agreement fusion (task categorical-product-ov-fusion) =====
@@ -6257,26 +6282,22 @@ forwardOrInfer meta cumulative whole sample operands forward
   | otherwise = do
       mapM_ (\(what, src, ir) -> requireDeterministicUnderEnum meta what src ir) operands
       res <- toIRInference meta cumulative (reinferRecovered meta (recoveredVars meta) whole) sample
-      -- Every enclosing enumerated sum ('enumSumP') reports its result as a
-      -- mass, dim 0, because until now its body always was one: a
-      -- forward-and-compare indicator. A delegated body can be a density
-      -- (@if b then Normal else Normal + 3.0@), and summing densities as if
-      -- they were masses would report the wrong dim -- and, where the dim
-      -- differs across enumerated values, the wrong mixture winner.
-      --
-      -- Whether it is one is in general a RUNTIME fact: @(x, Uniform)@ is a
-      -- mass exactly when the query marginalises the second slot with @ANY@
-      -- (the fuzz-found @enumDeadLetFreshDrawTuple@ reaches this through
-      -- @fst@), and topK pruning makes the dim a runtime choice even where it
-      -- would otherwise fold. So the probability is guarded at run time: a
-      -- possible result with a non-zero dim raises instead of being summed as
-      -- a mass. The guard is skipped where it is statically true -- a
-      -- cumulative result (a CDF value is a mass by construction), or a type
-      -- with no 'TFloat' leaf, which no density ever measures (this is what
-      -- keeps a helper call, whose dim is a runtime projection of the callee's
-      -- result, guard-free) -- and the optimizer folds it away where the dim
-      -- is a literal 0. Summing densities properly is follow-up task
-      -- enumerated-sum-over-density-body.
+      -- A delegated body can be a density (@if b then Normal else Normal +
+      -- 3.0@), and whether it is one is in general a RUNTIME fact: @(x,
+      -- Uniform)@ is a mass exactly when the query marginalises the second
+      -- slot with @ANY@ (the fuzz-found @enumDeadLetFreshDrawTuple@ reaches
+      -- this through @fst@), and topK pruning makes the dim a runtime choice
+      -- even where it would otherwise fold. The enclosing enumerated sums
+      -- keep their terms' dims ('enumTerm', 'enumMinDimP'; task
+      -- enumerated-sum-over-density-body), so the result is returned as it
+      -- is -- unless one of them sums its terms as masses ('dimAwareEnum'
+      -- off: its body's type has no static dim bound, a list of reals). Then
+      -- the probability is guarded at run time: a possible result with a
+      -- non-zero dim raises instead of being summed as a mass. The guard is
+      -- also skipped where it is statically true -- a cumulative result (a
+      -- CDF value is a mass by construction), or a type with no 'TFloat'
+      -- leaf, which no density ever measures -- and the optimizer folds it
+      -- away where the dim is a literal 0.
       if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole)) || dimAwareEnum meta
         then return res
         else do
@@ -6284,8 +6305,9 @@ forwardOrInfer meta cumulative whole sample operands forward
               refusal = IRError $ "probability-mode inference of an enumerated conditional (chain name "
                           ++ chainName (getTypeInfo whole) ++ ") met a continuous density: given the"
                           ++ " enumerated latents the query measures a fresh continuous draw, and an"
-                          ++ " enumerated sum over density-valued terms is not implemented (task"
-                          ++ " enum-let-latent-gates-fresh-draw; follow-up enumerated-sum-over-density-body)"
+                          ++ " enumerated sum over density-valued terms of a type with no static dim bound"
+                          ++ " (a list of reals) is not implemented (tasks enum-let-latent-gates-fresh-draw,"
+                          ++ " enumerated-sum-over-density-body)"
           return (onProb (\p -> IRIf isMass p refusal) res)
   where thd3 (_, _, x) = x
 

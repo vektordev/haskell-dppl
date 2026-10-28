@@ -6,5 +6,4 @@ cdf(1.5)=(0.5, 0.0)
 -- body is a continuous draw, handed to the ordinary rules (task
 -- enum-let-latent-gates-fresh-draw); a CDF value is a mass, so the enclosing
 -- enumerated sum is exact: cdf(0) = 0.5*Phi(0) + 0.5*Phi(-3). The point
--- density of the same program is a known issue
--- (known-issues/enumLetGatesFreshDensity).
+-- density of the same program is let-bindings/enumLetGatesFreshDensity.

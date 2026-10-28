@@ -673,7 +673,7 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" Integrate $
             mainPType "main = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
       , testCase "a draw-gated function choice applied to a Normal is Integrate" $
-          -- the interpreter stops at query time: ticket enumerated-sum-over-density-body
+          -- answers the mixture density since task enumerated-sum-over-density-body
           assertEqual "" Integrate $
             mainPType "main = draw b = Uniform < 0.5 in (if b then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
       , testCase "a draw-bound random function applied to a Normal is Integrate" $
