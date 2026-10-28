@@ -18,6 +18,7 @@ import SPLL.Parser (tryParseProgram)
 import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.Analysis (annotate, annotateEnumsProg, definitelyUntagged, materializationDomain, withinMaterializationBudget, structuralTag, listedTag)
 import qualified SPLL.CodeGenPyTorch
+import qualified SPLL.CodeGenJulia
 import SPLL.Typing.Infer (addTypeInfo, addModalityLaws)
 import SPLL.Typing.ModalityInfer (Law(..), Justification(..), EngineCert(..), engineName)
 import SPLL.Typing.ForwardChaining (WorldsShape(..))
@@ -2615,10 +2616,45 @@ test_listOfFieldReadsCompileFlat = testCase "listOfFieldReadsCompileFlat" $ do
       , "neural see :: (Symbol -> Face)"
       , "main img = draw f = see img in [" ++ intercalate ", " [ "x" ++ show i ++ " f" | i <- [1 .. n] ] ++ "]" ]
 
+-- | A bare neural Int read over an explicit V-value domain, @neural lm ::
+-- (Symbol -> Int) of [1, .., V]@ with @main ctx = lm ctx@, was
+-- known-issues/neuralIntReadDomainCompileGrowth (docs task
+-- neural-int-read-compile-quadratic-in-domain): the emitted module is linear
+-- in V, but the compile allocated ~V^2 (6.2 GB at V = 4000; V = 50257 did not
+-- finish in 20 min). Five walks were each quadratic down the V-deep index
+-- chain or writeLogits cons: 'firstAnyExceptIR' and 'propagateRefusals'
+-- collecting subterms by 'concatMap', the Python backend's per-level
+-- @else: if@ to @elif@ scan, 'fitPlanToSupport''s 'elem' subset test, and
+-- both text backends' String concatenation (a constant list's cons spine,
+-- and every Julia expression). Python at -O2 and -O0 (where the index chain
+-- stays an @indexOf@ over a V-element constant list) and Julia, each at
+-- slope about 1 now, 2 before; the bound admits linear growth.
+test_neuralIntReadDomainCompileLinear :: TestTree
+test_neuralIntReadDomainCompileLinear = testGroup "neuralIntReadDomainCompileLinear"
+  [ check "python" defaultCompilerConfig (SPLL.CodeGenPyTorch.generateFunctions True)
+  , check "python -O0" defaultCompilerConfig { optimizerLevel = 0 } (SPLL.CodeGenPyTorch.generateFunctions True)
+  , check "julia" defaultCompilerConfig SPLL.CodeGenJulia.generateFunctions
+  ]
+  where
+    check lbl conf codegen = testCase lbl $ do
+      verdict <- climb 1.5 [500, 1000, 2000] (compileAllocPointWith codegen "neuralIntReadDomainCompileLinear" conf src)
+      case verdict of
+        WithinBound _ -> return ()
+        Exceeds why -> assertFailure ("compiling a bare neural Int read grows faster than its domain \
+                                      \(task neural-int-read-compile-quadratic-in-domain): " ++ why)
+        Unmeasurable why -> assertFailure why
+    src v = unlines
+      [ "neural lm :: (Symbol -> Int) of [" ++ intercalate ", " (map show [1 .. v :: Int]) ++ "]"
+      , "main ctx = lm ctx" ]
+
 -- | The bytes a compile of the program @src n@ and its Python codegen
 -- allocate on this thread, under a 4 GB cap, as a 'climb' point.
 compileAllocPoint :: String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
-compileAllocPoint name conf src n = do
+compileAllocPoint = compileAllocPointWith (SPLL.CodeGenPyTorch.generateFunctions True)
+
+-- | 'compileAllocPoint' with the given backend's codegen in place of Python's.
+compileAllocPointWith :: (IREnv -> [String]) -> String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
+compileAllocPointWith codegen name conf src n = do
   prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
             (tryParseProgram name (src n))
   r <- try $ flip finally disableAllocationLimit $ do
@@ -2626,7 +2662,7 @@ compileAllocPoint name conf src n = do
     enableAllocationLimit
     env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
              (compile conf prog)
-    _ <- evaluate (length (concat (SPLL.CodeGenPyTorch.generateFunctions True env)))
+    _ <- evaluate (length (concat (codegen env)))
     remaining <- getAllocationCounter
     return (cap - toInteger remaining)
   return $ case r of
@@ -6544,6 +6580,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_markovBranchRandomRateCompilePolynomial
   , test_recordSharedFieldGroupsCodeSizePolynomial
   , test_listOfFieldReadsCompileFlat
+  , test_neuralIntReadDomainCompileLinear
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial

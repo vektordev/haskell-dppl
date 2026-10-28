@@ -876,7 +876,7 @@ firstAnyExceptIR (IREnv groups _ _) =
     funBodies = concatMap groupBodies [ g | g <- groups, isNothing (maskVariantOf g) ]
     groupBodies IRFunGroup{genFun=g, probFun=p, integFun=i, writeLogitsFun=e, normalFun=n} =
       map fst (mapMaybe id [g, p, i, e, n])
-    allSubExprsOf ir = ir : concatMap allSubExprsOf (getIRSubExprs ir)
+    allSubExprsOf = irSubterms
     isAnyExceptConst (IRConst (VAnyExcept _)) = True
     isAnyExceptConst _ = False
 
@@ -935,9 +935,19 @@ retireUnrenderableVariants lang (IREnv groups decls consts) = IREnv (map retire 
           ++ ": the variant compiled for it (" ++ vname ++ ") carries a VAnyExcept placeholder "
           ++ "(\"any value other than this one\"), which has no " ++ lang ++ " representation. "
           ++ "The interpreter answers this query. (task vanyexcept-unrenderable-in-text-backends)" )
-    allSubExprsOf ir = ir : concatMap allSubExprsOf (getIRSubExprs ir)
+    allSubExprsOf = irSubterms
     isAnyExceptConst (IRConst (VAnyExcept _)) = True
     isAnyExceptConst _ = False
+
+-- | Every subterm of an expression, itself included, in preorder. Built by
+-- accumulator passing: @e : concatMap irSubterms (getIRSubExprs e)@ re-copies
+-- a non-last child's whole list at every '++', which is quadratic down a deep
+-- spine in such a position, such as a curried call chain (task
+-- neural-int-read-compile-quadratic-in-domain).
+irSubterms :: IRExpr -> [IRExpr]
+irSubterms e0 = go e0 []
+  where
+    go e rest = e : foldr go rest (getIRSubExprs e)
 
 -- | An application spine, uncurried: the callee and its arguments in source
 -- order. A non-application collects zero arguments.

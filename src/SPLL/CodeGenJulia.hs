@@ -9,7 +9,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
-import Data.List (intercalate, dropWhileEnd)
+import Data.List (intercalate, intersperse, dropWhileEnd)
 import Data.Char (isDigit)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
@@ -80,7 +80,13 @@ juliaDouble f
 juliaVal :: IRValue -> String
 juliaVal (VList EmptyList) = "EmptyInferenceList()"
 juliaVal (VList AnyList) = "AnyInferenceList()"
-juliaVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ juliaVal x ++ ", " ++ juliaVal (VList xs) ++ ")"
+-- The cons spine is rendered as a difference string: @rest ++ ")"@ at every
+-- cell re-copied the whole tail, quadratic in a long constant list such as a
+-- V-value enumeration domain (task neural-int-read-compile-quadratic-in-domain).
+juliaVal (VList l@(ListCont _ _)) = cells l ""
+  where
+    cells (ListCont x xs) = showString "ConsInferenceList(" . showString (juliaVal x) . showString ", " . cells xs . showString ")"
+    cells rest = showString (juliaVal (VList rest))
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = juliaDouble f
 juliaVal (VBool f) = if f then "true" else "false"
@@ -279,179 +285,195 @@ generateStatementBlock expr = do
     return ["return " ++ e]
 
 
+-- | The text of an expression, built as a difference string (ShowS): a
+-- right-nested chain (a V-deep @prepend@ cons, an index chain of @?:@)
+-- re-copied its whole tail at every @tail ++ ")"@ with plain String
+-- concatenation, which made emitting it quadratic in its depth (task
+-- neural-int-read-compile-quadratic-in-domain; the Python backend's
+-- 'SPLL.CodeGenPyTorch.generateExpressionLifted' made the same change).
 generateExpression :: IRExpr -> GlobalVariableSupply String
+generateExpression e = ($ "") <$> genS e
 
-generateExpression (IRIf cond left right) = do
-    c <- generateExpression cond
-    l <- generateExpression left
-    r <- generateExpression right
-    return $ "(" ++ c ++ " ? " ++ l ++ " : " ++ r ++ ")"
-generateExpression (IROp OpApprox left right) = do
-    l <- generateExpression left
-    r <- generateExpression right
-    return $ "isclose(" ++ l ++ ", " ++ r ++ ")"
+genS :: IRExpr -> GlobalVariableSupply ShowS
+
+genS (IRIf cond left right) = do
+    c <- genS cond
+    l <- genS left
+    r <- genS right
+    return $ str "(" . c . str " ? " . l . str " : " . r . str ")"
+genS (IROp OpApprox left right) = do
+    l <- genS left
+    r <- genS right
+    return $ str "isclose(" . l . str ", " . r . str ")"
 -- 'OpMax' has no infix spelling; Julia's `max` is the prefix form.
-generateExpression (IROp OpMax left right) = do
-    l <- generateExpression left
-    r <- generateExpression right
-    return $ "max(" ++ l ++ ", " ++ r ++ ")"
-generateExpression (IROp op left right) = do
-    l <- generateExpression left
-    r <- generateExpression right
-    return $ "((" ++ l ++ ") " ++ juliaOps op ++ " (" ++ r ++ "))"
-generateExpression (IRUnaryOp op expr) = do
-    e <- generateExpression expr
-    return $ juliaUnaryOps op ++ "(" ++ e ++ ")"
-generateExpression (IRConst v) =
-    return $ juliaVal v
-generateExpression (IRBuiltin BMapList [f, x]) = do
-    ff <- generateExpression f
-    xx <- generateExpression x
-    return $ "mapList(" ++ ff ++ ", " ++ xx ++ ")"
+genS (IROp OpMax left right) = do
+    l <- genS left
+    r <- genS right
+    return $ str "max(" . l . str ", " . r . str ")"
+genS (IROp op left right) = do
+    l <- genS left
+    r <- genS right
+    return $ str "((" . l . str ") " . str (juliaOps op) . str " (" . r . str "))"
+genS (IRUnaryOp op expr) = do
+    e <- genS expr
+    return $ str (juliaUnaryOps op) . str "(" . e . str ")"
+genS (IRConst v) =
+    return $ str (juliaVal v)
+genS (IRBuiltin BMapList [f, x]) = do
+    ff <- genS f
+    xx <- genS x
+    return $ str "mapList(" . ff . str ", " . xx . str ")"
 -- The constructor/accessor family (design ir-reengineering), mirroring
 -- Julia's 1-based indexing for the theta/subtree accessors.
-generateExpression (IRConstruct TgTuple [fs, sn]) = do
-    f <- generateExpression fs
-    s <- generateExpression sn
-    return $ "T(" ++ f ++ ", " ++ s ++ ")"
-generateExpression (IRConstruct TgCons [hd, tl]) = do
-    h <- generateExpression hd
-    t <- generateExpression tl
-    return $ "prepend(" ++ h ++ ", " ++ t ++ ")"
-generateExpression (IRConstruct TgLeft [x]) = do
-    e <- generateExpression x
-    return $ "Left(" ++ e ++ ")"
-generateExpression (IRConstruct TgRight [x]) = do
-    e <- generateExpression x
-    return $ "Right(" ++ e ++ ")"
-generateExpression (IRDestruct AcFst x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ ")[1]"
-generateExpression (IRDestruct AcSnd x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ ")[2]"
-generateExpression (IRDestruct AcHead x) = do
-    e <- generateExpression x
-    return $ "head(" ++ e ++ ")"
-generateExpression (IRDestruct AcTail x) = do
-    e <- generateExpression x
-    return $ "tail(" ++ e ++ ")"
-generateExpression (IRDestruct AcFromLeft x) = do
-    e <- generateExpression x
-    return $ "fromLeft(" ++ e ++ ")"
-generateExpression (IRDestruct AcFromRight x) = do
-    e <- generateExpression x
-    return $ "fromRight(" ++ e ++ ")"
-generateExpression (IRDestruct AcIsLeft x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ " isa Left)"
-generateExpression (IRDestruct AcIsRight x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ " isa Right)"
-generateExpression (IRDestruct (AcTheta i) x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ ")[1][" ++ show (i + 1) ++ "]"
-generateExpression (IRDestruct (AcSubtree i) x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ ")[2][" ++ show (i + 1) ++ "]"
-generateExpression (IRDensity dist Linear x) = do
-    e <- generateExpression x
-    return $ "density_" ++ show dist ++ "(" ++ e ++ ")"
-generateExpression (IRCumulative dist Linear x) = do
-    e <- generateExpression x
-    return $ "cumulative_" ++ show dist ++ "(" ++ e ++ ")"
-generateExpression (IRDensity dist Log x) = do
-    e <- generateExpression x
-    return $ "log_density_" ++ show dist ++ "(" ++ e ++ ")"
-generateExpression (IRCumulative dist Log x) = do
-    e <- generateExpression x
-    return $ "log_cumulative_" ++ show dist ++ "(" ++ e ++ ")"
-generateExpression (IRSample IRNormal) =
-    return "randn()"
-generateExpression (IRSample IRUniform) =
-    return "rand()"
-generateExpression (IRVar name) = do
+genS (IRConstruct TgTuple [fs, sn]) = do
+    f <- genS fs
+    s <- genS sn
+    return $ str "T(" . f . str ", " . s . str ")"
+genS (IRConstruct TgCons [hd, tl]) = do
+    h <- genS hd
+    t <- genS tl
+    return $ str "prepend(" . h . str ", " . t . str ")"
+genS (IRConstruct TgLeft [x]) = do
+    e <- genS x
+    return $ str "Left(" . e . str ")"
+genS (IRConstruct TgRight [x]) = do
+    e <- genS x
+    return $ str "Right(" . e . str ")"
+genS (IRDestruct AcFst x) = do
+    e <- genS x
+    return $ str "(" . e . str ")[1]"
+genS (IRDestruct AcSnd x) = do
+    e <- genS x
+    return $ str "(" . e . str ")[2]"
+genS (IRDestruct AcHead x) = do
+    e <- genS x
+    return $ str "head(" . e . str ")"
+genS (IRDestruct AcTail x) = do
+    e <- genS x
+    return $ str "tail(" . e . str ")"
+genS (IRDestruct AcFromLeft x) = do
+    e <- genS x
+    return $ str "fromLeft(" . e . str ")"
+genS (IRDestruct AcFromRight x) = do
+    e <- genS x
+    return $ str "fromRight(" . e . str ")"
+genS (IRDestruct AcIsLeft x) = do
+    e <- genS x
+    return $ str "(" . e . str " isa Left)"
+genS (IRDestruct AcIsRight x) = do
+    e <- genS x
+    return $ str "(" . e . str " isa Right)"
+genS (IRDestruct (AcTheta i) x) = do
+    e <- genS x
+    return $ str "(" . e . str ")[1][" . str (show (i + 1)) . str "]"
+genS (IRDestruct (AcSubtree i) x) = do
+    e <- genS x
+    return $ str "(" . e . str ")[2][" . str (show (i + 1)) . str "]"
+genS (IRDensity dist Linear x) = do
+    e <- genS x
+    return $ str "density_" . str (show dist) . str "(" . e . str ")"
+genS (IRCumulative dist Linear x) = do
+    e <- genS x
+    return $ str "cumulative_" . str (show dist) . str "(" . e . str ")"
+genS (IRDensity dist Log x) = do
+    e <- genS x
+    return $ str "log_density_" . str (show dist) . str "(" . e . str ")"
+genS (IRCumulative dist Log x) = do
+    e <- genS x
+    return $ str "log_cumulative_" . str (show dist) . str "(" . e . str ")"
+genS (IRSample IRNormal) =
+    return (str "randn()")
+genS (IRSample IRUniform) =
+    return (str "rand()")
+genS (IRVar name) = do
     (_, callables) <- get
-    return $ if name `elem` callables then "(" ++ name ++ ")()" else name
-generateExpression expr@(IRLambda _ _) =
-    generateLambdaExpression expr
-generateExpression expr@(IRApply _ _) = do
+    return $ str (if name `elem` callables then "(" ++ name ++ ")()" else name)
+genS expr@(IRLambda _ _) =
+    str <$> generateLambdaExpression expr
+genS expr@(IRApply _ _) = do
     let (fn, args) = collectApplyChain expr
-    fn' <- generateExpression fn
-    args' <- mapM generateExpression args
-    return $ "(" ++ fn' ++ ")(" ++ intercalate ", " args' ++ ")"
-generateExpression (IRIsPossible multiVal expr) = do
-    e <- generateExpression expr
+    fn' <- genS fn
+    args' <- mapM genS args
+    return $ str "(" . fn' . str ")(" . commaSep args' . str ")"
+genS (IRIsPossible multiVal expr) = do
+    e <- genS expr
     var <- addOrGetFromGlobalStorage multiVal
-    return $ "isPossible(" ++ var ++ ", " ++ e ++ ")"
-generateExpression (IRBuiltin BListIndex [lst, idx]) = do
-    l <- generateExpression lst
-    i <- generateExpression idx
-    return $ "(" ++ l ++ ")[" ++ i ++ " + 1]"
-generateExpression (IRLetIn name val body) = do
-    v <- generateExpression val
-    b <- generateExpression body
-    return $ "(let " ++ name ++ " = " ++ v ++ "; " ++ b ++ " end)"
+    return $ str "isPossible(" . str (var) . str ", " . e . str ")"
+genS (IRBuiltin BListIndex [lst, idx]) = do
+    l <- genS lst
+    i <- genS idx
+    return $ str "(" . l . str ")[" . i . str " + 1]"
+genS (IRLetIn name val body) = do
+    v <- genS val
+    b <- genS body
+    return $ str "(let " . str (name) . str " = " . v . str "; " . b . str " end)"
 -- The tensor builtins (design ir-tensor-values); see the note in
 -- CodeGenPyTorch. A Julia rank-1 tensor is a Vector, so BIndex is an O(1) read
 -- against BListIndex's cons walk. Indices are 1-based, hence the "+ 1" that
 -- BListIndex also carries. Rank > 1 and axis > 0 are refused, as there too.
-generateExpression (IRBuiltin (BTensor sh) elems)
+genS (IRBuiltin (BTensor sh) elems)
     | shapeRank sh == 1 = do
-        es <- mapM generateExpression elems
-        return $ "[" ++ intercalate ", " es ++ "]"
+        es <- mapM genS elems
+        return $ str "[" . commaSep es . str "]"
     | otherwise = error (juliaRankUnsupported "BTensor" (shapeRank sh))
 -- The element positions, 0-based like every IR index (BIndex adds the 1).
-generateExpression (IRBuiltin (BIota sh) [])
-    | shapeRank sh == 1 = return $ "collect(0:" ++ show (shapeNumel sh - 1) ++ ")"
+genS (IRBuiltin (BIota sh) [])
+    | shapeRank sh == 1 = return $ str ("collect(0:" ++ show (shapeNumel sh - 1) ++ ")")
     | otherwise = error (juliaRankUnsupported "BIota" (shapeRank sh))
-generateExpression (IRBuiltin BMap [IRLambda v body, t]) = do
-    b <- generateExpression body
-    tt <- generateExpression t
-    return $ "[" ++ b ++ " for " ++ v ++ " in " ++ tt ++ "]"
-generateExpression (IRBuiltin BMap [f, t]) = do
-    ff <- generateExpression f
-    tt <- generateExpression t
-    return $ "map(" ++ ff ++ ", " ++ tt ++ ")"
+genS (IRBuiltin BMap [IRLambda v body, t]) = do
+    b <- genS body
+    tt <- genS t
+    return $ str "[" . b . str " for " . str v . str " in " . tt . str "]"
+genS (IRBuiltin BMap [f, t]) = do
+    ff <- genS f
+    tt <- genS t
+    return $ str "map(" . ff . str ", " . tt . str ")"
 -- sum needs an explicit init: Julia raises on a reduction over an empty
 -- collection, where a zero-extent axis must reduce to the operator identity.
-generateExpression (IRBuiltin (BReduce ROpAdd 0) [t]) = do
-    tt <- generateExpression t
-    return $ "sum(" ++ tt ++ "; init=0.0)"
-generateExpression (IRBuiltin (BReduce ROpLogSumExp 0) [t]) = do
-    tt <- generateExpression t
-    return $ "logsumexp(" ++ tt ++ ")"
-generateExpression (IRBuiltin (BReduce ROpMax 0) [t]) = do
-    tt <- generateExpression t
-    return $ "maximum(" ++ tt ++ "; init=-Inf)"
-generateExpression (IRBuiltin (BReduce _ ax) _) = error (juliaAxisUnsupported "BReduce" ax)
-generateExpression (IRBuiltin (BIndex 0) [t, k]) = do
-    tt <- generateExpression t
-    kk <- generateExpression k
-    return $ "(" ++ tt ++ ")[" ++ kk ++ " + 1]"
-generateExpression (IRBuiltin (BIndex ax) _) = error (juliaAxisUnsupported "BIndex" ax)
+genS (IRBuiltin (BReduce ROpAdd 0) [t]) = do
+    tt <- genS t
+    return $ str "sum(" . tt . str "; init=0.0)"
+genS (IRBuiltin (BReduce ROpLogSumExp 0) [t]) = do
+    tt <- genS t
+    return $ str "logsumexp(" . tt . str ")"
+genS (IRBuiltin (BReduce ROpMax 0) [t]) = do
+    tt <- genS t
+    return $ str "maximum(" . tt . str "; init=-Inf)"
+genS (IRBuiltin (BReduce _ ax) _) = error (juliaAxisUnsupported "BReduce" ax)
+genS (IRBuiltin (BIndex 0) [t, k]) = do
+    tt <- genS t
+    kk <- genS k
+    return $ str "(" . tt . str ")[" . kk . str " + 1]"
+genS (IRBuiltin (BIndex ax) _) = error (juliaAxisUnsupported "BIndex" ax)
 -- Elementwise zip of two equal-length Vectors (task
 -- categorical-product-ov-fusion). Julia spells this as a broadcast, which is
 -- both the idiomatic form and the vectorized one -- unlike the Python
 -- comprehension, it needs no loop variables and so cannot shadow anything.
-generateExpression (IRBuiltin (BZip op) [a, b]) = do
-    aa <- generateExpression a
-    bb <- generateExpression b
-    return $ "((" ++ aa ++ ") ." ++ juliaOps op ++ " (" ++ bb ++ "))"
+genS (IRBuiltin (BZip op) [a, b]) = do
+    aa <- genS a
+    bb <- genS b
+    return $ str "((" . aa . str ") ." . str (juliaOps op) . str " (" . bb . str "))"
 -- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep).
 -- 'start' is passed 0-based and converted inside juliaLib's categorical_index,
 -- which also returns the 0-based index the IR means.
-generateExpression (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
-    uu <- generateExpression u
-    ww <- generateExpression w
-    return $ "categorical_index(" ++ uu ++ ", " ++ ww ++ ", " ++ show start ++ ", " ++ show n ++ ")"
-generateExpression (IRError e) =
-    return $ "throw(\"" ++ escapeStr e ++ "\")"
-generateExpression (IRConformsTo t x) = do
-    sx <- generateExpression x
-    return (jlConforms t sx)
-generateExpression x =
+genS (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
+    uu <- genS u
+    ww <- genS w
+    return $ str "categorical_index(" . uu . str ", " . ww . str ", " . str (show start) . str ", " . str (show n) . str ")"
+genS (IRError e) =
+    return $ str "throw(\"" . str (escapeStr e) . str "\")"
+genS (IRConformsTo t x) = do
+    sx <- genS x
+    return (str (jlConforms t (sx "")))
+genS x =
     error ("Unknown expression in Julia codegen: " ++ show x)
+
+str :: String -> ShowS
+str = showString
+
+-- | Difference strings joined by @", "@.
+commaSep :: [ShowS] -> ShowS
+commaSep = foldr (.) id . intersperse (str ", ")
 
 -- | Escape a Haskell string for embedding in a double-quoted Julia string literal
 -- (e.g. an IRError message that may contain quotes from a show'd type).
