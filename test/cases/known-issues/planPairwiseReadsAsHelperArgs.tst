@@ -12,4 +12,4 @@
 -- P(True) = P(Obj a) * P(Obj b) * Phi((mu_b - mu_a) / sqrt(s_a^2 + s_b^2)).
 -- Residue of task plan-pairwise-across-separate-neural-reads.
 slow
-expect-failure: no-code probability
+expect-failure: refused "NeST computes no density or CDF for this combination"
