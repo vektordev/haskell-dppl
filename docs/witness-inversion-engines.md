@@ -766,3 +766,32 @@ recomputed). Corpus: `data-structures/fstOfPairWrapperStructuredDraw`,
 Not covered: a structured variable re-read through an alias (`draw s = t`),
 through a helper taking the whole tuple, or through a projecting helper
 behind a second helper (task structured-draw-reread-through-binder-drops-field).
+
+## A wildcard leaf the body reads again is summed out
+
+The point witness is the query slot itself, so an `ANY` in one of its leaves
+reaches every other read of the bound variable as a value. In `draw e = ev
+prev in e : gen (snd e)` at `[(0.0, ANY), ..]`, `gen` got the `ANY` as its
+state and every `prev == 0` test answered False (task
+`any-mark-passed-as-recursive-call-state`). In a condition it compared False
+or raised "Condition is not a boolean: VAny", and in a second output slot it
+matched anything. `IRCompiler.applyBinding`'s `pointInvert` sums such a leaf
+over its finite domain: where it is `ANY` at run time (and its enclosing
+tuples are not), the binding's result is the mixture (`mixP`) over the
+domain of the same result at the witness with the leaf fixed. That is exact
+by the law of total probability. The result at a witness is compiled once,
+as a closure over the inverse (`pointInvertWith`), and called once per
+value. The calls sit in the arm of the run-time test, so a query without the
+wildcard makes the one call it made before.
+
+A leaf qualifies when it is read by at least two occurrences, or by one in a
+computing position (`varFieldReads`: anything other than field
+constructors, `if` arms and let bodies down from the body's root), and when
+the bound value states its domain (`fieldDomainOf`: a `DiscreteValues` tag,
+through a tuple constructor, `if` arms, a let body, or a called top-level
+function's body). At most 64 fixed witnesses (`wildcardLeafSumBound`), and the query
+must be a point query of a value-typed body. Any other binding keeps its code.
+Each `ANY` leaf of a recursion's state doubles the calls, so the runtime is
+exponential in the number of masked leaves (no memo). Corpus
+`data-structures/anyMarkPassedAsRecursiveState`,
+`let-bindings/anyLeafReadAgain*`.
