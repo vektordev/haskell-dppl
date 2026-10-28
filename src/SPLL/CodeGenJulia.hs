@@ -12,7 +12,7 @@ import Data.List (intercalate, intersperse, dropWhileEnd)
 import Data.Char (isDigit)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
-import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
+import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.Maybe (fromMaybe)
 import Data.Functor ((<&>))
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))

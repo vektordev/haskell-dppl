@@ -34,7 +34,7 @@ import SPLL.Lang.Types
 import IRInterpreter
 import qualified Data.Bifunctor
 import StandardLibrary (invokeStandardFunction, stdListProd)
-import SPLL.Typing.AlgebraicDataTypes (implicitFunctionApplicable)
+import SPLL.IR.ADT (implicitFunctionApplicable)
 
 -- | The placeholder value standing for "anything at all" in the slot typed
 -- @rt@ of a container an inverse reconstructs.

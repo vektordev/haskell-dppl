@@ -63,7 +63,7 @@ import SPLL.Lang.Types (ADTDecl(..))
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
 import SPLL.CodeGenPyTorch (envToLUT, normalRefName, replaceCalls, pyMangle, pyDouble, pyAttrBase, groupClassName, irFreeVars, MemoPlan(..), memoPlan, memoDecorate)
-import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
+import SPLL.IR.ADT (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
 import Data.Containers.ListUtils (nubOrd)

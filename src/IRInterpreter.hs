@@ -25,7 +25,7 @@ import Data.List (isSuffixOf)
 import qualified Data.Map.Strict as Map
 import SPLL.Lang.Types
 import SPLL.Typing.RType
-import SPLL.Typing.AlgebraicDataTypes
+import SPLL.IR.ADT
 import Data.Vector.Internal.Check (HasCallStack)
 
 -- | A neural declaration's type is @input -> target@; the partition plan is built
@@ -570,16 +570,12 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) | "_mock" `is
 -- which is a lambda with a known bound variable. We can now find this variable in the env and have the value of our parameter
 generate f neurals' registry adts' globalEnv env args (IRVar name) | "_adt" `isSuffixOf` name && (iterate init name !! 4) `elem` implicitFunctionNames adts' = do
   let realName = iterate init name !! 4
-  let rt = lookupRType realName adts'
-  let lookupParams = sequence [lookupVar ("x" ++ show x) globalEnv env | x <- [0 :: Int .. arity rt - 1]]
+  let lookupParams = sequence [lookupVar ("x" ++ show x) globalEnv env | x <- [0 :: Int .. implicitFunctionArity adts' realName - 1]]
   case lookupParams of
     Nothing -> failWith f ("No parameter found for " ++ name ++ " in environment")
     Just val -> do
       paramVal <- mapM (generate f neurals' registry adts' globalEnv env args) val
       return $ implicitFunctionImpl adts' realName paramVal
-  where
-    arity (_ `TArrow` rt) = arity rt + 1
-    arity _ = 0
 generate f neurals' registry adts' globalEnv env args (IRVar name) =
   case lookupVar name globalEnv env of
     Just expr -> generate f neurals' registry adts' globalEnv env args expr

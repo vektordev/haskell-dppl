@@ -20,7 +20,7 @@ module SPLL.IROptimizer (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
-import SPLL.Typing.AlgebraicDataTypes (fieldAccessorOwners)
+import SPLL.IR.ADT (fieldAccessorOwners)
 import Data.Number.Erf (erfc)
 import Data.Bits (xor)
 import Data.Either (isLeft)

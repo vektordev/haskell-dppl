@@ -65,7 +65,7 @@ import SPLL.Lang.Types
 import SPLL.IR.Value
 import SPLL.Typing.PType (PType(Deterministic))
 import SPLL.Typing.RType
-import SPLL.Typing.AlgebraicDataTypes
+import SPLL.IR.ADT
 
 import qualified Data.Set as Set
 import Data.Maybe

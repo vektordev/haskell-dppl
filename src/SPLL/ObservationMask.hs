@@ -56,7 +56,7 @@ module SPLL.ObservationMask
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
-import SPLL.Typing.AlgebraicDataTypes (fieldAccessorOwners, findField)
+import SPLL.IR.ADT (fieldAccessorOwners, findField)
 import PredefinedFunctions (isObsConstructor)
 import SPLL.ReservedNames (isFrontendBinder)
 
