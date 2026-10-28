@@ -271,8 +271,8 @@ corruptManifest = withManifest $ \file -> do
 closureIsNarrow :: IO ()
 closureIsNarrow = do
   files <- interpreterClosure
-  assertBool "IRInterpreter is in its closure" ("src/IRInterpreter.hs" `elem` files)
+  assertBool "IRInterpreter is in its closure" ("nest-ir/src/IRInterpreter.hs" `elem` files)
   assertBool "Prelude (the run*C entry points) is in it" ("src/SPLL/Prelude.hs" `elem` files)
   assertBool "MockNN is in it" ("src/MockNN.hs" `elem` files)
-  forM_ ["src/SPLL/IRCompiler.hs", "src/SPLL/IROptimizer.hs", "src/SPLL/Parser.hs", "src/SPLL/CodeGenPyTorch.hs"] $ \f ->
+  forM_ ["src/SPLL/IRCompiler.hs", "nest-ir/src/SPLL/IROptimizer.hs", "src/SPLL/Parser.hs", "nest-ir/src/SPLL/CodeGenPyTorch.hs"] $ \f ->
     assertBool (f ++ " is not in the interpreter closure") (f `notElem` files)

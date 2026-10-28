@@ -23,8 +23,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, pythonNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.PythonNesting (tooDeepForPython, spillDeep, adtCallees, renameFree, pythonMaxIndent, blockIndent, bindIterable, hasAssignmentExpr)
-import SPLL.Lang.Types
-import SPLL.Typing.RType (shapeRank, shapeNumel)
+import SPLL.IR.Value
 import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
 import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd, nub)

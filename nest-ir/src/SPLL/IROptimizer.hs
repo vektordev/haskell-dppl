@@ -21,7 +21,6 @@ module SPLL.IROptimizer (
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types
 import SPLL.IR.ADT (fieldAccessorOwners)
 import SPLL.IR.Type (IRADTDecl(..))
 import Data.Number.Erf (erfc)
@@ -34,7 +33,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Monad.State (State, runState, get, put, modify')
 import Debug.Trace (trace)
-import SPLL.IR.Value (floatApproxEqThresh)
+import SPLL.IR.Value
 
 
 -- | What the optimizer reads of the compiler's configuration. A projection of

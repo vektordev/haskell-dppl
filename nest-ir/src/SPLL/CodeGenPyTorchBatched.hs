@@ -55,7 +55,7 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Typing.RType (shapeRank, shapeNumel)
+import SPLL.IR.Value (shapeRank, shapeNumel)
 import SPLL.IR.Type (IRType(ITFloat), IRADTDecl(..))
 import SPLL.IR.Value (CompilerError, GenericValue(..), GenericList(..), GenericMultiValue(..), multiValueToValueList, multiValueCardinality)
 -- 'pyDouble' is shared with the scalar backend for the same reason

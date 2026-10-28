@@ -31,7 +31,8 @@ import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.CompilerConfig
 import SPLL.Typing.RType
-import SPLL.IR.Type (IRType(..), irTypeOfRType)
+import SPLL.IR.Type (IRType(..))
+import SPLL.IRTypeBridge (irTypeOfRType)
 import SPLL.Lang.Lang
 import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName)
 import StandardLibrary
