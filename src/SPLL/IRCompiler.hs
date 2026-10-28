@@ -7585,14 +7585,50 @@ data PlanRef = PlanRef PartitionPlan Int
 -- difference (mass, dim 0); 'PLeafPt' pins it to a point, measured as the
 -- leaf's density times the |change-of-variables| factor (dim 1), under
 -- membership guards accumulated from intersected intervals.
+--
+-- 'PLeafEq' (task per-value-neural-equality-unrolled-sum) is a 'PLeafCon' in
+-- disguise: a discrete region over the contiguous Int domain @[lo .. hi]@
+-- (slot @i@ holding value @lo + i@) constrained to equal (@True@) or differ
+-- from (@False@) the run-time value @x@, a variable or an accessor chain over
+-- one. Its last field is that same constraint spelled as per-slot guards,
+-- which is what it becomes the moment it meets another constraint on its
+-- region ('expandLeafEq'). Left alone it is measured as one indexed read
+-- @raw[x - lo]@ under a range guard (or that read's complement) instead of a
+-- V-term guarded sum: the difference between O(1) and O(V) per evaluation,
+-- and O(V) against O(V^2) for a per-value query over the domain.
 data PLeafCon = PLeafCon Int [(Int, IRExpr)]
               | PLeafIvl Int WBound WBound
               | PLeafPt  Int IRExpr IRExpr [IRExpr]
+              | PLeafEq  Int Int Int IRExpr Bool [(Int, IRExpr)]
 
 plcBase :: PLeafCon -> Int
 plcBase (PLeafCon b _)    = b
 plcBase (PLeafIvl b _ _)  = b
 plcBase (PLeafPt b _ _ _) = b
+plcBase (PLeafEq b _ _ _ _ _) = b
+
+-- | A 'PLeafEq' as the per-slot 'PLeafCon' it stands for; anything else
+-- unchanged.
+expandLeafEq :: PLeafCon -> PLeafCon
+expandLeafEq (PLeafEq b _ _ _ _ slots) = PLeafCon b slots
+expandLeafEq c = c
+
+-- | The constraint "the discrete leaf at @off@, over @vals@, equals (or, with
+-- @pol@ False, differs from) @x@", given as its per-slot guards @slots@: a
+-- 'PLeafEq' where the domain is a contiguous Int range and @x@ is cheap to
+-- read three times, else the 'PLeafCon' of those guards.
+discreteEqCon :: Int -> [Value] -> IRExpr -> Bool -> [(Int, IRExpr)] -> PLeafCon
+discreteEqCon off vals x pol slots
+  | simpleRead x
+  , (lo : _) <- ints
+  , length ints == length vals
+  , ints == [lo .. lo + length ints - 1] = PLeafEq off lo (lo + length ints - 1) x pol slots
+  | otherwise = PLeafCon off slots
+  where
+    ints = [ k | VInt k <- vals ]
+    simpleRead (IRVar _)        = True
+    simpleRead (IRDestruct _ e) = simpleRead e
+    simpleRead _                = False
 
 -- | A guarded conjunction of per-leaf constraints; the plan-leaf analogue of
 -- 'WWorld'. Contributes (product of constrained leaf masses) when all guards
@@ -7720,6 +7756,7 @@ pwOverCoupled (PlanWorld _ cons pairs _ _ _)
     coupled = concat [[a, b] | (a, b) <- pairs]
     contCon = [plcBase c | c <- cons, isCont c]
     isCont PLeafCon{} = False
+    isCont PLeafEq{}  = False
     isCont _          = True
     overCoupled = [ b | b <- coupled
                       , length (filter (== b) coupled) > 1 || b `elem` contCon ]
@@ -7806,6 +7843,22 @@ planRawRead raws k = case [ r | r@(start, _) <- raws, start <= k ] of
   [] -> error ("planRawRead: offset " ++ show k ++ " precedes every neural read's range " ++ show raws)
   rs -> let (start, v) = last rs in IRBuiltin BListIndex [IRVar v, IRConst (VInt (k - start))]
 
+-- | The logit for the Int value @x@ of a region starting at flat offset
+-- @base@ whose slot 0 holds the value @lo@: 'planRawRead' with a run-time
+-- index, @raw[x - lo]@ within the region.
+planRawReadAt :: PlanRaws -> Int -> Int -> IRExpr -> IRExpr
+planRawReadAt raws base lo x = case [ r | r@(start, _) <- raws, start <= base ] of
+  -- Invariant, as in 'planRawRead'.
+  [] -> error ("planRawReadAt: offset " ++ show base ++ " precedes every neural read's range " ++ show raws)
+  rs -> let (start, v) = last rs
+            off = base - start - lo
+        in IRBuiltin BListIndex [IRVar v, if off == 0 then x else IROp OpPlus x (IRConst (VInt off))]
+
+-- | Bool IR: does the Int @x@ lie in @[lo .. hi]@?
+intInRange :: Int -> Int -> IRExpr -> IRExpr
+intInRange lo hi x = IROp OpAnd (IROp OpLessThan (IRConst (VInt (lo - 1))) x)
+                              (IROp OpLessThan x (IRConst (VInt (hi + 1))))
+
 -- ('CompilerM', the unapplied form: 'CompilerMonad' would be an unsaturated
 -- synonym application here.)
 type PlanM a = StateT PlanState CompilerM a
@@ -7827,6 +7880,10 @@ andGuard a b | a == constTrueIR = b
 -- the mergeExpr convention). A region cannot be discrete in one constraint
 -- and continuous in another (the plan fixes each region's kind).
 intersectLeafCon :: PLeafCon -> PLeafCon -> PLeafCon
+intersectLeafCon c@(PLeafEq _ _ _ x p _) (PLeafEq _ _ _ x' p' _)
+  | x == x' && p == p' = c
+intersectLeafCon c@PLeafEq{} c' = intersectLeafCon (expandLeafEq c) c'
+intersectLeafCon c c'@PLeafEq{} = intersectLeafCon c (expandLeafEq c')
 intersectLeafCon (PLeafCon b s1) (PLeafCon _ s2) =
   PLeafCon b [ (i, andGuard g1 g2) | (i, g1) <- s1, Just g2 <- [lookup i s2] ]
 intersectLeafCon (PLeafIvl b lo1 hi1) (PLeafIvl _ lo2 hi2) =
@@ -7841,6 +7898,7 @@ intersectLeafCon c c' = error ("plan leaf region at offset " ++ show (plcBase c)
   ++ " is constrained as both discrete and continuous (plan invariant violation): "
   ++ show (isDisc c) ++ " vs " ++ show (isDisc c'))
   where isDisc PLeafCon{} = True
+        isDisc PLeafEq{}  = True
         isDisc _          = False
 
 insertLeafCon :: PLeafCon -> [PLeafCon] -> [PLeafCon]
@@ -8114,9 +8172,10 @@ planEvalRef meta env = go
 -- before the traversal, and an enclosing component split guards it.
 planRefWorlds :: [ADTDecl] -> PlanRef -> [PLeafCon] -> PTarget -> Either String [PlanWorld]
 planRefWorlds _ (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
-  Right [pw1 (insertLeafCon
-          (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
-          cons)]
+  Right [pw1 (insertLeafCon (con [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ]) cons)]
+  where con = case tgt of
+          PTPoint s -> discreteEqCon off vals s True
+          PTUpTo _  -> PLeafCon off
 planRefWorlds adtDecls' (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
   wa <- component (PlanRef a off) (IRDestruct AcFst s)
   wb <- component (PlanRef b (off + getSize a)) (IRDestruct AcSnd s)
@@ -8622,8 +8681,9 @@ planInvertNode meta env planBody target = case planBody of
         Just (Right (PlanRef (Discretes rty (MultiDiscretes vals)) off, cons)) -> do
           dv <- bindDetSide "eq_rhs" de
           let eqG v = planDetGuard rty (IRConst (valueToIR v)) (PTPoint (IRVar dv))
-          let tw = [pw1 (insertLeafCon (PLeafCon off [ (i, eqG v)                    | (i, v) <- zip [0..] vals ]) cons)]
-          let fw = [pw1 (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (eqG v)) | (i, v) <- zip [0..] vals ]) cons)]
+          let eqCon pol = discreteEqCon off vals (IRVar dv) pol
+          let tw = [pw1 (insertLeafCon (eqCon True  [ (i, eqG v)                    | (i, v) <- zip [0..] vals ]) cons)]
+          let fw = [pw1 (insertLeafCon (eqCon False [ (i, IRUnaryOp OpNot (eqG v)) | (i, v) <- zip [0..] vals ]) cons)]
           return (Right (planBoolWorlds target tw fw))
         Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) | all (null . snd) ctorPlans -> do
           dv <- bindDetSide "eq_rhs" de
@@ -9460,11 +9520,15 @@ planGroupValues pairs = do
 -- what a collapsed group keeps live ('planGroupValues', 'planFieldProduct').
 planCommonDiscreteCons :: [PlanWorld] -> [PLeafCon]
 planCommonDiscreteCons (w:ws') =
-  [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (planConEq c) (pwCons w')) ws' ]
+  [ c | c <- pwCons w, isDiscrete c, all (\w' -> any (planConEq c) (pwCons w')) ws' ]
+  where isDiscrete PLeafCon{} = True
+        isDiscrete PLeafEq{}  = True
+        isDiscrete _          = False
 planCommonDiscreteCons [] = []
 
 planConEq :: PLeafCon -> PLeafCon -> Bool
 planConEq (PLeafCon b1 s1) (PLeafCon b2 s2) = b1 == b2 && s1 == s2
+planConEq (PLeafEq b1 _ _ x1 p1 _) (PLeafEq b2 _ _ x2 p2 _) = b1 == b2 && x1 == x2 && p1 == p2
 planConEq _ _ = False
 
 -- | The worlds of a constructed value, from its fields' worlds: their
@@ -10039,6 +10103,15 @@ planWorldMass sr raws w =
     -- native log form: summed linearly, then carried into the semiring.
     leafMass (PLeafCon _ [])       = srZero sr
     leafMass (PLeafCon base slots) = fromLinearSR sr (foldr1 (IROp OpPlus) (map (slotRead base) slots))
+    -- One indexed read in place of the guarded sum ('PLeafEq'). The region is
+    -- a softmax, so the mass of every slot but @x@'s is the complement of
+    -- @x@'s, as an unconstrained leaf's mass is the semiring one. The read is
+    -- a raw logit, not a compiled (possibly pruned) result, so the complement
+    -- has no lower bound to flip.
+    leafMass (PLeafEq base lo hi x pol _) =
+      let point = fromLinearSR sr (planRawReadAt raws base lo x)
+      in if pol then IRIf (intInRange lo hi x) point (srZero sr)
+                else IRIf (intInRange lo hi x) (srComplement sr point) (srOne sr)
     leafMass (PLeafIvl base lo hi) = case (lo, hi) of
       -- one-sided intervals cannot go negative; only a runtime-empty
       -- two-sided intersection needs the clamp (mirrors measureSet). The log

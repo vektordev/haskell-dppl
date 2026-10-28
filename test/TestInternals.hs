@@ -2616,6 +2616,50 @@ test_listOfFieldReadsCompileFlat = testCase "listOfFieldReadsCompileFlat" $ do
       , "neural see :: (Symbol -> Face)"
       , "main img = draw f = see img in [" ++ intercalate ", " [ "x" ++ show i ++ " f" | i <- [1 .. n] ] ++ "]" ]
 
+-- | The per-value veto @(t, not (t == c))@ over two V-value neural reads (docs
+-- task per-value-neural-equality-unrolled-sum, formerly the known-issues pin
+-- perValueGivenEqualityUnrolledSum): with @t@ known, the plan engine measured
+-- P(c == t) and P(not (c == t)) as a V-term sum of one-hot reads
+-- @raw[k] if k == t else 0.0@, so the per-value posterior's given step cost
+-- O(V) per value, O(V^2) per token (0.28 s over V = 2000 values). They are one
+-- indexed read @raw[t]@ and its complement now ('PLeafEq'). Every compiled
+-- body, at -O2 and -O0, must hold no such term; the values are checked by
+-- test/cases/neural/perValueVetoIndexedRead.
+test_perValueVetoIndexedRead :: TestTree
+test_perValueVetoIndexedRead = testGroup "perValueVetoIndexedRead"
+  [ check "-O2" defaultCompilerConfig
+  , check "-O0" defaultCompilerConfig { optimizerLevel = 0 }
+  ]
+  where
+    check lbl conf = testCase lbl $ do
+      prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+                (tryParseProgram "perValueVetoIndexedRead" src)
+      IREnv groups _ _ <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+                            (compile conf prog)
+      let bodies = [ (groupName g, b) | g <- groups, Just (b, _) <- [probFun g, integFun g] ]
+          offenders = [ (n, c) | (n, b) <- bodies, let c = oneHot b, c > 0 ]
+      assertBool "the program has probability bodies" (not (null bodies))
+      assertEqual "one-hot terms (raw[k] if k == x else 0.0) per body" [] offenders
+    oneHot e = (if isOneHot e then 1 else 0) + sum (map oneHot (getIRSubExprs e)) :: Int
+    isOneHot e = case e of
+      IRIf c (IRBuiltin BListIndex [_, IRConst (VInt _)]) (IRConst (VFloat 0.0)) -> keyTest c
+      _ -> False
+    keyTest c = case c of
+      IRUnaryOp OpNot c' -> keyTest c'
+      IROp OpEq (IRConst (VInt _)) _ -> True
+      IROp OpEq _ (IRConst (VInt _)) -> True
+      _ -> False
+    dom = "[" ++ intercalate ", " (map show [0 .. 99 :: Int]) ++ "]"
+    src = unlines
+      [ "neural lm :: (Symbol -> Int) of " ++ dom
+      , "neural lmAnti :: (Symbol -> Int) of " ++ dom
+      , "main ctx ctxC ="
+      , "  draw t = lm ctx in"
+      , "  draw c = lmAnti ctxC in"
+      , "  (t, not (t == c))"
+      , "posterior :: Symbol -> Symbol -> (Enumerated Int, Bool)"
+      , "posterior = main" ]
+
 -- | A bare neural Int read over an explicit V-value domain, @neural lm ::
 -- (Symbol -> Int) of [1, .., V]@ with @main ctx = lm ctx@, was
 -- known-issues/neuralIntReadDomainCompileGrowth (docs task
@@ -6581,6 +6625,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_recordSharedFieldGroupsCodeSizePolynomial
   , test_listOfFieldReadsCompileFlat
   , test_neuralIntReadDomainCompileLinear
+  , test_perValueVetoIndexedRead
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
@@ -6788,7 +6833,16 @@ gatherPassTests = testGroup "one-hot read as a gather (batched-mask-variant-neur
           Right ls -> do
             let m01 = takeWhile (not . ("class Main__m11" `isPrefixOf`)) (dropWhile (not . ("class Main__m01" `isPrefixOf`)) ls)
             assertBool "Main__m01 missing" (not (null m01))
-            assertBool "no nn_gather in Main__m01" (any ("nn_gather(l_0_nn_raw, (sample)[0])" `isInfixOf`) m01)
+            -- The read is the plan engine's own indexed read since task
+            -- per-value-neural-equality-unrolled-sum ('PLeafEq'), which the
+            -- optimizer inlines the network call into; one call either way.
+            assertBool "no nn_gather in Main__m01"
+              (any (\l -> any (`isInfixOf` l) ["nn_gather(l_0_nn_raw, (sample)[0])", "nn_gather(lmA(ctxA), (sample)[0])"]) m01)
+            let calls str
+                  | null str = 0 :: Int
+                  | "lmA(ctxA)" `isPrefixOf` str = 1 + calls (drop 9 str)
+                  | otherwise = calls (tail str)
+            assertEqual "network calls in Main__m01" 1 (sum (map calls m01))
             assertBool ("Main__m01 still reads constant slots:\n" ++ unlines m01) (not (any ("[..., " `isInfixOf`) m01))
   ]
   where
