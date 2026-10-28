@@ -8,7 +8,6 @@ module SPLL.CodeGenJulia (
 import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
-import SPLL.Lang.Lang
 import Data.List (intercalate, intersperse, dropWhileEnd)
 import Data.Char (isDigit)
 import SPLL.Lang.Types

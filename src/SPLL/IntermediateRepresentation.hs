@@ -7,7 +7,6 @@ module SPLL.IntermediateRepresentation (
 , IRFunGroup (..)
 , VariantRefusal(..)
 , showRefusal
-, Tag(..)
 , Operand(..)
 , UnaryOperand(..)
 , Builtin(..)
@@ -56,8 +55,6 @@ module SPLL.IntermediateRepresentation (
 
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), Shape, Extent(..), shapeNumel)
-import SPLL.Typing.PType()
-import SPLL.Typing.Typing()
 import Data.Data()
 import Data.List (isSuffixOf, sort, group)
 import Data.Char (isAlpha, isAlphaNum)

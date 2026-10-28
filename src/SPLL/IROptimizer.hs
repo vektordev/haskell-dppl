@@ -4,7 +4,6 @@ module SPLL.IROptimizer (
 , optimizeEnvWith
 , shareNetworkCallsCounted
 , postProcess
-, failConversion
 , OptStats(..)
 , OptEnv(..)
 , emptyOptEnv
@@ -727,9 +726,6 @@ replaceAll find replaceWith = irMap (replace find replaceWith)
 
 replace :: Eq p => p -> p -> p -> p
 replace find replace' expr = if find == expr then replace' else expr
-
-failConversion :: Expr -> IRExpr
-failConversion = error "Cannot convert VClosure"
 
 softForceLogic :: Operand -> IRExpr -> IRExpr -> IRExpr
 --logic operands: or and and

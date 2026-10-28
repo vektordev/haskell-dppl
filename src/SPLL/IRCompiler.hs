@@ -3367,6 +3367,9 @@ scaleMayVanish = not . nonzero
       nonzero a || nonzero b
     nonzero _ = False
 
+failConversion :: Expr -> IRExpr
+failConversion = error "Cannot convert VClosure"
+
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
 -- A witnessed sample can itself be the 'VAnyExcept' placeholder an '==' (or ADT
