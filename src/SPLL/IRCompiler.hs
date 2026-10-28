@@ -158,7 +158,15 @@ data CompilerMetadata = CompilerMetadata {
   -- ('withBindingLaw'). Extended by the modality engine's own binder rule
   -- ('bindingLawEnv'), so it is the environment 'inferE' had there. Read by
   -- nothing that dispatches yet (milestone M3).
-  lawEnv :: LawEnv
+  lawEnv :: LawEnv,
+  -- | Whether every enclosing enumerated sum keeps its terms' dims
+  -- ('enumSumTerms'; task enumerated-sum-over-density-body). True outside
+  -- any enumeration; an enumeration whose body's type has no static bound on
+  -- its dim ('floatLeafBound') sums its terms as masses and clears it for
+  -- everything below. 'forwardOrInfer' reads it: a delegated body that may
+  -- be a density needs its run-time guard only when some enclosing sum
+  -- would report it as a mass.
+  dimAwareEnum :: Bool
 }
 
 -- | A value's law as an affine combination of independent standard-normal
@@ -713,7 +721,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty [] laws Map.empty
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty [] laws Map.empty True
     reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
@@ -5150,7 +5158,6 @@ enumerateBinding meta l v preTable compileBody = do
         return (fresh, renameFreeVar paramVar fresh (findExprWithCN fExprs bodyCn))
       else return (paramVar, findExprWithCN fExprs bodyCn)
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
-  let sr = semiringOf meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   -- Inside an enclosing enumeration, the argument's measure is tabulated once
   -- per domain value ahead of this loop rather than recomputed in it (task
@@ -5179,12 +5186,13 @@ enumerateBinding meta l v preTable compileBody = do
     -- the plan traversal must see the loop variable as fixed, not as an enclosing
     -- random binding shared across factors ('planFactorExternals').
     let bodyMeta = meta{ typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta
-                       , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
+                       , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta)
+                       , dimAwareEnum = keepsDims }
     bodyRes <- compileBody bodyMeta lBodyExpr
-    return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
-  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
-  setVariables outerBinds
-  enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+    enumTerm meta dimBound pBranch bodyRes)
+  enumSumTerms meta boundVar discreteVVals irTuple
+  where
+    (keepsDims, dimBound) = enumSumDims meta (rType (getTypeInfo l))
 
 -- | A draw's argument as 'enumerateBinding' measures it: with the enclosing
 -- enumerated latents fixed. Inside their loops each holds one value, and a
@@ -5498,17 +5506,68 @@ enumerateCurriedArgument meta cumulative appTi l v sample = do
   let vTi = getTypeInfo v
       loopVar = Expr (vTi {pType = Deterministic, tags = []}) (Var boundVar)
       loopBody = Expr appTi (Apply l loopVar)
+      (keepsDims, dimBound) = enumSumDims meta (rType appTi)
       bodyMeta = meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
-                      , recoveredVars = boundVar : recoveredVars meta }
-      sr = semiringOf meta
+                      , recoveredVars = boundVar : recoveredVars meta
+                      , dimAwareEnum = keepsDims }
   irTuple <- scoped (do
     pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
     bodyRes <- toIREnumerate bodyMeta cumulative loopBody sample
-    return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
+    enumTerm meta dimBound pBranch bodyRes)
   let discreteVVals = head [x | DiscreteValues x <- tags vTi]
-  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+  enumSumTerms meta boundVar discreteVVals irTuple
+
+-- | How an enumerated sum whose body measures a value of type @rt@ combines
+-- its terms (task enumerated-sum-over-density-body). The first component is
+-- 'dimAwareEnum' for the body: whether this sum, and every one enclosing it,
+-- reports the body's dim faithfully. The second is the static dim bound the
+-- dim-aware sum ('enumMinDimP') is built with, 'Nothing' when every term is
+-- a mass anyway (a float-free type, which 'floatFree' covers).
+--
+-- A type with no static bound ('floatLeafBound' 'Nothing': a list of reals)
+-- keeps the old sum, which reports a mass: there 'forwardOrInfer''s run-time
+-- guard stays, and raises on a density rather than mislabelling it.
+enumSumDims :: CompilerMetadata -> RType -> (Bool, Maybe Int)
+enumSumDims meta rt = case floatLeafBound (adtDecls meta) (resultOf rt) of
+  Nothing -> (False, Nothing)
+  Just d -> (dimAwareEnum meta, if d > 0 then Just d else Nothing)
+  where
+    -- The bound is taken on what the enumerated body returns, which for a
+    -- lambda being applied is its codomain.
+    resultOf (TArrow _ b) = b
+    resultOf t = t
+
+-- | One term of an enumerated sum: the body's result weighted by the mass
+-- @pBranch@ of the enumerated value, and the dim bound the sum must keep
+-- ('enumSumDims'), or 'Nothing' for a plain mass sum. The dim-aware form is
+-- used only where the body's dim is not literally 0 -- a forward-and-compare
+-- indicator always is, so the emitted code of such sums is unchanged. A
+-- value with no mass is then an impossible term rather than a possible zero:
+-- the lowest possible dim decides the sum's dim, and a zero-weight atom must
+-- not outvote a real density (the tag over-approximates the support).
+enumTerm :: CompilerMetadata -> Maybe Int -> IRExpr -> PResult -> CompilerMonad (PResult, Maybe Int)
+enumTerm meta dimBound pBranch bodyRes
+  | Just d <- dimBound, rDim bodyRes /= dim0 = do
+      w <- mkVariable "enum_weight"
+      setVariables [(w, pBranch)]
+      return ( impossibleWhen (IROp OpEq (IRVar w) (srZero sr)) (onProb (\p -> srTimes sr p (IRVar w)) bodyRes)
+             , Just d )
+  | otherwise = return (onProb (\p -> srTimes sr p pBranch) bodyRes, Nothing)
+  where sr = semiringOf meta
+
+-- | Sum the scoped terms 'enumTerm' built over the enumerated variable's
+-- domain: 'enumMinDimP' when a term may be a density, else the plain mass sum
+-- 'enumSumP'.
+enumSumTerms :: CompilerMetadata -> Varname -> MultiValue -> Open (PResult, Maybe Int) -> CompilerMonad PResult
+enumSumTerms meta boundVar vals o = do
+  let irTuple = generateLetInBlock meta (fst <$> o)
+      (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+      sr = semiringOf meta
+      bc = countBranches (compilerConfig meta)
   setVariables outerBinds
-  enumSumP sr (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+  case snd (openValue o) of
+    Just d -> enumMinDimP sr bc id d boundVar vals innerTuple
+    Nothing -> enumSumP sr bc id boundVar vals innerTuple
 
 
 -- ===== Agreement fusion (task categorical-product-ov-fusion) =====
@@ -6004,7 +6063,7 @@ forwardOrInfer meta cumulative whole sample operands forward
       -- result, guard-free) -- and the optimizer folds it away where the dim
       -- is a literal 0. Summing densities properly is follow-up task
       -- enumerated-sum-over-density-body.
-      if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole))
+      if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole)) || dimAwareEnum meta
         then return res
         else do
           let isMass = orIR (rImposs res) (IROp OpEq (rDim res) dim0)
@@ -6015,6 +6074,29 @@ forwardOrInfer meta cumulative whole sample operands forward
                           ++ " enum-let-latent-gates-fresh-draw; follow-up enumerated-sum-over-density-body)"
           return (onProb (\p -> IRIf isMass p refusal) res)
   where thd3 (_, _, x) = x
+
+-- | A static upper bound on the dim of a point probability of a value of the
+-- type: its number of real leaves, the larger alternative for a sum type.
+-- 'Nothing' when there is none (a list or tensor of reals, a recursive ADT
+-- with a real field) or the type is not recognised. Used by the enumerated
+-- sums ('enumSumTerms') to find the lowest dim among their terms
+-- ('enumMinDimP'), which needs the bound to build its ladder.
+floatLeafBound :: [ADTDecl] -> RType -> Maybe Int
+floatLeafBound decls = go Set.empty
+  where
+    go seen t
+      | floatFree decls t = Just 0
+      | otherwise = case t of
+          TFloat -> Just 1
+          Tuple a b -> (+) <$> go seen a <*> go seen b
+          TEither a b -> max <$> go seen a <*> go seen b
+          TADT n
+            | Set.member n seen -> Nothing
+            | otherwise -> case find ((== n) . dataName) decls of
+                Just d -> fmap (maximum . (0 :)) $ sequence
+                            [ sum <$> mapM (go (Set.insert n seen) . snd) fs | (_, fs) <- constructors d ]
+                Nothing -> Nothing
+          _ -> Nothing
 
 -- | True when no value of the type contains a 'TFloat' leaf, so a point
 -- probability of it is always a mass (dim 0). Conservative: anything it does
