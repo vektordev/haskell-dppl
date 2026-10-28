@@ -247,6 +247,11 @@ rewriteApply decls env ti l v = case node l of
          -- IRCompiler's Bottom-argument arm refuse a callee that never reads it
          -- (task admitted-callee-ignores-bottom-argument).
          Var _ | not (x `Set.member` freeVarsExpr body') -> body'
+         -- A literal likewise: it draws nothing, so dropping it changes no
+         -- distribution. Left as it was, @snd ((\\h -> (a, Normal)) False)@
+         -- kept a redex toIRNormalParams cannot see through (task
+         -- snd-out-of-lambda-redex-normal-params).
+         Constant _ | not (x `Set.member` freeVarsExpr body') -> body'
          _ -> Expr ti (Apply (Expr (ann l) (Lambda x body')) v')
   -- An `if` choosing between function values: push the application into both
   -- arms. Re-walked, so a nested selection (`(if a then (if b then f else g)
