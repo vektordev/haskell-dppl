@@ -49,7 +49,6 @@ module SPLL.IntermediateRepresentation (
 , retireUnrenderableVariants
 ) where
 
-import SPLL.Lang.Types
 import SPLL.IR.Value
 import SPLL.IR.Type (IRType, IRADTDecl(..))
 import Data.Data()

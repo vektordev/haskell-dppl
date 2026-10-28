@@ -57,7 +57,7 @@ module SPLL.PerValue
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (substituteVar, freeVarsExpr, autoDeriveMultiValue, multiValueIsFinite, multiValueToValueList, prettyRType)
 import SPLL.Typing.RType (RType(..))
-import SPLL.IR.Type (irConformanceType)
+import SPLL.IRTypeBridge (irConformanceType)
 import SPLL.IntermediateRepresentation
 import SPLL.CompilerConfig
 import SPLL.ReservedNames (perValuePointSuffix, perValuePriorSuffix, perValueGivenSuffix, perValueSlotSuffix,

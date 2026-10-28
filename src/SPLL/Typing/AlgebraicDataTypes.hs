@@ -6,7 +6,8 @@ module SPLL.Typing.AlgebraicDataTypes (
 ) where
 import SPLL.Lang.Types
 import SPLL.Typing.RType
-import SPLL.IR.Type (IRADTDecl(..), irTypeOfRType)
+import SPLL.IR.Type (IRADTDecl(..))
+import SPLL.IRTypeBridge (irTypeOfRType)
 
 implicitFunctionsRTypeProg :: Program -> [(String, RType)]
 implicitFunctionsRTypeProg Program {adts=adtDecls} = concatMap implicitFunctionRTypes adtDecls

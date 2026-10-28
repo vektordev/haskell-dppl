@@ -52,7 +52,8 @@ import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable
 import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
-import SPLL.IR.Type (IRType(..), irConformanceType)
+import SPLL.IR.Type (IRType(..))
+import SPLL.IRTypeBridge (irConformanceType)
 import SPLL.Semiring
 import Control.Monad (foldM, forM, mfilter, unless, void, when, zipWithM, (>=>))
 import Debug.Trace (traceM)

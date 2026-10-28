@@ -42,13 +42,11 @@ module SPLL.IRTypeCheck
   , checkIREnv
   , checkIREnvWith
   , inferIRExpr
-  , irTypeOfRType
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types
-import SPLL.Typing.RType (shapeNumel, dropAxis, prettyShape)
-import SPLL.IR.Type (IRType(..), IRADTDecl(..), irTypeOfRType)
+import SPLL.IR.Value
+import SPLL.IR.Type (IRType(..), IRADTDecl(..))
 import SPLL.IR.ADT (implicitFunctionIRTypes)
 import StandardLibrary (standardEnv)
 

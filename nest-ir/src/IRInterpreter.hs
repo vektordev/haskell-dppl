@@ -9,7 +9,7 @@ generateReplay
 
 import Statistics.Distribution (quantile)
 import SPLL.IntermediateRepresentation
-import SPLL.IR.Value (elementAt, floatApproxEqThresh, valueInMultiValue)
+import SPLL.IR.Value
 import StandardLibrary
 import SPLL.IR.Neural (NeuralOracle, NeuralPrimitive(..), lookupNeuralPrimitive)
 
@@ -20,8 +20,6 @@ import Statistics.Distribution.Normal (normalDistr)
 import Data.Number.Erf
 import Data.List (isSuffixOf)
 import qualified Data.Map.Strict as Map
-import SPLL.Lang.Types
-import SPLL.Typing.RType
 import SPLL.IR.ADT
 import SPLL.IR.Type (IRType(..), IRADTDecl(..))
 import Data.Vector.Internal.Check (HasCallStack)

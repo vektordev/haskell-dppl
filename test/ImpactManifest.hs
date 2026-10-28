@@ -69,10 +69,10 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVar_, readMVar)
 import Control.Exception (SomeException, evaluate, try)
-import Control.Monad (forM, when, unless)
+import Control.Monad (filterM, forM, when, unless)
 import Data.Char (isSpace, isUpper)
 import Data.List (intercalate, sort)
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (isJust, listToMaybe, mapMaybe)
 import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
@@ -327,17 +327,23 @@ sourcesFingerprint m files = modifyMVar (mSources m) $ \cache -> case Map.lookup
 interpreterClosure :: IO [FilePath]
 interpreterClosure = do
   mods <- go [] ["IRInterpreter", "MockNN"]
-  return (sort ("src/SPLL/Prelude.hs" : map modPath mods))
+  return (sort ("src/SPLL/Prelude.hs" : map fst mods))
   where
-    modPath m = "src" </> map (\c -> if c == '.' then '/' else c) m ++ ".hs"
+    -- A module is in the frontend's src/ or in the nest-ir package's.
+    modPaths m = [ root </> map (\c -> if c == '.' then '/' else c) m ++ ".hs" | root <- ["src", "nest-ir/src"] ]
+    findModule m = do
+      found <- filterM doesFileExist (modPaths m)
+      return (listToMaybe found)
     go seen [] = return seen
     go seen (m : rest)
-      | m `elem` seen = go seen rest
+      | m `elem` map snd seen = go seen rest
       | otherwise = do
-          exists <- doesFileExist (modPath m)
-          if not exists then go seen rest else do
-            src <- readFile (modPath m)
-            length src `seq` go (m : seen) (importsOf src ++ rest)
+          found <- findModule m
+          case found of
+            Nothing -> go seen rest
+            Just path -> do
+              src <- readFile path
+              length src `seq` go ((path, m) : seen) (importsOf src ++ rest)
     importsOf src = mapMaybe importOf (lines src)
     importOf l = case words l of
       ("import" : "qualified" : m : _) -> modName m

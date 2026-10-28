@@ -10,8 +10,7 @@ import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import Data.List (intercalate, intersperse, dropWhileEnd)
 import Data.Char (isDigit)
-import SPLL.Lang.Types
-import SPLL.Typing.RType (shapeRank, shapeNumel)
+import SPLL.IR.Value
 import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
 import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.Maybe (fromMaybe)
