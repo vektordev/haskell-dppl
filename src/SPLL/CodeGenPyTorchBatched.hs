@@ -1464,6 +1464,12 @@ structural env e = case e of
   -- A field of a bucket-uniform value is bucket-uniform: a payload read off
   -- an enumerated domain constant ('bindMap'), say.
   IRDestruct _ a    -> structural env a
+  -- A tensor of structural elements (an enumeration domain of constants, bound
+  -- once and read by position), and its element at a structural position (a
+  -- loop index over 'BIota', 'bindMap'): the same Python value for the whole
+  -- call (task grid-constraint-network-enumerated-jointly).
+  IRBuiltin (BTensor _) es -> all (structural env) es
+  IRBuiltin (BIndex _) [t, k] -> structural env t && structural env k
   _                 -> False
 
 -- | Extend the structural environment with a @let@ binding (shadowing a
@@ -1488,6 +1494,8 @@ bindS env n v = bound { sEnumDeps = [(n, deps) | not (null deps)]
 bindMap :: SEnv -> String -> IRExpr -> SEnv
 bindMap env n t
   | IRBuiltin (BTensor _) elems <- t, all isConst elems = env { sBound = nub (n : sBound env) }
+  -- the positions of an axis, a loop index: plain Python ints
+  | IRBuiltin (BIota _) [] <- t = env { sBound = nub (n : sBound env) }
   | otherwise = env { sBound = filter (/= n) (sBound env) }
   where isConst (IRConst _) = True
         isConst _           = False

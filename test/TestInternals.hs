@@ -2591,6 +2591,38 @@ test_recordSharedFieldGroupsCodeSizePolynomial = testCase "recordSharedFieldGrou
       , "neural see :: (Symbol -> Face)"
       , "main img = draw f = see img in Ans" ++ concat [ concat [" (a", show i, " f) (b", show i, " f) (a", show i, " f && b", show i, " f)"] | i <- [1 .. n] ] ]
 
+-- | A 3x3 grid of 10-way reads whose rows and columns must be all different
+-- (docs task grid-constraint-network-enumerated-jointly) compiled to nine
+-- nested loops, one per read: about 10^9 terms per call, more than ten
+-- minutes. Its clauses share the reads in a cycle, so IRCompiler now sums the
+-- reads out by variable elimination ('ConstraintNet'): tables over at most
+-- four reads, each built by one more loop. The loop nest of the probability
+-- body is the static trace of the difference: 9 deep before, 5 now.
+test_gridConstraintNetEliminated :: TestTree
+test_gridConstraintNetEliminated = testCase "gridConstraintNetEliminated" $ do
+  prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+            (tryParseProgram "gridConstraintNet" src)
+  env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+           (compile defaultCompilerConfig prog)
+  (probExpr, _) <- maybe (assertFailure "compiled main has no probability variant" >> error "unreachable")
+                     return (probFun (lookupIREnv "main" env))
+  let depth = loopDepth probExpr
+  assertBool ("the probability body of the 3x3 all-different grid nests " ++ show depth
+              ++ " loops; variable elimination needs at most 6, the joint enumeration 9") (depth <= 6)
+  where
+    loopDepth :: IRExpr -> Int
+    loopDepth (IRBuiltin BMap [IRLambda _ b, t]) = max (1 + loopDepth b) (loopDepth t)
+    loopDepth e = maximum (0 : map loopDepth (getIRSubExprs e))
+    src = unlines
+      [ "neural cell :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+      , "diff3 u v w = not (u == v) && not (u == w) && not (v == w)"
+      , "main a b c d e f g h i ="
+      , "  draw x1 = cell a in draw x2 = cell b in draw x3 = cell c in"
+      , "  draw x4 = cell d in draw x5 = cell e in draw x6 = cell f in"
+      , "  draw x7 = cell g in draw x8 = cell h in draw x9 = cell i in"
+      , "  diff3 x1 x2 x3 && diff3 x4 x5 x6 && diff3 x7 x8 x9 &&"
+      , "  diff3 x1 x4 x7 && diff3 x2 x5 x8 && diff3 x3 x6 x9" ]
+
 -- | A list literal of N field reads of one neural read, @[x1 f, .., xN f]@,
 -- was known-issues/listOfFieldReadsCompileGrowth (docs task
 -- list-of-field-reads-compile-exponential): Analysis listed every cell's
@@ -6543,6 +6575,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_helperApplicationsCompileLinear
   , test_markovBranchRandomRateCompilePolynomial
   , test_recordSharedFieldGroupsCodeSizePolynomial
+  , test_gridConstraintNetEliminated
   , test_listOfFieldReadsCompileFlat
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
