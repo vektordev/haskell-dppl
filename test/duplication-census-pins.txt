@@ -178,8 +178,8 @@ planOverBudgetMult main.integ=3 main.prob=3 numRed.prob=4
 planOverBudgetPlus main.integ=3 main.prob=3 numRed.prob=4
 planOverBudgetTupleConst main.prob=3 numRed.prob=4
 planOverBudgetTupleOuter main.integ=3 main.prob=3 main__m1.prob=3 numRed.prob=4
-planRecursiveHelperOnDrawnRead main.integ=4 main.prob=4
-planRecursiveHelperOnInlineRead main.integ=4 main.prob=4
+planRecursiveHelperOnDrawnRead main.integ=3 main.prob=3
+planRecursiveHelperOnInlineRead main.integ=3 main.prob=3
 planSceneFloatPassthroughFactored main.prob=16
 planSceneFloatPassthroughSharedSlot main.prob=105 main__m01.prob=16 main__m10.prob=16
 planSceneRebuildPerFieldDraws main.prob=18
