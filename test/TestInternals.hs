@@ -150,7 +150,7 @@ test_plusBoolReject = testCase "plusBoolReject" $ do
   case tryParseProgram "<test>" src of
     Left err -> assertFailure ("Parse failed: " ++ show err)
     Right prog -> case tryAddRTypeInfo prog of
-      Left (ClassConstraintViolation _ _) -> return ()
+      Left (ClassConstraintViolation _ _ _) -> return ()
       other -> assertFailure ("Expected ClassConstraintViolation, got: " ++ show other)
 
 classConstraintTests :: TestTree

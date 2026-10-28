@@ -208,7 +208,7 @@ everySiteAt f ctx e = [ ([], lbl, e', extra) | (lbl, e', extra) <- f ctx e ] ++
 
 -- | @typedTwin e t@: @t@, the node inference annotated, if it has @e@'s shape
 -- at the root (the same constructor, variable, function name and arity).
--- Inference does not rebuild the tree, but a monomorphized retry clones
+-- Inference does not rebuild the tree, but monomorphization clones
 -- declarations; a mismatch drops the types below that point, so a
 -- type-directed rewrite only ever reads the type of the node it rewrites.
 typedTwin :: Expr -> Expr -> Maybe Expr

@@ -99,7 +99,7 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
 
 ```
 source → Parser → Validator → PerValue (helper expansion) → CalleeNormalize
-  → RInfer (+ Monomorphize on failure) → Analysis (DiscreteValues) → DrawSinking
+  → RInfer (let-generalisation + Monomorphize) → Analysis (DiscreteValues) → DrawSinking
   → ForwardChaining → ModalityInfer
   → IRCompiler (generate / probability / integrate) → PerValue (install)
   → IRSelectPass (batched only) → IROptimizer → IRGatherPass, IRLeafTablePass (batched only)

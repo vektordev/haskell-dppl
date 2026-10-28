@@ -3,12 +3,14 @@ module TestMonomorphize (monomorphizeTests) where
 -- Design polymorphic-monomorphization: a top-level function used at two
 -- numeric types is typed by let-generalisation and cloned once per type
 -- ('SPLL.Typing.Monomorphize'), where monomorphic inference used to reject the
--- program outright. The end-to-end values are pinned by the corpus programs
--- test/cases/arithmetic/polyTwoTypes and polyNestedTwoTypes; this module pins
--- the typing: which declarations come out, at which types, and that nothing
--- monomorphic inference already accepted or rejected changes.
+-- program outright. Since task rinfer-generalise-unconditionally the
+-- generalising inference is the only path, not a fallback, so its diagnostics
+-- are the ones reported. The end-to-end values are pinned by the corpus
+-- programs test/cases/arithmetic/polyTwoTypes and polyNestedTwoTypes; this
+-- module pins the typing: which declarations come out, at which types, and
+-- which error an ill-typed program gets.
 
-import SPLL.Lang.Types (Program(..), Expr(..), ExprF(..), TypeInfo(..), CompilerError)
+import SPLL.Lang.Types (Program(..), Expr(..), ExprF(..), TypeInfo(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.RInfer (addRTypeInfo)
 import SPLL.Parser (tryParseProgram)
@@ -70,16 +72,55 @@ monomorphizeTests = testGroup "Monomorphize"
         Left e -> assertFailure ("compile failed: " ++ e)
         Right g -> assertEqual "sample" "VTuple (VFloat 3.5) (VInt 3)" (show (evalRand g (mkStdGen 1)))
 
-  , testCase "a class constraint is still checked at each instance" $
-      rejected "addTwice x = x + x\nmain = (addTwice 1.0, addTwice True)\n"
+  , testCase "a class constraint is still checked at each instance" $ do
+      -- Reported at the use that instantiates it at Bool, in the user's
+      -- vocabulary; the monomorphic-first fallback blamed the well-typed
+      -- 'addTwice 1.0' ("Couldn't match type 'Float' with 'Bool'" at 2:32).
+      msg <- typeError "addTwice x = x + x\nmain = (addTwice 1.0, addTwice True)\n"
+      assertBool ("diagnostic names the instance: " ++ msg) ("No instance for (Num Bool)" `isInfixOf` msg)
+      assertBool ("diagnostic names the use's position: " ++ msg) ("poly.ppl:2:23:" `isInfixOf` msg)
+      assertBool ("solver internals leaked: " ++ msg) (not ("TV " `isInfixOf` msg) && not ("CNum" `isInfixOf` msg))
 
-  , testCase "an ill-typed program keeps its monomorphic diagnostic" $ do
-      -- Ill-typed under generalisation too (a Bool added to a Float), so the
-      -- fallback declines and the original error is reported unchanged.
-      let src = "f x = x + 1.0\nmain = f True\n"
-      p <- parse src
-      mono <- either return (const (assertFailure "accepted" >> return "")) (addRTypeInfo p)
-      assertBool ("diagnostic names the clash: " ++ mono) ("Couldn't match type" `isInfixOf` mono)
+  , testCase "an ill-typed program is blamed at its type clash" $ do
+      msg <- typeError "f x = x + 1.0\nmain = f True\n"
+      assertBool ("diagnostic names the clash: " ++ msg) ("Couldn't match type" `isInfixOf` msg)
+      assertBool ("diagnostic names Bool: " ++ msg) ("Bool" `isInfixOf` msg)
+
+  , testCase "a helper used at two types is not blamed for an error elsewhere" $ do
+      -- The monomorphic-first fallback reported its own error when the
+      -- generalised retry failed too: 'addTwice 1' at 3:33, "Couldn't match
+      -- type 'Float' with 'Int'", a well-typed use. The real mistake is
+      -- 'f True'.
+      msg <- typeError "addTwice x = x + x\nf x = x + 1.0\nmain = (addTwice 1.0, (addTwice 1, f True))\n"
+      assertBool ("diagnostic names Bool: " ++ msg) ("Bool" `isInfixOf` msg)
+      assertBool ("diagnostic blames line 3: " ++ msg) ("poly.ppl:3:" `isInfixOf` msg)
+      assertBool ("the two-type use was blamed: " ++ msg) (not ("poly.ppl:3:33" `isInfixOf` msg))
+      assertBool ("diagnostic mentions Int: " ++ msg) (not ("Int" `isInfixOf` msg))
+
+  , testCase "a nullary declaration used at two types is cloned per type" $ do
+      -- No monomorphism restriction (task rinfer-generalise-unconditionally):
+      -- a declaration without parameters whose type is class-constrained is
+      -- generalised like any other.
+      p <- typed "twice = \\x -> x + x\nmain = (twice 1.0, twice 1)\n"
+      assertEqual "declarations" (sort ["main", "twice__int", "twice__float"]) (sort (declNames p))
+      assertEqual "Int instance" (TArrow TInt TInt) (declType p "twice__int")
+      assertEqual "Float instance" (TArrow TFloat TFloat) (declType p "twice__float")
+      assertEqual "main" (Tuple TFloat TInt) (declType p "main")
+
+  , testCase "a random nullary declaration used at two types draws per use" $ do
+      p <- typed "pick = if Uniform < 0.5 then (\\x -> x) else (\\x -> x + x)\nmain = (pick 1.0, pick 1)\n"
+      assertEqual "declarations" (sort ["main", "pick__int", "pick__float"]) (sort (declNames p))
+      src <- parse "pick = if Uniform < 0.5 then (\\x -> x) else (\\x -> x + x)\nmain = (pick 1.0, pick 1)\n"
+      case runGen defaultCompilerConfig src [] of
+        Left e -> assertFailure ("compile failed: " ++ e)
+        Right g -> do
+          let samples = [ show (evalRand g (mkStdGen seed)) | seed <- [1 .. 40] ]
+          assertBool "every sample is one of the four combinations"
+            (all (`elem` [ "VTuple (VFloat " ++ a ++ ") (VInt " ++ b ++ ")" | a <- ["1.0", "2.0"], b <- ["1", "2"] ]) samples)
+          -- Each reference is its own draw: the two components disagree in
+          -- some samples, which one shared draw would never do.
+          assertBool ("the two uses never draw independently: " ++ show samples)
+            (any (`elem` ["VTuple (VFloat 1.0) (VInt 2)", "VTuple (VFloat 2.0) (VInt 1)"]) samples)
   ]
 
 parse :: String -> IO Program
@@ -90,12 +131,10 @@ typed src = do
   p <- parse src
   either (\e -> assertFailure ("type inference failed: " ++ e) >> undefined) return (addRTypeInfo p)
 
-rejected :: String -> IO ()
-rejected src = do
+typeError :: String -> IO String
+typeError src = do
   p <- parse src
-  case (addRTypeInfo p :: Either CompilerError Program) of
-    Left _ -> return ()
-    Right _ -> assertFailure "accepted an ill-typed program"
+  either return (const (assertFailure "accepted an ill-typed program" >> return "")) (addRTypeInfo p)
 
 declNames :: Program -> [String]
 declNames = map fst . functions

@@ -71,7 +71,7 @@ per-value marker `Enumerated t` (see `per-value-queries.md`). Only `name ::` is
 tentative, so a broken signature is reported where it breaks.
 
 A signature *constrains* inference: RInfer adds `type(f) ~ T` after every
-other constraint, in both the monomorphic and the generalising pass, so a
+other constraint, in the generalising pass (and again when the clones are typed), so a
 definition that disagrees is reported "In the type signature of 'f'". A
 signature naming no definition, two signatures for one name, and more than one
 `Enumerated` slot are refused by `SPLL.PerValue.validateSignatures`. A
@@ -208,32 +208,37 @@ triage of every other user-facing error site is the docs-repo investigation
 
 ## Polymorphic top-level functions are monomorphized
 
-RInfer types every top-level declaration monomorphically: one type, shared by
-all uses. `add x y = x + y` used at both `Float` and `Int` therefore used to be
-a unification failure. When -- and only when -- that monomorphic inference
-rejects a program, `RInfer.retryMonomorphized` retries it with
-let-generalisation (`inferGeneralized`: HM over the call graph's strongly
-connected components, dependencies first, class constraints on a generalised
-variable carried in the scheme and re-checked at each instantiation), then
-`SPLL.Typing.Monomorphize` clones each polymorphic declaration once per type it
-is used at, and the cloned program goes through the ordinary monomorphic
-inference. Every later pass sees an ordinary program with more declarations.
+RInfer is Hindley-Milner with let-generalisation of top-level declarations,
+always (`inferGeneralized`): declarations are typed one strongly connected
+component of the call graph at a time, dependencies first, each component
+generalised over its free type variables once solved, and class constraints on
+a generalised variable carried in the scheme and re-checked at each
+instantiation. `add x y = x + y` can therefore be used at both `Float` and
+`Int`. `SPLL.Typing.Monomorphize` then clones each polymorphic declaration once
+per type it is used at, and the cloned program goes through the monomorphic
+inference (`addRTypeInfoMono`, one type per declaration) that annotates every
+node. Every later pass sees an ordinary program with more declarations. A
+program that types with one shared type per declaration comes out of the clone
+step unchanged. Every diagnostic is the generalising pass's, so a helper used
+at two types is never blamed for an error elsewhere.
+
+There is no monomorphism restriction: a nullary declaration
+(`empty = []`) is generalised and cloned per use type like any other. Every
+reference to a nullary declaration is already a call of its own (a random one
+draws afresh), so cloning changes no law.
 
 Naming: a declaration used at one type keeps its name; one used at several
 becomes `add__int`/`add__float` (`mangleName`, a fixed-arity prefix encoding of
 the type arguments, so `__`-separated and unambiguous) and no longer exists
 under its own name; an uninstantiated polymorphic declaration stays as it was
-(its free type variables default to the float variant, as before). A mangled
-name that collides with a user declaration gets `_` appended.
+(its free type variables default to the float variant). A mangled name that
+collides with a user declaration gets `_` appended.
 
-Retrying only on failure is deliberate: every program the old inference
-accepted is typed exactly as before, and if the generalised retry fails too
-the **original** monomorphic diagnostic is reported, so no existing error text
-moved. The monomorphization happens at the RInfer seam, not in IRCompiler as
-the design first sketched, because ForwardChaining, ModalityInfer, Determinism
-and Analysis all key off declaration names and `rType`s and would otherwise
-each need to see through a polymorphic body. Out of scope: passing a
-polymorphic function as a value (higher-order polymorphism) -- it is
-instantiated at the one type its use forces, like any reference. Tests:
+The monomorphization happens at the RInfer seam, not in IRCompiler,
+because ForwardChaining, ModalityInfer, Determinism and Analysis all key off
+declaration names and `rType`s and would otherwise each need to see through a
+polymorphic body. Out of scope: passing a polymorphic function as a value
+(higher-order polymorphism) -- it is instantiated at the one type its use
+forces, like any reference. Tests:
 `test/TestMonomorphize.hs`; corpus `arithmetic/polyTwoTypes`,
 `polyNestedTwoTypes`.
