@@ -25,6 +25,10 @@ aliasReadTwice main.prob=6 main__m10.prob=6 main__m11.prob=4
 aliasedDrawScaledChain main.prob=10 main__m100.prob=4
 aliasedDrawScaledSibling main.integ=8 main.prob=7
 aliasedDrawThroughScalingHelper main.integ=6 main.prob=6
+anyLeafReadAgainAsCondition main__m10.prob=4
+anyLeafReadAgainInCondition main__m10.prob=9
+anyLeafReadAgainInOutput main__m01.prob=5 main__m10.prob=3
+anyMarkPassedAsRecursiveState ev.integ=4 ev.prob=4 gen.prob=3
 applyEnumComparison selF.prob=3
 applyEnumForwardOnly notB.prob=3
 applyEnumOperandPair sel.prob=3
@@ -55,7 +59,6 @@ drawBoundIntTimesPositiveCdf main.integ=20 main.prob=8
 drawBoundListElementGuardsEmptyTail main.prob=6
 drawBoundScaledWitness main__m11.prob=4
 drawBoundSceneIntermediate main.integ=3 main.prob=3 main.writeLogits=10
-drawDestructuredAgreementArmLet main.integ=3 main.prob=3
 drawDestructuredAgreementHelperArm pair.integ=8 pair.prob=8
 drawDestructuredShared main.prob=14
 drawProductReadPerField main.integ=3 main.prob=3
@@ -224,7 +227,7 @@ symbolSelectedByHelper nth.integ=3
 tensorDiffusionTrajectory main.prob=12 step.prob=13
 topKComplementAnyExcept main.prob=3
 topKComplementCdfFlip main.integ=4 main.prob=4
-tupleCtorTestOfSharedDraw main.prob=5 main__m01.prob=18
+tupleCtorTestOfSharedDraw main__m01.prob=18
 tupleDiscreteDistrib main.integ=5 main.prob=5
 tupleOfEithersAny main.integ=5 main.prob=10
 tupleRoundtrip main.prob=25 main__m01.prob=4 main__m10.prob=4
