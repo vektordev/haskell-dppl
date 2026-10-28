@@ -6116,6 +6116,36 @@ letBinderTagTests = testGroup "let binder threads DiscreteValues into the body"
     isPlusI (Expr _ (InjF (Named n) _)) = n == "plusI"
     isPlusI _ = False
 
+-- | A recursion called on closed-constant arguments is unrolled by the enum
+-- annotation (task recursive-consumer-of-recursive-random-list-refused):
+-- @rollout 3@ gets its four-list domain, which is what lets @len (rollout 3)@
+-- enumerate @len@'s argument. The bounds are pinned too: a tree recursion
+-- (two recursive calls) is not unrolled, and neither is one deeper than the
+-- fuel; both keep the old answer, no tag.
+recursionUnrollTagTests :: TestTree
+recursionUnrollTagTests = testGroup "enum annotation unrolls a recursion on constant arguments"
+  [ testCase "rollout 3 is tagged with its four lists" $
+      assertEqual "values of main" (Just 4) (length . multiValueToValueList <$> mainTag (rolloutSrc "3"))
+  , testCase "past the unroll fuel it stays untagged" $
+      assertEqual "values of main" Nothing (length . multiValueToValueList <$> mainTag (rolloutSrc "100"))
+  , testCase "a tree recursion is not unrolled" $
+      assertEqual "values of main" Nothing (mainTag (unlines
+        [ "fib n = if n < 2 then n else fib (n - 1) + fib (n - 2)"
+        , "main = fib 5" ]))
+  ]
+  where
+    rolloutSrc k = unlines
+      [ "rollout k = if k == 0 then [] else (if Uniform < 0.5 then [] else 1 : rollout (k - 1))"
+      , "main = rollout " ++ k ]
+    mainTag src =
+      let parsed = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+          rtyped = either (\e -> error ("rtype inference failed: " ++ show e)) id (tryAddRTypeInfo parsed)
+      in case lookup "main" (functions (annotateEnumsProg rtyped)) of
+           Just e -> case [mv | DiscreteValues mv <- tags (getTypeInfo e)] of
+             [mv] -> Just mv
+             _ -> Nothing
+           Nothing -> error "no main"
+
 -- | 'definitelyUntagged' lets the enum annotation refute a node from its shape
 -- before forcing any operand's value set (task
 -- plan-fold-mutual-recursion-blowup). The case that needs it is recursion
@@ -6597,6 +6627,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , letBinderTagTests
+  , recursionUnrollTagTests
   , valueSetTests
   , domainScaleTests
   , noGenerateNeuralSamplerTests

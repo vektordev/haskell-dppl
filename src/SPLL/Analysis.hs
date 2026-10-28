@@ -15,7 +15,7 @@ module SPLL.Analysis (
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
-import Data.Maybe (maybeToList)
+import Data.Maybe (maybeToList, isJust)
 import Data.Either (isRight)
 import Data.List (genericLength, genericTake, nub)
 import Data.Bifunctor
@@ -56,22 +56,25 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adtsDecls, writeLogits
                  Right mv <- [resolveNeuralAnnotation adtsDecls registry decl]]
 
 annotate :: [ADTDecl] -> FunEnv -> TagEnv -> Expr -> Expr
-annotate adtsParam funEnv = annotateIn adtsParam funEnv []
+annotate adtsParam funEnv = annotateIn adtsParam funEnv unrollFuel []
 
 -- | 'annotate', carrying the set of top-level function names currently being
 -- looked through by 'applyTags'. Re-entering one of them would not terminate,
 -- so it refuses instead (see 'applyTags').
-annotateIn :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> Expr
---annotateIn _ _ _ e | trace ((show e)) False = undefined
-annotateIn _ _ _ env e@(Expr ti (Var n)) = case lookup n env of
+--
+-- @fuel@ bounds how many calls deep 'applyTags' may still unroll a recursive
+-- function called on constant arguments (see 'unrollFuel').
+annotateIn :: [ADTDecl] -> FunEnv -> Int -> [String] -> TagEnv -> Expr -> Expr
+--annotateIn _ _ _ _ e | trace ((show e)) False = undefined
+annotateIn _ _ _ _ env e@(Expr ti (Var n)) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
-annotateIn _ _ _ env e@(Expr ti (ReadNN n _)) = case lookup n env of
+annotateIn _ _ _ _ env e@(Expr ti (ReadNN n _)) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
-annotateIn adtsParam funEnv visited env e = withNewTypeInfo
+annotateIn adtsParam funEnv fuel visited env e = withNewTypeInfo
   where
-    rec = annotateIn adtsParam funEnv visited env
+    rec = annotateIn adtsParam funEnv fuel visited env
     oldTags = tags $ getTypeInfo e
     -- A directly-applied lambda is `let`: inside the body the parameter *is* the
     -- argument, so the body is annotated with the argument's tags bound to it.
@@ -101,10 +104,22 @@ annotateIn adtsParam funEnv visited env e = withNewTypeInfo
       Expr _ (Apply l@(Expr _ (Lambda param lamBody)) v) ->
         let annotatedV = rec v
             bodyEnv = (param, tags (getTypeInfo annotatedV)) : env
-            annotatedL = setSubExprs l [annotateIn adtsParam funEnv visited bodyEnv lamBody]
+            annotatedL = setSubExprs l [annotateIn adtsParam funEnv fuel visited bodyEnv lamBody]
         in setSubExprs e [annotatedL, annotatedV]
+      -- A condition that is a closed constant decides the arm ('liveArm'). The
+      -- dead arm is annotated with no unrolling fuel: inside an unrolled
+      -- recursion it is the branch past the base case (@rollout (0 - 1)@), and
+      -- unrolling it would run until the fuel ran out. With no fuel it is
+      -- annotated exactly as it was before unrolling existed.
+      Expr _ (IfThenElse c l r) ->
+        let c' = rec c
+            dead = annotateIn adtsParam funEnv 0 visited env
+        in case liveArm fuel c' of
+             Just True  -> setSubExprs e [c', rec l, dead r]
+             Just False -> setSubExprs e [c', dead l, rec r]
+             Nothing    -> setSubExprs e [c', rec l, rec r]
       _ -> setSubExprs e (map rec (getSubExprs e))
-    valueTgs = discretesTags adtsParam funEnv visited env withNewSubExpr
+    valueTgs = discretesTags adtsParam funEnv fuel visited env withNewSubExpr
     -- Idempotent in DiscreteValues: this pass owns that tag, so re-annotating a
     -- node replaces its tag rather than appending a second one -- which
     -- 'getValuesFromExpr' treats as an error. 'applyTags' re-annotates an inline
@@ -114,14 +129,14 @@ annotateIn adtsParam funEnv visited env e = withNewTypeInfo
     isDiscreteValues (DiscreteValues _) = True
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
 
-discretesTags :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> [Tag]
+discretesTags :: [ADTDecl] -> FunEnv -> Int -> [String] -> TagEnv -> Expr -> [Tag]
 -- A tag may carry continuous leaves (see neuralEnv above): it is then the
 -- node's value *shape*, which the structural accessors below read through, but
 -- not an enumeration -- every consumer that loops over a tag refuses one with
 -- a continuous leaf. The generic InjF case below finds no values in such a
 -- domain ('multiValueToValueList') and leaves the node untagged.
-discretesTags adtsParam funEnv visited env e = case e of
-  (Expr _ (Apply _ _)) -> applyTags adtsParam funEnv visited env e
+discretesTags adtsParam funEnv fuel visited env e = case e of
+  (Expr _ (Apply _ _)) -> applyTags adtsParam funEnv fuel visited env e
   _ -> [DiscreteValues mv | mv <- maybeToList values]
   where
     values = case e of
@@ -175,6 +190,13 @@ discretesTags adtsParam funEnv visited env e = case e of
         guard (not (any untagged params))
         paramValues <- mapM getValuesFromExpr params
         listedTag adtsParam resultCap name paramValues
+      -- A closed-constant condition: the value set is the live arm's alone
+      -- (the dead arm may well be untagged, see 'annotateIn').
+      (Expr _ (IfThenElse c left right))
+        | Just b <- liveArm fuel c -> do
+            let arm = if b then left else right
+            guard (not (untagged arm))
+            getValuesFromExpr arm
       (Expr _ (IfThenElse _ left right)) -> do
         guard (not (untagged left || untagged right))
         valuesLeft <- getValuesFromExpr left
@@ -380,12 +402,33 @@ distinctUpTo cap results = case cap of
 --     over nothing. This needs no case of its own -- the callee's body is then
 --     another 'Lambda', which has no 'DiscreteValues' of its own.
 --   * an over-application (more arguments than the callee has parameters),
---   * recursion: a function already being looked through. Unrolling it has no
---     termination story, and the enclosing fixpoint would not converge, so the
---     recursive call site is left untagged. This is why @visited@ is threaded
---     through 'annotateIn' rather than being local here.
-applyTags :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> [Tag]
-applyTags adtsParam funEnv visited env e = case appSpine e of
+--   * recursion: a function already being looked through. Unrolling it in
+--     general has no termination story, and the enclosing fixpoint would not
+--     converge, so the recursive call site is left untagged. This is why
+--     @visited@ is threaded through 'annotateIn' rather than being local here.
+--
+-- The one recursion that does unroll is a call whose arguments are all closed
+-- constants (@rollout 3@, and inside it @rollout (3 - 1)@): the constants are
+-- substituted for the parameters, so every condition on them is itself a
+-- closed constant, which decides its arm ('liveArm'), and the base case stops
+-- the unrolling where the program's own evaluation stops. Such a call does not
+-- join @visited@. Two things bound it: 'unrollFuel' calls deep, after which it
+-- falls back to the ordinary look-through, and only a callee with at most one
+-- call that can recurse back into it is unrolled ('unrollableCallee'), so the
+-- unrolling is a chain, never a tree (@fib 30@ stays untagged rather than
+-- costing 2^30 annotations). Task recursive-consumer-of-recursive-random-list-refused:
+-- @len (rollout 3) < 2@ needs @rollout 3@'s list domain to enumerate @len@'s
+-- argument.
+applyTags :: [ADTDecl] -> FunEnv -> Int -> [String] -> TagEnv -> Expr -> [Tag]
+applyTags adtsParam funEnv fuel visited env e = case appSpine e of
+  (Expr _ (Var n), args@(_:_))
+    | fuel > 0
+    , Just calleeBody <- lookup n funEnv
+    , all closedConstant args
+    , unrollableCallee funEnv n calleeBody
+    , Just consts <- mapM constantOf args
+    , Just unrolled <- substParams calleeBody consts ->
+        [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo (annotateIn adtsParam funEnv (fuel - 1) visited env unrolled))]
   (Expr _ (Var n), args@(_:_))
     | n `notElem` visited
     , Just calleeBody <- lookup n funEnv -> tagOf (n:visited) calleeBody args
@@ -408,12 +451,80 @@ applyTags adtsParam funEnv visited env e = case appSpine e of
     -- earlier one of the same name, as it does in the body).
     tagOf vis callee as = case bindParams callee as env of
       Just (calleeBody, bodyEnv) ->
-        [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo (annotateIn adtsParam funEnv vis bodyEnv calleeBody))]
+        [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo (annotateIn adtsParam funEnv fuel vis bodyEnv calleeBody))]
       Nothing -> []
     bindParams b [] en = Just (b, en)
     bindParams (Expr _ (Lambda param lamBody)) (a:as) en = bindParams lamBody as ((param, tags (getTypeInfo a)) : en)
     -- More arguments than parameters: over-applied, no result to enumerate.
     bindParams _ _ _ = Nothing
+    -- The argument's one value, from its (already computed, and for a closed
+    -- constant cheap) tag, as a literal carrying the argument's annotation.
+    constantOf a = case getValuesFromExpr a of
+      Just mv | not (multiValueContainsContinuous mv)
+              , [v] <- multiValueToValueList mv
+              , v /= VAny -> Just (Expr (getTypeInfo a) (Constant v))
+      _ -> Nothing
+    -- Strip one lambda per argument, substituting the constant for its
+    -- parameter; partial and over-application are not unrolled.
+    substParams b [] = case b of
+      Expr _ (Lambda _ _) -> Nothing
+      _ -> Just b
+    substParams (Expr _ (Lambda param lamBody)) (c:cs) = substParams (substituteVar param c lamBody) cs
+    substParams _ _ = Nothing
+
+-- | How many calls deep 'applyTags' unrolls a recursion on constant
+-- arguments. Past it, the call is looked through the ordinary way, where the
+-- recursive call is refused as visited.
+unrollFuel :: Int
+unrollFuel = 64
+
+-- | An argument that is a closed constant by shape: a literal, or a
+-- deterministic 'InjF' of closed constants. Decided without reading any tag, so
+-- 'definitelyUntagged' can ask it too. ('Uniform' and 'Normal' are 'Var's,
+-- so they are not closed; 'collapse' is a Gaussian, not a function.)
+closedConstant :: Expr -> Bool
+closedConstant e = case e of
+  Expr _ (Constant VAny) -> False
+  Expr _ (Constant _) -> True
+  Expr _ (InjF (Named name) params) -> not (isCollapse name) && all closedConstant params
+  _ -> False
+
+-- | The arm a closed-constant condition selects, when its tag says it is one
+-- Bool. Only a condition that is closed by shape counts, so that
+-- 'definitelyUntagged' can tell from shape where the real pass may read one
+-- arm.
+--
+-- Only inside an unrolled body (@fuel@ below 'unrollFuel'), where it is what
+-- stops the unrolling at the base case and the annotated body is discarded
+-- for its tag. Elsewhere the union of both arms stays: a program's own
+-- @if False then .. else ..@ keeps the tags it had, which IRCompiler routes
+-- on (refining them at top level gave decreasingRecursionEnumeratedArgument's
+-- @loop@ a new copy fan-out in the duplication census).
+liveArm :: Int -> Expr -> Maybe Bool
+liveArm fuel c
+  | fuel < unrollFuel
+  , closedConstant c
+  , Just mv <- getValuesFromExpr c
+  , [VBool b] <- multiValueToValueList mv = Just b
+  | otherwise = Nothing
+
+-- | Does the callee's body hold at most one call that can lead back into it?
+-- Each unrolled level then spawns at most one more, so unrolling costs
+-- linear, not exponential, annotation work. Counted syntactically over every
+-- 'Var' naming a top-level function (a shadowing local over-counts, which only
+-- declines).
+unrollableCallee :: FunEnv -> String -> Expr -> Bool
+unrollableCallee funEnv n calleeBody = length (filter (reachesBack n) (topLevelRefs calleeBody)) <= 1
+  where
+    topLevelRefs ex = [v | Expr _ (Var v) <- universe ex, isJust (lookup v funEnv)]
+    universe ex = ex : concatMap universe (getSubExprs ex)
+    reachesBack target start = go [] [start]
+      where
+        go _ [] = False
+        go seen (g:gs)
+          | g == target = True
+          | g `elem` seen = go seen gs
+          | otherwise = go (g : seen) (maybe [] topLevelRefs (lookup g funEnv) ++ gs)
 
 -- | An application split into its head and its arguments, outermost-last:
 -- @f a b@ is @(f, [a, b])@.
@@ -451,6 +562,11 @@ appSpine e = (e, [])
 definitelyUntagged :: FunEnv -> [String] -> Expr -> Bool
 definitelyUntagged funEnv visited e = case e of
   Expr _ (Apply _ _) -> case appSpine e of
+    -- 'applyTags' may unroll it, visited or not: a "maybe".
+    (Expr _ (Var n), args@(_:_))
+      | all closedConstant args
+      , Just calleeBody <- lookup n funEnv
+      , unrollableCallee funEnv n calleeBody -> False
     (Expr _ (Var n), args@(_:_))
       | n `notElem` visited
       , Just calleeBody <- lookup n funEnv -> bodyUntagged (n:visited) calleeBody (length args)
@@ -464,6 +580,10 @@ definitelyUntagged funEnv visited e = case e of
   Expr _ (InjF (Named name) [_, _]) | name `elem` ["gt", "lt"] -> False
   Expr _ (InjF (Named name) _) | isCollapse name -> True
   Expr _ (InjF _ params) -> any (definitelyUntagged funEnv visited) params
+  -- A closed-constant condition reads one arm only ('liveArm'), which this
+  -- does not evaluate: untagged only if both arms are.
+  Expr _ (IfThenElse c l r)
+    | closedConstant c -> definitelyUntagged funEnv visited l && definitelyUntagged funEnv visited r
   Expr _ (IfThenElse _ l r) -> definitelyUntagged funEnv visited l || definitelyUntagged funEnv visited r
   _ -> True
   where
