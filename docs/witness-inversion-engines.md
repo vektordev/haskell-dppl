@@ -610,8 +610,9 @@ tries them as a declared list. The engines:
   being deterministic; a call through a bound lambda or a resolved in-scope
   lambda binds its parameter. A `draw` whose body hides a field constructor
   carries the residue factor (`letHidesField`).
-- **a random leading argument** (`pair Uniform Uniform`, `obs b p`) is bound
-  first, in parameter order, as a curried lambda in place binds
+- **a random leading argument** (`pair Uniform Uniform`, `obs b p`) that the
+  enumeration engine does not take (it takes a call's only random argument
+  when that is enumerable, `leadingEnumerableArgument`) is bound first, in parameter order, as a curried lambda in place binds
   (`leadingArgBinding`): its witness is read from the call's forward-chaining
   copy, and its body factor is the call with the argument replaced by the
   recovered variable. `ANY` in that witness slot is a runtime refusal, and the

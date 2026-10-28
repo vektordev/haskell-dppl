@@ -93,8 +93,14 @@ applied to arguments that are all deterministic -- once the enclosing
 enumerated latents are fixed (`reinferRecovered` over `recoveredVars`) -- except
 a random enumerable *last* one is compiled by `enumerateCurriedArgument`, which
 loops over that argument's domain exactly as `enumerateAppliedLambda` loops
-over a `let`'s. A random *leading* argument declines there and keeps its old
-path; and `enumerateAppliedLambda` measures its bound value with the enclosing
+over a `let`'s. A random enumerable *leading* argument, when it is the call's
+only random argument, is enumerated the same way (`leadingEnumerableArgument`:
+the loop body is the call with that position fixed), so the engine a call
+meets does not depend on where its author put the random parameter
+(`walk (trans fog) (n - 1)` and `walk (n - 1) (trans fog)` agree, corpus
+`leadingRandomStateMarkovChain`, `leadingRandomArgumentCurried`). Several random
+arguments, or one without a finite domain, keep the binding path
+(`leadingArgBinding`, `witness-inversion-engines.md`); and `enumerateAppliedLambda` measures its bound value with the enclosing
 latents fixed, which is what `draw v = contrib u 1` (u enumerated outside,
 `sharedLatentNestedLet`) needs once `contrib u 1` carries a tag. Before, even
 `match Red (readC s)` had no probability path ("set-valued witness

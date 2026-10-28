@@ -143,7 +143,6 @@ observeDisjointTails main.prob=3
 observeKeywordTruncated main.prob=3
 observeMaybePayloadRightAny main.prob=3
 observeNegatedContinuousEqualsLetfree main.integ=4 main.prob=4
-observePredicateParameterLambda main.prob=3
 observeTwoSidedInterval main.prob=6
 observeTwoSidedIntervalAnd main.prob=6
 ofRealLeafCountingCurriedThreshold match.integ=4 match.prob=4

@@ -388,7 +388,8 @@ distinctUpTo cap results = case cap of
 -- single 'Apply' node it was handed and a random @a@ sat out of its reach. That
 -- is decided in IRCompiler now, where 'pType' is known: a spine whose leading
 -- arguments are deterministic -- once the enclosing enumerated latents are
--- fixed -- enumerates its last argument ('enumerateCurriedArgument'), and an
+-- fixed -- enumerates its last argument ('enumerateCurriedArgument'; a lone
+-- random leading argument likewise, 'leadingEnumerableArgument'), and an
 -- enumerated binding measures its argument with those latents fixed, which is
 -- what the spine needs when its random argument is a leading one
 -- (test/cases/let-bindings/sharedLatentNestedLet is the canary for that).

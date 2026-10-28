@@ -1874,7 +1874,7 @@ leadingArgBinding meta expr0
           b0 = resolveBinding meta prefix ai
       fresh <- mkVariable param
       let wVar = Expr ((getTypeInfo ai) { pType = Deterministic }) (Var fresh)
-      return (Just b0 { bindVar = fresh, bindBody = replaceArg (length args - 1 - i) wVar expr
+      return (Just b0 { bindVar = fresh, bindBody = replaceSpineArg (length args - 1 - i) wVar expr
                       , bindOccs = [chainName (getTypeInfo ai)], bindOuterVars = []
                       , bindLeadingArg = True, bindScope = Just [], bindTopLevel = Nothing })
   | otherwise = return Nothing
@@ -1888,11 +1888,13 @@ leadingArgBinding meta expr0
     -- The spine's own nodes, head first: @[f, f a1, f a1 a2, ..]@.
     spinePrefixes e@(Expr _ (Apply g _)) = spinePrefixes g ++ [e]
     spinePrefixes e = [e]
-    -- Replace the argument @k@ applications up from the end of the spine.
-    replaceArg :: Int -> Expr -> Expr -> Expr
-    replaceArg 0 w (Expr t (Apply g _)) = Expr t (Apply g w)
-    replaceArg k w (Expr t (Apply g a)) = Expr t (Apply (replaceArg (k - 1) w g) a)
-    replaceArg _ _ e = e
+
+-- | Replace the argument @k@ applications up from the end of a curried call
+-- spine (@k = 0@ is the last argument).
+replaceSpineArg :: Int -> Expr -> Expr -> Expr
+replaceSpineArg 0 w (Expr t (Apply g _)) = Expr t (Apply g w)
+replaceSpineArg k w (Expr t (Apply g a)) = Expr t (Apply (replaceSpineArg (k - 1) w g) a)
+replaceSpineArg _ _ e = e
 
 -- | Make a binding's body meaningful in this scope: each leading parameter of
 -- 'bindScope' is renamed to a fresh variable let-bound to its argument, and
@@ -3858,7 +3860,16 @@ toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
 toIRInference meta cumulative (Expr ti (Apply l v)) sample
   | Just l' <- curriedEnumerableCallee meta l v
   , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)) =
-  enumerateCurriedArgument meta cumulative ti l' v sample
+  enumerateCurriedArgument meta cumulative (\x -> Expr ti (Apply l' x)) v sample
+-- The same call with its one random enumerable argument in a /leading/
+-- position, @cont (trans fog) n@: marginalised the same way, so where the
+-- author put the state parameter does not decide which engine sees it (task
+-- random-leading-argument-into-recursion-refused). Without this the argument
+-- became a 'leadingArgBinding', whose engines none enumerate a finite domain.
+toIRInference meta cumulative expr@(Expr _ (Apply _ _)) sample
+  | Just (mkBody, ai) <- leadingEnumerableArgument meta expr
+  , enumerationWithinMaterializationBudget meta (tags (getTypeInfo ai)) =
+  enumerateCurriedArgument meta cumulative mkBody ai sample
 -- Deterministic curried call spine rooted at a known top-level function: build
 -- the WHOLE application (the query sample, plus every source-level argument)
 -- as one contiguous 'IRApply' chain and let-bind it exactly once, instead of
@@ -5775,20 +5786,43 @@ curriedEnumerableCallee meta l v
     returnsFunction (TArrow _ (TArrow _ _)) = True
     returnsFunction _ = False
 
--- | @sum_x P(v = x) * P(l x = sample)@ over @v@'s domain, for the curried spine
--- 'curriedEnumerableCallee' accepted. The counterpart of
+-- | A saturated call @f a1 .. an@ of a conditional top-level function whose
+-- one non-deterministic argument @ai@ is enumerable and is not the last one
+-- (that case is 'curriedEnumerableCallee''s): every other argument is
+-- deterministic given the enclosing latents. Answers the call with @ai@
+-- replaced by a given expression, and @ai@ itself. Two or more random
+-- arguments decline, leaving the call to 'leadingArgBinding'.
+leadingEnumerableArgument :: CompilerMetadata -> Expr -> Maybe (Expr -> Expr, Expr)
+leadingEnumerableArgument meta expr0
+  | not (isTArrowType (rType (getTypeInfo expr)))
+  , (hd@(Expr _ (Var f)), args@(_:_:_)) <- flattenApplySpine expr
+  , Just (TArrow _ _, True) <- lookup f (typeEnv meta)
+  , [i] <- [ k | (k, a) <- zip [0 ..] args, pType (getTypeInfo a) /= Deterministic ]
+  , i < length args - 1
+  , ai <- args !! i
+  , isEnumerable (tags (getTypeInfo ai))
+  , headIsConditional (fcData meta) (compilingProgram meta) hd
+  = Just (\x -> replaceSpineArg (length args - 1 - i) x expr, ai)
+  | otherwise = Nothing
+  where
+    expr = reinferRecovered meta (recoveredVars meta) expr0
+
+-- | @sum_x P(v = x) * P(body x = sample)@ over @v@'s domain, where @body x@ is
+-- the call with @v@'s position fixed at @x@: for the curried spine
+-- 'curriedEnumerableCallee' accepted, @l x@; for a leading argument,
+-- 'leadingEnumerableArgument''s spine. The counterpart of
 -- 'enumerateAppliedLambda', which marginalises a 'let'-bound argument through
 -- its lambda body; a partial application has no lambda body of its own to
 -- resolve, so the loop body is the application itself with a fresh loop
 -- variable in the argument position. Inside the loop every argument is fixed,
 -- so 'toIREnumerate' compiles it forward and compares (or, for a helper that
 -- draws fresh randomness, hands it to the ordinary inference rules).
-enumerateCurriedArgument :: CompilerMetadata -> Bool -> TypeInfo -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
-enumerateCurriedArgument meta cumulative appTi l v sample = do
+enumerateCurriedArgument :: CompilerMetadata -> Bool -> (Expr -> Expr) -> Expr -> IRExpr -> CompilerMonad PResult
+enumerateCurriedArgument meta cumulative mkBody v sample = do
   boundVar <- mkVariable "enum_arg"
   let vTi = getTypeInfo v
       loopVar = Expr (vTi {pType = Deterministic, tags = []}) (Var boundVar)
-      loopBody = Expr appTi (Apply l loopVar)
+      loopBody = mkBody loopVar
       bodyMeta = meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
                       , recoveredVars = boundVar : recoveredVars meta }
       sr = semiringOf meta
