@@ -615,7 +615,9 @@ tries them as a declared list. The engines:
   (`leadingArgBinding`): its witness is read from the call's forward-chaining
   copy, and its body factor is the call with the argument replaced by the
   recovered variable. `ANY` in that witness slot is a runtime refusal, and the
-  cumulative variant is refused.
+  cumulative variant is refused. Where this refuses and the argument is the
+  call's only random one and enumerable, it is enumerated instead
+  (`leadingEnumerableArgument`, `enumeration.md`).
 
 Corpus `higher-order/namedFunction*`, `rewriteProbeHelper*`,
 `helperCallsHelperRandomArg`, `namedHof*`, `set-witness/absNTopLevelSetWitness`,
