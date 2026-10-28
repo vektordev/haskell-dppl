@@ -8,6 +8,7 @@ module SPLL.AutoNeural(
 , inputLayoutString
 , makePartitionPlan
 , resolvePartitionAnnotation
+, neuralIRSignature
 , PartitionPlan (..)
 , makeProb
 , getSize
@@ -30,6 +31,7 @@ import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.CompilerConfig
 import SPLL.Typing.RType
+import SPLL.IR.Type (IRType(..), irTypeOfRType)
 import SPLL.Lang.Lang
 import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName)
 import StandardLibrary
@@ -81,6 +83,18 @@ makeAutoNeural adtDecls conf registry decl@(name, declType, tag) =
 -- to 'Nothing'.
 resolvePartitionAnnotation :: [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe MultiValue
 resolvePartitionAnnotation registry ty tag = tag <|> lookup ty registry
+
+-- | The IR type of a neural declaration of type @rt@, for the checker
+-- ('SPLL.IR.Neural.neuralSignature'). In the IR a network maps its input to
+-- its logit vector, a list of floats ("MockNN"). A 'TSymbol' input is opaque
+-- to the IR (the interpreter's mocks read a tuple encoding out of it), so it
+-- is typed as a variable. 'Nothing' for a declaration that is not
+-- @input -> target@ with an admissible input.
+neuralIRSignature :: RType -> Maybe IRType
+neuralIRSignature rt = do
+  inp <- neuralInputType rt
+  t <- if inp == TSymbol then Just (ITVar 0) else irTypeOfRType inp
+  return (ITArrow t (ITList ITFloat))
 
 -- 'neuralReadLogitsSuffix' (re-exported above) is the naming convention
 -- 'makeReadLogitsFunGroup' uses to mark a read-logits network's own

@@ -43,7 +43,6 @@ module SPLL.IRTypeCheck
   , checkIREnvWith
   , inferIRExpr
   , irTypeOfRType
-  , neuralExternals
   ) where
 
 import SPLL.IntermediateRepresentation
@@ -51,8 +50,6 @@ import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), TVarR, shapeNumel, dropAxis, prettyShape)
 import SPLL.IR.Type (IRType(..), irTypeOfRType)
 import SPLL.IR.ADT (implicitFunctionIRTypes)
-import SPLL.Lang.Lang (neuralInputType)
-import Data.Maybe (mapMaybe)
 import StandardLibrary (standardEnv)
 
 import Control.Monad (forM, forM_, unless, when, zipWithM_, foldM)
@@ -637,19 +634,6 @@ rtypesToIR rts = evalStateT (mapM go rts) Map.empty
             return t
       GreaterType _ _ -> lift fresh
       NotSetYet -> lift fresh
-
--- | The externals a compiled environment needs for its neural declarations,
--- for 'checkIREnvWith'. In the IR a network maps its input to its logit
--- vector, a list of floats ("MockNN"). A 'TSymbol' input is opaque to the
--- IR (the interpreter's mocks read a tuple encoding out of it), so it is
--- typed as a variable.
-neuralExternals :: [NeuralDecl] -> [(String, IRType)]
-neuralExternals = mapMaybe external
-  where
-    external (n, rt, _) = do
-      inp <- neuralInputType rt
-      t <- if inp == TSymbol then Just (ITVar 0) else irTypeOfRType inp
-      return (n, ITArrow t (ITList ITFloat))
 
 -- ---------------------------------------------------------------------------
 -- Binding groups

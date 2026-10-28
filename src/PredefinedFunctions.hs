@@ -32,6 +32,7 @@ import SPLL.Lang.Lang
 import Data.Maybe (fromJust, fromMaybe)
 import SPLL.Lang.Types
 import IRInterpreter
+import SPLL.IR.Neural (noNeurals)
 import qualified Data.Bifunctor
 import StandardLibrary (invokeStandardFunction, stdListProd)
 import SPLL.IR.ADT (implicitFunctionApplicable)
@@ -710,7 +711,7 @@ propagateValues adtsDecl name values = case sequence (propagateValuesLazily adts
 -- once the result type's whole domain has turned up) consumes this instead and
 -- stops early (task agreement-compile-time-quadratic-in-domain).
 propagateValuesLazily :: [ADTDecl] -> String -> [[Value]] -> [Either String Value]
-propagateValuesLazily adtsDecl name values = map (fmap (fmap failConversionRev) . generateDet [] [] (IREnv [] adtsDecl []) []) letInBlocks
+propagateValuesLazily adtsDecl name values = map (fmap (fmap failConversionRev) . generateDet noNeurals (IREnv [] adtsDecl []) []) letInBlocks
   where
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) applicableProd

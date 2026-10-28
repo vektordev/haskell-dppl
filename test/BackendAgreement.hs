@@ -109,6 +109,7 @@ import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC, runGenC, compile)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.ReservedNames (componentNormalName)
 import IRInterpreter (generateDet)
+import MockNN (programMockOracle)
 import SPLL.Typing.RType (RType(..))
 import Control.Monad (replicateM)
 import Control.Monad.Random (evalRand)
@@ -258,7 +259,7 @@ interpreterBodyAnswer :: Program -> IREnv -> [IRValue] -> Query -> Maybe Answer
 interpreterBodyAnswer p env args q = case q of
   QNormal g _ -> do
     (body, _) <- normalFun (lookupIREnv g env)
-    case generateDet (neurals p) (writeLogitsDecls p) env (map IRConst args) body of
+    case generateDet (programMockOracle p) env (map IRConst args) body of
       Right (VTuple (VFloat m) (VFloat s)) -> Just (AnsweredVec [Just m, Just s])
       _ -> Nothing
   QWriteLogits g _ -> do

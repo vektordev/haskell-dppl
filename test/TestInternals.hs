@@ -47,6 +47,9 @@ import ScalingCheck (Point(..), Verdict(..), climb)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
+import SPLL.IR.Neural (noNeurals, neuralOracle, NeuralPrimitive(..), oracleSignatures)
+import SPLL.IR.Type (IRType(..))
+import Data.Either (isLeft)
 import IRInterpreter (generateDet, generateRand)
 import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), CodeVariant(..), expectationProb, expectationDim, defaultBackends,
                         parseTestCasesFromString, corpusPplPath, corpusTstPath, TstFile(..), parseTstFileFromString)
@@ -5864,6 +5867,30 @@ test_headHashDistinguishesConTagsAndAccessors = testCase
                             , h1 == h2 ]
     assertBool ("headHash collision(s) among ConTag/Accessor: " ++ show dupes) (null dupes)
 
+-- | The interpreter's neural primitive (design ir-package-boundary, B5): a
+-- name the injected oracle binds is answered by the oracle, applied directly
+-- or passed as a function value, and a local binding of the name shadows it.
+test_neuralOracleInterpretation :: TestTree
+test_neuralOracleInterpretation = testCase
+  "a neural call is answered by the injected oracle" $ do
+    let net = NeuralPrimitive
+          { neuralSignature = Just (ITArrow ITFloat (ITList ITFloat))
+          , neuralEval = \v -> case v of
+              VFloat x -> VList (ListCont (VFloat (x * 10)) EmptyList)
+              _ -> error "net: not a float" }
+        oracle = neuralOracle [("net", net)]
+        eval = generateDet oracle (IREnv [] [] []) []
+        arg = IRConst (VFloat 2)
+        expected = Right (VList (ListCont (VFloat 20) EmptyList))
+    eval (IRApply (IRVar "net") arg) @?= expected
+    -- First-class: (\g -> g 2) net
+    eval (IRApply (IRLambda "g" (IRApply (IRVar "g") arg)) (IRVar "net")) @?= expected
+    -- A local binding named like the network shadows it.
+    eval (IRApply (IRLambda "net" (IRApply (IRVar "net") arg)) (IRLambda "y" (IRVar "y"))) @?= Right (VFloat 2)
+    -- Without the oracle the name is unbound.
+    assertBool "no oracle, no network" (isLeft (evalClosedIR (IRApply (IRVar "net") arg)))
+    oracleSignatures oracle @?= [("net", ITArrow ITFloat (ITList ITFloat))]
+
 -- | 'IRInterpreter.generate' must evaluate every 'ConTag'/'Accessor' shape of
 -- 'IRConstruct'/'IRDestruct' correctly.
 test_irConstructDestructInterpreterDispatch :: TestTree
@@ -6744,6 +6771,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , sumTypeShowcaseTests
   , test_headHashDistinguishesConTagsAndAccessors
   , test_irConstructDestructInterpreterDispatch
+  , test_neuralOracleInterpretation
   , test_hasTailDescentRecognisesNewShape
   , test_valueDependentRecursionSplits
   , test_batchedPureCallees
@@ -6785,11 +6813,11 @@ slowInternalsTests = testGroup "Internals (slow)"
 
 -- | Evaluate a closed IR expression with no neural networks or globals.
 evalClosedIR :: IRExpr -> Either String IRValue
-evalClosedIR = generateDet [] [] (IREnv [] [] []) []
+evalClosedIR = generateDet noNeurals (IREnv [] [] []) []
 
 -- | Sample a closed IR expression with no neural networks or globals.
 sampleClosedIR :: IRExpr -> IRValue
-sampleClosedIR e = evalRand (generateRand [] [] (IREnv [] [] []) [] e) (mkStdGen 0)
+sampleClosedIR e = evalRand (generateRand noNeurals (IREnv [] [] []) [] e) (mkStdGen 0)
 
 -- ===========================================================================
 -- Inverse-CDF categorical index (neural-categorical-sampler-nests-v-deep)

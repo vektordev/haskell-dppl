@@ -317,14 +317,16 @@ sourcesFingerprint m files = modifyMVar (mSources m) $ \cache -> case Map.lookup
     return (Map.insert files v cache, v)
 
 -- | Every @src/@ module the interpreter transitively imports (M1 of the task:
--- any change to them invalidates every interpreter-run check), plus
+-- any change to them invalidates every interpreter-run check), together with
+-- those of "MockNN", whose 'MockNN.programMockOracle' is the neural oracle the
+-- @run*C@ entry points inject into the interpreter, plus
 -- @SPLL/Prelude.hs@ itself, which holds the @run*C@ entry points the checks
 -- call (but not its own imports: those are the compiler, whose output the
 -- key already contains). Computed from the import lines, so a new import is
 -- picked up without a hand-kept list going stale.
 interpreterClosure :: IO [FilePath]
 interpreterClosure = do
-  mods <- go [] ["IRInterpreter"]
+  mods <- go [] ["IRInterpreter", "MockNN"]
   return (sort ("src/SPLL/Prelude.hs" : map modPath mods))
   where
     modPath m = "src" </> map (\c -> if c == '.' then '/' else c) m ++ ".hs"

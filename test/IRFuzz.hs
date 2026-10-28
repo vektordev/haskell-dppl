@@ -103,6 +103,7 @@ import SPLL.IRTypeCheck (IRType(..), checkIREnv, showIRType, showIRTypeError, ir
 import SPLL.Semiring
 import SPLL.IRCompiler (stripBranchCount)
 import SPLL.Typing.RType (RType(..), TVarR(..), shapeNumel)
+import SPLL.IR.Neural (noNeurals)
 import IRInterpreter (generateDet, generateReplay)
 import qualified SPLL.CodeGenPyTorch as Py
 import qualified SPLL.CodeGenJulia as Jl
@@ -1344,8 +1345,8 @@ interpretIRCase c args = do
     -- A generate body answers its sample with how many draws it took, as
     -- the drivers report a backend's ('VTuple' of the count and the sample).
     run env as f
-      | icKind c == GenBody = (\(v, k) -> VTuple (VInt k) v) <$> generateReplay [] [] env (icDraws c) as f
-      | otherwise = generateDet [] [] env as f
+      | icKind c == GenBody = (\(v, k) -> VTuple (VInt k) v) <$> generateReplay noNeurals env (icDraws c) as f
+      | otherwise = generateDet noNeurals env as f
 
 -- | A refusal's reason with the offending values cut off, for tabulation.
 refusalKey :: String -> String

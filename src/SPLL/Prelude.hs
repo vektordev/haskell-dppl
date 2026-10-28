@@ -128,6 +128,7 @@ import SPLL.CalleeNormalize (normalizeCallees, etaExpandArrowResults)
 import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.PerValue (validateSignatures, expandPerValue, perValuePlans, checkSignatureTypes, dropSlotProbes, installPerValue)
 import IRInterpreter (generateRand, generateDet, generateRandE)
+import MockNN (programMockOracle)
 import Control.Monad.Random (Rand, RandomGen, evalRand)
 import System.Random (mkStdGen)
 import SPLL.IRCompiler
@@ -780,7 +781,7 @@ runProbC p compiled = runProbNamedC p compiled "main"
 runGenNamedC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g IRValue
 runGenNamedC p compiled name args =
   case genFun (lookupIREnv name compiled) of
-    Just (gen, _) -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) gen
+    Just (gen, _) -> generateRand (programMockOracle p) compiled (map IRConst args) gen
     -- Unlike the prob/integ runners there is no error channel in the return
     -- type to report this through.
     Nothing -> error (missingVariant "generate" "gen" (lookupIREnv name compiled))
@@ -789,7 +790,7 @@ runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either Co
 runProbNamedC p compiled name args x =
   case probFun (lookupIREnv name compiled) of
     Nothing -> Left (missingVariant "probability" "prob" (lookupIREnv name compiled))
-    Just (prob, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst args') prob
+    Just (prob, _) -> generateDet (programMockOracle p) compiled (map IRConst args') prob
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with the semiring's multiplicative
       -- identity at the query root -- linear 1.0, or log-space 0.0. Hardcoding
@@ -839,7 +840,7 @@ runIntegNamedC p compiled name args sample =
   case integFun (lookupIREnv name compiled) of
     -- A topK-compiled integrate function takes the runtime cutoff right
     -- after the sample (no acc_prob: its root seeds its own).
-    Just (integ, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sample : maybeToList (topKCutoff compiled) ++ args)) integ
+    Just (integ, _) -> generateDet (programMockOracle p) compiled (map IRConst (sample : maybeToList (topKCutoff compiled) ++ args)) integ
     Nothing -> Left (missingVariant "integrate" "integ" (lookupIREnv name compiled))
 
 -- | Modality inference decides per definition which of the three variants are
@@ -880,7 +881,7 @@ runWriteLogitsRandC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] 
 runWriteLogitsRandC p compiled target outerArgs =
   case validateWriteLogitsGaussian (adts p) (writeLogitsDecls p) (neurals p) compiled >> findEnc of
     Left err  -> return (Left err)
-    Right enc -> generateRandE (neurals p) (writeLogitsDecls p) compiled (map IRConst outerArgs) enc
+    Right enc -> generateRandE (programMockOracle p) compiled (map IRConst outerArgs) enc
   where
     IREnv groups _ _ = compiled
     findEnc = case find ((== target) . groupName) groups of

@@ -692,8 +692,9 @@ its own key (`sourcesFingerprint`), so editing it reruns that sweep only.
 | `Slow.RewriteInvarianceCorpus` | the rows, and for the original and every variant (family and site) its program fields and its compile, a refusal's message included, and the interpreter fingerprint; `TestRewrites.hs` and `Rewrites.hs` join the harness. A variant whose compile timed out, or whose shown environment crashed or timed out, leaves the program unkeyed |
 
 The **interpreter fingerprint** (M1 of the task) is the source of every
-`src/` module that `IRInterpreter` transitively imports (13 of 39, read off the
-import lines at run time), plus `SPLL/Prelude.hs` (the `run*C` entry points),
+`src/` module that `IRInterpreter` or `MockNN` (which builds the neural oracle
+the interpreter is handed) transitively imports (read off the import lines at
+run time), plus `SPLL/Prelude.hs` (the `run*C` entry points),
 `stack.yaml` and the GHC version. The compiler proper (`IRCompiler`, the
 optimizer, the parser, the typing passes, codegen) is outside it. A compiler
 change reaches an interpreter check through the emitted `IREnv`, which is in

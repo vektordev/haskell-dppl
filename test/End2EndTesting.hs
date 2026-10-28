@@ -41,7 +41,7 @@ import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.QSem (newQSem, waitQSem, signalQSem)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
-import MockNN (evaluateMockNN, mockInputFor, MockSlot(..), planAwareMockSlots, planHasTensor)
+import MockNN (evaluateMockNN, programMockOracle, mockInputFor, MockSlot(..), planAwareMockSlots, planHasTensor)
 import ImpactManifest
 import CorpusSweep
 import TestDuplicationCensus (duplicationCensusSweep)
@@ -544,12 +544,12 @@ normalizationResults p compiled = case (genFun (lookupIREnv "main" compiled), pr
     -- neural outputs, which currently yields Bottom and emits no main_prob.
     (Just (genExpr, _), Just (probExpr, _)) -> do
       let (params, randomParamsForSamples) = normalizationDraws p
-          gens = map (\args -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
+          gens = map (\args -> generateRand (programMockOracle p) compiled (map IRConst args) genExpr) randomParamsForSamples
           pSamples = evalRand (sequence gens) (mkStdGen 42)
           uniqueSamples = nub pSamples
           counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
       -- The per-sample prob queries are independent and pure; force them in parallel.
-      probResults <- parEval (map (\sam -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
+      probResults <- parEval (map (\sam -> generateDet (programMockOracle p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
       return ((,) counts <$> sequence probResults)
     _ -> return (Left "main has no probability function (inference unavailable); only generate compiled")
 
