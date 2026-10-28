@@ -2199,28 +2199,57 @@ tupleLeafPaths _ = [[]]
 -- @fst@/@snd@ projections read, and whether it sits in an output position:
 -- reached from the root through field constructors, @if@ arms and let
 -- bodies only, so its value is compared against the observation (as a
--- wildcard where the observation is one) rather than computed with. An
--- occurrence aliased by a binder counts as a computing read of the whole.
-varFieldReads :: [ADTDecl] -> String -> Expr -> [(Bool, [FieldStep])]
-varFieldReads adtDs x = go True
+-- wildcard where the observation is one) rather than computed with.
+--
+-- The reads are followed through the spellings that only rename the value
+-- (slow-tier follow-up of task any-mark-passed-as-recursive-call-state, the
+-- rewrite-invariance net): a projection of @x@ bound by a @draw y = ..@
+-- reads @x@ wherever the body reads @y@, and a projection of @x@ passed to a
+-- top-level function reads @x@ wherever that function's body reads the
+-- parameter (in output position only where the call itself is, and at most
+-- @fuel@ calls deep). Where the fuel runs out, the argument counts as one
+-- computing read of the whole projection, which is the conservative answer:
+-- an extra read only costs the sum, it never makes it wrong.
+varFieldReads :: Program -> [ADTDecl] -> String -> Expr -> [(Bool, [FieldStep])]
+varFieldReads prog adtDs x0 = readsOf (4 :: Int) x0 True
   where
-    go out e | Just (n, p) <- projectionOf e = [(out, p) | n == x]
-    go _ (Expr _ (Lambda n b)) = if n == x then [] else go False b
-    go out (Expr _ (Apply (Expr _ (Lambda y b)) arg))
-      | y == x = go False arg
-      | otherwise = go False arg ++ go out b
-    go out (Expr _ (IfThenElse c a b)) = go False c ++ go out a ++ go out b
-    go out (Expr _ (InjF (Named n) args)) | isFieldConstructor adtDs n = concatMap (go out) args
-    go _ e = concatMap (go False) (getSubExprs e)
+    -- the reads of @x@ in @e@, where @e@'s value is an output iff @out@
+    readsOf fuel x = go
+      where
+        go out e | Just (n, p) <- projectionOf e = [(out, p) | n == x]
+        go _ (Expr _ (Lambda n b)) = if n == x then [] else go False b
+        go out (Expr _ (Apply (Expr _ (Lambda y b)) arg))
+          | Just (n, p) <- projectionOf arg, n == x =
+              aliased p (readsOf fuel y out b) ++ (if y == x then [] else go out b)
+          | y == x = go False arg
+          | otherwise = go False arg ++ go out b
+        go out (Expr _ (IfThenElse c a b)) = go False c ++ go out a ++ go out b
+        go out (Expr _ (InjF (Named n) args)) | isFieldConstructor adtDs n = concatMap (go out) args
+        go out e
+          | fuel > 0
+          , (Expr _ (Var f), args@(_ : _)) <- flattenApplySpine e
+          , f /= x
+          , Just (params, fBody) <- lookup f (functions prog) >>= paramsN (length args) =
+              concat [ case projectionOf a of
+                         Just (n, p) | n == x -> aliased p (readsOf (fuel - 1) prm out fBody)
+                         _ -> go False a
+                     | (a, prm) <- zip args params ]
+        go _ e = concatMap (go False) (getSubExprs e)
+    aliased p rs = [ (o, p ++ q) | (o, q) <- rs ]
     projectionOf (Expr _ (Var n)) = Just (n, [])
     projectionOf (Expr _ (InjF (Named "fst") [a])) = fmap (++ [FieldFst]) <$> projectionOf a
     projectionOf (Expr _ (InjF (Named "snd") [a])) = fmap (++ [FieldSnd]) <$> projectionOf a
     projectionOf _ = Nothing
+    paramsN :: Int -> Expr -> Maybe ([String], Expr)
+    paramsN 0 b = Just ([], b)
+    paramsN n (Expr _ (Lambda v b)) = (\(vs, r) -> (v : vs, r)) <$> paramsN (n - 1) b
+    paramsN _ _ = Nothing
 
 -- | The finite set of values the field at path @p@ of @e@'s value can take,
 -- where the program states one: the node's own enumerable domain, else
--- through a tuple constructor, both arms of an @if@, a let body, or the body
--- of a called top-level function (at most @fuel@ calls deep). A superset is
+-- through a tuple constructor, a @fst@/@snd@ projection, both arms of an
+-- @if@, a let body, or the body of a called (or nullary) top-level function
+-- (at most @fuel@ calls deep). A superset is
 -- sound for a sum over it (a value the field cannot take has no mass).
 fieldDomainOf :: Program -> Int -> Expr -> [FieldStep] -> Maybe [Value]
 fieldDomainOf prog = go
@@ -2234,8 +2263,10 @@ fieldDomainOf prog = go
             FieldSnd : r -> go fuel b r
             [] -> Nothing
           Expr _ (IfThenElse _ a b) -> (\xs ys -> nub (xs ++ ys)) <$> go fuel a path <*> go fuel b path
+          Expr _ (InjF (Named "fst") [a]) -> go fuel a (FieldFst : path)
+          Expr _ (InjF (Named "snd") [a]) -> go fuel a (FieldSnd : path)
           Expr _ (Apply (Expr _ (Lambda _ b)) _) -> go fuel b path
-          _ | (Expr _ (Var f), args@(_ : _)) <- flattenApplySpine e
+          _ | (Expr _ (Var f), args) <- flattenApplySpine e
             , Just fBody <- lookup f (functions prog)
             , Just b <- stripN (length args) fBody -> go (fuel - 1) b path
           _ -> Nothing
@@ -11316,7 +11347,7 @@ applyBinding meta cumulative rt binding sample = do
    -- A point query of a value-typed body only: a closure-valued result has no
    -- mixture, and a cumulative one is left to the existing refusals.
    let enumLeaves =
-         let occReads = varFieldReads (adtDecls meta) toInvCN (bindBody binding)
+         let occReads = varFieldReads (compilingProgram meta) (adtDecls meta) toInvCN (bindBody binding)
              overlapping p = [ r | r@(_, q) <- occReads, q `isPrefixOf` p || p `isPrefixOf` q ]
              readAgain p = let ov = overlapping p in length ov >= 2 || any (not . fst) ov
              leaves = [ (p, vals)
