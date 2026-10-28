@@ -17,7 +17,7 @@ program compiles into three variants — **generate**, **probability**,
 
 ```bash
 stack build
-stack test                     # default suite (both test binaries)
+stack test                     # default suite (all three test binaries)
 stack run -- -i file.ppl compile -o output.py -l python   # -o is required
 stack run -- -i file.ppl compile -o output.jl -l julia
 stack run -- -i file.ppl generate
@@ -39,10 +39,11 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   the run. `NEST_FULL_TESTS=1` executes everything. See `docs/testing.md`,
   "Impact analysis".
 
-- `stack test` runs two test binaries: `haskell-dppl-test` (everything) and
-  `haskell-dppl-test-corpus` (the `Corpus` group). A bare `--ta PATTERN` goes
-  to both, and a binary it matches nothing in reports "All 0 tests passed".
-  To target one, use the full `package:test:suite` form shown above.
+- `stack test` runs three test binaries: `haskell-dppl-test` (everything),
+  `haskell-dppl-test-corpus` (the `Corpus` group) and `nest-ir:test:nest-ir-test`
+  (the IR checker's own suite, in the `nest-ir` package). A bare `--ta PATTERN`
+  goes to all of them, and a binary it matches nothing in reports "All 0 tests
+  passed". To target one, use the full `package:test:suite` form shown above.
 - Store test output in a temp file and grep that. Don't rerun to grep again.
 - CLI flags: `-v`, `-O 0-2`, `-k CUTOFF` (topK), `-c` (branch counts), `-d`
   (dump AST/IR after each stage), `--logSpace`, `--batched`, `--marginals`,
@@ -99,7 +100,7 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
 
 ```
 source → Parser → Validator → PerValue (helper expansion) → CalleeNormalize
-  → RInfer (+ Monomorphize on failure) → Analysis (DiscreteValues) → DrawSinking
+  → RInfer (let-generalisation + Monomorphize) → Analysis (DiscreteValues) → DrawSinking
   → ForwardChaining → ModalityInfer
   → IRCompiler (generate / probability / integrate) → PerValue (install)
   → IRSelectPass (batched only) → IROptimizer → IRGatherPass, IRLeafTablePass (batched only)
@@ -131,6 +132,38 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `PerValue` — per-value queries: a signature's `Enumerated` slot answered as one vector over its domain.
 - `IRCompiler` — AST to IR for all three variants, holding all the inference engines.
 - `Semiring` — `PResult` combinators over the linear/log/max-product semirings.
+- `AutoNeural` — generated readLogits/writeLogits functions and partition plans for neural declarations.
+- `CompileWarnings` — compile-time warnings (non-blocking diagnostics), computed by `Prelude.programWarnings`/`compiledWarnings`.
+- `CompilerConfig` — `CompilerConfig`, `SemiringFamily` and the defaults; `OptimizerProjection` projects it onto the IR optimizer's `OptimizerConfig`.
+- `Prelude` — `compile`, smart constructors and the `run*` query entry points.
+- `DuplicationCensus` — counts copies of large subtrees in unoptimized IR, the tripwire for exponential compile blowups (`docs/testing.md`, "Duplication census").
+- `StageDiff` — compiles two equivalent programs side by side and names the first stage that diverges (`docs/testing.md`, "Rewrite invariance").
+- `Examples` — hand-built example programs.
+
+`src/`: `PredefinedFunctions` (InjF table: forward, inverse, derivatives),
+`MockNN` (mock networks for tests), `PrettyPrint`. `SPLL/IRTypeBridge`
+translates `RType` into the IR's `IRType`; `SPLL/Typing/AlgebraicDataTypes`
+holds the ADT functions' `RType` schemes and `irADTDecl`.
+`app/Main.hs` is the CLI. The runtimes are `pythonLib.py`,
+`pythonLibBatched.py` and `juliaLib.jl`, at the repository root (the test
+harness finds them relative to the working directory, which `stack test` sets
+to the package root).
+
+### The `nest-ir` package
+
+`nest-ir/` is a second Stack package (`stack.yaml` lists `.` and `nest-ir`).
+The frontend (`haskell-dppl`) depends on it; it imports nothing from the
+frontend, and GHC enforces that. Module names are unchanged (`SPLL.IRTypeCheck`
+is `nest-ir/src/SPLL/IRTypeCheck.hs`). It has the same warning flags
+(`-Werror`) and its own test suite (`nest-ir/test`: the checker's constructs,
+builtins, rejections and environments; that the checker accepts compiler
+output is in the main suite's `IRTypeCheck` group). Design:
+`ir-package-boundary` in the docs repo. New code that the IR side needs from
+the frontend is a sign something belongs IR-side: put the vocabulary in
+`SPLL.IR.*` and convert at the lowering boundary.
+
+`nest-ir/src/SPLL/`:
+
 - `IntermediateRepresentation` — `IRExpr` and `IRFunGroup`.
 - `IRTypeCheck` — the IR's type contract: `IRType` and an inference checker over an `IREnv`.
 - `IRSelectPass` — `IRIf` → `IRSelect` for batched mode.
@@ -139,19 +172,11 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `IROptimizer` — constant folding, CSE and let-in optimization.
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.
 - `PythonNesting` — CPython's per-line bracket and indentation limits, and the deep-line spill both Python backends share.
-- `AutoNeural` — generated readLogits/writeLogits functions and partition plans for neural declarations.
-- `CompileWarnings` — compile-time warnings (non-blocking diagnostics), computed by `Prelude.programWarnings`/`compiledWarnings`.
 - `ReservedNames` — the single registry of compiler-claimed and target-language names.
-- `Prelude` — `compile`, smart constructors and the `run*` query entry points.
-- `DuplicationCensus` — counts copies of large subtrees in unoptimized IR, the tripwire for exponential compile blowups (`docs/testing.md`, "Duplication census").
-- `StageDiff` — compiles two equivalent programs side by side and names the first stage that diverges (`docs/testing.md`, "Rewrite invariance").
-- `Examples` — hand-built example programs.
+- `IR/Value`, `IR/Type`, `IR/ADT`, `IR/Neural` — the IR's value vocabulary, `IRType`, the ADT functions' IR-level semantics, and the injected neural oracle.
 
-`src/`: `IRInterpreter` (reference semantics), `PredefinedFunctions`
-(InjF table: forward, inverse, derivatives), `StandardLibrary` (IR
-stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
-`app/Main.hs` is the CLI. The runtimes are `pythonLib.py`,
-`pythonLibBatched.py` and `juliaLib.jl`.
+`nest-ir/src/`: `IRInterpreter` (reference semantics), `StandardLibrary` (IR
+stdlib), `Utils`.
 
 ## Documentation index (`docs/`)
 

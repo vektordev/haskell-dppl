@@ -172,6 +172,20 @@ declaration (`data T = … depth N`) — otherwise give a depth-bounded
 override (`3x.{...}`) or compilation errors. Only *direct* self-recursion
 is auto-detected.
 
+## A network in the IR and the interpreter
+
+In the IR a network is a neural primitive: a name bound by a
+`NeuralOracle` (`SPLL.IR.Neural`), from its input value to its logit vector.
+The interpreter takes the oracle as an argument and knows nothing about
+declarations or partition plans. A name the oracle binds and no local binding
+shadows is answered by the oracle, applied directly or passed as a function
+value. The oracle's signatures (`oracleSignatures`) are the externals
+`IRTypeCheck.checkIREnvWith` needs. The `run*` entry points build the mock
+oracle from a program's declarations (`MockNN.programMockOracle`): each
+network is the mock for its input type over the partition plan of its target,
+resolved like the compiler's (`of` clause, then the writeLogits registry, then
+auto-derivation).
+
 ## A read-logits network's categorical sampler is one call
 
 A discrete leaf of a read-logits network's own `generate`

@@ -56,7 +56,8 @@ module SPLL.ObservationMask
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
-import SPLL.Typing.AlgebraicDataTypes (fieldAccessorOwners, findField)
+import SPLL.IR.ADT (fieldAccessorOwners, findField)
+import SPLL.Typing.AlgebraicDataTypes (irADTDecl)
 import PredefinedFunctions (isObsConstructor)
 import SPLL.ReservedNames (isFrontendBinder)
 
@@ -403,8 +404,8 @@ accessorStep decls f = case f of
   "tail"      -> Just (Accessor "Cons" 1)
   "fromLeft"  -> Just (Accessor "left" 0)
   "fromRight" -> Just (Accessor "right" 0)
-  _ | f `elem` map fst (fieldAccessorOwners decls) ->
-        let (c, i) = findField decls f in Just (Accessor c i)
+  _ | f `elem` map fst (fieldAccessorOwners (map irADTDecl decls)) ->
+        let (c, i) = findField (map irADTDecl decls) f in Just (Accessor c i)
     | otherwise -> Nothing
 
 -- ---------------------------------------------------------------------------

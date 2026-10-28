@@ -8,6 +8,7 @@ module SPLL.AutoNeural(
 , inputLayoutString
 , makePartitionPlan
 , resolvePartitionAnnotation
+, neuralIRSignature
 , PartitionPlan (..)
 , makeProb
 , getSize
@@ -28,7 +29,10 @@ module SPLL.AutoNeural(
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Typing.RType
+import SPLL.IR.Type (IRType(..))
+import SPLL.IRTypeBridge (irTypeOfRType)
 import SPLL.Lang.Lang
 import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName)
 import StandardLibrary
@@ -81,6 +85,18 @@ makeAutoNeural adtDecls conf registry decl@(name, declType, tag) =
 resolvePartitionAnnotation :: [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe MultiValue
 resolvePartitionAnnotation registry ty tag = tag <|> lookup ty registry
 
+-- | The IR type of a neural declaration of type @rt@, for the checker
+-- ('SPLL.IR.Neural.neuralSignature'). In the IR a network maps its input to
+-- its logit vector, a list of floats ("MockNN"). A 'TSymbol' input is opaque
+-- to the IR (the interpreter's mocks read a tuple encoding out of it), so it
+-- is typed as a variable. 'Nothing' for a declaration that is not
+-- @input -> target@ with an admissible input.
+neuralIRSignature :: RType -> Maybe IRType
+neuralIRSignature rt = do
+  inp <- neuralInputType rt
+  t <- if inp == TSymbol then Just (ITVar 0) else irTypeOfRType inp
+  return (ITArrow t (ITList ITFloat))
+
 -- 'neuralReadLogitsSuffix' (re-exported above) is the naming convention
 -- 'makeReadLogitsFunGroup' uses to mark a read-logits network's own
 -- 'IRFunGroup': the network's declared name with that suffix appended. It is
@@ -108,7 +124,7 @@ makeReadLogitsFunGroup adtDecls conf name target tag fwdDecl =
     -- group's prob also takes the symbol, so the batched backend's arity rule
     -- keeps dense mode off them for now; recording it here is the truthful
     -- answer rather than a placeholder.
-    (listToMaybe $ filter multiValueIsFinite (maybeToList tag ++ [mv | Right mv <- [autoDeriveMultiValue adtDecls target]]))
+    (fmap multiValueToIR $ listToMaybe $ filter multiValueIsFinite (maybeToList tag ++ [mv | Right mv <- [autoDeriveMultiValue adtDecls target]]))
     Nothing
     where plan = makePartitionPlan adtDecls target tag
 
@@ -389,7 +405,7 @@ makeProbRec sr _adtDecls (Discretes _rty tag) ix sample = (noAny sr sample guard
     -- sample is impossible: the guard answers the semiring zero, from which
     -- 'makeProb' derives the impossibility flag (task
     -- neural-read-query-outside-domain-unchecked).
-    guarded = IRIf (IRIsPossible tag sample) p (srZero sr)
+    guarded = IRIf (IRIsPossible (multiValueToIR tag) sample) p (srZero sr)
     p = fromLinearSR sr (IRBuiltin BListIndex [IRVar vector, IROp OpPlus (indexOf tag sample) (IRConst (VInt ix))])
 makeProbRec sr _adtDecls Continuous ix sample = (noAny sr sample p, noAnyDim0 sample (IRConst (VInt 1)), IRConst (VFloat 0))
   where

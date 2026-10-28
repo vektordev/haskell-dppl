@@ -42,16 +42,12 @@ module SPLL.IRTypeCheck
   , checkIREnv
   , checkIREnvWith
   , inferIRExpr
-  , irTypeOfRType
-  , neuralExternals
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..), TVarR, shapeNumel, dropAxis, prettyShape)
-import SPLL.Typing.AlgebraicDataTypes (implicitFunctionRTypes)
-import SPLL.Lang.Lang (neuralInputType)
-import Data.Maybe (mapMaybe)
+import SPLL.IR.Value
+import SPLL.IR.Type (IRType(..), IRADTDecl(..))
+import SPLL.IR.ADT (implicitFunctionIRTypes)
 import StandardLibrary (standardEnv)
 
 import Control.Monad (forM, forM_, unless, when, zipWithM_, foldM)
@@ -61,28 +57,6 @@ import Data.List (nub)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-
--- | The value types of the IR.
---
--- Unlike 'RType', a tensor's element type is not restricted to a scalar: the
--- compiler builds 'BTensor's over enumerated domains of tuples, 'Either's and
--- ADT values (an enumerated sum maps over one). A tensor's shape is part of
--- its type, as in 'TTensor', and two tensor types unify only at equal shapes.
-data IRType
-  = ITBool
-  | ITInt
-  | ITFloat
-  | ITSymbol
-  | ITUnit
-  | ITThetaTree
-  | ITList IRType
-  | ITTuple IRType IRType
-  | ITEither IRType IRType
-  | ITADT String          -- ^ By type name, as 'TADT'.
-  | ITTensor Shape IRType
-  | ITArrow IRType IRType
-  | ITVar Int             -- ^ A type variable. In a checker result, a variable is universally quantified.
-  deriving (Show, Eq, Ord)
 
 -- | Why an expression or environment was rejected.
 data IRTypeError = IRTypeError
@@ -166,7 +140,7 @@ type TC = StateT TCState (Either IRTypeError)
 
 data Ctx = Ctx
   { ctxGlobals :: Map.Map String Scheme
-  , ctxADTs    :: [ADTDecl]
+  , ctxADTs    :: [IRADTDecl]
   , ctxLocals  :: Map.Map String IRType
   }
 
@@ -598,12 +572,12 @@ valueType ctx e v = case v of
     a <- fresh
     forM_ xs $ \x -> valueType ctx e x >>= unify e a
     return (ITTensor sh a)
-  VADT ctor fields -> case [ (dataName d, fs) | d <- ctxADTs ctx, (c, fs) <- constructors d, c == ctor ] of
+  VADT ctor fields -> case [ (irDataName d, fs) | d <- ctxADTs ctx, (c, fs) <- irConstructors d, c == ctor ] of
     ((tyName, fs) : _) -> do
       unless (length fs == length fields) $
         failAt e ("constructor " ++ ctor ++ " has " ++ show (length fs) ++ " fields, the value "
                   ++ show (length fields))
-      declared <- rtypesToIR (map snd fs)
+      let declared = map snd fs
       zipWithM_ (\fv ft -> valueType ctx e fv >>= unify e ft) fields declared
       return (ITADT tyName)
     [] -> failAt e ("unknown ADT constructor " ++ ctor)
@@ -625,82 +599,13 @@ valueType ctx e v = case v of
         valueType ctx e x >>= unify e a
         listElems a rest
 
--- | Translate declared 'RType's (ADT fields, implicit-function signatures),
--- one variable per distinct 'TVarR' across the list. 'RType's with no
--- runtime content of their own ('NotSetYet', 'GreaterType', 'BottomTuple')
--- become fresh variables.
-rtypesToIR :: [RType] -> TC [IRType]
-rtypesToIR rts = evalStateT (mapM go rts) Map.empty
-  where
-    go :: RType -> StateT (Map.Map TVarR IRType) TC IRType
-    go rt = case rt of
-      TBool -> return ITBool
-      TInt -> return ITInt
-      TSymbol -> return ITSymbol
-      TFloat -> return ITFloat
-      TUnit -> return ITUnit
-      TThetaTree -> return ITThetaTree
-      ListOf a -> ITList <$> go a
-      Tuple a b -> ITTuple <$> go a <*> go b
-      TEither a b -> ITEither <$> go a <*> go b
-      TADT n -> return (ITADT n)
-      NullList -> ITList <$> lift fresh
-      BottomTuple -> lift fresh
-      TArrow a b -> ITArrow <$> go a <*> go b
-      TTensor sh a -> ITTensor sh <$> go a
-      TVarR v -> do
-        m <- get
-        case Map.lookup v m of
-          Just t -> return t
-          Nothing -> do
-            t <- lift fresh
-            put (Map.insert v t m)
-            return t
-      GreaterType _ _ -> lift fresh
-      NotSetYet -> lift fresh
-
--- | A monomorphic 'RType' as an 'IRType'. 'Nothing' when it holds a type
--- variable or one of the 'RType's with no runtime content of their own.
-irTypeOfRType :: RType -> Maybe IRType
-irTypeOfRType rt = case rt of
-  TBool -> Just ITBool
-  TInt -> Just ITInt
-  TSymbol -> Just ITSymbol
-  TFloat -> Just ITFloat
-  TUnit -> Just ITUnit
-  TThetaTree -> Just ITThetaTree
-  ListOf a -> ITList <$> irTypeOfRType a
-  Tuple a b -> ITTuple <$> irTypeOfRType a <*> irTypeOfRType b
-  TEither a b -> ITEither <$> irTypeOfRType a <*> irTypeOfRType b
-  TADT n -> Just (ITADT n)
-  TArrow a b -> ITArrow <$> irTypeOfRType a <*> irTypeOfRType b
-  TTensor sh a -> ITTensor sh <$> irTypeOfRType a
-  NullList -> Nothing
-  BottomTuple -> Nothing
-  TVarR _ -> Nothing
-  GreaterType _ _ -> Nothing
-  NotSetYet -> Nothing
-
--- | The externals a compiled environment needs for its neural declarations,
--- for 'checkIREnvWith'. In the IR a network maps its input to its logit
--- vector, a list of floats ("MockNN"). A 'TSymbol' input is opaque to the
--- IR (the interpreter's mocks read a tuple encoding out of it), so it is
--- typed as a variable.
-neuralExternals :: [NeuralDecl] -> [(String, IRType)]
-neuralExternals = mapMaybe external
-  where
-    external (n, rt, _) = do
-      inp <- neuralInputType rt
-      t <- if inp == TSymbol then Just (ITVar 0) else irTypeOfRType inp
-      return (n, ITArrow t (ITList ITFloat))
-
 -- ---------------------------------------------------------------------------
 -- Binding groups
 
 -- | Check a list of top-level bindings, a strongly connected component of
 -- their call graph at a time, and add their generalised schemes to the
 -- globals. A name bound twice keeps its first binding, as in the interpreter.
-checkBindings :: [ADTDecl] -> Map.Map String Scheme -> [(String, IRExpr)] -> TC (Map.Map String Scheme)
+checkBindings :: [IRADTDecl] -> Map.Map String Scheme -> [(String, IRExpr)] -> TC (Map.Map String Scheme)
 checkBindings decls globals0 bindings0 = foldM checkComponent globals0 components
   where
     bindings = dedupe Set.empty bindings0
@@ -764,18 +669,13 @@ valueMentions v = case v of
 
 -- | The globals every environment sees: the implicit functions of its ADTs,
 -- the caller's externals, then the standard library checked from its bodies.
-baseGlobals :: [ADTDecl] -> [(String, IRType)] -> TC (Map.Map String Scheme)
+baseGlobals :: [IRADTDecl] -> [(String, IRType)] -> TC (Map.Map String Scheme)
 baseGlobals decls externals = do
-  adtFns <- forM (concatMap implicitFunctionRTypes decls) $ \(n, rt) -> do
-    ts <- rtypesToIR [rt]
-    t <- zonk (head' ts)
-    return (n, closedScheme t)
+  let adtFns = [ (n, closedScheme t) | (n, t) <- implicitFunctionIRTypes decls ]
   let ext = Map.fromList [ (n, closedScheme t) | (n, t) <- externals ]
       base = Map.union ext (Map.fromList adtFns)
   modify' (\s -> s { tcBinding = "the standard library" })
   checkBindings decls base standardEnv
-  where head' (t : _) = t
-        head' [] = ITUnit
 
 initState :: TCState
 initState = TCState { tcNext = 0, tcSubst = IM.empty, tcPending = [], tcBinding = "" }
@@ -801,7 +701,7 @@ checkIREnvWith externals env@(IREnv _ decls _) = flip evalStateT initState $ do
 -- | The type of one closed expression against the standard library, the
 -- given ADTs' implicit functions and the given externals. Constraints still
 -- undecided at the end are accepted, as for a top-level binding.
-inferIRExpr :: [ADTDecl] -> [(String, IRType)] -> IRExpr -> Either IRTypeError IRType
+inferIRExpr :: [IRADTDecl] -> [(String, IRType)] -> IRExpr -> Either IRTypeError IRType
 inferIRExpr decls externals e = flip evalStateT initState $ do
   base <- baseGlobals decls externals
   modify' (\s -> s { tcBinding = "" })

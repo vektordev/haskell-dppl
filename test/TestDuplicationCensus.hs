@@ -24,6 +24,7 @@ import Test.Tasty.HUnit (testCase, testCaseInfo, assertBool, assertEqual, assert
 
 import CorpusSweep
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Lang.Types (GenericValue(..), CompilerError)
 import SPLL.DuplicationCensus
 import SPLL.Parser (tryParseProgram)

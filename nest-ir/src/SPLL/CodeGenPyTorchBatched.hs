@@ -55,15 +55,15 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Typing.RType (RType(TFloat), shapeRank, shapeNumel)
-import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
-import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
+import SPLL.IR.Value (shapeRank, shapeNumel)
+import SPLL.IR.Type (IRType(ITFloat), IRADTDecl(..))
+import SPLL.IR.Value (CompilerError, GenericValue(..), GenericList(..), GenericMultiValue(..), multiValueToValueList, multiValueCardinality)
 -- 'pyDouble' is shared with the scalar backend for the same reason
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
 import SPLL.CodeGenPyTorch (envToLUT, normalRefName, replaceCalls, pyMangle, pyDouble, pyAttrBase, groupClassName, irFreeVars, MemoPlan(..), memoPlan, memoDecorate)
-import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
+import SPLL.IR.ADT (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
 import Data.Containers.ListUtils (nubOrd)
@@ -269,14 +269,14 @@ pickOffender offs = listToMaybe ([o | o@([], _) <- offs] ++ offs)
 -- shared diagnostic is for, and NaN propagation through a @torch.where@ is
 -- the failure mode @batched-adt-cdf-refusal-becomes-nan@ had to add a runtime
 -- guard for.
-generateADTClassesBatched :: [String] -> [ADTDecl] -> [String]
+generateADTClassesBatched :: [String] -> [IRADTDecl] -> [String]
 generateADTClassesBatched enums decls =
   concatMap oneDecl decls
   ++ concatMap (uncurry accessor) (fieldAccessorOwners decls)
   where
     oneDecl d
-      | dataName d `elem` enums = concat (zipWith (enumCtor (dataName d)) [0 :: Int ..] (map fst (constructors d)))
-      | otherwise               = concatMap one (constructors d)
+      | irDataName d `elem` enums = concat (zipWith (enumCtor (irDataName d)) [0 :: Int ..] (map fst (irConstructors d)))
+      | otherwise               = concatMap one (irConstructors d)
     -- A constructor of a collapsed (all-nullary) ADT: it carries its ADT's
     -- name and its tag index as class attributes, which is what
     -- 'pythonLibBatched.signature' keys on (one bucket for the whole ADT) and
@@ -392,7 +392,7 @@ generateClass clsName env lut genArities genMethods pureNames evals decorators (
 
 -- | The class-level @DOMAIN@ constant, or @[]@ when there is no renderable
 -- finite domain, or when the domain is larger than 'denseDomainCap'.
-denseDomainLines :: Maybe MultiValue -> [String]
+denseDomainLines :: Maybe (GenericMultiValue IRExpr) -> [String]
 -- Deduplicated: a DiscreteValues tag may enumerate the same value by several
 -- routes (tupleDiscreteDistrib's tag lists each tuple 3x), and a repeated slot
 -- would cost kernel work for a column nothing distinct reads -- and inflate V,
@@ -428,7 +428,7 @@ denseDomainCap = 65536
 -- (it packs the leaves into @[B]@ tensors itself). Deliberately separate from
 -- 'batchedVal', which answers a different question -- what may appear as a
 -- constant *inside* a kernel body -- and must not silently gain cases here.
-domainVal :: Value -> Maybe String
+domainVal :: GenericValue IRExpr -> Maybe String
 domainVal (VFloat f) = Just (pyDouble f)
 domainVal (VInt i)   = Just (show i)
 domainVal (VBool b)  = Just (if b then "True" else "False")
@@ -1329,7 +1329,7 @@ data SEnv = SEnv
 -- 'generateADTClassesBatched' (which prints it) and
 -- 'SPLL.IntermediateRepresentation.adtIdentifierRenaming' (which renames IR
 -- references to it) -- the constructor is mangled first, then prefixed.
-adtEnv :: [ADTDecl] -> SEnv
+adtEnv :: [IRADTDecl] -> SEnv
 adtEnv = adtEnvWith []
 
 -- | 'adtEnv' with the named ADTs /collapsed/ ('enumAdtNames'): their
@@ -1340,22 +1340,22 @@ adtEnv = adtEnvWith []
 -- keeps refusing it -- blaming the ADT whose test the condition reads
 -- ('enumBlame'), which is what sends 'generateFunctionsBatched' to retry with
 -- that ADT uncollapsed.
-adtEnvWith :: [String] -> [ADTDecl] -> SEnv
+adtEnvWith :: [String] -> [IRADTDecl] -> SEnv
 adtEnvWith enums decls = SEnv
   { sBound        = []
-  , sCtors        = [ pyMangle cn        | d <- decls, (cn, _)  <- constructors d ]
-  , sNullaryCtors = [ pyMangle cn        | d <- decls, (cn, []) <- constructors d ]
-  , sCtorPreds    = [ "is" ++ pyMangle cn | d <- decls, dataName d `notElem` enums
-                                          , (cn, _)  <- constructors d ]
-  , sEnumPreds    = [ ("is" ++ pyMangle cn, dataName d) | d <- decls, dataName d `elem` enums
-                                                        , (cn, _) <- constructors d ]
+  , sCtors        = [ pyMangle cn        | d <- decls, (cn, _)  <- irConstructors d ]
+  , sNullaryCtors = [ pyMangle cn        | d <- decls, (cn, []) <- irConstructors d ]
+  , sCtorPreds    = [ "is" ++ pyMangle cn | d <- decls, irDataName d `notElem` enums
+                                          , (cn, _)  <- irConstructors d ]
+  , sEnumPreds    = [ ("is" ++ pyMangle cn, irDataName d) | d <- decls, irDataName d `elem` enums
+                                                        , (cn, _) <- irConstructors d ]
   , sEnumDeps     = []
   , sGenNames     = []
   , sMethodSCCs   = []
   , sRecCallees   = []
   , sNullaryCalls = []
-  , sAccessors    = [ pyMangle f | d <- decls, length (constructors d) > 1
-                                 , (_, fields) <- constructors d, (f, _) <- fields ]
+  , sAccessors    = [ pyMangle f | d <- decls, length (irConstructors d) > 1
+                                 , (_, fields) <- irConstructors d, (f, _) <- fields ]
   , sPartialCalls = []
   , sAdtCalls     = adtCallees pyMangle decls
   }
@@ -1380,9 +1380,9 @@ enumBlame env0 = nub . go env0
 -- these are the one kind of sum type that can be too (task
 -- batched-bucketing-splits-on-nullary-constructors). Keyed by the declared
 -- (unmangled) name, which is what 'generateADTClassesBatched' also sees.
-enumAdtNames :: [ADTDecl] -> [String]
+enumAdtNames :: [IRADTDecl] -> [String]
 enumAdtNames decls =
-  [ dataName d | d <- decls, not (null (constructors d)), all (null . snd) (constructors d) ]
+  [ irDataName d | d <- decls, not (null (irConstructors d)), all (null . snd) (irConstructors d) ]
 
 -- | Is this expression's value fixed by the sample's /shape/ alone, hence a
 -- plain Python value that is constant across a bucket?
@@ -1422,7 +1422,7 @@ structural env e = case e of
   -- ('SPLL.IRCompiler.leafEqIR'): a slot's dtype is part of its tensor, so
   -- uniform across the call, and the arm it rules out ('isclose' on a bool
   -- tensor) is illegal to evaluate eagerly.
-  IRConformsTo TFloat _ -> True
+  IRConformsTo ITFloat _ -> True
   IROp OpEq a b     | isEmptyListConst a || isEmptyListConst b -> True
   IROp OpAnd a b    -> structural env a && structural env b
   IROp OpOr  a b    -> structural env a && structural env b
@@ -1991,7 +1991,7 @@ emittable e = case e of
   -- Only the float test 'structural' admits; the root query-type guard is
   -- stripped before this check ('stripRootGuard'), and any other shape test
   -- stays refused.
-  IRConformsTo TFloat _ -> True
+  IRConformsTo ITFloat _ -> True
   IRConst v      -> isJust (batchedVal v)   -- scalar/tuple leaves only; see 'batchedVal'
   IRVar{}        -> True
   IRLetIn{}      -> True
@@ -2175,7 +2175,7 @@ batchedValOrDie v = fromMaybe
 -- (an Either/ADT-shaped read-logits network trips the Either tag test or the ADT-declaration bail
 -- first), so its positive control is the synthetic-IR row in
 -- @TestInternals.batchedRefusalUnitTests@ rather than a corpus program.
-scalarDiscreteMulti :: MultiValue -> Bool
+scalarDiscreteMulti :: GenericMultiValue IRExpr -> Bool
 scalarDiscreteMulti (MultiDiscretes vs) = not (null vs) && all isScalarV vs
   where isScalarV (VInt _)   = True
         isScalarV (VBool _)  = True
@@ -2455,7 +2455,7 @@ batchedExpr env (IRUnaryOp OpIsAny e) = "isAny(" ++ batchedExpr env e ++ ")"
 -- A plain Python bool, like 'isAny': see the 'IRConformsTo' row of 'structural'.
 -- A number literal is parenthesised before the method call
 -- (@0.is_floating_point()@ does not parse; 'pyAttrBase').
-batchedExpr env (IRConformsTo TFloat e) =
+batchedExpr env (IRConformsTo ITFloat e) =
   let x = batchedExpr env e
   in "(isinstance(" ++ x ++ ", float) or (torch.is_tensor(" ++ x ++ ") and " ++ pyAttrBase x ++ ".is_floating_point()))"
 -- A value-to-constant lookup -- @x == k0 ? v0 : x == k1 ? v1 : .. : d@ with

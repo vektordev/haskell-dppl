@@ -9,40 +9,20 @@ generateReplay
 
 import Statistics.Distribution (quantile)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, valueInMultiValue, neuralValueType, neuralInputType)
+import SPLL.IR.Value
 import StandardLibrary
-import MockNN
-import SPLL.AutoNeural
+import SPLL.IR.Neural (NeuralOracle, NeuralPrimitive(..), lookupNeuralPrimitive)
 
 import Control.Monad.Random
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.State.Strict (StateT, runStateT, get, put)
 import Statistics.Distribution.Normal (normalDistr)
 import Data.Number.Erf
-import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.List (isSuffixOf)
 import qualified Data.Map.Strict as Map
-import SPLL.Lang.Types
-import SPLL.Typing.RType
-import SPLL.Typing.AlgebraicDataTypes
+import SPLL.IR.ADT
+import SPLL.IR.Type (IRType(..), IRADTDecl(..))
 import Data.Vector.Internal.Check (HasCallStack)
-
--- | A neural declaration's type is @input -> target@; the partition plan is built
--- from the target. Validation rejects any other shape, so a mismatch here is a
--- declaration that bypassed it.
-neuralOutputType :: String -> RType -> RType
-neuralOutputType name rt = fromMaybe
-  (error ("Neural network '" ++ name ++ "' is declared as " ++ show rt
-          ++ "; a read-logits declaration must have type input -> <output type>"))
-  (neuralValueType rt)
-
--- | The input type of a neural declaration, which picks its mock
--- ('MockNN.evaluateMockNNFor'). Same validation premise as 'neuralOutputType'.
-neuralInputTypeOf :: String -> RType -> RType
-neuralInputTypeOf name rt = fromMaybe
-  (error ("Neural network '" ++ name ++ "' is declared as " ++ show rt
-          ++ "; a read-logits declaration must have type input -> <output type>"))
-  (neuralInputType rt)
 
 -- | 'AcTheta'/'AcSubtree' index into the theta tree their argument evaluates to.
 asThetaTree :: IRValue -> ThetaTree
@@ -125,9 +105,9 @@ lookupVar name globals env = case lookup name env of
 --
 -- 'IRError' is unchanged: it is a node the compiler emitted on purpose and
 -- 'generate' still throws on it (see there).
-generateRand :: (RandomGen g) => [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> [IRExpr]-> IRExpr -> Rand g IRValue
-generateRand neurals' registry env params e =
-  either VError id <$> runExceptT (generate f neurals' registry adts' (globalEnvFrom startingEnv) [] params e)
+generateRand :: (RandomGen g) => NeuralOracle -> IREnv -> [IRExpr]-> IRExpr -> Rand g IRValue
+generateRand oracle env params e =
+  either VError id <$> runExceptT (generate f oracle adts' (globalEnvFrom startingEnv) [] params e)
   where
     f :: RandomGen g => RandomFunctions (ExceptT String (Rand g)) a
     f = RandomFunctions {
@@ -135,7 +115,7 @@ generateRand neurals' registry env params e =
       normalGen = lift (irSample IRNormal),
       failWith = error,
       raise = throwError}
-    startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
+    startingEnv = reduceIREnv env ++ standardEnv ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
 -- | Like 'generateDet', failures included (every failure is a 'Left'), but with real
@@ -143,9 +123,9 @@ generateRand neurals' registry env params e =
 -- writeLogits vector's dead-arm slots (task writelogits-dead-arm-nan) -- where
 -- 'generateDet' would refuse the draw and 'generateRand' would throw on a compiler-level
 -- failure instead of reporting it.
-generateRandE :: (RandomGen g) => [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> [IRExpr] -> IRExpr -> Rand g (Either String IRValue)
-generateRandE neurals' registry env params e =
-  runExceptT (generate f neurals' registry adts' (globalEnvFrom startingEnv) [] params e)
+generateRandE :: (RandomGen g) => NeuralOracle -> IREnv -> [IRExpr] -> IRExpr -> Rand g (Either String IRValue)
+generateRandE oracle env params e =
+  runExceptT (generate f oracle adts' (globalEnvFrom startingEnv) [] params e)
   where
     f :: RandomGen g => RandomFunctions (ExceptT String (Rand g)) a
     f = RandomFunctions {
@@ -153,7 +133,7 @@ generateRandE neurals' registry env params e =
       normalGen = lift (irSample IRNormal),
       failWith = throwError,
       raise = throwError}
-    startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
+    startingEnv = reduceIREnv env ++ standardEnv ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
 -- | Like 'generateDet', but every 'IRSample' takes the next value of a given
@@ -163,9 +143,9 @@ generateRandE neurals' registry env params e =
 -- draws through the interpreter (the IR fuzz generator's generate bodies), so
 -- a backend's sample can be checked against the interpreter's value under the
 -- same randomness, in the interpreter's evaluation order.
-generateReplay :: [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> ([Double], [Double]) -> [IRExpr] -> IRExpr -> Either String (IRValue, Int)
-generateReplay neurals' registry env (us0, ns0) params e =
-  (\(v, (n, _, _)) -> (v, n)) <$> runStateT (generate f neurals' registry adts' (globalEnvFrom startingEnv) [] params e) (0, us0, ns0)
+generateReplay :: NeuralOracle -> IREnv -> ([Double], [Double]) -> [IRExpr] -> IRExpr -> Either String (IRValue, Int)
+generateReplay oracle env (us0, ns0) params e =
+  (\(v, (n, _, _)) -> (v, n)) <$> runStateT (generate f oracle adts' (globalEnvFrom startingEnv) [] params e) (0, us0, ns0)
   where
     f :: RandomFunctions (StateT (Int, [Double], [Double]) (Either String)) a
     f = RandomFunctions {
@@ -181,74 +161,83 @@ generateReplay neurals' registry env (us0, ns0) params e =
           [] -> throwError "draw stream exhausted",
       failWith = throwError,
       raise = throwError}
-    startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
+    startingEnv = reduceIREnv env ++ standardEnv ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
-generateDet :: (HasCallStack) => [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
---generateDet neurals' registry env params e | traceShow e False = undefined
-generateDet neurals' registry env = generate f neurals' registry adts' (globalEnvFrom startingEnv) []
+generateDet :: NeuralOracle -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
+--generateDet oracle env params e | traceShow e False = undefined
+generateDet oracle env = generate f oracle adts' (globalEnvFrom startingEnv) []
   where
     f = RandomFunctions {
       uniformGen = Left "Uniform Gen is not det",
       normalGen = Left "Normal Gen is not det",
       failWith = Left,
       raise = Left}
-    startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
+    startingEnv = reduceIREnv env ++ standardEnv ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
-generate :: (Monad m, HasCallStack) => RandomFunctions m a -> [NeuralDecl] -> [(RType, MultiValue)] -> [ADTDecl ] -> GlobalEnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
---generate f neurals' registry adts' globalEnv env args expr | trace ((show expr) {-++ " " ++ show env-}) False = undefined
-generate f neurals' registry adts' globalEnv env args expr | args /= [] = do
+-- | No 'HasCallStack' here, deliberately. With it, every entry allocates one
+-- call-stack thunk per recursive call site up front, over 10 KB in all. A heap
+-- check that large exceeds a block, and when it fails the RTS extends the
+-- nursery instead of collecting. Entry to 'generate' is the interpreter's
+-- hottest allocation, so most nursery exhaustion happened there and garbage
+-- piled up uncollected: gigabytes in a second of corpus sampling, killed by
+-- the OOM killer. 'failWith' keeps its own 'HasCallStack', so a failure still
+-- names its site in 'generate'.
+generate :: Monad m => RandomFunctions m a -> NeuralOracle -> [IRADTDecl] -> GlobalEnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
+--generate f oracle adts' globalEnv env args expr | trace ((show expr) {-++ " " ++ show env-}) False = undefined
+generate f oracle adts' globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
   let newExpr = foldr (flip IRApply) expr reverseArgs
-  generate f neurals' registry adts' globalEnv env [] newExpr
-generate _ _ _ _ _ env [] (IRLambda name expr) = do
+  generate f oracle adts' globalEnv env [] newExpr
+generate _ _ _ _ env [] (IRLambda name expr) = do
   return $ VClosure env name expr
-generate f neurals' registry adts' globalEnv env [] (IRApply (IRVar name) sym)
-  | Just (rt, tags') <- lookupNeural name neurals' = do
-    let realRT = neuralOutputType name rt
-    let partPlan = makePartitionPlan adts' realRT (resolvePartitionAnnotation registry realRT tags')
-    symVal <- generate f neurals' registry adts' globalEnv env [] sym
-    return $ evaluateMockNNFor (neuralInputTypeOf name rt) partPlan symVal
-generate f neurals' registry adts' globalEnv env [] (IRApply expr val) = do
-  exprVal <- generate f neurals' registry adts' globalEnv env [] expr
-  valVal <- generate f neurals' registry adts' globalEnv env [] val
+-- A neural primitive ("SPLL.IR.Neural"): a name the oracle binds and no local
+-- binding shadows. It takes precedence over a top-level binding of that name.
+generate f oracle adts' globalEnv env [] (IRApply (IRVar name) sym)
+  | Just prim <- lookupNeuralPrimitive name oracle
+  , Nothing <- lookup name env = do
+    symVal <- generate f oracle adts' globalEnv env [] sym
+    return $ neuralEval prim symVal
+generate f oracle adts' globalEnv env [] (IRApply expr val) = do
+  exprVal <- generate f oracle adts' globalEnv env [] expr
+  valVal <- generate f oracle adts' globalEnv env [] val
   case exprVal of
     (VClosure closEnv name lambda) -> do
       let constClosEnv = (name, IRConst valVal):closEnv
-      generate f neurals' registry adts' globalEnv constClosEnv [] lambda
+      generate f oracle adts' globalEnv constClosEnv [] lambda
     _ -> failWith f ("Type error: Expression is not a closure: " ++ show exprVal)
-generate f neurals' registry adts' globalEnv env args (IRIf cond thenCase elseCase) = do
-  condVal <- generate f neurals' registry adts' globalEnv env args cond
+generate f oracle adts' globalEnv env args (IRIf cond thenCase elseCase) = do
+  condVal <- generate f oracle adts' globalEnv env args cond
   case condVal of
-    VBool True -> generate f neurals' registry adts' globalEnv env args thenCase
-    VBool False -> generate f neurals' registry adts' globalEnv env args elseCase
+    VBool True -> generate f oracle adts' globalEnv env args thenCase
+    VBool False -> generate f oracle adts' globalEnv env args elseCase
     _ -> failWith f $ "Type error: Condition is not a boolean: " ++ show condVal
 -- A select lowers to the lazy if under scalar interpretation (design
 -- pytorch-tensorizer, M1): only a batched backend distinguishes the two.
-generate f neurals' registry adts' globalEnv env args (IRSelect cond thenCase elseCase) =
-  generate f neurals' registry adts' globalEnv env args (IRIf cond thenCase elseCase)
-generate f neurals' registry adts' globalEnv env [] (IROp OpPlus a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env args (IRSelect cond thenCase elseCase) =
+  generate f oracle adts' globalEnv env args (IRIf cond thenCase elseCase)
+generate f oracle adts' globalEnv env [] (IROp OpPlus a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af + bf)
     (VInt af, VInt bf) -> return $ VInt (af + bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
     _ -> failWith f ("Type error: Plus can only add up numbers (of the same type): " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IROp OpMult a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpMult a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af * bf)
     (VInt af, VInt bf) -> return $ VInt (af * bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
     _ -> failWith f ("Type error: Mult can only multiply numbers (of the same type): " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IROp OpGreaterThan aOrig bOrig) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] aOrig
-  bVal <- generate f neurals' registry adts' globalEnv env [] bOrig
+generate f oracle adts' globalEnv env [] (IROp OpGreaterThan aOrig bOrig) = do
+  aVal <- generate f oracle adts' globalEnv env [] aOrig
+  bVal <- generate f oracle adts' globalEnv env [] bOrig
   VBool <$> gt aVal bVal
   -- Answers in the evaluation monad rather than in 'Bool' so its failures
   -- reach 'failWith' like every other program-level failure here.
@@ -261,9 +250,9 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpGreaterThan aOrig bO
           (VList EmptyList, VList EmptyList) -> return False
           (VList (ListCont aHead aTail), VList (ListCont bHead bTail)) -> (&&) <$> gt aHead bHead <*> gt (VList aTail) (VList bTail)
           _ -> failWith f ("Type error: greater than can only compare two numbers (of the same type): " ++ show (a, b))
-generate f neurals' registry adts' globalEnv env [] (IROp OpLessThan aOrig bOrig) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] aOrig
-  bVal <- generate f neurals' registry adts' globalEnv env [] bOrig
+generate f oracle adts' globalEnv env [] (IROp OpLessThan aOrig bOrig) = do
+  aVal <- generate f oracle adts' globalEnv env [] aOrig
+  bVal <- generate f oracle adts' globalEnv env [] bOrig
   VBool <$> lt aVal bVal
   where lt a b = case (a, b) of
           (VFloat af, VFloat bf) -> return (af < bf)
@@ -274,9 +263,9 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpLessThan aOrig bOrig
           (VList EmptyList, VList EmptyList) -> return False
           (VList (ListCont aHead aTail), VList (ListCont bHead bTail)) -> (&&) <$> lt aHead bHead <*> lt (VList aTail) (VList bTail)
           _ -> failWith f ("Type error: less than can only compare two numbers (of the same type): " ++ show (a, b))
-generate f neurals' registry adts' globalEnv env [] (IROp OpDiv a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpDiv a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af / bf)
     --(VAny, _) -> return VAny
@@ -286,53 +275,53 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpDiv a b) = do
 -- only ever emitted guarded by an applicability test asserting the modulo is
 -- zero first (see PredefinedFunctions.multIInv1/multIInv2), so the rounding
 -- direction never matters here.
-generate f neurals' registry adts' globalEnv env [] (IROp OpIntDiv a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpIntDiv a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VInt af, VInt bf) -> return $ VInt (af `div` bf)
     _ -> failWith f ("Type error: IntDiv can only divide two ints: " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IROp OpMod a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpMod a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VInt af, VInt bf) -> return $ VInt (af `mod` bf)
     _ -> failWith f ("Type error: Mod can only apply to two ints: " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IROp OpSub a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpSub a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af - bf)
     (VInt af, VInt bf) -> return $ VInt (af - bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
     _ -> failWith f ("Type error: Minus can only subtract two numbers (of the same type): " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IROp OpMax a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpMax a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (max af bf)
     (VInt af, VInt bf) -> return $ VInt (max af bf)
     _ -> failWith f ("Type error: Max can only compare two numbers (of the same type): " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IROp OpOr a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpOr a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VBool af, VBool bf) -> return $ VBool (af || bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
     _ -> failWith f ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IROp OpAnd a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpAnd a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VBool af, VBool bf) -> return $ VBool (af && bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
     _ -> failWith f ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IROp OpEq a b) = do
-  aVal' <- generate f neurals' registry adts' globalEnv env [] a
-  bVal' <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpEq a b) = do
+  aVal' <- generate f oracle adts' globalEnv env [] a
+  bVal' <- generate f oracle adts' globalEnv env [] b
   -- Answers in the evaluation monad rather than in 'Bool' so its fallthrough
   -- reaches 'failWith' like every other program-level failure here.
   let cmp aVal bVal = case (aVal, bVal) of
@@ -376,39 +365,39 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpEq a b) = do
         (_, VAny) -> return False
         _ -> failWith f ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
   VBool <$> cmp aVal' bVal'
-generate f neurals' registry adts' globalEnv env [] (IROp OpApprox a b) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
-  bVal <- generate f neurals' registry adts' globalEnv env [] b
+generate f oracle adts' globalEnv env [] (IROp OpApprox a b) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
+  bVal <- generate f oracle adts' globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VBool $ abs (af - bf) <= floatApproxEqThresh
     _ -> failWith f ("Type error: Approx can only evaluate on two floats: " ++ show (aVal, bVal))
-generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpNot a) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRUnaryOp OpNot a) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
   case aVal of
     VBool af -> return $ VBool (not af)
     --VAny -> return VAny
     _ -> failWith f "Type error: Not can only evaluate on a Bool"
-generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpExp a) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRUnaryOp OpExp a) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat $ exp af
     --VAny -> return VAny
     _ -> failWith f "Type error: Exp can only evaluate on a floating point numbers"
-generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpLog a) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRUnaryOp OpLog a) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat $ log af
     --VAny -> return VAny
     _ -> failWith f "Type error: Log can only evaluate on a floating point numbers"
-generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpNeg a) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRUnaryOp OpNeg a) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat (-af)
     VInt af -> return $ VInt (-af)
     --VAny -> return VAny
     _ -> failWith f "Type error: Neg can only evaluate on a number"
-generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpSign a) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRUnaryOp OpSign a) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
   case aVal of
     VFloat af | af < 0 -> return $ VFloat (-1)
     VFloat af | af == 0 -> return $ VFloat (0)
@@ -418,15 +407,15 @@ generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpSign a) = do
     VInt af | af > 0 -> return $ VInt (1)
     --VAny -> return VAny
     _ -> failWith f "Type error: Neg can only evaluate on a number"
-generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpAbs a) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRUnaryOp OpAbs a) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat (abs af)
     VInt af -> return $ VInt (abs af)
     --VAny -> return VAny
     _ -> failWith f "Type error: Abs can only evaluate on a number"
-generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpIsAny a) = do
-  aVal <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRUnaryOp OpIsAny a) = do
+  aVal <- generate f oracle adts' globalEnv env [] a
   case aVal of
     VAny -> return $ VBool True
     -- The list-shaped hole is an any-value too. Julia's and Python's isAny
@@ -436,159 +425,152 @@ generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpIsAny a) = do
     -- back a scalar VAny for a ListCont _ AnyList.
     VList AnyList -> return $ VBool True
     _ -> return $ VBool False
-generate f neurals' registry adts' globalEnv env [] (IRDestruct (AcTheta i) a) = do
-  tt <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRDestruct (AcTheta i) a) = do
+  tt <- generate f oracle adts' globalEnv env [] a
   let ThetaTree thetas _ = asThetaTree tt
   return $ VFloat (thetas!!i)
-generate f neurals' registry adts' globalEnv env [] (IRDestruct (AcSubtree i) a) = do
-  tt <- generate f neurals' registry adts' globalEnv env [] a
+generate f oracle adts' globalEnv env [] (IRDestruct (AcSubtree i) a) = do
+  tt <- generate f oracle adts' globalEnv env [] a
   let ThetaTree _ subtrees = asThetaTree tt
   return $ VThetaTree (subtrees!!i)
-generate _ _ _ _ _ _ [] (IRConst val) = return val
+generate _ _ _ _ _ [] (IRConst val) = return val
 -- The constructor/accessor family (design ir-reengineering), dispatching on
 -- 'ConTag'/'Accessor' -- same value semantics, same 'VClosure' push-through
 -- for the tuple projections.
-generate f neurals' registry adts' globalEnv env [] (IRConstruct TgTuple [fstExpr, sndExpr]) = do
-  fstVal <- generate f neurals' registry adts' globalEnv env [] fstExpr
-  sndVal <- generate f neurals' registry adts' globalEnv env [] sndExpr
+generate f oracle adts' globalEnv env [] (IRConstruct TgTuple [fstExpr, sndExpr]) = do
+  fstVal <- generate f oracle adts' globalEnv env [] fstExpr
+  sndVal <- generate f oracle adts' globalEnv env [] sndExpr
   return $ VTuple fstVal sndVal
-generate f neurals' registry adts' globalEnv env [] (IRConstruct TgCons [hd, tl]) = do
-  ls <- generate f neurals' registry adts' globalEnv env [] tl
+generate f oracle adts' globalEnv env [] (IRConstruct TgCons [hd, tl]) = do
+  ls <- generate f oracle adts' globalEnv env [] tl
   case ls of
     VList xs -> do
-      x <- generate f neurals' registry adts' globalEnv env [] hd
+      x <- generate f oracle adts' globalEnv env [] hd
       return $ VList $ ListCont x xs
     VAny -> do
-      x <- generate f neurals' registry adts' globalEnv env [] hd
+      x <- generate f oracle adts' globalEnv env [] hd
       return $ VList $ ListCont x AnyList
     _ -> failWith f "Type error: Tail of cons is not a list"
-generate f neurals' registry adts' globalEnv env [] (IRConstruct TgLeft [expr]) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRConstruct TgLeft [expr]) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ VEither (Left x)
-generate f neurals' registry adts' globalEnv env [] (IRConstruct TgRight [expr]) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRConstruct TgRight [expr]) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ VEither (Right x)
-generate f neurals' registry adts' globalEnv env args (IRDestruct AcFst expr) = do
-  val <- generate f neurals' registry adts' globalEnv env args expr
+generate f oracle adts' globalEnv env args (IRDestruct AcFst expr) = do
+  val <- generate f oracle adts' globalEnv env args expr
   case val of
     VTuple first _ -> return first
     VClosure cEnv n cExpr -> return $ VClosure cEnv n (IRDestruct AcFst cExpr)
     _ -> failWith f ("Type error: Expression of Fst is not a tuple: " ++ show val)
-generate f neurals' registry adts' globalEnv env args (IRDestruct AcSnd expr) = do
-  val <- generate f neurals' registry adts' globalEnv env args expr
+generate f oracle adts' globalEnv env args (IRDestruct AcSnd expr) = do
+  val <- generate f oracle adts' globalEnv env args expr
   case val of
     VTuple _ second -> return second
     VClosure cEnv n cExpr -> return $ VClosure cEnv n (IRDestruct AcSnd cExpr)
     _ -> failWith f ("Type error: Expression of Snd is not a tuple: " ++ show val)
-generate f neurals' registry adts' globalEnv env args (IRDestruct AcHead listExpr) = do
-  listVal <- generate f neurals' registry adts' globalEnv env args listExpr
+generate f oracle adts' globalEnv env args (IRDestruct AcHead listExpr) = do
+  listVal <- generate f oracle adts' globalEnv env args listExpr
   case listVal of
     VList (ListCont a _) -> return a
     VList EmptyList -> raise f "head of an empty list"
     _ -> failWith f ("Type error: head must be called on a list: " ++ show listVal)
-generate f neurals' registry adts' globalEnv env args (IRDestruct AcTail listExpr) = do
-  listVal <- generate f neurals' registry adts' globalEnv env args listExpr
+generate f oracle adts' globalEnv env args (IRDestruct AcTail listExpr) = do
+  listVal <- generate f oracle adts' globalEnv env args listExpr
   case listVal of
     VList (ListCont _ AnyList) -> return VAny
     VList (ListCont _ a) -> return $ VList a
     VList EmptyList -> raise f "tail of an empty list"
     _ -> failWith f ("Type error: tail must be called on a list: " ++ show listVal)
-generate f neurals' registry adts' globalEnv env args (IRBuiltin BMapList [fExpr, listExpr]) = do
-  listVal <- generate f neurals' registry adts' globalEnv env args listExpr
+generate f oracle adts' globalEnv env args (IRBuiltin BMapList [fExpr, listExpr]) = do
+  listVal <- generate f oracle adts' globalEnv env args listExpr
   case listVal of
     VList lst -> do
-      newLst <- mapM (\x -> generate f neurals' registry adts' globalEnv env args (IRApply fExpr (IRConst x))) lst
+      newLst <- mapM (\x -> generate f oracle adts' globalEnv env args (IRApply fExpr (IRConst x))) lst
       return $ VList newLst
     _ ->  failWith f "Type error: map must be called on a list"
-generate f neurals' registry adts' globalEnv env [] (IRDestruct AcFromLeft expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRDestruct AcFromLeft expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   case x of
     VEither (Left l) -> return l
     VEither (Right _) -> raise f "fromLeft of a Right"
     _ -> failWith f $ "Type error: fromLeft requires an Either: " ++ show x
-generate f neurals' registry adts' globalEnv env [] (IRDestruct AcFromRight expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRDestruct AcFromRight expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   case x of
     VEither (Right r) -> return r
     VEither (Left _) -> raise f "fromRight of a Left"
     _ -> failWith f $ "Type error: fromRight requires an Either: " ++ show x
-generate f neurals' registry adts' globalEnv env [] (IRDestruct AcIsLeft expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRDestruct AcIsLeft expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   case x of
     VEither (Left _) -> return (VBool True)
     VEither (Right _) -> return (VBool False)
     _ -> failWith f $ "Type error: isLeft requires an either: " ++ show x
-generate f neurals' registry adts' globalEnv env [] (IRDestruct AcIsRight expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRDestruct AcIsRight expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   case x of
     VEither (Left _) -> return (VBool False)
     VEither (Right _) -> return (VBool True)
     _ -> failWith f $ "Type error: isLeft requires an either: " ++ show x
-generate f neurals' registry adts' globalEnv env [] (IRConformsTo t expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRConformsTo t expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ VBool (valueConformsTo t x)
-generate f neurals' registry adts' globalEnv env [] (IRDensity IRUniform Linear expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRDensity IRUniform Linear expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ irPDF IRUniform x
-generate f neurals' registry adts' globalEnv env [] (IRDensity IRNormal Linear expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRDensity IRNormal Linear expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ irPDF IRNormal x
-generate f neurals' registry adts' globalEnv env [] (IRCumulative IRUniform Linear expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRCumulative IRUniform Linear expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ irCDF IRUniform x
-generate f neurals' registry adts' globalEnv env [] (IRCumulative IRNormal Linear expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRCumulative IRNormal Linear expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ irCDF IRNormal x
-generate f neurals' registry adts' globalEnv env [] (IRDensity dist Log expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRDensity dist Log expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ irLogPDF dist x
-generate f neurals' registry adts' globalEnv env [] (IRCumulative dist Log expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
+generate f oracle adts' globalEnv env [] (IRCumulative dist Log expr) = do
+  x <- generate f oracle adts' globalEnv env [] expr
   return $ irLogCDF dist x
-generate f _ _ _ _ _ [] (IRSample IRUniform) =
+generate f _ _ _ _ [] (IRSample IRUniform) =
   uniformGen f
-generate f _ _ _ _ _ [] (IRSample IRNormal) =
+generate f _ _ _ _ [] (IRSample IRNormal) =
   normalGen f
 -- Let in evaluates the declaration expression to avoid sampling the same term multiple times
-generate f neurals' registry adts' globalEnv env args (IRLetIn name decl body) = do
-  declVal <- generate f neurals' registry adts' globalEnv env args decl
+generate f oracle adts' globalEnv env args (IRLetIn name decl body) = do
+  declVal <- generate f oracle adts' globalEnv env args decl
   let extendedEnv = (name, IRConst declVal):env
-  generate f neurals' registry adts' globalEnv extendedEnv args body
--- In case somebody decides to invoke neurals with IRVar
-generate f neurals' registry adts' globalEnv env args (IRVar name) | "_mock" `isSuffixOf` name && isJust (lookupNeural (iterate init name !! 5) neurals') = do
-  let (rt, tags') = fromJust (lookupNeural (iterate init name !! 5) neurals')
-  let partPlan = makePartitionPlan adts' (neuralOutputType name rt) tags'
-  case lookupVar symbolEnvName globalEnv env of
-    Nothing -> failWith f "No symbol found in the environment"
-    Just sym -> do
-      symVal <- generate f neurals' registry adts' globalEnv env args sym
-      return $ evaluateMockNNFor (neuralInputTypeOf name rt) partPlan symVal
+  generate f oracle adts' globalEnv extendedEnv args body
+-- A neural primitive used as a function value: a closure that applies it.
+generate _ oracle _ _ env _ (IRVar name)
+  | Just _ <- lookupNeuralPrimitive name oracle
+  , Nothing <- lookup name env =
+    return $ VClosure [] neuralArg (IRApply (IRVar name) (IRVar neuralArg))
+  where neuralArg = name ++ " input"
 -- To jump out of the interpreter into the implicit functions implemented in haskell we need to acuire the values of the parameter.
 -- This is not possible in normal program flow, because the parameters are applied to the functions before the IRVar call.
 -- To solve this we have created an artificial entry in the env table with the original name (E.g. Test) that points to a fresh name (E.g. Test_adt)
 -- which is a lambda with a known bound variable. We can now find this variable in the env and have the value of our parameter
-generate f neurals' registry adts' globalEnv env args (IRVar name) | "_adt" `isSuffixOf` name && (iterate init name !! 4) `elem` implicitFunctionNames adts' = do
+generate f oracle adts' globalEnv env args (IRVar name) | "_adt" `isSuffixOf` name && (iterate init name !! 4) `elem` implicitFunctionNames adts' = do
   let realName = iterate init name !! 4
-  let rt = lookupRType realName adts'
-  let lookupParams = sequence [lookupVar ("x" ++ show x) globalEnv env | x <- [0 :: Int .. arity rt - 1]]
+  let lookupParams = sequence [lookupVar ("x" ++ show x) globalEnv env | x <- [0 :: Int .. implicitFunctionArity adts' realName - 1]]
   case lookupParams of
     Nothing -> failWith f ("No parameter found for " ++ name ++ " in environment")
     Just val -> do
-      paramVal <- mapM (generate f neurals' registry adts' globalEnv env args) val
+      paramVal <- mapM (generate f oracle adts' globalEnv env args) val
       return $ implicitFunctionImpl adts' realName paramVal
-  where
-    arity (_ `TArrow` rt) = arity rt + 1
-    arity _ = 0
-generate f neurals' registry adts' globalEnv env args (IRVar name) =
+generate f oracle adts' globalEnv env args (IRVar name) =
   case lookupVar name globalEnv env of
-    Just expr -> generate f neurals' registry adts' globalEnv env args expr
+    Just expr -> generate f oracle adts' globalEnv env args expr
     Nothing -> failWith f ("Variable " ++ name ++ " not declared")
-generate f neurals' registry adts' globalEnv env [] (IRIsPossible multiVal expr) = do
-  val <- generate f neurals' registry adts' globalEnv env [] expr
-  return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))
-generate f neurals' registry adts' globalEnv env args (IRBuiltin BListIndex [lstExpr, idxExpr]) = do
-  lst <- generate f neurals' registry adts' globalEnv env args lstExpr
-  idx <- generate f neurals' registry adts' globalEnv env args idxExpr
+generate f oracle adts' globalEnv env [] (IRIsPossible multiVal expr) = do
+  val <- generate f oracle adts' globalEnv env [] expr
+  return $ VBool (valueInMultiValue multiVal val)
+generate f oracle adts' globalEnv env args (IRBuiltin BListIndex [lstExpr, idxExpr]) = do
+  lst <- generate f oracle adts' globalEnv env args lstExpr
+  idx <- generate f oracle adts' globalEnv env args idxExpr
   case lst of
     VList l -> case idx of
       VInt i -> return $ l `elementAt` i
@@ -600,36 +582,36 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin BListIndex [lst
 -- indexing along an arbitrary axis is stride arithmetic rather than new
 -- machinery. The backends emit rank 1 only; these cases are what pin the
 -- layout convention the rest of the compiler is written against.
-generate f neurals' registry adts' globalEnv env args (IRBuiltin (BTensor sh) elems) = do
-  vals <- mapM (generate f neurals' registry adts' globalEnv env args) elems
+generate f oracle adts' globalEnv env args (IRBuiltin (BTensor sh) elems) = do
+  vals <- mapM (generate f oracle adts' globalEnv env args) elems
   if length vals == shapeNumel sh
     then return $ VTensor sh vals
     else failWith f ("BTensor: shape " ++ show sh ++ " needs " ++ show (shapeNumel sh)
                 ++ " elements, got " ++ show (length vals))
 -- The flat row-major position of every element, as an integer.
-generate _ _ _ _ _ _ _ (IRBuiltin (BIota sh) []) =
+generate _ _ _ _ _ _ (IRBuiltin (BIota sh) []) =
   return $ VTensor sh (map VInt [0 .. shapeNumel sh - 1])
-generate f neurals' registry adts' globalEnv env args (IRBuiltin BMap [fExpr, tExpr]) = do
-  tVal <- generate f neurals' registry adts' globalEnv env args tExpr
+generate f oracle adts' globalEnv env args (IRBuiltin BMap [fExpr, tExpr]) = do
+  tVal <- generate f oracle adts' globalEnv env args tExpr
   case tVal of
     VTensor sh xs -> do
-      ys <- mapM (\x -> generate f neurals' registry adts' globalEnv env args (IRApply fExpr (IRConst x))) xs
+      ys <- mapM (\x -> generate f oracle adts' globalEnv env args (IRApply fExpr (IRConst x))) xs
       return $ VTensor sh ys
     _ -> failWith f ("BMap: not a tensor: " ++ show tVal)
 -- Reduction folds right within each fibre, matching the association order the
 -- retired enum-sum family used (foldrM over the same domain), so the terms of
 -- an enumeration are reduced in the same order they always were.
-generate f neurals' registry adts' globalEnv env args (IRBuiltin (BReduce op ax) [tExpr]) = do
-  tVal <- generate f neurals' registry adts' globalEnv env args tExpr
+generate f oracle adts' globalEnv env args (IRBuiltin (BReduce op ax) [tExpr]) = do
+  tVal <- generate f oracle adts' globalEnv env args tExpr
   case tVal of
     VTensor sh xs -> case fibres ax sh xs of
       Nothing -> failWith f ("BReduce: axis " ++ show ax ++ " out of range for shape " ++ show sh)
       Just (sh', groups) ->
         return $ rewrap sh' (map (foldr (reduceStep op) (reduceIdentity op)) groups)
     _ -> failWith f ("BReduce: not a tensor: " ++ show tVal)
-generate f neurals' registry adts' globalEnv env args (IRBuiltin (BIndex ax) [tExpr, keyExpr]) = do
-  tVal <- generate f neurals' registry adts' globalEnv env args tExpr
-  keyVal <- generate f neurals' registry adts' globalEnv env args keyExpr
+generate f oracle adts' globalEnv env args (IRBuiltin (BIndex ax) [tExpr, keyExpr]) = do
+  tVal <- generate f oracle adts' globalEnv env args tExpr
+  keyVal <- generate f oracle adts' globalEnv env args keyExpr
   case (tVal, keyVal) of
     (VTensor sh xs, VInt i) -> case fibres ax sh xs of
       Nothing -> failWith f ("BIndex: axis " ++ show ax ++ " out of range for shape " ++ show sh)
@@ -653,13 +635,13 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin (BIndex ax) [tE
 -- The shape check is an equality, not a broadcast: 'BZip' deliberately does
 -- not broadcast (see the soundness note on 'Builtin'), so unequal shapes are
 -- a compiler bug and fail loudly.
-generate f neurals' registry adts' globalEnv env args (IRBuiltin (BZip op) [aExpr, bExpr]) = do
-  aVal <- generate f neurals' registry adts' globalEnv env args aExpr
-  bVal <- generate f neurals' registry adts' globalEnv env args bExpr
+generate f oracle adts' globalEnv env args (IRBuiltin (BZip op) [aExpr, bExpr]) = do
+  aVal <- generate f oracle adts' globalEnv env args aExpr
+  bVal <- generate f oracle adts' globalEnv env args bExpr
   case (aVal, bVal) of
     (VTensor shA xs, VTensor shB ys)
       | shA == shB -> do
-          zs <- zipWithM (\x y -> generate f neurals' registry adts' globalEnv env args
+          zs <- zipWithM (\x y -> generate f oracle adts' globalEnv env args
                                     (IROp op (IRConst x) (IRConst y))) xs ys
           return $ VTensor shA zs
       | otherwise -> failWith f ("BZip " ++ show op ++ ": shape mismatch, "
@@ -670,9 +652,9 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin (BZip op) [aExp
 -- the contract is on 'BCategoricalIndex'. The weight vector is whatever
 -- 'BListIndex' reads a logit slot out of -- a cons list here -- or a rank-1
 -- tensor.
-generate f neurals' registry adts' globalEnv env args (IRBuiltin (BCategoricalIndex start n) [uExpr, wExpr]) = do
-  uVal <- generate f neurals' registry adts' globalEnv env args uExpr
-  wVal <- generate f neurals' registry adts' globalEnv env args wExpr
+generate f oracle adts' globalEnv env args (IRBuiltin (BCategoricalIndex start n) [uExpr, wExpr]) = do
+  uVal <- generate f oracle adts' globalEnv env args uExpr
+  wVal <- generate f oracle adts' globalEnv env args wExpr
   u <- case uVal of
     VFloat x -> return x
     other -> failWith f ("BCategoricalIndex: uniform draw is not a float: " ++ show other)
@@ -690,7 +672,7 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin (BCategoricalIn
       let target = u * sum ws
           below = length (takeWhile (<= target) (scanl1 (+) ws))
       return (VInt (min (n - 1) below))
-generate f _ _ _ _ _ _ e@(IRBuiltin b args) =
+generate f _ _ _ _ _ e@(IRBuiltin b args) =
   failWith f ("Malformed tensor builtin" ++ show b ++ " with " ++ show (length args)
          ++ " arguments: " ++ show e)
 -- 'IRError' is deliberately left throwing. It is not a compiler-internal
@@ -703,8 +685,8 @@ generate f _ _ _ _ _ _ e@(IRBuiltin b args) =
 -- TestInternals/TestRejection exist to keep. Out of scope for task
 -- compiler-throws-instead-of-returning-left, which is about compile-time
 -- paths.
-generate _ _ _ _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
-generate f _ _ _ _ _ _ expr = failWith f ("Expression is not yet implemented " ++ show expr)
+generate _ _ _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
+generate f _ _ _ _ _ expr = failWith f ("Expression is not yet implemented " ++ show expr)
 
 
 -- | Regroup a flat row-major block into the fibres along one axis: every group
@@ -792,32 +774,28 @@ irLogCDF _ x = error ("Expression must be the log-cumulative of a valid distribu
 -- permissive for types that carry no meaningful runtime tag (type variables,
 -- functions, unset) and for marginal-query wildcards (VAny/VAnyExcept), so the
 -- guard only ever fires on an unambiguous mismatch.
-valueConformsTo :: RType -> GenericValue a -> Bool
+valueConformsTo :: IRType -> GenericValue a -> Bool
 valueConformsTo _ VAny             = True
 valueConformsTo _ (VAnyExcept _)   = True
 valueConformsTo _ (VError _)       = True
-valueConformsTo TBool      (VBool _)   = True
-valueConformsTo TInt       (VInt _)    = True
-valueConformsTo TSymbol    (VSymbol _) = True
-valueConformsTo TFloat     (VFloat _)  = True
-valueConformsTo TUnit      VUnit       = True
-valueConformsTo TThetaTree (VThetaTree _) = True
-valueConformsTo (ListOf t)   (VList xs)        = all (valueConformsTo t) (listToValues xs)
-valueConformsTo (Tuple a b)  (VTuple x y)      = valueConformsTo a x && valueConformsTo b y
-valueConformsTo (TEither a _) (VEither (Left x))  = valueConformsTo a x
-valueConformsTo (TEither _ b) (VEither (Right y)) = valueConformsTo b y
+valueConformsTo ITBool      (VBool _)   = True
+valueConformsTo ITInt       (VInt _)    = True
+valueConformsTo ITSymbol    (VSymbol _) = True
+valueConformsTo ITFloat     (VFloat _)  = True
+valueConformsTo ITUnit      VUnit       = True
+valueConformsTo ITThetaTree (VThetaTree _) = True
+valueConformsTo (ITList t)   (VList xs)        = all (valueConformsTo t) (listToValues xs)
+valueConformsTo (ITTuple a b)  (VTuple x y)      = valueConformsTo a x && valueConformsTo b y
+valueConformsTo (ITEither a _) (VEither (Left x))  = valueConformsTo a x
+valueConformsTo (ITEither _ b) (VEither (Right y)) = valueConformsTo b y
 -- A tensor conforms only at its exact shape, element by element: a wrongly
 -- shaped query is refused rather than answered (design tensors-in-core-language
 -- §2.2, item 2).
-valueConformsTo (TTensor sh t) (VTensor sh' xs) = sh == sh' && length xs == shapeNumel sh && all (valueConformsTo t) xs
-valueConformsTo (TADT _)     (VADT _ _)        = True
+valueConformsTo (ITTensor sh t) (VTensor sh' xs) = sh == sh' && length xs == shapeNumel sh && all (valueConformsTo t) xs
+valueConformsTo (ITADT _)     (VADT _ _)        = True
 -- Types with no checkable runtime tag: never reject.
-valueConformsTo (TVarR _)       _ = True
-valueConformsTo (TArrow _ _)    _ = True
-valueConformsTo (GreaterType _ _) _ = True
-valueConformsTo BottomTuple     _ = True
-valueConformsTo NullList        _ = True
-valueConformsTo NotSetYet       _ = True
+valueConformsTo (ITVar _)       _ = True
+valueConformsTo (ITArrow _ _)   _ = True
 -- Any remaining concrete-type / value pairing is a genuine mismatch.
 valueConformsTo _ _ = False
 

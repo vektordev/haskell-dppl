@@ -18,19 +18,21 @@ module TestRejection (rejectionTests) where
 
 import Data.Char (isUpper)
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), GenericList(..), MultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), GenericList(..), GenericMultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
 import SPLL.Typing.RType (RType(..), Extent(..))
 import Control.Monad.Random (evalRand, mkStdGen)
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, runGen, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (CompilerConfig(..), defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
+import SPLL.IntermediateRepresentation (firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
+import SPLL.CompilerConfig (CompilerConfig(..), defaultCompilerConfig)
 import SPLL.IRCompiler (requireNoGenerateBacked, symbolCdfMessage)
 import TestSupport (expectVariantRefused)
 import Data.Maybe (isJust, isNothing)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
-import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage, accessorMismatchMessage)
+import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage)
+import SPLL.Typing.AlgebraicDataTypes (adtCdfMessage)
 import qualified SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorch (pyMangle, pythonKeywords)
 import SPLL.CodeGenJulia (juliaMangle, juliaKeywords)

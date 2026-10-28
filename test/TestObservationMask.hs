@@ -17,6 +17,7 @@ import SPLL.ObservationMask
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import TestCaseParser (corpusPplPath)

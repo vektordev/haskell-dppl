@@ -239,7 +239,20 @@ rewriteApply decls env ti l v = case node l of
   Lambda x lambdaBody ->
     let v' = rewrite decls env v
         bodyEnv = (x, v') : dropBinder x env
-    in Expr ti (Apply (Expr (ann l) (Lambda x (rewrite decls bodyEnv lambdaBody))) v')
+        body' = rewrite decls bodyEnv lambdaBody
+    in case node v' of
+         -- A redex that binds a bare variable and drops it is its body: the
+         -- argument is a name, so nothing is drawn or duplicated by dropping
+         -- it. Left as it was, the occurrence of the name in the argument made
+         -- IRCompiler's Bottom-argument arm refuse a callee that never reads it
+         -- (task admitted-callee-ignores-bottom-argument).
+         Var _ | not (x `Set.member` freeVarsExpr body') -> body'
+         -- A literal likewise: it draws nothing, so dropping it changes no
+         -- distribution. Left as it was, @snd ((\\h -> (a, Normal)) False)@
+         -- kept a redex toIRNormalParams cannot see through (task
+         -- snd-out-of-lambda-redex-normal-params).
+         Constant _ | not (x `Set.member` freeVarsExpr body') -> body'
+         _ -> Expr ti (Apply (Expr (ann l) (Lambda x body')) v')
   -- An `if` choosing between function values: push the application into both
   -- arms. Re-walked, so a nested selection (`(if a then (if b then f else g)
   -- else h) x`) collapses in the same pass.

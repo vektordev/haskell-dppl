@@ -36,7 +36,8 @@ import Text.Megaparsec (ParseErrorBundle, errorBundlePretty)
 import SPLL.Lang.Types
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, runGenC, runProbC, runIntegC, runProbNamedC, runIntegNamedC)
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, IREnv, IRValue, pattern VProbDim)
+import SPLL.IntermediateRepresentation (IREnv, IRValue, pattern VProbDim)
+import SPLL.CompilerConfig (defaultCompilerConfig)
 import TestCaseParser (TestCase(..), expectationProb, parseTestCasesFromString,
                        FreezeCase(..), FreezeMode(..), parseFreezeCasesFromString)
 import TestTolerances (probTolerance)

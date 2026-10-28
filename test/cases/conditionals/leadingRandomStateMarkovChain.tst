@@ -1,5 +1,6 @@
 -- decreasingRecursionMarkovChain with the random state as the LEADING
--- argument of the self-call: enumerated like a last argument
+-- argument of the self-call: enumerated like a last argument where the binding
+-- engines refuse
 -- (leadingEnumerableArgument, docs task
 -- random-leading-argument-into-recursion-refused), so the answer does not
 -- depend on parameter order. State distribution after three transitions from

@@ -110,11 +110,14 @@ import SPLL.ReservedNames (topKCutoffName, accProbInitName)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo(..), ADTDecl, FnDecl, spanPretty)
 import SPLL.Typing.PType (PType(..))
+import qualified SPLL.Typing.RType as R
 import SPLL.ObservationMask
 import SPLL.MaskVariants
 import SPLL.AutoNeural (validateWriteLogitsGaussian, topLevelWriteLogitsPlan, fitPlanToSupport)
 import SPLL.CompileWarnings
 import SPLL.IntermediateRepresentation
+import SPLL.OptimizerProjection (optimizerConfig)
+import SPLL.CompilerConfig
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo, addModalityLaws)
 import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..), renderJustification, engineName)
@@ -125,6 +128,7 @@ import SPLL.CalleeNormalize (normalizeCallees, etaExpandArrowResults)
 import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.PerValue (validateSignatures, expandPerValue, perValuePlans, checkSignatureTypes, dropSlotProbes, installPerValue)
 import IRInterpreter (generateRand, generateDet, generateRandE)
+import MockNN (programMockOracle)
 import Control.Monad.Random (Rand, RandomGen, evalRand)
 import System.Random (mkStdGen)
 import SPLL.IRCompiler
@@ -500,7 +504,7 @@ frontEndS conf p0 = do
   -- `main x = (if ..) x` a user would write, then normalised and inferred
   -- again (task arrow-result-main-entry-points). Type-directed, so it needs
   -- the first inference's arities; see 'etaExpandArrowResults'.
-  rtyped <- case etaExpandArrowResults rtyped0 normalized of
+  rtyped <- case etaExpandArrowResults rtyped0 (untypedOf rtyped0) of
     Nothing -> return rtyped0
     Just expanded -> do
       let renormalized = fromMaybe expanded (normalizeCallees expanded)
@@ -553,7 +557,7 @@ compileRTypedS conf rtypedWithSigs = do
   let selected = if batched conf then selectPassEnv stripped else stripped
   stageIR conf "After Select Pass" selected
 
-  let optimized = optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
+  let optimized = optimizeEnvWith (optimizerConfig conf) (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
       -- Batched only: a one-hot sum reading a logit tensor at a contiguous
       -- key range becomes one guarded gather (task
       -- batched-mask-variant-neural-read-nests-v-deep). After the optimizer,
@@ -777,7 +781,7 @@ runProbC p compiled = runProbNamedC p compiled "main"
 runGenNamedC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g IRValue
 runGenNamedC p compiled name args =
   case genFun (lookupIREnv name compiled) of
-    Just (gen, _) -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) gen
+    Just (gen, _) -> generateRand (programMockOracle p) compiled (map IRConst args) gen
     -- Unlike the prob/integ runners there is no error channel in the return
     -- type to report this through.
     Nothing -> error (missingVariant "generate" "gen" (lookupIREnv name compiled))
@@ -786,7 +790,7 @@ runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either Co
 runProbNamedC p compiled name args x =
   case probFun (lookupIREnv name compiled) of
     Nothing -> Left (missingVariant "probability" "prob" (lookupIREnv name compiled))
-    Just (prob, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst args') prob
+    Just (prob, _) -> generateDet (programMockOracle p) compiled (map IRConst args') prob
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with the semiring's multiplicative
       -- identity at the query root -- linear 1.0, or log-space 0.0. Hardcoding
@@ -836,7 +840,7 @@ runIntegNamedC p compiled name args sample =
   case integFun (lookupIREnv name compiled) of
     -- A topK-compiled integrate function takes the runtime cutoff right
     -- after the sample (no acc_prob: its root seeds its own).
-    Just (integ, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sample : maybeToList (topKCutoff compiled) ++ args)) integ
+    Just (integ, _) -> generateDet (programMockOracle p) compiled (map IRConst (sample : maybeToList (topKCutoff compiled) ++ args)) integ
     Nothing -> Left (missingVariant "integrate" "integ" (lookupIREnv name compiled))
 
 -- | Modality inference decides per definition which of the three variants are
@@ -877,7 +881,7 @@ runWriteLogitsRandC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] 
 runWriteLogitsRandC p compiled target outerArgs =
   case validateWriteLogitsGaussian (adts p) (writeLogitsDecls p) (neurals p) compiled >> findEnc of
     Left err  -> return (Left err)
-    Right enc -> generateRandE (neurals p) (writeLogitsDecls p) compiled (map IRConst outerArgs) enc
+    Right enc -> generateRandE (programMockOracle p) compiled (map IRConst outerArgs) enc
   where
     IREnv groups _ _ = compiled
     findEnc = case find ((== target) . groupName) groups of
@@ -991,9 +995,16 @@ normalizeAndInfer :: Program -> Either CompilerError Program
 normalizeAndInfer p = do
   let normalized = fromMaybe p (normalizeCallees p)
   rtyped <- addRTypeInfo normalized
-  case etaExpandArrowResults rtyped normalized of
+  case etaExpandArrowResults rtyped (untypedOf rtyped) of
     Nothing -> return rtyped
     Just expanded -> addRTypeInfo (fromMaybe expanded (normalizeCallees expanded))
+
+-- | A typed program with its 'rType's cleared, for a rewrite that is
+-- inferred again. Not the program inference was given: RInfer clones a
+-- declaration used at several types ('SPLL.Typing.Monomorphize'), so only the
+-- typed program has the declarations whose types are read.
+untypedOf :: Program -> Program
+untypedOf p = p { functions = [ (n, tMap (\x -> (getTypeInfo x) { rType = R.NotSetYet }) e) | (n, e) <- functions p ] }
 
 -- | Enum annotation plus chain naming. The analysis needs chain names because
 -- latent identity is keyed by them.

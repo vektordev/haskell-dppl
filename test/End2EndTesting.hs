@@ -26,6 +26,7 @@ import SPLL.Parser (tryParseProgram)
 import TestCaseParser
 import TestTolerances (probTolerance, writeLogitsSlotTolerance, normalizationTolerance, samplingTolerance)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Typing.RType
 import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, topLevelWriteLogitsPlan, PartitionPlan, getSize, InputSlot(..), inputSlots, inputWidth)
 import SPLL.Typing.Infer (addTypeInfo)
@@ -40,7 +41,7 @@ import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.QSem (newQSem, waitQSem, signalQSem)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
-import MockNN (evaluateMockNN, mockInputFor, MockSlot(..), planAwareMockSlots, planHasTensor)
+import MockNN (evaluateMockNN, programMockOracle, mockInputFor, MockSlot(..), planAwareMockSlots, planHasTensor)
 import ImpactManifest
 import CorpusSweep
 import TestDuplicationCensus (duplicationCensusSweep)
@@ -184,8 +185,8 @@ budgetZeroKnownDivergent = []
 budgetZeroKnownDivergentRows :: [(String, IRValue)]
 budgetZeroKnownDivergentRows =
   -- The default compile reports the `Right` rows' density at dim 0 where
-  -- budget 0 says dim 1 (task enumerated-sum-over-density-body: the default's
-  -- enumerated sum reports a mass). The letfree `Right ANY` also differs in
+  -- budget 0 says dim 1 (task enumerated-weight-density-reported-as-mass: the
+  -- default's enumerated sum drops the dim of each value's weight). The letfree `Right ANY` also differs in
   -- value: budget 0 answers impossible, because the letfree CDF of
   -- `if Normal == 0.5 then 1 else 2` at 1 is a possible zero mass at dim 0
   -- rather than the density (task letfree-cdf-density-atom-reports-zero-mass).
@@ -543,12 +544,12 @@ normalizationResults p compiled = case (genFun (lookupIREnv "main" compiled), pr
     -- neural outputs, which currently yields Bottom and emits no main_prob.
     (Just (genExpr, _), Just (probExpr, _)) -> do
       let (params, randomParamsForSamples) = normalizationDraws p
-          gens = map (\args -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
+          gens = map (\args -> generateRand (programMockOracle p) compiled (map IRConst args) genExpr) randomParamsForSamples
           pSamples = evalRand (sequence gens) (mkStdGen 42)
           uniqueSamples = nub pSamples
           counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
       -- The per-sample prob queries are independent and pure; force them in parallel.
-      probResults <- parEval (map (\sam -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
+      probResults <- parEval (map (\sam -> generateDet (programMockOracle p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
       return ((,) counts <$> sequence probResults)
     _ -> return (Left "main has no probability function (inference unavailable); only generate compiled")
 

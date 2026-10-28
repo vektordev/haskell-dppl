@@ -35,19 +35,26 @@ Uniform < 0.1)` (`test/cases/let-bindings/enumLetGatesFreshDraw*`), plus three
 fuzz-found known issues now in the corpus (`enumNeuralBoolGatesFreshDraw`,
 `enumNeuralDeadBranchFreshDraw`, `enumDeadLetFreshDrawTuple`).
 
-Delegation has one catch: every enumerated sum (`enumSumP`) reports a **mass**
-(dim 0), which was true while enumerated bodies were always forward-and-compare
-indicators, and a delegated body can be a density. Whether it is one is a
-*runtime* fact (`(x, Uniform)` is a mass exactly when the query puts `ANY` in
-the second slot; topK makes the dim a runtime choice too), so the delegated
-probability is guarded at run time — a possible result with a non-zero dim
-raises "met a continuous density" rather than being summed as a mass. The guard
-is omitted for a cumulative result and for a result type with no `Float` leaf
-(which is what keeps a helper call guard-free: its dim is a runtime projection),
-and folds away where the dim is a literal 0. A real density sum is the
-follow-up `enumerated-sum-over-density-body`, pinned by
-`known-issues/enumLetGatesFreshDensity`. Solving the fixed point
-algebraically (the marginal *is* closed-form for that program) was declined: it
+Delegation has one catch: a delegated body can be a density, and whether it is
+one is a *runtime* fact (`(x, Uniform)` is a mass exactly when the query puts
+`ANY` in the second slot; topK makes the dim a runtime choice too). So the
+enumerated sums over a `draw` keep their terms' dims: where the body's dim is
+not literally 0 they sum with `Semiring.enumMinDimP`, the enumerated form of
+the mixture rule (impossible terms dropped, the lowest possible dim wins, only
+terms at that dim summed; `docs/semiring-presult-internals.md`). `draw b =
+Uniform < 0.5 in if b then Normal else 3.0` is then the mass 0.5 at 3.0 and the
+density 0.5·φ(x) elsewhere (task `enumerated-sum-over-density-body`, corpus
+`let-bindings/enumLetGatesFresh{Density,MixedDim,TupleDims}`). That needs a
+static bound on the dims (`IRCompiler.floatLeafBound`); under a sum whose body
+type has none (a list of reals), `CompilerMetadata.dimAwareEnum` is off and the
+delegated probability keeps a run-time guard: a possible result with a non-zero
+dim raises "met a continuous density" rather than being summed as a mass. The
+guard is also omitted for a cumulative result and for a result type with no
+`Float` leaf.
+
+The refusal of a draw through a function on a call cycle stays. Solving the
+fixed point algebraically (the marginal *is* closed-form for the resample-and-
+retry program) was declined: it
 would make "does my program infer?" unpredictable from the source. The refusal
 is an absent probability/integrate variant with a recorded reason (see "A
 static refusal is an absent variant" in `modality-and-admission.md`), so `generate` still works.
@@ -95,12 +102,13 @@ a random enumerable *last* one is compiled by `enumerateCurriedArgument`, which
 loops over that argument's domain exactly as `enumerateAppliedLambda` loops
 over a `let`'s. A random enumerable *leading* argument, when it is the call's
 only random argument, is enumerated the same way (`leadingEnumerableArgument`:
-the loop body is the call with that position fixed), so the engine a call
-meets does not depend on where its author put the random parameter
+the loop body is the call with that position fixed) wherever the binding path
+(`leadingArgBinding`) refuses, so whether a call is answered does not depend on
+where its author put the random parameter
 (`walk (trans fog) (n - 1)` and `walk (n - 1) (trans fog)` agree, corpus
 `leadingRandomStateMarkovChain`, `leadingRandomArgumentCurried`). Several random
-arguments, or one without a finite domain, keep the binding path
-(`leadingArgBinding`, `witness-inversion-engines.md`); and `enumerateAppliedLambda` measures its bound value with the enclosing
+arguments, or one without a finite domain, have only the binding path
+(`witness-inversion-engines.md`); and `enumerateAppliedLambda` measures its bound value with the enclosing
 latents fixed, which is what `draw v = contrib u 1` (u enumerated outside,
 `sharedLatentNestedLet`) needs once `contrib u 1` carries a tag. Before, even
 `match Red (readC s)` had no probability path ("set-valued witness

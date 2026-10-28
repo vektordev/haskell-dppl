@@ -92,6 +92,7 @@ import IRFuzz (IRCase(..), InterpOutcome(..), genIRCase, shrinkIRCase, irCaseWel
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), TVarR(..))
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.IRCompiler (generateBackedSites)
 import SPLL.Prelude
 import SPLL.Validator (validateProgram)

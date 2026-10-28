@@ -35,6 +35,7 @@ import Test.Tasty.HUnit (testCaseInfo, assertFailure, assertEqual)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.IR.Neural (noNeurals)
 import IRInterpreter (generateDet)
 
 -- | One @categorical_index(u, w, start, n)@ call.
@@ -53,7 +54,7 @@ catCases =
 -- | What the interpreter answers for a case: the reference.
 interpreterIndex :: CatCase -> Either String Integer
 interpreterIndex (CatCase u w s n) =
-  case generateDet [] [] (IREnv [] [] []) [] (IRBuiltin (BCategoricalIndex s n) [IRConst (VFloat u), wl]) of
+  case generateDet noNeurals (IREnv [] [] []) [] (IRBuiltin (BCategoricalIndex s n) [IRConst (VFloat u), wl]) of
     Right (VInt k) -> Right (fromIntegral k)
     other -> Left ("the interpreter answered " ++ show other)
   where wl = IRConst (VList (foldr (ListCont . VFloat) EmptyList w))

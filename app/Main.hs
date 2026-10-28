@@ -3,6 +3,7 @@ module Main (main) where
 import Options.Applicative
 import SPLL.Lang.Lang (Program)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Parser
 import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
@@ -106,7 +107,7 @@ readSemiringList :: ReadM [SemiringFamily]
 readSemiringList = eitherReader (\s -> mapM parseOne (splitOn ',' s))
   where
     parseOne "map"   = Right SRMaxProduct
-    parseOne "count" = Left "--semiring=count: model counting has no sound implementation in this compiler (see the SRCounting comment in SPLL.IntermediateRepresentation) -- not merely unimplemented, refused"
+    parseOne "count" = Left "--semiring=count: model counting has no sound implementation in this compiler (see the SRCounting comment in SPLL.CompilerConfig) -- not merely unimplemented, refused"
     parseOne tok     = Left ("Unknown --semiring entry " ++ show tok ++ ": expected \"map\"")
     splitOn sep s' = case break (== sep) s' of
       (chunk, [])       -> [chunk]
@@ -280,7 +281,7 @@ main = transpile =<< execParser opts
 transpile :: GlobalOpts -> IO ()
 transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR, marginalSlotsBudget=mSlots, materializationBudget=matBudget, marginalsReport=wantMarginals, duplicationReport=wantCensus, memoRecursionMode=memoRec}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=matBudget, marginalSlots=mSlots, extraSemirings=extraSR, memoRecursion=memoRec})
+  let conf = (CompilerConfig {SPLL.CompilerConfig.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=matBudget, marginalSlots=mSlots, extraSemirings=extraSR, memoRecursion=memoRec})
   reportMarginals wantMarginals conf prog
   reportDuplicationCensus wantCensus conf prog
   -- The compile-time warnings that read only the program (today: functions

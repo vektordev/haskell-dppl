@@ -76,7 +76,7 @@ import Control.Monad (replicateM)
 import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, lift, State, execState, evalState, modify)
 import Data.Char (isSpace, toLower)
 import Data.List (intercalate, isPrefixOf, isInfixOf, isSuffixOf, nub, sort)
-import Data.Maybe (mapMaybe, isJust, fromMaybe)
+import Data.Maybe (mapMaybe, isJust)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as M
 import System.Directory (getCurrentDirectory, findExecutable)
@@ -99,10 +99,12 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
-import SPLL.IRTypeCheck (IRType(..), checkIREnv, showIRType, showIRTypeError, irTypeOfRType)
+import SPLL.IRTypeCheck (checkIREnv, showIRType, showIRTypeError)
+import SPLL.IR.Type (IRType(..), IRADTDecl(..))
 import SPLL.Semiring
 import SPLL.IRCompiler (stripBranchCount)
-import SPLL.Typing.RType (RType(..), TVarR(..), shapeNumel)
+import SPLL.Typing.RType (shapeNumel)
+import SPLL.IR.Neural (noNeurals)
 import IRInterpreter (generateDet, generateReplay)
 import qualified SPLL.CodeGenPyTorch as Py
 import qualified SPLL.CodeGenJulia as Jl
@@ -141,7 +143,7 @@ data IRCase = IRCase
   , icBody   :: IRExpr                -- ^ under the parameter lambdas
   , icArgs   :: [[IRValue]]           -- ^ one argument vector per query
   , icHelpers :: [Helper]             -- ^ the other function groups (M3), in definition order
-  , icADTs   :: [ADTDecl]             -- ^ the env's ADT declarations (M3)
+  , icADTs   :: [IRADTDecl]             -- ^ the env's ADT declarations (M3)
   , icDraws  :: ([Double], [Double])
     -- ^ a generate body's random stream (M4): what each backend's @rand()@
     -- and @randn()@ return, in call order, and what the interpreter's draws
@@ -283,11 +285,11 @@ renderIRCase c = unlines $
 --
 -- 'gsDraws' says whether the body being drawn may draw ('IRSample'): a
 -- generate body or a generate helper's (M4), not a deterministic one.
-data GS = GS { gsNext :: !Int, gsADTs :: [ADTDecl], gsDraws :: Bool }
+data GS = GS { gsNext :: !Int, gsADTs :: [IRADTDecl], gsDraws :: Bool }
 
 type G = StateT GS Gen
 
-runG :: [ADTDecl] -> G a -> Gen a
+runG :: [IRADTDecl] -> G a -> Gen a
 runG ds m = evalStateT m (GS 0 ds False)
 
 -- | Run a generator with draws allowed or not, restoring the setting after.
@@ -308,7 +310,7 @@ fresh pre = do
 liftG :: Gen a -> G a
 liftG = lift
 
-adtsG :: G [ADTDecl]
+adtsG :: G [IRADTDecl]
 adtsG = gets gsADTs
 
 frequencyG :: [(Int, G a)] -> G a
@@ -343,8 +345,8 @@ genTypeWith o d
                          ++ [ (2, elements (map ITADT (tyADTs o))) | not (null (tyADTs o)) ]
 
 -- | A type for a value a backend's caller passes or reads: no functions.
-genValueType :: [ADTDecl] -> Int -> Gen IRType
-genValueType ds = genTypeWith (TyOpts False (map dataName ds))
+genValueType :: [IRADTDecl] -> Int -> Gen IRType
+genValueType ds = genTypeWith (TyOpts False (map irDataName ds))
 
 -- | A type inside a body: functions too.
 genTy :: Int -> G IRType
@@ -353,7 +355,7 @@ genTy d = genTySuchThat d (const True)
 genTySuchThat :: Int -> (IRType -> Bool) -> G IRType
 genTySuchThat d ok = do
   ds <- adtsG
-  liftG (genTypeWith (TyOpts True (map dataName ds)) d `suchThat` ok)
+  liftG (genTypeWith (TyOpts True (map irDataName ds)) d `suchThat` ok)
 
 isNumeric :: IRType -> Bool
 isNumeric t = t == ITFloat || t == ITInt
@@ -431,7 +433,7 @@ genInt :: Gen Int
 genInt = frequency [(4, choose (-5, 5)), (1, elements [0, 1, -1, 1000, -1000])]
 
 -- | A value of a function-free type, over the case's ADTs.
-genValue :: [ADTDecl] -> IRType -> Gen IRValue
+genValue :: [IRADTDecl] -> IRType -> Gen IRValue
 genValue ds t = case t of
   ITBool -> VBool <$> arbitrary
   ITInt -> VInt <$> genInt
@@ -460,28 +462,25 @@ genValue ds t = case t of
 -- by its field accessors (guarded by its constructor tests: an accessor
 -- applied to another constructor is a Haskell 'error' in the interpreter)
 -- and compared by equality; constants and arguments of it are drawn too.
-genADTs :: Gen [ADTDecl]
+genADTs :: Gen [IRADTDecl]
 genADTs = frequency [(3, return []), (1, (: []) <$> one)]
   where
     one = do
       k <- choose (1, 3)
       ctors <- mapM ctor (take k ["Qa", "Qb", "Qc"])
-      return (ADTDecl "Qt" ctors Nothing)
+      return (IRADTDecl "Qt" ctors)
     ctor c = do
       nf <- choose (0, 2)
-      tys <- vectorOf nf (elements [TFloat, TInt, TBool])
+      tys <- vectorOf nf (elements [ITFloat, ITInt, ITBool])
       return (c, [ (map toLower c ++ show i, rt) | (i, rt) <- zip [0 :: Int ..] tys ])
 
 -- | The constructors of an ADT, with their field types.
-adtCtors :: [ADTDecl] -> String -> [(String, [IRType])]
-adtCtors ds n = [ (c, map (fieldTy . snd) fs) | d <- ds, dataName d == n, (c, fs) <- constructors d ]
+adtCtors :: [IRADTDecl] -> String -> [(String, [IRType])]
+adtCtors ds n = [ (c, map snd fs) | d <- ds, irDataName d == n, (c, fs) <- irConstructors d ]
 
 -- | Every field: its ADT, constructor, accessor and type.
-adtFields :: [ADTDecl] -> [(String, String, String, IRType)]
-adtFields ds = [ (dataName d, c, f, fieldTy rt) | d <- ds, (c, fs) <- constructors d, (f, rt) <- fs ]
-
-fieldTy :: RType -> IRType
-fieldTy rt = fromMaybe (error ("IRFuzz.fieldTy: " ++ show rt)) (irTypeOfRType rt)
+adtFields :: [IRADTDecl] -> [(String, String, String, IRType)]
+adtFields ds = [ (irDataName d, c, f, t) | d <- ds, (c, fs) <- irConstructors d, (f, t) <- fs ]
 
 -- ---------------------------------------------------------------------------
 -- Expressions
@@ -654,14 +653,14 @@ genExpr sc t n
                  acc <- liftG (elements [AcIsLeft, AcIsRight])
                  IRDestruct acc <$> genExpr sc (ITEither a b) (n - 1))
         , (1, do s <- genTySuchThat 1 isConformable
-                 rt <- frequencyG [(3, return (rTypeOf s)), (1, rTypeOf <$> genTySuchThat 1 isConformable)]
+                 rt <- frequencyG [(3, return s), (1, genTySuchThat 1 isConformable)]
                  IRConformsTo rt <$> genExpr sc s (n - 1))
         , (1, do s <- genTySuchThat 1 (isJust . domainShape)
                  dom <- liftG (genDomain s)
-                 IRIsPossible dom <$> genExpr sc s (n - 1))
+                 IRIsPossible (multiValueToIR dom) <$> genExpr sc s (n - 1))
         ] ++
-        [ (1, do (c, _) <- liftG (elements (adtCtors ds (dataName d)))
-                 IRApply (IRVar ("is" ++ c)) <$> genExpr sc (ITADT (dataName d)) (n - 1))
+        [ (1, do (c, _) <- liftG (elements (adtCtors ds (irDataName d)))
+                 IRApply (IRVar ("is" ++ c)) <$> genExpr sc (ITADT (irDataName d)) (n - 1))
         | d <- ds ]
       ITList a ->
         [ (3, IRConstruct TgCons <$> sequence [genExpr sc a half, genExpr sc t half])
@@ -785,20 +784,6 @@ leaf sc t = do
 -- | A random draw: a uniform or a standard normal.
 drawG :: G IRExpr
 drawG = IRSample <$> liftG (frequency [(3, return IRUniform), (2, return IRNormal)])
-
-rTypeOf :: IRType -> RType
-rTypeOf t = case t of
-  ITBool -> TBool
-  ITInt -> TInt
-  ITFloat -> TFloat
-  ITUnit -> TUnit
-  ITThetaTree -> TThetaTree
-  ITSymbol -> TSymbol
-  ITList a -> ListOf (rTypeOf a)
-  ITTuple a b -> Tuple (rTypeOf a) (rTypeOf b)
-  ITEither a b -> TEither (rTypeOf a) (rTypeOf b)
-  ITADT n -> TADT n
-  _ -> NotSetYet
 
 -- | The types 'IRIsPossible' is drawn at: those a 'MultiValue' describes
 -- (no lists, no unit).
@@ -1045,6 +1030,7 @@ data PPlan
   | PShare [IRExpr] PPlan                       -- ^ 'closeResult' under guards
   | PEnumSum Bool String MultiValue PPlan       -- ^ 'enumSumP', with or without branch counts
   | PEnumMix Bool IRExpr String MultiValue PPlan -- ^ 'enumMixP', with its density dim
+  | PEnumMinDim Bool Int String MultiValue PPlan -- ^ 'enumMinDimP', with its static dim bound
   deriving (Show)
 
 semiringFor :: SemiringChoice -> Semiring
@@ -1078,6 +1064,7 @@ planNodes pl = takeWhile (/= ' ') (show pl) : concatMap planNodes (subPlans pl)
       PShare _ a -> [a]
       PEnumSum _ _ _ a -> [a]
       PEnumMix _ _ _ _ a -> [a]
+      PEnumMinDim _ _ _ _ a -> [a]
       _ -> []
 
 -- | Every 'PPlan' constructor; 'PMixSub' is not drawn under max-product.
@@ -1085,7 +1072,7 @@ planLabels :: SemiringChoice -> [String]
 planLabels c =
   [ "PDensity", "PScaledNormal", "PCdf", "PMass", "PDet", "PIndicator", "PImpossible", "PMeasureDiff"
   , "PSumAll", "PImpossibleWhen", "PProd", "PGuard", "PScaleCoV", "PScaleCoVAtom", "PComplement"
-  , "PComplementWhen", "PAnySafe", "PAnySafeShared", "PMix", "PIf", "PLet", "PShare", "PEnumSum", "PEnumMix" ]
+  , "PComplementWhen", "PAnySafe", "PAnySafeShared", "PMix", "PIf", "PLet", "PShare", "PEnumSum", "PEnumMix", "PEnumMinDim" ]
   ++ [ "PMixSub" | not (isMaxProduct c) ]
 
 -- | The packed result the plan builds, its floated let-bindings around it.
@@ -1138,6 +1125,7 @@ buildPlan c plan = case runCompilerMonad (go plan) of
         closeResult sr "share" guards o
       PEnumSum bc v dom a -> packedOf a >>= enumSumP sr bc id v dom
       PEnumMix bc dd v dom a -> packedOf a >>= enumMixP sr bc id dd v dom
+      PEnumMinDim bc d v dom a -> packedOf a >>= enumMinDimP sr bc id d v dom
     -- The caller's branch count, as an 'IfThenElse' passes it: both arms'.
     mix f a b = do
       ra <- go a
@@ -1174,6 +1162,11 @@ genPlan c sc n
                                           dd <- liftG (elements [dim1, dim0])
                                           dd' <- frequency' [(1, return dd), (1, anyGuardedDim <$> float)]
                                           return (PEnumMix bc dd' v dom body)))
+      -- The bound is any upper bound on the body's dims; a plan's dims are
+      -- small, and a loose bound must give the same answer as a tight one.
+      , (1, enumerated (\v dom body -> do bc <- liftG arbitrary
+                                          d <- liftG (choose (1, 4))
+                                          return (PEnumMinDim bc d v dom body)))
       ]
       ++ [ (1, PMixSub <$> half <*> half) | not (isMaxProduct c) ]
   where
@@ -1336,8 +1329,8 @@ interpretIRCase c args = do
     -- A generate body answers its sample with how many draws it took, as
     -- the drivers report a backend's ('VTuple' of the count and the sample).
     run env as f
-      | icKind c == GenBody = (\(v, k) -> VTuple (VInt k) v) <$> generateReplay [] [] env (icDraws c) as f
-      | otherwise = generateDet [] [] env as f
+      | icKind c == GenBody = (\(v, k) -> VTuple (VInt k) v) <$> generateReplay noNeurals env (icDraws c) as f
+      | otherwise = generateDet noNeurals env as f
 
 -- | A refusal's reason with the offending values cut off, for tabulation.
 refusalKey :: String -> String
@@ -1377,7 +1370,7 @@ letInComprehensionIterableCases =
   [ repro [] (ITTensor [EFixed 1] ITFloat) (lcIdent (lcLetTensor "l" [IRVar "l"])) []
   , repro [] (ITTensor [EFixed 2] ITFloat)
       (IRBuiltin (BZip OpPlus) [lcLetTensor "l" [IRVar "l", lcLit 2], lcTensor [lcLit 10, IRLetIn "k" (lcLit 20) (IRVar "k")]]) []
-  , repro [] ITBool (IRConformsTo (ListOf TFloat) (IRLetIn "l0" (IRConst (VInt 1)) (IRConst (VList (ListCont (VFloat 1) EmptyList))))) []
+  , repro [] ITBool (IRConformsTo (ITList ITFloat) (IRLetIn "l0" (IRConst (VInt 1)) (IRConst (VList (ListCont (VFloat 1) EmptyList))))) []
   , repro [] (ITTensor [EFixed 2] ITFloat) (lcIdent (lcDoubled (lcTensor [lcLit 1, lcLit 2]))) []
   , repro [] (ITTensor [EFixed 2] ITFloat) (lcNestedSameName (lcLit 0)) []
   ]
@@ -1399,14 +1392,14 @@ letInComprehensionIterableBatchedCases =
 -- and Float, plus a tuple of negative literals that does conform.
 conformsLiteralCases :: [IRCase]
 conformsLiteralCases =
-  [ chk (Tuple TInt TInt) (IRConst (VInt (-3)))
-  , chk (Tuple TFloat TFloat) (IRConst (VFloat (-1)))
-  , chk (Tuple TInt TFloat) (IRConst (VInt 3))
-  , chk (Tuple TFloat TInt) (IRConst (VFloat 2.5))
-  , chk (TEither TInt TFloat) (IRConst (VInt (-2)))
-  , chk (TEither TFloat TInt) (IRConst (VFloat (-0.5)))
-  , chk (Tuple TInt TFloat) (IRConstruct TgTuple [IRConst (VInt (-3)), IRConst (VFloat (-1))])
-  , chk (Tuple TFloat TFloat) (IROp OpSub (IRConst (VFloat 0)) (IRConst (VFloat 1)))
+  [ chk (ITTuple ITInt ITInt) (IRConst (VInt (-3)))
+  , chk (ITTuple ITFloat ITFloat) (IRConst (VFloat (-1)))
+  , chk (ITTuple ITInt ITFloat) (IRConst (VInt 3))
+  , chk (ITTuple ITFloat ITInt) (IRConst (VFloat 2.5))
+  , chk (ITEither ITInt ITFloat) (IRConst (VInt (-2)))
+  , chk (ITEither ITFloat ITInt) (IRConst (VFloat (-0.5)))
+  , chk (ITTuple ITInt ITFloat) (IRConstruct TgTuple [IRConst (VInt (-3)), IRConst (VFloat (-1))])
+  , chk (ITTuple ITFloat ITFloat) (IROp OpSub (IRConst (VFloat 0)) (IRConst (VFloat 1)))
   ]
   where chk t x = repro [] ITBool (IRConformsTo t x) []
 
@@ -1421,7 +1414,7 @@ conformsLiteralBatchedCases =
   , guarded (IRConst (VFloat (-1.5)))
   , guarded (IRConst (VFloat 2))
   ]
-  where guarded x = batchedRepro (IRIf (IRConformsTo TFloat x) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1)
+  where guarded x = batchedRepro (IRIf (IRConformsTo ITFloat x) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1)
 
 lcLit :: Double -> IRExpr
 lcLit = IRConst . VFloat
@@ -1583,7 +1576,7 @@ knownDisagreements =
   , KnownFamily "opsign-nan-negative-zero-and-int-results-differ-across-engines" ["python", "julia"]
       (AsIf (\b -> irMap (backendSign b)))
       (repro [("a0", ITFloat), ("a1", ITFloat)] (ITTuple ITBool ITFloat)
-         (IRConstruct TgTuple [IRConformsTo TFloat (IRUnaryOp OpSign (IRVar "a0")), IRUnaryOp OpSign (IRVar "a1")])
+         (IRConstruct TgTuple [IRConformsTo ITFloat (IRUnaryOp OpSign (IRVar "a0")), IRUnaryOp OpSign (IRVar "a1")])
          [VFloat 2, VFloat (-0.0)])
   -- The same ticket, where Python's int sign meets an operator the
   -- interpreter takes floats only for (found in M4): the rewrite above then
@@ -1593,7 +1586,7 @@ knownDisagreements =
       (ByAnswer (\c o a -> isValue o && isSampled a && not (null [ () | IRUnaryOp OpSign _ <- caseUniverse c ])))
       (repro [("a0", ITFloat)] ITBool
          (IRLetIn "s" (IRUnaryOp OpSign (IRVar "a0"))
-            (IRConformsTo TFloat (IRIf (IROp OpApprox (IRVar "s") (IRConst (VFloat 1))) (IRVar "s") (IRConst (VFloat 0)))))
+            (IRConformsTo ITFloat (IRIf (IROp OpApprox (IRVar "s") (IRConst (VFloat 1))) (IRVar "s") (IRConst (VFloat 0)))))
          [VFloat 2])
   , KnownFamily "python-float-division-by-zero-raises" ["python"]
       (ByAnswer (\_ o a -> isValue o && raisedWith "ZeroDivisionError" a))
@@ -1603,7 +1596,7 @@ knownDisagreements =
       (repro [("a0", ITFloat)] ITFloat (IRDensity IRNormal Linear (IRVar "a0")) [VFloat 1e300])
   , KnownFamily "python-uniform-density-and-cdf-answer-ints" ["python"]
       (AsIf (const (irMap pythonUniform)))
-      (repro [("a0", ITFloat)] ITBool (IRConformsTo TFloat (IRDensity IRUniform Linear (IRVar "a0"))) [VFloat 0.5])
+      (repro [("a0", ITFloat)] ITBool (IRConformsTo ITFloat (IRDensity IRUniform Linear (IRVar "a0"))) [VFloat 0.5])
   -- The same ticket, where the int flows on into float arithmetic: the
   -- rewrite above then stops the interpreter (an int meets a float), so the
   -- family is recognised by the construct and a differing value instead.
@@ -1612,7 +1605,7 @@ knownDisagreements =
   , KnownFamily "python-uniform-density-and-cdf-answer-ints" ["python"]
       (ByAnswer (\c o a -> isValue o && isSampled a
                            && not (null [ () | x <- caseUniverse c, linearUniform x ])))
-      (repro [("a0", ITFloat)] ITBool (IRConformsTo TFloat (IRCumulative IRUniform Linear (IRVar "a0"))) [VFloat 2])
+      (repro [("a0", ITFloat)] ITBool (IRConformsTo ITFloat (IRCumulative IRUniform Linear (IRVar "a0"))) [VFloat 2])
   , KnownFamily "python-empty-list-head-and-tail-answer-none" ["python"]
       (ByAnswer (\_ o a -> case (o, a) of
                   (InterpRaise m, Sampled _) -> m `elem` ["head of an empty list", "tail of an empty list"]
@@ -1623,10 +1616,10 @@ knownDisagreements =
       (repro [] ITBool (IRIsPossible (MultiTuple MultiContinuous MultiContinuous) (IRConst (VTuple (VFloat 1) (VFloat 2)))) [])
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (AsIf (const (irMap conformsUnitUnchecked)))
-      (repro [] ITBool (IRConformsTo TUnit (IRConst (VBool True))) [])
+      (repro [] ITBool (IRConformsTo ITUnit (IRConst (VBool True))) [])
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (AsIf (const (irMap conformsUnitUnchecked)))
-      ((repro [] ITBool (IRConformsTo (TADT "Qt") (IRConst (VBool True))) []) { icADTs = [ADTDecl "Qt" [("Qa", [])] Nothing] })
+      ((repro [] ITBool (IRConformsTo (ITADT "Qt") (IRConst (VBool True))) []) { icADTs = [IRADTDecl "Qt" [("Qa", [])]] })
   -- M3 (builtins, tensors and function groups).
   , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
       (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
@@ -1643,7 +1636,7 @@ knownDisagreements =
   , KnownFamily "julia-listprod-of-an-empty-list-raises" ["python", "julia"]
       (ByAnswer (\c o a -> isValue o && isSampled a
                            && not (null [ () | IRConformsTo _ x <- caseUniverse c, IRVar "listProd" <- universe x ])))
-      (repro [] ITBool (IRConformsTo TFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList)))) [])
+      (repro [] ITBool (IRConformsTo ITFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList)))) [])
   , KnownFamily "bzip-max-and-approx-have-no-text-lowering" ["python", "julia"]
       (ByAnswer (\_ _ a -> raisedWith "codegen threw" a && (raisedWith "OpMax" a || raisedWith "OpApprox" a)))
       (repro [] (ITTensor [EFixed 1] ITFloat)
@@ -1686,7 +1679,7 @@ knownDisagreements =
   , KnownFamily "text-backends-conformsto-reevaluates-its-operand" ["python", "julia"]
       (ByAnswer (\c o a -> icKind c == GenBody && isValue o && isSampled a
                            && not (null [ () | IRConformsTo _ x <- caseUniverse c, not (isPure x) ])))
-      (genRepro [] ITBool (IRConformsTo TFloat (IRSample IRUniform)))
+      (genRepro [] ITBool (IRConformsTo ITFloat (IRSample IRUniform)))
   -- The interpreter evaluates a cons's tail before its head; both text
   -- backends evaluate the head first. Only the order of the draws differs.
   , KnownFamily "interpreter-cons-evaluates-its-tail-before-its-head" ["python", "julia"]
@@ -1859,7 +1852,7 @@ maxPick backend x y
   | otherwise =
       IRIf (isNaNE x) x $ IRIf (isNaNE y) y $ IRIf (gtE x y) x $ IRIf (gtE y x) y $
         -- Equal: only a pair of zeros of different sign can still differ.
-        IRIf (IRConformsTo TFloat x)
+        IRIf (IRConformsTo ITFloat x)
              (IRIf (gtE (IROp OpDiv (IRConst (VFloat 1)) x) (IRConst (VFloat 0))) x y)
              x
 
@@ -1919,7 +1912,7 @@ backendMaxReduce backend = go M.empty
 -- zero, and refuses a NaN.
 backendSign :: String -> IRExpr -> IRExpr
 backendSign backend e = case e of
-  IRUnaryOp OpSign a -> IRLetIn "sg_a" a (IRIf (IRConformsTo TFloat x) (pick (VFloat 0) (VFloat 1)) (pick (VInt 0) (VInt 1)))
+  IRUnaryOp OpSign a -> IRLetIn "sg_a" a (IRIf (IRConformsTo ITFloat x) (pick (VFloat 0) (VFloat 1)) (pick (VInt 0) (VInt 1)))
   _ -> e
   where
     x = IRVar "sg_a"
@@ -2038,12 +2031,12 @@ conformsUnitUnchecked e = case e of
   _ -> e
   where
     loosen t = case t of
-      TUnit -> TVarR (TV "unchecked")
-      TThetaTree -> TVarR (TV "unchecked")
-      TADT _ -> TVarR (TV "unchecked")
-      ListOf a -> ListOf (loosen a)
-      Tuple a b -> Tuple (loosen a) (loosen b)
-      TEither a b -> TEither (loosen a) (loosen b)
+      ITUnit -> ITVar 0
+      ITThetaTree -> ITVar 0
+      ITADT _ -> ITVar 0
+      ITList a -> ITList (loosen a)
+      ITTuple a b -> ITTuple (loosen a) (loosen b)
+      ITEither a b -> ITEither (loosen a) (loosen b)
       _ -> t
 
 gtE, ltE, geE, leE :: IRExpr -> IRExpr -> IRExpr
@@ -2619,7 +2612,7 @@ caseFeatures c = nub $
     varsOf e = [ v | IRVar v <- universe e ]
     hasDraw e = not (null [ () | IRSample _ <- universe e ])
     vars = [ v | IRVar v <- caseUniverse c ]
-    ctors = [ k | d <- icADTs c, (k, _) <- constructors d ]
+    ctors = [ k | d <- icADTs c, (k, _) <- irConstructors d ]
     isADT t = case t of { ITADT _ -> True; _ -> False }
     isTensor t = case t of { ITTensor _ _ -> True; _ -> False }
 

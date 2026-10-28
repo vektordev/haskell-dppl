@@ -29,11 +29,14 @@ module SPLL.IRCompiler (
 
 import SPLL.ReservedNames (distributionPrimitiveNames, queryParamName, accProbParamName, topKCutoffName, topKCutoffParamName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
 import SPLL.IntermediateRepresentation
+import SPLL.OptimizerProjection (optimizerConfig)
+import SPLL.CompilerConfig
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
+import PrettyPrint (pPrintValue)
 import PredefinedFunctions
 import SPLL.Analysis (getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
@@ -49,6 +52,8 @@ import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable
 import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
+import SPLL.IR.Type (IRType(..))
+import SPLL.IRTypeBridge (irConformanceType)
 import SPLL.Semiring
 import Control.Monad (foldM, forM, mfilter, unless, void, when, zipWithM, (>=>))
 import Debug.Trace (traceM)
@@ -158,7 +163,15 @@ data CompilerMetadata = CompilerMetadata {
   -- ('withBindingLaw'). Extended by the modality engine's own binder rule
   -- ('bindingLawEnv'), so it is the environment 'inferE' had there. Read by
   -- nothing that dispatches yet (milestone M3).
-  lawEnv :: LawEnv
+  lawEnv :: LawEnv,
+  -- | Whether every enclosing enumerated sum keeps its terms' dims
+  -- ('enumSumTerms'; task enumerated-sum-over-density-body). True outside
+  -- any enumeration; an enumeration whose body's type has no static bound on
+  -- its dim ('floatLeafBound') sums its terms as masses and clears it for
+  -- everything below. 'forwardOrInfer' reads it: a delegated body that may
+  -- be a density needs its run-time guard only when some enclosing sum
+  -- would report it as a mass.
+  dimAwareEnum :: Bool
 }
 
 -- | A value's law as an affine combination of independent standard-normal
@@ -297,7 +310,7 @@ envToIR conf fcDat laws p
           -- Batched mode: retag elementwise ifs to selects before optimizing
           -- (design pytorch-tensorizer). Mirrors 'Prelude.compile'.
           selected = if batched conf then selectPassEnv stripped else stripped
-      in optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals p]) selected
+      in optimizeEnvWith (optimizerConfig conf) (Set.fromList [n | (n, _, _) <- neurals p]) selected
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).
@@ -531,7 +544,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
             guardUnderLambdas (IRLambda n b) = IRLambda n (guardUnderLambdas b)
             guardUnderLambdas bodyExpr
               | checkQueryType conf =
-                  IRIf (IRConformsTo returnRType (IRVar queryParamName))
+                  IRIf (IRConformsTo (irConformanceType returnRType) (IRVar queryParamName))
                        bodyExpr
                        (IRError (kind ++ "(" ++ name ++ "): query value does not conform to return type " ++ show returnRType))
               | otherwise = bodyExpr
@@ -591,7 +604,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
               Just (toNormalDecl name . cutoffBinding <$> compileNormalExpr (meta progTypeEnv) binding)
             else
               Nothing
-        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom, maskVariantOf=Nothing,
+        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=fmap multiValueToIR sampleDom, maskVariantOf=Nothing,
           integFun = presentVariant integE,
           probFun = presentVariant probE,
           genFun = presentVariant genE,
@@ -610,10 +623,12 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         -- (x < 0.5, Uniform < x)@ compiled with exit 0 and no word on why
         -- the probability function was missing), and likewise at a binding no
         -- inference engine applies to (task engine-applicability-as-data).
+        -- Any other intractable root names the node its 'Bottom' starts at
+        -- ('bottomOrigin', task bottom-verdict-records-no-refusal-reason).
         intractableRefusal lbl suppressed
           | suppressed || admittedPT pt = []
           | otherwise = [ (lbl, VariantRefusal why cn)
-                        | Just (why, cn) <- [comparisonWithoutClosedForm binding <|> bindingWithoutEngine laws binding] ]
+                        | Just (why, cn) <- [comparisonWithoutClosedForm binding <|> bindingWithoutEngine laws binding <|> bottomOrigin binding] ]
         -- Generate per-component normal functions for tuple outputs
         tupleNormalGroups = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
         tupleNormalFuns = map fst tupleNormalGroups
@@ -661,7 +676,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
                     in Just (appendDoc guardNote . toProbDecl name . IRLambda queryParamName . guardQuery "p" <$> compileBody metaExtra)
                   else Nothing ]
     in [baseFunGroup] ++ tupleNormalFuns ++ extraFunGroups) (functions p))
-  progADTs
+  (map irADTDecl progADTs)
   -- The cutoff must live in the same space as the accumulated probability it's
   -- compared against: under logSpace that's log(thresh), not the raw linear
   -- threshold. The comparison operators themselves (OpLessThan/OpGreaterThan)
@@ -713,7 +728,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty [] laws Map.empty
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty [] laws Map.empty True
     reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
@@ -954,6 +969,76 @@ bindingWithoutEngine laws e@(Expr _ f) = case f of
       ++ " affine Gaussian form flowing into one consumer or jointly into at most "
       ++ show ModalityInfer.jointAffineMaxSlots ++ " tuple fields, and the observation has no"
       ++ " set-valued inverse onto it. The binding is sample-only, and so is the function"
+
+-- | Where a 'Bottom' verdict starts, for a function whose root modality
+-- inference typed 'Bottom' and neither 'comparisonWithoutClosedForm' nor
+-- 'bindingWithoutEngine' explains (task bottom-verdict-records-no-refusal-reason:
+-- @Normal + Uniform@ compiled generate-only with no word on why). Descends
+-- through 'Bottom' nodes into their first 'Bottom' operand; the node none of
+-- whose operands is 'Bottom' is where the rule itself returned 'Bottom', and
+-- the diagnostic names it, its source position and its operands' laws. A
+-- curried call is one node, its spine head and its arguments the operands, so
+-- @f x y@ is named "the call of 'f'" rather than by its inner partial
+-- application. A call of a function that is itself sample-only says so: that
+-- function's own group carries the reason.
+bottomOrigin :: Expr -> Maybe (String, ChainName)
+bottomOrigin e@(Expr ti _)
+  | not (isBottom e) = Nothing
+  | (Expr hti (Var f), args) <- callSpine e, pType hti == Bottom =
+      Just (phrase ((if null args then "" else "the call of ") ++ "'" ++ f ++ "'")
+              ++ " is sample-only because '" ++ f ++ "' is: its own probability variant is refused", chainName ti)
+  | (Expr _ (Var f), args@(_:_)) <- callSpine e =
+      case filter isBottom args of
+        (a:_) -> bottomOrigin a
+        [] -> Just (rule ("the call of '" ++ f ++ "'") "arguments" args, chainName ti)
+  | otherwise = case node e of
+      -- The arguments first: in a let redex @(\x -> body) arg@ a 'Bottom'
+      -- argument is the origin, and the body only reads it.
+      Apply {} | (hd, args) <- callSpine e, (b:_) <- filter isBottom (args ++ [hd]) ->
+        bottomOrigin b
+      Apply {} | (hd, args) <- callSpine e -> Just (rule "the application" "operands" (hd : args), chainName ti)
+      _ -> case filter isBottom (getSubExprs e) of
+        (c:_) -> bottomOrigin c
+        [] -> Just (rule (nodeName e) "operands" (getSubExprs e), chainName ti)
+  where
+    isBottom x = pType (getTypeInfo x) == Bottom
+    -- The head and arguments of a curried application; a non-application is
+    -- its own head.
+    callSpine x = case node x of
+      Apply g a -> let (h, as) = callSpine g in (h, as ++ [a])
+      _ -> (x, [])
+    phrase what = what ++ maybe "" ((" at " ++) . spanPretty) (srcPos ti)
+    rule what kind ops =
+      phrase what ++ " has no inference rule for its " ++ kind
+      ++ (if null ops then "" else " " ++ listPhrase (map operand ops))
+      ++ ": NeST computes no density or CDF for this combination, so it is"
+      ++ " sample-only, and so is the function"
+    listPhrase xs = case reverse xs of
+      (l:r@(_:_)) -> intercalate ", " (reverse r) ++ " and " ++ l
+      _ -> concat xs
+    operand x = operandName x ++ " (" ++ lawName (pType (getTypeInfo x)) ++ ")"
+    operandName x = case node x of
+      Var n -> n
+      Constant v -> "the literal " ++ pPrintValue v
+      InjF (Named n) _ -> "a " ++ opName n ++ " expression"
+      Apply {} | (Expr _ (Var f), _) <- callSpine x -> "a call of '" ++ f ++ "'"
+      _ -> nodeName x
+    nodeName x = case node x of
+      InjF (Named n) _ -> opName n
+      IfThenElse {} -> "the if-then-else"
+      Lambda n _ -> "the lambda '\\" ++ n ++ "'"
+      ReadNN n _ -> "the neural read of '" ++ n ++ "'"
+      Var n -> "'" ++ n ++ "'"
+      _ -> printFlat x
+    opName n = maybe ("`" ++ n ++ "`") (\s -> "`" ++ s ++ "`") (lookup n surfaceOps)
+    surfaceOps = [("plus", "+"), ("mult", "*"), ("lt", "<"), ("gt", ">"), ("neg", "-")]
+    lawName p = case p of
+      Deterministic -> "deterministic"
+      PNormal -> "Gaussian"
+      PLogNormal -> "log-normal"
+      Integrate -> "random"
+      PArr {} -> "a function"
+      _ -> show p
 
 -- | The operands of a comparison against a random enumerable bound, when the
 -- 'toIRInference' equation of that name applies: @Just (enumIsLeft, enumSide,
@@ -1623,7 +1708,7 @@ pointQueryTable meta e dom@(v0 : vs) = do
   where
     inferAt v = toIRInference meta False e (IRConst (valueToIR v))
     compiledSize count o = count (unP (rProb (openValue o))) + openBlockSize count o
-    foldedSize o = irLogicNodeCount (postProcess (compilerConfig meta) (closeExpr o (unP . rProb)))
+    foldedSize o = irLogicNodeCount (postProcess (optimizerConfig (compilerConfig meta)) (closeExpr o (unP . rProb)))
     bindCell p = do
       cellName <- mkVariable "mat_leaf"
       setVariables [(cellName, p)]
@@ -3288,6 +3373,9 @@ scaleMayVanish = not . nonzero
       nonzero a || nonzero b
     nonzero _ = False
 
+failConversion :: Expr -> IRExpr
+failConversion = error "Cannot convert VClosure"
+
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
 -- A witnessed sample can itself be the 'VAnyExcept' placeholder an '==' (or ADT
@@ -3861,15 +3949,6 @@ toIRInference meta cumulative (Expr ti (Apply l v)) sample
   | Just l' <- curriedEnumerableCallee meta l v
   , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)) =
   enumerateCurriedArgument meta cumulative (\x -> Expr ti (Apply l' x)) v sample
--- The same call with its one random enumerable argument in a /leading/
--- position, @cont (trans fog) n@: marginalised the same way, so where the
--- author put the state parameter does not decide which engine sees it (task
--- random-leading-argument-into-recursion-refused). Without this the argument
--- became a 'leadingArgBinding', whose engines none enumerate a finite domain.
-toIRInference meta cumulative expr@(Expr _ (Apply _ _)) sample
-  | Just (mkBody, ai) <- leadingEnumerableArgument meta expr
-  , enumerationWithinMaterializationBudget meta (tags (getTypeInfo ai)) =
-  enumerateCurriedArgument meta cumulative mkBody ai sample
 -- Deterministic curried call spine rooted at a known top-level function: build
 -- the WHOLE application (the query sample, plus every source-level argument)
 -- as one contiguous 'IRApply' chain and let-bind it exactly once, instead of
@@ -3946,13 +4025,32 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply l v)) sample 
   -- ('leadingArgBinding'), as for a random last argument. Tried second, so a
   -- call they answer keeps its emitted code.
   leading <- if cumulative then return Nothing else leadingArgBinding meta expr
-  case leading of
-    Nothing -> viaCallee
-    Just b -> do
-      first <- (Right <$> scoped viaCallee) `catchError` (return . Left)
+  let viaBinding = case leading of
+        Nothing -> viaCallee
+        Just b -> do
+          first <- (Right <$> scoped viaCallee) `catchError` (return . Left)
+          case first of
+            Right o -> inline o
+            Left _ -> applyBinding meta cumulative rt b sample
+  -- The call's one random argument, in a leading position and enumerable
+  -- (@cont (trans fog) n@), is marginalised over its domain as a random last
+  -- argument is ('enumerateCurriedArgument'), where the arms above refuse:
+  -- the binding engines none enumerate a finite domain, so which refusal a
+  -- call met depended on where its author put the random parameter (task
+  -- random-leading-argument-into-recursion-refused). Tried last, so a call
+  -- they answer keeps its emitted code; where all refuse, the enumeration's
+  -- own refusal is the one reported. Not for the cumulative variant, which
+  -- the binding path does not take either: there it would admit integrate
+  -- variants that were absent before (corpus observePredicateParameterLambda),
+  -- which batched mode cannot tensorize.
+  case leadingEnumerableArgument meta expr of
+    Just (mkBody, ai) | not cumulative
+                      , enumerationWithinMaterializationBudget meta (tags (getTypeInfo ai)) -> do
+      first <- (Right <$> scoped viaBinding) `catchError` (return . Left)
       case first of
         Right o -> inline o
-        Left _ -> applyBinding meta cumulative rt b sample
+        Left _ -> enumerateCurriedArgument meta False mkBody ai sample
+    _ -> viaBinding
 -- Probabilistic bound expression
 toIRInference meta cumulative (Expr TypeInfo{rType=_, chainName=_} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
@@ -4469,7 +4567,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     -- evaluated before any membership test can run. Gating via 'IRIf' rather
     -- than 'OpAnd' matters here: both operands of an IR boolean op are
     -- evaluated, so an 'OpAnd' would still divide by zero.
-    let possibleExpr = IRIf appTest (IRIsPossible enumListR invExpr) (IRConst (VBool False))
+    let possibleExpr = IRIf appTest (IRIsPossible (multiValueToIR enumListR) invExpr) (IRConst (VBool False))
     -- Without topK, pLeft is read once, inside the 'possible' arm below, and the
     -- optimizer's let-inlining moves its bindings there: a cell whose inverted
     -- value lies outside the right-hand domain never descends into @left@.
@@ -5095,7 +5193,7 @@ equalityGuardBody _    _ v sample = IROp OpEq sample v
 -- ('SPLL.CodeGenPyTorchBatched.structural').
 leafEqIR :: RType -> IRExpr -> IRExpr -> IRExpr
 leafEqIR TFloat    a b = IROp OpApprox a b
-leafEqIR (TVarR _) a b = IRIf (IRConformsTo TFloat a) (IROp OpApprox a b) (IROp OpEq a b)
+leafEqIR (TVarR _) a b = IRIf (IRConformsTo ITFloat a) (IROp OpApprox a b) (IROp OpEq a b)
 leafEqIR _         a b = IROp OpEq a b
 
 
@@ -5244,7 +5342,6 @@ enumerateBinding meta l v preTable compileBody = do
         return (fresh, renameFreeVar paramVar fresh (findExprWithCN fExprs bodyCn))
       else return (paramVar, findExprWithCN fExprs bodyCn)
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
-  let sr = semiringOf meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   -- Inside an enclosing enumeration, the argument's measure is tabulated once
   -- per domain value ahead of this loop rather than recomputed in it (task
@@ -5273,12 +5370,13 @@ enumerateBinding meta l v preTable compileBody = do
     -- the plan traversal must see the loop variable as fixed, not as an enclosing
     -- random binding shared across factors ('planFactorExternals').
     let bodyMeta = meta{ typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta
-                       , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
+                       , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta)
+                       , dimAwareEnum = keepsDims }
     bodyRes <- compileBody bodyMeta lBodyExpr
-    return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
-  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
-  setVariables outerBinds
-  enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+    return (pBranch, bodyRes))
+  enumSumTerms meta dimBound boundVar discreteVVals irTuple
+  where
+    (keepsDims, dimBound) = enumSumDims meta (rType (getTypeInfo l))
 
 -- | A draw's argument as 'enumerateBinding' measures it: with the enclosing
 -- enumerated latents fixed. Inside their loops each holds one value, and a
@@ -5823,17 +5921,93 @@ enumerateCurriedArgument meta cumulative mkBody v sample = do
   let vTi = getTypeInfo v
       loopVar = Expr (vTi {pType = Deterministic, tags = []}) (Var boundVar)
       loopBody = mkBody loopVar
+      (keepsDims, dimBound) = enumSumDims meta (rType (getTypeInfo loopBody))
       bodyMeta = meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
-                      , recoveredVars = boundVar : recoveredVars meta }
-      sr = semiringOf meta
+                      , recoveredVars = boundVar : recoveredVars meta
+                      , dimAwareEnum = keepsDims }
   irTuple <- scoped (do
     pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
     bodyRes <- toIREnumerate bodyMeta cumulative loopBody sample
-    return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
+    return (pBranch, bodyRes))
   let discreteVVals = head [x | DiscreteValues x <- tags vTi]
-  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
-  setVariables outerBinds
-  enumSumP sr (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+  enumSumTerms meta dimBound boundVar discreteVVals irTuple
+
+-- | How an enumerated sum whose body measures a value of type @rt@ combines
+-- its terms (task enumerated-sum-over-density-body). The first component is
+-- 'dimAwareEnum' for the body: whether this sum, and every one enclosing it,
+-- reports the body's dim faithfully. The second is the static dim bound the
+-- dim-aware sum ('enumMinDimP') is built with, 'Nothing' when every term is
+-- a mass anyway (a float-free type, which 'floatFree' covers).
+--
+-- A type with no static bound ('floatLeafBound' 'Nothing': a list of reals)
+-- keeps the old sum, which reports a mass: there 'forwardOrInfer''s run-time
+-- guard stays, and raises on a density rather than mislabelling it.
+enumSumDims :: CompilerMetadata -> RType -> (Bool, Maybe Int)
+enumSumDims meta rt = case floatLeafBound (adtDecls meta) (resultOf rt) of
+  Nothing -> (False, Nothing)
+  Just d -> (dimAwareEnum meta, if d > 0 then Just d else Nothing)
+  where
+    -- The bound is taken on what the enumerated body returns, which for a
+    -- lambda being applied is its codomain.
+    resultOf (TArrow _ b) = b
+    resultOf t = t
+
+-- | Sum the scoped terms of an enumerated variable's domain, each the body's
+-- result and the mass @pBranch@ of its value, over the domain: the body
+-- weighted by that mass. With a dim bound ('enumSumDims') and a body whose
+-- dim is not statically 0 ('packedStaticDim') the sum keeps the terms' dims
+-- ('enumMinDimP'); otherwise it is the plain mass sum 'enumSumP'. A
+-- forward-and-compare indicator's dim is always statically 0, so those sums
+-- emit what they did before. In the dim-aware sum a value with no mass is an
+-- impossible term rather than a possible zero: the lowest possible dim
+-- decides the sum's dim, and a zero-weight atom must not outvote a real
+-- density (the tag over-approximates the support).
+enumSumTerms :: CompilerMetadata -> Maybe Int -> Varname -> MultiValue -> Open (IRExpr, PResult) -> CompilerMonad PResult
+enumSumTerms meta dimBound boundVar vals o = do
+  let sr = semiringOf meta
+      bc = countBranches (compilerConfig meta)
+      weighted (pBranch, r) = onProb (\p -> srTimes sr p pBranch) r
+      sumWith f o' = do
+        let irTuple = generateLetInBlock meta o'
+            (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+        setVariables outerBinds
+        f boundVar vals innerTuple
+  case dimBound of
+    Just d | packedStaticDim (generateLetInBlock meta (snd <$> o)) /= Just 0 -> do
+      o' <- scoped (do
+        (pBranch, r) <- inline o
+        w <- mkVariable "enum_weight"
+        setVariables [(w, pBranch)]
+        return (impossibleWhen (IROp OpEq (IRVar w) (srZero sr)) (weighted (IRVar w, r))))
+      sumWith (enumMinDimP sr bc id d) o'
+    _ -> sumWith (enumSumP sr bc id) (weighted <$> o)
+
+-- | The dim of a packed result ('packResult' under its let block) when it is
+-- a compile-time constant: read through the block's bindings, tuple
+-- projections of constructed tuples (and of both arms of a guarded block), an
+-- @if@ whose arms agree and a sum of dims. 'Nothing' when the dim depends on anything else (a run-time
+-- projection of a call, a binding outside the block, an @ANY@ test).
+packedStaticDim :: IRExpr -> Maybe Int
+packedStaticDim e = case flattenLetIns e of
+  (binds, IRConstruct TgTuple [_, IRConstruct TgTuple [d, _]]) -> staticInt (Map.fromList binds) d
+  _ -> Nothing
+  where
+    staticInt env x = case resolve env x of
+      IRConst (VInt n) -> Just n
+      IRIf _ a b -> do
+        n <- staticInt env a
+        m <- staticInt env b
+        if n == m then Just n else Nothing
+      IROp OpPlus a b -> (+) <$> staticInt env a <*> staticInt env b
+      _ -> Nothing
+    resolve env x = case x of
+      IRVar v | Just b <- Map.lookup v env -> resolve (Map.delete v env) b
+      IRLetIn v b rest -> resolve (Map.insert v b env) rest
+      IRDestruct AcFst t | IRConstruct TgTuple [a, _] <- resolve env t -> resolve env a
+      IRDestruct AcSnd t | IRConstruct TgTuple [_, b] <- resolve env t -> resolve env b
+      -- a projection of a guarded block ('closeResult'): project both arms
+      IRDestruct acc t | IRIf c a b <- resolve env t -> IRIf c (IRDestruct acc a) (IRDestruct acc b)
+      _ -> x
 
 
 -- ===== Agreement fusion (task categorical-product-ov-fusion) =====
@@ -6310,37 +6484,57 @@ forwardOrInfer meta cumulative whole sample operands forward
   | otherwise = do
       mapM_ (\(what, src, ir) -> requireDeterministicUnderEnum meta what src ir) operands
       res <- toIRInference meta cumulative (reinferRecovered meta (recoveredVars meta) whole) sample
-      -- Every enclosing enumerated sum ('enumSumP') reports its result as a
-      -- mass, dim 0, because until now its body always was one: a
-      -- forward-and-compare indicator. A delegated body can be a density
-      -- (@if b then Normal else Normal + 3.0@), and summing densities as if
-      -- they were masses would report the wrong dim -- and, where the dim
-      -- differs across enumerated values, the wrong mixture winner.
-      --
-      -- Whether it is one is in general a RUNTIME fact: @(x, Uniform)@ is a
-      -- mass exactly when the query marginalises the second slot with @ANY@
-      -- (the fuzz-found @enumDeadLetFreshDrawTuple@ reaches this through
-      -- @fst@), and topK pruning makes the dim a runtime choice even where it
-      -- would otherwise fold. So the probability is guarded at run time: a
-      -- possible result with a non-zero dim raises instead of being summed as
-      -- a mass. The guard is skipped where it is statically true -- a
-      -- cumulative result (a CDF value is a mass by construction), or a type
-      -- with no 'TFloat' leaf, which no density ever measures (this is what
-      -- keeps a helper call, whose dim is a runtime projection of the callee's
-      -- result, guard-free) -- and the optimizer folds it away where the dim
-      -- is a literal 0. Summing densities properly is follow-up task
-      -- enumerated-sum-over-density-body.
-      if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole))
+      -- A delegated body can be a density (@if b then Normal else Normal +
+      -- 3.0@), and whether it is one is in general a RUNTIME fact: @(x,
+      -- Uniform)@ is a mass exactly when the query marginalises the second
+      -- slot with @ANY@ (the fuzz-found @enumDeadLetFreshDrawTuple@ reaches
+      -- this through @fst@), and topK pruning makes the dim a runtime choice
+      -- even where it would otherwise fold. The enclosing enumerated sums
+      -- keep their terms' dims ('enumTerm', 'enumMinDimP'; task
+      -- enumerated-sum-over-density-body), so the result is returned as it
+      -- is -- unless one of them sums its terms as masses ('dimAwareEnum'
+      -- off: its body's type has no static dim bound, a list of reals). Then
+      -- the probability is guarded at run time: a possible result with a
+      -- non-zero dim raises instead of being summed as a mass. The guard is
+      -- also skipped where it is statically true -- a cumulative result (a
+      -- CDF value is a mass by construction), or a type with no 'TFloat'
+      -- leaf, which no density ever measures -- and the optimizer folds it
+      -- away where the dim is a literal 0.
+      if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole)) || dimAwareEnum meta
         then return res
         else do
           let isMass = orIR (rImposs res) (IROp OpEq (rDim res) dim0)
               refusal = IRError $ "probability-mode inference of an enumerated conditional (chain name "
                           ++ chainName (getTypeInfo whole) ++ ") met a continuous density: given the"
                           ++ " enumerated latents the query measures a fresh continuous draw, and an"
-                          ++ " enumerated sum over density-valued terms is not implemented (task"
-                          ++ " enum-let-latent-gates-fresh-draw; follow-up enumerated-sum-over-density-body)"
+                          ++ " enumerated sum over density-valued terms of a type with no static dim bound"
+                          ++ " (a list of reals) is not implemented (tasks enum-let-latent-gates-fresh-draw,"
+                          ++ " enumerated-sum-over-density-body)"
           return (onProb (\p -> IRIf isMass p refusal) res)
   where thd3 (_, _, x) = x
+
+-- | A static upper bound on the dim of a point probability of a value of the
+-- type: its number of real leaves, the larger alternative for a sum type.
+-- 'Nothing' when there is none (a list or tensor of reals, a recursive ADT
+-- with a real field) or the type is not recognised. Used by the enumerated
+-- sums ('enumSumTerms') to find the lowest dim among their terms
+-- ('enumMinDimP'), which needs the bound to build its ladder.
+floatLeafBound :: [ADTDecl] -> RType -> Maybe Int
+floatLeafBound decls = go Set.empty
+  where
+    go seen t
+      | floatFree decls t = Just 0
+      | otherwise = case t of
+          TFloat -> Just 1
+          Tuple a b -> (+) <$> go seen a <*> go seen b
+          TEither a b -> max <$> go seen a <*> go seen b
+          TADT n
+            | Set.member n seen -> Nothing
+            | otherwise -> case find ((== n) . dataName) decls of
+                Just d -> fmap (maximum . (0 :)) $ sequence
+                            [ sum <$> mapM (go (Set.insert n seen) . snd) fs | (_, fs) <- constructors d ]
+                Nothing -> Nothing
+          _ -> Nothing
 
 -- | True when no value of the type contains a 'TFloat' leaf, so a point
 -- probability of it is always a mass (dim 0). Conservative: anything it does

@@ -25,7 +25,7 @@ import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import PredefinedFunctions
 import Utils
-import SPLL.IntermediateRepresentation (defaultMaterializationCardinality)
+import SPLL.CompilerConfig (defaultMaterializationCardinality)
 import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN)
 
 type TagEnv = [(String, [Tag])]
@@ -389,7 +389,8 @@ distinctUpTo cap results = case cap of
 -- is decided in IRCompiler now, where 'pType' is known: a spine whose leading
 -- arguments are deterministic -- once the enclosing enumerated latents are
 -- fixed -- enumerates its last argument ('enumerateCurriedArgument'; a lone
--- random leading argument likewise, 'leadingEnumerableArgument'), and an
+-- random leading argument likewise where binding it refuses,
+-- 'leadingEnumerableArgument'), and an
 -- enumerated binding measures its argument with those latents fixed, which is
 -- what the spine needs when its random argument is a leading one
 -- (test/cases/let-bindings/sharedLatentNestedLet is the canary for that).

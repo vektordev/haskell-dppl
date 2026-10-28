@@ -8,12 +8,11 @@ module SPLL.CodeGenJulia (
 import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
-import SPLL.Lang.Lang
 import Data.List (intercalate, intersperse, dropWhileEnd)
 import Data.Char (isDigit)
-import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
-import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
+import SPLL.IR.Value
+import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
+import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.Maybe (fromMaybe)
 import Data.Functor ((<&>))
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
@@ -25,11 +24,11 @@ import Utils
 -- Expected format format of ThetaTrees:
 --    ThetaTree = ([Double], [ThetaTree])
 
-type GlobalStorage = StateT ([(MultiValue, String)], [String])
+type GlobalStorage = StateT ([(GenericMultiValue IRExpr, String)], [String])
 type VariableSupply = Supply
 type GlobalVariableSupply a = GlobalStorage VariableSupply a
 
-addOrGetFromGlobalStorage :: MultiValue -> GlobalVariableSupply String
+addOrGetFromGlobalStorage :: GenericMultiValue IRExpr -> GlobalVariableSupply String
 addOrGetFromGlobalStorage mv = do
   (globalStorage, callables) <- get
   case lookup mv globalStorage of
@@ -116,7 +115,7 @@ juliaVal v@(VAnyExcept _) = error (unlines
   , "generateFunctions without that guard."
   , "(task vanyexcept-unrenderable-in-text-backends)" ])
 juliaVal x = error ("unknown juliaVal for " ++ show x)
-juliaMultiVal :: MultiValue -> String
+juliaMultiVal :: GenericMultiValue IRExpr -> String
 juliaMultiVal MultiContinuous = "(\"C\", nothing)"
 juliaMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (juliaVal . valueToIR) vals) ++ "] )"
 juliaMultiVal (MultiTuple l r) = "(\"T\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"
@@ -151,16 +150,16 @@ juliaCtorRef name = case break (== '.') (reverse name) of
   (revLast, '.':revQual) -> reverse revQual ++ "." ++ juliaMangle (reverse revLast)
   _                      -> juliaMangle name
 
-generateADTClasses :: [ADTDecl] -> [String]
+generateADTClasses :: [IRADTDecl] -> [String]
 generateADTClasses decls =
-  concatMap generateADTClass (concatMap constructors decls)
+  concatMap generateADTClass (concatMap irConstructors decls)
   ++ concatMap (uncurry generateADTAccessor) (fieldAccessorOwners decls)
 
 -- Every identifier printed here goes through 'juliaMangle'; the declaration
 -- keeps the user's names (see 'renameADTIdentifiers'), and 'anyCtorTestMessage'
 -- deliberately still quotes the source constructor name so the diagnostic reads
 -- the same here, in Python, and in the interpreter.
-generateADTClass :: ADTConstructorDecl -> [String]
+generateADTClass :: IRADTConstructorDecl -> [String]
 generateADTClass (name, fields) =
   -- Struct declaration
   ["struct " ++ struct]++
@@ -213,7 +212,7 @@ generateFunctions env0 = do
                       -- nullary ADT constructors must be emitted as instantiations,
                       -- otherwise the bare struct type never compares equal to an
                       -- instance (same rule as CodeGenPyTorch's callableNames).
-                      ++ [ juliaMangle cName | decl <- adtDecls, (cName, fields) <- constructors decl, null fields ]
+                      ++ [ juliaMangle cName | decl <- adtDecls, (cName, fields) <- irConstructors decl, null fields ]
                       -- a nullary normal function is referenced by a bare name
                       -- too, and writeLogits indexes its (mu, sigma) result
                       ++ [ normalFnName n
@@ -491,28 +490,28 @@ escapeStr = concatMap esc
 -- in Julia, so TInt explicitly excludes Bool. The marginal-query wildcard (isAny) is
 -- accepted at every level, matching VAny, and short-circuits before any component
 -- accessor. The Int arg is a nesting depth used to name list-lambda binders uniquely.
-jlConforms :: RType -> String -> String
+jlConforms :: IRType -> String -> String
 jlConforms = jlConformsAt 0
 
-jlConformsAt :: Int -> RType -> String -> String
+jlConformsAt :: Int -> IRType -> String -> String
 jlConformsAt d t e = "(isAny(" ++ e ++ ") || " ++ jlConformsShape d t e ++ ")"
 
-jlConformsShape :: Int -> RType -> String -> String
+jlConformsShape :: Int -> IRType -> String -> String
 -- Real and not Integer rather than AbstractFloat: an AD number (ForwardDiff's
 -- Dual is a Real, not an AbstractFloat) is a float sample whose derivative the
 -- caller wants, the twin of the Python guard's 0-d tensor (task
 -- emitted-runtime-differentiability-gaps). Bool <: Integer, so a Bool stays out.
-jlConformsShape _ TFloat  e = "((" ++ e ++ " isa Real) && !(" ++ e ++ " isa Integer))"
-jlConformsShape _ TBool   e = "(" ++ e ++ " isa Bool)"
-jlConformsShape _ TInt    e = "((" ++ e ++ " isa Integer) && !(" ++ e ++ " isa Bool))"
-jlConformsShape d (Tuple a b) e =
+jlConformsShape _ ITFloat  e = "((" ++ e ++ " isa Real) && !(" ++ e ++ " isa Integer))"
+jlConformsShape _ ITBool   e = "(" ++ e ++ " isa Bool)"
+jlConformsShape _ ITInt    e = "((" ++ e ++ " isa Integer) && !(" ++ e ++ " isa Bool))"
+jlConformsShape d (ITTuple a b) e =
   "((" ++ e ++ " isa T) && " ++ jlConformsAt d a (jlFieldBase e ++ ".t1") ++ " && " ++ jlConformsAt d b (jlFieldBase e ++ ".t2") ++ ")"
-jlConformsShape d (ListOf t) e =
+jlConformsShape d (ITList t) e =
   let v = "_ce" ++ show d
   in "((" ++ e ++ " isa InferenceList) && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
-jlConformsShape d (TEither a b) e =
+jlConformsShape d (ITEither a b) e =
   "(((" ++ e ++ " isa Left) && " ++ jlConformsAt d a (jlFieldBase e ++ ".val") ++ ") || ((" ++ e ++ " isa Right) && " ++ jlConformsAt d b (jlFieldBase e ++ ".val") ++ "))"
-jlConformsShape d (TTensor sh t) e
+jlConformsShape d (ITTensor sh t) e
   | shapeRank sh == 1 =
       let v = "_ce" ++ show d
       in "((" ++ e ++ " isa AbstractVector) && length(" ++ e ++ ") == " ++ show (shapeNumel sh)

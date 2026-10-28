@@ -14,6 +14,7 @@ import SPLL.Examples
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Validator
 import Control.Monad.Random.Lazy (evalRandIO)
 import SPLL.Parser

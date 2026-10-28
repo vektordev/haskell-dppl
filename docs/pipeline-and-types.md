@@ -38,7 +38,7 @@ deterministic).
   else is sugar assembled from those by `SPLL.Prelude`: `letIn x v b` is
   `Apply (Lambda x b) v`, `Uniform`/`Normal` are `Var`s, `cons`/`tCons` are
   `InjF`s.
-- **IRExpr** (`src/SPLL/IntermediateRepresentation.hs`): IR after
+- **IRExpr** (`nest-ir/src/SPLL/IntermediateRepresentation.hs`): IR after
   compilation — `IRIf`, `IROp`, `IRLetIn`, `IRLambda`, `IRDensity`,
   `IRSample`, etc., plus `IRBuiltin Builtin [IRExpr]` for the tensor
   operations (see `enumeration.md`, "Tensors in the IR").

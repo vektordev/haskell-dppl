@@ -8,8 +8,8 @@ module MockNN
   , planHasTensor
   , flattenMockInput
   , mockInputFor
-  , symbolEnvName
-  , neuralRTypeToEnv
+  , mockNeuralOracle
+  , programMockOracle
   ) where
 
 import SPLL.IntermediateRepresentation
@@ -17,6 +17,7 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.AutoNeural
 import SPLL.Typing.RType
+import SPLL.IR.Neural (NeuralOracle, NeuralPrimitive(..), neuralOracle)
 
 import System.Random
 import Data.List (elemIndex)
@@ -285,11 +286,27 @@ randomList size = do
   xs <- randomList (size - 1)
   return (x:xs)
 
-symbolEnvName :: String
-symbolEnvName = "sym"
--- The interpreter does not inherently know how to handle neural networs.
--- We create entries in the environment so that they look like functions.
--- We declare here which entry in the enviroment the symbol is set to
--- so we can read them when jumping to the NN
-neuralRTypeToEnv :: NeuralDecl -> (String, IRExpr)
-neuralRTypeToEnv (name, _, _) = (name, IRLambda symbolEnvName (IRVar (name ++ "_mock")))
+-- | The interpreter's neural oracle for a program's declarations
+-- ("SPLL.IR.Neural"): each network is the mock 'evaluateMockNNFor' picks for
+-- its input type, over the partition plan of its target type (the
+-- declaration's @of@ clause, else the registry's entry for the type, else the
+-- derived plan).
+--
+-- A declaration that is not @input -> target@ errors when its network is
+-- called, not when the oracle is built; validation rejects it before here.
+mockNeuralOracle :: [ADTDecl] -> [(RType, MultiValue)] -> [NeuralDecl] -> NeuralOracle
+mockNeuralOracle adtDecls registry decls = neuralOracle (map entry decls)
+  where
+    entry (name, rt, tag) = (name, NeuralPrimitive
+      { neuralSignature = neuralIRSignature rt
+      , neuralEval = evaluateMockNNFor (inputTy name rt) (plan name rt tag) })
+    plan name rt tag =
+      let target = fromMaybe (malformed name rt) (neuralValueType rt)
+      in makePartitionPlan adtDecls target (resolvePartitionAnnotation registry target tag)
+    inputTy name rt = fromMaybe (malformed name rt) (neuralInputType rt)
+    malformed name rt = error ("Neural network '" ++ name ++ "' is declared as " ++ show rt
+                               ++ "; a read-logits declaration must have type input -> <output type>")
+
+-- | 'mockNeuralOracle' over a program's own declarations and registry.
+programMockOracle :: Program -> NeuralOracle
+programMockOracle p = mockNeuralOracle (adts p) (writeLogitsDecls p) (neurals p)

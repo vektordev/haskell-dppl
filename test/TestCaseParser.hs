@@ -45,6 +45,7 @@ import Control.Monad (forM)
 
 import SPLL.Parser (tryParseProgram, pValue)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Lang.Types
 
 import qualified Text.Megaparsec.Char.Lexer as L

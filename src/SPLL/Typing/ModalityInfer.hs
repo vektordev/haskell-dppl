@@ -73,7 +73,7 @@ import Data.Graph (SCC(..), stronglyConnComp)
 
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
-  , Value, GenericValue(..), GenericList(..), Tag(..), MultiValue(..) )
+  , Value, GenericValue(..), GenericList(..), Tag(..), MultiValue, GenericMultiValue(..) )
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isZeroValue, freeVarsExpr)
 import SPLL.Analysis (enumerableDomain, enumerableApplication)
 import SPLL.AutoNeural (planReadOf, planProjectedReadOf)
