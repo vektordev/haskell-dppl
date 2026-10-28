@@ -239,6 +239,37 @@ shared fields, and an `ANY` slot still keeps its fields in the group. Pinned by
 `Internals.recordSharedFieldGroupsCodeSizePolynomial` and the
 `neural/recordSharedFieldGroups{,Noisy}` corpus pairs.
 
+**A conjunction of clauses that share draws in a cycle is summed by variable
+elimination** (task `grid-constraint-network-enumerated-jointly`). A 3x3 grid
+of 10-way reads whose rows and columns must each be all different puts every
+read in two clauses, so sinking leaves most of them above the conjunction and
+the loops nest nine deep: about `10^9` terms per call, more than ten minutes.
+IRCompiler's `constraintNet` recognises a Boolean tree of `&&` whose inner
+nodes carry enumerable draws (wherever sinking left them) and whose leaves are
+clauses deterministic given the draws (re-inferred with the draws pinned); no
+draw may read another or a random enclosing local, the binder names must be
+unique and not captured, and the clauses must not be holes. It is taken only
+when the clause/draw incidence graph has a cycle (acyclic networks are what
+sinking already factorises) and the elimination costs under a quarter of the
+joint enumeration, and declined under topK, branch counting and max-product
+(below). `compileConstraintNet` then emits, per draw, its domain and its
+measure as a rank-1 tensor; per elimination (greedy, smallest table first,
+`eliminationOrder`), a table over the draws the eliminated one shares a factor
+with, built as nested `BMap`s over `BIota` positions whose innermost body sums
+the eliminated draw, its clauses guarding the product of its measure and the
+tables read at those positions. The tables are tensors of tensors, read by
+chained `BIndex`; the clauses read the draws by name, bound from their
+positions. `P(True)` is the last table; `P(False)` is the product of the draws'
+totals minus it (`measureDiffSR`, exact sums only, hence the declines), and
+`ANY` is the total. Measured on the 3x3 grid (scalar Python): 0.3 s per call
+with float probabilities; 9 s with `[128]` torch vectors, 24 s batched, whose
+kernel per table entry is still one small torch op (a real `[10^k, B]` table
+would be einsum speed). The batched backend reads a `BIota` binder and a
+constant domain at it as structure, and `tensor_index`/`tensor_sum` take a
+Python element as it stands rather than stacking the axis. Pinned by
+`Internals.gridConstraintNetEliminated` (loop depth) and the
+`neural/gridLatinNet` / `neural/gridSumNet` corpus pairs.
+
 **A nested draw's measure is tabulated ahead of its loop** (task
 `split-read-field-leaf-rebuilt-per-world`). Inside an enclosing enumeration,
 `enumerateBinding` compiles the argument's measure once per domain value
@@ -698,7 +729,9 @@ Only **rank 1 and axis 0** are emitted. The representation admits any rank and
 the interpreter implements it (`fibres`/`rewrap` do the stride arithmetic, and
 `Internals/tensor builtins` pins the layout); the three backends refuse higher
 rank with a named diagnostic rather than emitting something plausible. Nothing
-produces a rank > 1 tensor today.
+produces a rank > 1 tensor today. A table over several variables is a rank-1
+tensor of rank-1 tensors instead (the constraint-network elimination above),
+read one axis at a time.
 
 One refusal this form does **not** preserve: `--batched --logSpace`.
 `CodeGenPyTorchBatched`'s `emittable` used to have no `IRLogEnumSum` case (and

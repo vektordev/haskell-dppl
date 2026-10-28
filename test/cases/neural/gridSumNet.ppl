@@ -1,0 +1,18 @@
+-- A 2x3 grid of reads whose rows sum to rowSum and whose columns sum to
+-- colSum, a constraint network with cycles (every read is in a row and a
+-- column clause), so IRCompiler sums the reads out by variable elimination.
+-- The clauses call top-level definitions besides reading the cells, one clause
+-- reads no cell at all, and one cell is not a neural read but a choice of 1 or
+-- 2. Task grid-constraint-network-enumerated-jointly.
+neural cell :: (Symbol -> Int) of [0, 1, 2, 3]
+
+rowSum = 3
+colSum = 2
+
+main a b c d e =
+  draw x1 = cell a in draw x2 = cell b in draw x3 = cell c in
+  draw x4 = cell d in draw x5 = cell e in
+  draw x6 = (if Uniform < 0.3 then 1 else 2) in
+  (colSum + colSum + colSum == rowSum + rowSum) &&
+  (x1 + x2 + x3 == rowSum) && (x4 + x5 + x6 == rowSum) &&
+  (x1 + x4 == colSum) && (x2 + x5 == colSum) && (x3 + x6 == colSum)

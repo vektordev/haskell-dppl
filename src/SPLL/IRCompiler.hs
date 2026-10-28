@@ -3286,6 +3286,11 @@ toIRInference meta cumulative e@(Expr TypeInfo {rType=rt} _) sample
       if cumulative
         then return (mass (compareValueExpr (semiringOf meta) rt (IRConst (valueToIR v)) sample))
         else return (indicatorP (semiringOf meta) (equalityGuard rt (IRConst (valueToIR v)) sample))
+-- A conjunction of clauses over enumerable draws whose clauses share the draws
+-- in a cycle: variable elimination over the draws ('ConstraintNet'), instead
+-- of the nested joint enumeration the stack would otherwise get.
+toIRInference meta False e sample
+  | Just net <- constraintNet meta e = compileConstraintNet meta net sample
 toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, gaussianLeaf meta e = do
   (mu, sigma0) <- toIRNormalParams meta e
   degenerateScaleGuard meta False TFloat mu sigma0 sample $ \sigma ->
@@ -5358,6 +5363,214 @@ factoredDrawStack meta cumulative ds sample = do
     productOf = foldl1 (prodP sr)
 
 
+-- | A conjunction of Boolean clauses over enumerable draws, compiled by
+-- variable elimination (task grid-constraint-network-enumerated-jointly).
+--
+-- > draw x1 = readD a in .. draw x9 = readD i in
+-- > diff3 x1 x2 x3 && diff3 x4 x5 x6 && .. && diff3 x3 x6 x9
+--
+-- Every draw sits in two clauses (a row and a column), so after
+-- 'SPLL.DrawSinking' most of them still sit above the whole conjunction, and
+-- the nested enumeration walks close to the joint of all nine reads: @10^9@
+-- terms per call, more than ten minutes. The probability that the conjunction
+-- holds is a sum over the draws of a product of factors, one per draw (its
+-- measure) and one indicator per clause, which variable elimination sums one
+-- draw at a time: summing out a draw multiplies the factors that mention it
+-- into a table over the draws they also mention ('eliminationOrder' picks the
+-- draw whose table is smallest). The tables are nested rank-1 tensors indexed
+-- by domain position ('BIota'), built at run time, so the code stays linear in
+-- the program and the cost is the sum of the table sizes times the eliminated
+-- domain.
+--
+-- The shape is a tree of @&&@ whose inner nodes may carry draws (where
+-- sinking left them) and whose leaves are the clauses. It is sound to hoist
+-- every draw to the top: each is still one sample covering every use of its
+-- name, which the checks below make unique and not captured; and a draw's
+-- measure is a factor of the joint whether or not the clause that reads it is
+-- evaluated. The leaves must be deterministic given the draws (re-inferred
+-- with the draws pinned), and no draw may read another draw or a random
+-- enclosing local, so the draws are independent and their factors unary.
+--
+-- @P(False)@ is the total measure (the product of the draws' own totals)
+-- minus @P(True)@, a subtraction on exact sums, which is why the rule is
+-- declined under topK (and under branch counting, whose counts it does not
+-- reproduce) and under a semiring that has no subtraction (max-product). It is
+-- taken only where it pays: the clause hypergraph has a cycle (an acyclic
+-- network is what sinking already factorises) and the elimination costs less
+-- than a quarter of the joint enumeration.
+data ConstraintNet = ConstraintNet
+  { cnDraws   :: [(String, Expr)]
+    -- ^ each draw's binder and value, in the order the walk met them
+  , cnClauses :: [(Expr, [Int])]
+    -- ^ each clause and the draws it reads (indices into 'cnDraws')
+  , cnOrder   :: [Int]
+    -- ^ the elimination order
+  }
+
+constraintNet :: CompilerMetadata -> Expr -> Maybe ConstraintNet
+constraintNet meta e0 = do
+  let conf = compilerConfig meta
+      sr = semiringOf meta
+  need (not (countBranches conf) && isNothing (topKThreshold conf))
+  need (srReduceOp sr `elem` [ROpAdd, ROpLogSumExp])
+  need (rType (getTypeInfo e0) == TBool && rootShape e0)
+  (draws, leaves) <- collect e0
+  let names = map fst draws
+      nameSet = Set.fromList names
+      domains = [ take 1 [ mv | DiscreteValues mv <- tags (getTypeInfo v) ] | (_, v) <- draws ]
+  need (length draws >= 2 && Set.size nameSet == length names)
+  need (Set.null (nameSet `Set.intersection` freeVarsExpr e0))
+  need (all ((== 1) . length) domains)
+  need (all (Set.null . Set.intersection nameSet . freeVarsExpr . snd) draws)
+  let sizes = [ length (multiValueToValueList mv) | [mv] <- domains ]
+      idx = Map.fromList (zip names [0 :: Int ..])
+      clauses = [ (c, sort [ j | x <- Set.toList (freeVarsExpr c), Just j <- [Map.lookup x idx] ]) | c <- leaves ]
+  need (all ((== TBool) . rType . getTypeInfo) leaves)
+  -- a pruned observation's hole is a unit factor, not a value to compare
+  need (null [ () | Expr _ (Constant VAny) <- concatMap subtreesOf leaves ])
+  need (cyclicIncidence (length draws) (map snd clauses))
+  let (order, veCost) = eliminationOrder sizes (map snd clauses)
+  need (4 * veCost < product (map toInteger sizes))
+  -- The semantic checks last: they re-run modality inference.
+  need (not (any (readsRandomLocal nameSet) (map snd draws ++ leaves)))
+  let pins = names ++ recoveredVars meta
+  need (all (\c -> pType (getTypeInfo (reinferRecovered meta pins c)) == Deterministic) leaves)
+  return (ConstraintNet draws clauses order)
+  where
+    need b = if b then Just () else Nothing
+    rootShape (Expr _ (Apply (Expr _ (Lambda _ _)) _)) = True
+    rootShape (Expr _ (InjF (Named "and") [_, _])) = True
+    rootShape _ = False
+    collect (Expr _ (Apply l@(Expr _ (Lambda x b)) v))
+      | isDraw l v = do
+          (ds, cs) <- collect b
+          return ((x, v) : ds, cs)
+    collect (Expr _ (InjF (Named "and") [p, q])) = do
+      (d1, c1) <- collect p
+      (d2, c2) <- collect q
+      return (d1 ++ d2, c1 ++ c2)
+    collect leaf = Just ([], [leaf])
+    -- The lambda is literal, and its body is walked here rather than
+    -- resolved through chain names, so 'calleeBodyInScope' does not apply
+    -- (it would see the names the enclosing draws of the net bind as unbound).
+    isDraw l v = pType (getTypeInfo v) /= Deterministic
+      && isEnumerableApplication meta l v
+      && enumerationWithinMaterializationBudget meta (tags (getTypeInfo v))
+      && isNothing (agreementShape meta l v)
+    -- as in 'drawStack': a local neither fixed by an enclosing engine nor
+    -- typed 'Deterministic' at every occurrence couples what reads it
+    readsRandomLocal netVars ex = any (isRandomLocal netVars) (Set.toList (randomReads ex))
+    isRandomLocal netVars u = not (u `Set.member` netVars) && u `notElem` recoveredVars meta
+      && case lookup u (typeEnv meta) of
+           Just (t, False) -> not (isTArrowType t)
+           _ -> False
+    randomReads ex = Set.fromList [ n | Expr ti (Var n) <- subtreesOf ex, pType ti /= Deterministic ]
+    subtreesOf ex = ex : concatMap subtreesOf (getSubExprs ex)
+
+-- | Whether the incidence graph of @n@ variables and the clauses over them
+-- (each a list of variables) has a cycle: more edges than a forest on its
+-- nodes could hold.
+cyclicIncidence :: Int -> [[Int]] -> Bool
+cyclicIncidence n scopes0 =
+  let scopes = filter (not . null) scopes0
+      nodes = n + length scopes
+      edges = [ (n + c, v) | (c, s) <- zip [0 ..] scopes, v <- s ]
+      adj = Map.fromListWith (++) (concat [ [(a, [b]), (b, [a])] | (a, b) <- edges ])
+      graph = [ (u, u, Map.findWithDefault [] u adj) | u <- [0 .. nodes - 1] ]
+      comps = length (stronglyConnComp graph)
+  in length edges > nodes - comps
+
+-- | A greedy elimination order for variables of the given domain sizes under
+-- factors over the given scopes (one unary factor per variable is implied),
+-- and its cost: the sum, over the eliminations, of the size of the table
+-- built times the eliminated domain. Each step eliminates the variable whose
+-- factors span the fewest assignments.
+eliminationOrder :: [Int] -> [[Int]] -> ([Int], Integer)
+eliminationOrder sizes scopes0 =
+  go (Set.fromList [0 .. n - 1]) (map Set.fromList (filter (not . null) scopes0)) [] 0
+  where
+    n = length sizes
+    sz v = toInteger (sizes !! v)
+    span' fs v = Set.insert v (Set.unions [ s | s <- fs, v `Set.member` s ])
+    weight fs v = product (map sz (Set.toList (span' fs v)))
+    go remaining fs acc cost
+      | Set.null remaining = (reverse acc, cost)
+      | otherwise =
+          let v = snd (minimum [ (weight fs u, u) | u <- Set.toList remaining ])
+              (touch, rest) = partition (Set.member v) fs
+              merged = Set.delete v (Set.unions touch)
+              fs' = if Set.null merged then rest else merged : rest
+          in go (Set.delete v remaining) fs' (v : acc) (cost + weight fs v)
+
+-- | A factor of a 'ConstraintNet' during elimination.
+data NetFactor
+  = NFUnary Int            -- ^ a draw's measure, indexed by its position
+  | NFClause IRExpr [Int]  -- ^ a clause, reading the draws by name
+  | NFTable Varname [Int]  -- ^ a table built by an elimination, nested in scope order
+
+netFactorScope :: NetFactor -> [Int]
+netFactorScope (NFUnary k) = [k]
+netFactorScope (NFClause _ s) = s
+netFactorScope (NFTable _ s) = s
+
+-- | The probability of a 'ConstraintNet' by variable elimination; see
+-- 'ConstraintNet'. Every table is let-bound in the current scope, ahead of
+-- the result, which reads the sample only at its root.
+compileConstraintNet :: CompilerMetadata -> ConstraintNet -> IRExpr -> CompilerMonad PResult
+compileConstraintNet meta net sample = do
+  let draws = cnDraws net
+      doms = [ head [ mv | DiscreteValues mv <- tags (getTypeInfo v) ] | (_, v) <- draws ]
+      sizes = map (length . multiValueToValueList) doms
+      reduceSum t = IRBuiltin (BReduce (srReduceOp sr) 0) [t]
+      iota k = IRBuiltin (BIota [EFixed (sizes !! k)]) []
+  domVars <- forM draws (const (mkVariable "net_dom"))
+  setVariables (zip domVars (map tensorDomainSR doms))
+  unaryVars <- forM (zip draws doms) $ \((_, v), mv) -> do
+    xv <- mkVariable "net_val"
+    o <- scoped (unP . rProb <$> toIRInference meta False (drawMeasured meta v) (IRVar xv))
+    u <- mkVariable "net_unary"
+    setVariables [(u, IRBuiltin BMap [IRLambda xv (closeExpr o id), tensorDomainSR mv])]
+    return u
+  let metaC = meta { typeEnv = [ (x, (rType (getTypeInfo v), False)) | (x, v) <- draws ] ++ typeEnv meta
+                   , recoveredVars = map fst draws ++ recoveredVars meta }
+  clauseIRs <- mapM (toIRGenerate metaC . fst) (cnClauses net)
+  let eliminate fs k = do
+        let (touch, rest) = partition (elem k . netFactorScope) fs
+            newScope = sort (nub (concatMap netFactorScope touch)) \\ [k]
+        ivs <- Map.fromList <$> forM (k : newScope) (\v -> (,) v <$> mkVariable "net_i")
+        let ix v = IRVar (ivs Map.! v)
+            weightOf (NFUnary j) = Just (IRBuiltin (BIndex 0) [IRVar (unaryVars !! j), ix j])
+            weightOf (NFTable t s) = Just (foldl (\acc v -> IRBuiltin (BIndex 0) [acc, ix v]) (IRVar t) s)
+            weightOf NFClause{} = Nothing
+            conds = [ c | NFClause c _ <- touch ]
+            prod = foldl1 (srTimes sr) (mapMaybe weightOf touch)
+            guarded = if null conds then prod else IRIf (foldr1 andIR conds) prod (srZero sr)
+            -- the clauses read the draws by name: bound from the indices
+            readVars = nub (concat [ s | NFClause _ s <- touch ])
+            summand = foldr (\v acc -> IRLetIn (fst (draws !! v)) (IRBuiltin (BIndex 0) [IRVar (domVars !! v), ix v]) acc)
+                            guarded readVars
+            inner = reduceSum (IRBuiltin BMap [IRLambda (ivs Map.! k) summand, iota k])
+            table = foldr (\v acc -> IRBuiltin BMap [IRLambda (ivs Map.! v) acc, iota v]) inner newScope
+        t <- mkVariable "net_table"
+        setVariables [(t, table)]
+        return (NFTable t newScope : rest)
+  final <- foldM eliminate ([ NFUnary k | k <- [0 .. length draws - 1] ]
+                            ++ [ NFClause c s | (c, (_, s)) <- zip clauseIRs (cnClauses net) ])
+                   (cnOrder net)
+  let constConds = [ c | NFClause c [] <- final ]
+      scalars = [ IRVar t | NFTable t [] <- final ]
+      holds = foldl1 (srTimes sr) scalars
+      truth = if null constConds then holds else IRIf (foldr1 andIR constConds) holds (srZero sr)
+  tVar <- mkVariable "net_true"
+  zVar <- mkVariable "net_total"
+  setVariables [ (tVar, truth)
+               , (zVar, foldl1 (srTimes sr) [ reduceSum (IRVar u) | u <- unaryVars ]) ]
+  opaqueMass sr (IRIf (IRUnaryOp OpIsAny sample) (IRVar zVar)
+                   (IRIf sample (IRVar tVar) (measureDiffSR sr (IRVar zVar) (IRVar tVar))))
+             const0
+  where
+    sr = semiringOf meta
+
 -- | The enumerable @draw@s an expression reads through the shapes
 -- 'latentCellSum' walks: a draw (an applied literal lambda whose argument is
 -- random and enumerable within the dense budget given the draws above it),
@@ -5906,6 +6119,7 @@ toIREnumerate meta cumulative e@(Expr _ (Apply l v)) sample
     else case agreementShape meta l v of
       Just ag -> enumerateAgreement meta cumulative ag sample
       Nothing
+        | not cumulative, Just net <- constraintNet meta e -> compileConstraintNet meta net sample
         | Just ds <- drawStack meta e -> factoredDrawStack meta cumulative ds sample
         | otherwise -> enumerateAppliedLambda meta cumulative l v sample
   where

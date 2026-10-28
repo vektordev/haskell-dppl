@@ -493,11 +493,33 @@ def _uniform(xs):
       return False
   return True
 
+def _uniform_tensors(xs):
+  # Every tensor element of one shape and dtype, Python values aside.
+  shape = dt = None
+  for x in xs:
+    if isinstance(x, torch.Tensor):
+      if dt is None:
+        shape, dt = x.shape, x.dtype
+      elif x.dtype != dt or x.shape != shape:
+        return False
+  return True
+
 def tensor_sum(xs):
   if not xs:
     return torch.tensor(0.0, dtype=DTYPE)
   if len(xs) == 1:
     return xs[0]
+  # Python values in the axis (a term a constant guard zeroed, task
+  # grid-constraint-network-enumerated-jointly) are added as one Python sum
+  # rather than each broadcast to a [B] row and stacked; an axis of Python
+  # values alone sums to a Python value, the same for the whole batch.
+  ts = [x for x in xs if isinstance(x, torch.Tensor)]
+  if len(ts) < len(xs) and _uniform_tensors(ts) and all(isinstance(x, (int, float)) for x in xs if not isinstance(x, torch.Tensor)):
+    c = float(sum(x for x in xs if not isinstance(x, torch.Tensor)))
+    if not ts:
+      return c
+    t = ts[0] if len(ts) == 1 else torch.stack(ts).sum(0)
+    return t if c == 0.0 else t + c
   return _tensor_stack(xs).sum(0)
 
 def tensor_logsumexp(xs):
@@ -523,8 +545,19 @@ def tensor_index(xs, idx):
   # the stack-and-gather below would give the same values, at the cost of a
   # stack of the whole axis per read (task
   # batched-enumeration-rereads-neural-leaf-per-world).
-  if isinstance(idx, int) and _uniform(xs):
-    return xs[min(max(int(idx), 0), len(xs) - 1)]
+  #
+  # It reads the element itself on more axes than uniform ones (task
+  # grid-constraint-network-enumerated-jointly): a nested axis, a table over
+  # several enumerated variables, whose elements are the inner lists; and an
+  # element that is a Python value (an enumeration domain's constant, a zero
+  # entry of a table next to [B] tensors), which the stack would only have
+  # broadcast to a [B] row of that same value. A tensor element is read as it
+  # stands when its tensor siblings share its shape and dtype, which is all
+  # the stack would change.
+  if isinstance(idx, int):
+    x = xs[min(max(int(idx), 0), len(xs) - 1)]
+    if not isinstance(x, torch.Tensor) or _uniform_tensors(xs):
+      return x
   stacked = _tensor_stack(xs)
   idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
   idx_t = idx_t.clamp(0, stacked.shape[0] - 1)
