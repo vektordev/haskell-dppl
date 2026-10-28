@@ -14,8 +14,8 @@ module SPLL.IR.ADT (
   anyCtorTestMessage,
   accessorMismatchMessage
 ) where
-import SPLL.Lang.Types
-import SPLL.IR.Type (IRType(..), irTypeOfRType)
+import SPLL.IR.Value
+import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
 import SPLL.IntermediateRepresentation (IRExpr (..))
 import Data.Function (on)
 import Data.List (nubBy)
@@ -23,28 +23,26 @@ import Data.Vector.Internal.Check (HasCallStack)
 
 -- | Name and parameter count of every implicit function of the declarations,
 -- constructor, then its test, then its accessors, per constructor.
-implicitFunctionSignatures :: [ADTDecl] -> [(String, Int)]
+implicitFunctionSignatures :: [IRADTDecl] -> [(String, Int)]
 implicitFunctionSignatures decls =
-  [ sig | ADTDecl{constructors=cs} <- decls, (name, fields) <- cs
+  [ sig | IRADTDecl{irConstructors=cs} <- decls, (name, fields) <- cs
         , sig <- (name, length fields) : ("is" ++ name, 1) : [ (f, 1) | (f, _) <- fields ] ]
 
-implicitFunctionNames :: [ADTDecl] -> [String]
+implicitFunctionNames :: [IRADTDecl] -> [String]
 implicitFunctionNames = map fst . implicitFunctionSignatures
 
 -- | The number of parameters of an implicit function (0 for an unknown name).
-implicitFunctionArity :: [ADTDecl] -> String -> Int
+implicitFunctionArity :: [IRADTDecl] -> String -> Int
 implicitFunctionArity decls name = maybe 0 id (lookup name (implicitFunctionSignatures decls))
 
--- | The 'IRType' of every implicit function. A constructor with a field of no
--- runtime type (a type variable, say, which a parsed declaration never has) is
--- left out, with its accessors.
-implicitFunctionIRTypes :: [ADTDecl] -> [(String, IRType)]
+-- | The 'IRType' of every implicit function.
+implicitFunctionIRTypes :: [IRADTDecl] -> [(String, IRType)]
 implicitFunctionIRTypes decls = concat
   [ (name, foldr (ITArrow . snd) self fieldTys)
     : ("is" ++ name, self `ITArrow` ITBool)
     : [ (f, self `ITArrow` t) | (f, t) <- fieldTys ]
-  | ADTDecl{dataName=tyName, constructors=cs} <- decls, (name, fields) <- cs
-  , Just fieldTys <- [mapM (\(f, rt) -> (,) f <$> irTypeOfRType rt) fields]
+  | IRADTDecl{irDataName=tyName, irConstructors=cs} <- decls, (name, fields) <- cs
+  , let fieldTys = fields
   , let self = ITADT tyName ]
 
 -- | Every field accessor paired with the constructor whose field it reads,
@@ -64,26 +62,26 @@ implicitFunctionIRTypes decls = concat
 -- earlier) and Julia accept-both (the two typed methods dispatch), so the same
 -- program answered three different ways. They now emit one accessor per name,
 -- from this list.
-fieldAccessorOwners :: [ADTDecl] -> [(String, String)]
+fieldAccessorOwners :: [IRADTDecl] -> [(String, String)]
 fieldAccessorOwners decls = nubBy ((==) `on` fst)
   [ (fName, cName)
-  | decl <- decls, (cName, fields) <- constructors decl, (fName, _) <- fields ]
+  | decl <- decls, (cName, fields) <- irConstructors decl, (fName, _) <- fields ]
 
 -- Create an entry in the environment that wraps a call to the funnction in lambdas for each of its parameters
 -- Final form: x3 -> x2 -> x1 -> x0 -> IRVar "constr_adt"
 -- No need to invoke here, because this is only for the interpreter
-implicitFunctionsToEnv :: ADTDecl -> [(String, IRExpr)]
+implicitFunctionsToEnv :: IRADTDecl -> [(String, IRExpr)]
 implicitFunctionsToEnv decl = map (\(n, k) -> (n, lambdas k 0 (IRVar $ n ++ "_adt"))) (implicitFunctionSignatures [decl])
   where
     lambdas :: Int -> Int -> IRExpr -> IRExpr
     lambdas 0 _ inner = inner
     lambdas k idx inner = IRLambda ("x" ++ show idx) (lambdas (k - 1) (idx + 1) inner)
 
-implicitFunctionImpl :: (Show a, HasCallStack) => [ADTDecl] -> String -> [GenericValue a] -> GenericValue a
+implicitFunctionImpl :: (Show a, HasCallStack) => [IRADTDecl] -> String -> [GenericValue a] -> GenericValue a
 implicitFunctionImpl decls fName [param] | fName `elem` isFNames = isImpl (drop 2 fName) param
-  where isFNames = concatMap (map (("is" ++) . fst) . constructors) decls
+  where isFNames = concatMap (map (("is" ++) . fst) . irConstructors) decls
 implicitFunctionImpl decls fName param | fName `elem` constrFNames = VADT fName param
-  where constrFNames = concatMap (map fst . constructors) decls
+  where constrFNames = concatMap (map fst . irConstructors) decls
 implicitFunctionImpl decls fName [param] =
   case param of
     VADT constr fields ->
@@ -106,11 +104,11 @@ implicitFunctionImpl _ fName params = error $ "somethigng went wrong with implic
 -- multi-constructor domain necessarily contains values every accessor is
 -- undefined on. It asks this first and skips them, so an accessor's enumerated
 -- domain is the values of its own constructor rather than a compiler crash.
-implicitFunctionApplicable :: [ADTDecl] -> String -> [GenericValue a] -> Bool
+implicitFunctionApplicable :: [IRADTDecl] -> String -> [GenericValue a] -> Bool
 implicitFunctionApplicable decls fName [param] | fName `elem` isFNames = isADTValue param
-  where isFNames = concatMap (map (("is" ++) . fst) . constructors) decls
+  where isFNames = concatMap (map (("is" ++) . fst) . irConstructors) decls
 implicitFunctionApplicable decls fName _ | fName `elem` constrFNames = True
-  where constrFNames = concatMap (map fst . constructors) decls
+  where constrFNames = concatMap (map fst . irConstructors) decls
 implicitFunctionApplicable decls fName [param] | fName `elem` implicitFunctionNames decls =
   case param of
     VADT constr _ -> constr == fst (findField decls fName)
@@ -172,13 +170,13 @@ accessorMismatchMessage accessor ctor =
   ++ "other constructor."
 
 -- Returns constructor and field index
-findField :: [ADTDecl] -> String -> (String, Int)
-findField decls name = case mapM (mapM (mFindField 0) . constructors) decls of
+findField :: [IRADTDecl] -> String -> (String, Int)
+findField decls name = case mapM (mapM (mFindField 0) . irConstructors) decls of
   Left a -> a
   Right _ -> error ("Field not found: " ++ name)
   where
     -- Use the either monad to find the field so we can run this on all constructors and get one output. Could be done using list operators, but I assume its easier this way
-    mFindField :: Int -> ADTConstructorDecl -> Either (String, Int) ()
+    mFindField :: Int -> IRADTConstructorDecl -> Either (String, Int) ()
     mFindField idx (cName, (fName, _):_) | fName == name = Left (cName, idx)
     mFindField idx (cName, _:fields) = mFindField (idx + 1) (cName, fields)
     mFindField _ _ = Right ()

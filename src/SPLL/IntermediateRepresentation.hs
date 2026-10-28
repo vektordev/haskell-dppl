@@ -51,7 +51,7 @@ module SPLL.IntermediateRepresentation (
 
 import SPLL.Lang.Types
 import SPLL.IR.Value
-import SPLL.Typing.RType (RType(..))
+import SPLL.IR.Type (IRType, IRADTDecl(..))
 import Data.Data()
 import Data.List (isSuffixOf, sort, group)
 import Data.Char (isAlpha, isAlphaNum)
@@ -543,18 +543,18 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRBuiltin Builtin [IRExpr]
               | IRError String
               -- Runtime type-tag check: True iff the value of the sub-expression
-              -- structurally conforms to the given RType. Emitted as the
+              -- structurally conforms to the given IRType. Emitted as the
               -- query-type guard at a prob/integ function root (see IRCompiler),
               -- so a wrong-typed query value fails with a clear diagnostic instead
               -- of a silent bogus number or a deep "not a boolean" panic, and, at
               -- TFloat, as the float test of a type-variable leaf's comparison
               -- ('SPLL.IRCompiler.leafEqIR').
-              | IRConformsTo RType IRExpr
+              | IRConformsTo IRType IRExpr
               deriving (Show, Eq)
 
 type IRValue = GenericValue IRExpr
 
-data IREnv = IREnv [IRFunGroup] [ADTDecl] [(String, IRValue)] deriving (Show)
+data IREnv = IREnv [IRFunGroup] [IRADTDecl] [(String, IRValue)] deriving (Show)
 
 
 -- | Why the compiler declined to build one variant of a function group (task
@@ -1032,7 +1032,7 @@ unmangleDiagnostic mangle (IREnv groups decls _) = retoken
 -- declaration set is in scope, so two distinct source identifiers sharing one
 -- emitted name is a refusal rather than two definitions of which the second
 -- silently wins.
-adtIdentifierRenaming :: (String -> String) -> [ADTDecl] -> [(String, String)]
+adtIdentifierRenaming :: (String -> String) -> [IRADTDecl] -> [(String, String)]
 adtIdentifierRenaming mangle decls
   | not (null introduced) = error (mangleCollisionMessage introduced)
   | otherwise             = [ (from, to) | (from, to) <- allPairs, from /= to ]
@@ -1040,7 +1040,7 @@ adtIdentifierRenaming mangle decls
     allPairs =
       [ pair
       | decl <- decls
-      , (cName, fields) <- constructors decl
+      , (cName, fields) <- irConstructors decl
       , pair <- (cName, mangle cName)
               : ("is" ++ cName, "is" ++ mangle cName)
               : [ (fName, mangle fName) | (fName, _) <- fields ]
@@ -1077,7 +1077,7 @@ mangleCollisionMessage clashes = unlines
 -- | Apply an 'adtIdentifierRenaming' to every 'IRVar' reference in every
 -- compiled function body.
 --
--- The 'ADTDecl's are deliberately left alone, so they keep the names the user
+-- The 'IRADTDecl's are deliberately left alone, so they keep the names the user
 -- wrote. The declarations are printed by exactly one function per backend
 -- (@generateADTClass@), which applies @mangle@ itself at each identifier it
 -- emits -- and can therefore still spell the *source* constructor name into

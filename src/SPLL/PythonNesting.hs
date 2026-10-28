@@ -21,7 +21,7 @@ module SPLL.PythonNesting
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types (ADTDecl (..))
+import SPLL.IR.Type (IRADTDecl(..))
 import Data.List (isSuffixOf)
 import Utils (Supply, demandUniqueNumber)
 
@@ -213,10 +213,10 @@ spillable callables pureCalls = go
 -- backends, spelled through the given mangler: every constructor (a class),
 -- its @is\<Ctor\>@ test and every field accessor. What 'spillable' admits as
 -- a pure call besides an inference method.
-adtCallees :: (String -> String) -> [ADTDecl] -> [String]
+adtCallees :: (String -> String) -> [IRADTDecl] -> [String]
 adtCallees mangle decls = concat
   [ mangle c : ("is" ++ mangle c) : [ mangle f | (f, _) <- fields ]
-  | d <- decls, (c, fields) <- constructors d ]
+  | d <- decls, (c, fields) <- irConstructors d ]
 
 -- | The callee of a call 'spillable' admits: a function group's probability
 -- or cumulative method, as 'envToLUT' renamed it (@n.forward@ for @n_prob@,

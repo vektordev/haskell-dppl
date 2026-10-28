@@ -24,7 +24,8 @@ import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, pythonNeed
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.PythonNesting (tooDeepForPython, spillDeep, adtCallees, renameFree, pythonMaxIndent, blockIndent, bindIterable, hasAssignmentExpr)
 import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
+import SPLL.Typing.RType (shapeRank, shapeNumel)
+import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
 import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd, nub)
 import Data.Char (toUpper, isDigit)
@@ -258,7 +259,7 @@ generateFunctionsWith memo genBoil env0 =
                            , let ref = normalRefName n ]
                         -- nullary ADT constructors must be emitted as instantiations,
                         -- otherwise the bare class never compares equal to enumerated instances
-                        ++ [ pyMangle cName | decl <- adtsEnv, (cName, fields) <- constructors decl, null fields ]
+                        ++ [ pyMangle cName | decl <- adtsEnv, (cName, fields) <- irConstructors decl, null fields ]
     in if genBoil then
       ["from pythonLib import *",
       "import functools",
@@ -319,18 +320,18 @@ groupClassName (IREnv funcs adtDecls _) n = fromMaybe (onHead toUpper n) (lookup
       let c = until (`notElem` taken) (++ "_") (onHead toUpper g) in (c : taken, (g, c) : acc)
     taken0 = pythonReservedIdentifiers
           ++ concat [ pyMangle c : ("is" ++ pyMangle c) : [ pyMangle f | (f, _) <- fields ]
-                    | d <- adtDecls, (c, fields) <- constructors d ]
+                    | d <- adtDecls, (c, fields) <- irConstructors d ]
 
-generateADTClasses :: [ADTDecl] -> [String]
+generateADTClasses :: [IRADTDecl] -> [String]
 generateADTClasses decls =
-  concatMap generateADTClass (concatMap constructors decls)
+  concatMap generateADTClass (concatMap irConstructors decls)
   ++ concatMap (uncurry generateADTAccessor) (fieldAccessorOwners decls)
 
 -- Every identifier printed here goes through 'pyMangle'; the declaration itself
 -- keeps the names the user wrote (see 'renameADTIdentifiers'). The one place
 -- the *source* name is used instead is 'anyCtorTestMessage', which must read
 -- identically across all three backends and the interpreter.
-generateADTClass :: ADTConstructorDecl -> [String]
+generateADTClass :: IRADTConstructorDecl -> [String]
 generateADTClass (name, fields) =
   -- Class declaration
   ["class " ++ cls ++ ":"]++
@@ -1097,24 +1098,24 @@ escapeStr = concatMap esc
 -- rejects). The marginal-query wildcard (isAny) is accepted at every level, matching
 -- VAny, and short-circuits before any component accessor is evaluated. The Int arg is
 -- a nesting depth used to name list-comprehension binders uniquely.
-pyConforms :: RType -> String -> String
+pyConforms :: IRType -> String -> String
 pyConforms = pyConformsAt 0
 
-pyConformsAt :: Int -> RType -> String -> String
+pyConformsAt :: Int -> IRType -> String -> String
 pyConformsAt d t e = "(isAny(" ++ e ++ ") or " ++ pyConformsShape d t e ++ ")"
 
-pyConformsShape :: Int -> RType -> String -> String
-pyConformsShape _ TFloat  e = "isFloat(" ++ e ++ ")"
-pyConformsShape _ TBool   e = "isinstance(" ++ e ++ ", bool)"
-pyConformsShape _ TInt    e = "(isinstance(" ++ e ++ ", int) and not isinstance(" ++ e ++ ", bool))"
-pyConformsShape d (Tuple a b) e =
+pyConformsShape :: Int -> IRType -> String -> String
+pyConformsShape _ ITFloat  e = "isFloat(" ++ e ++ ")"
+pyConformsShape _ ITBool   e = "isinstance(" ++ e ++ ", bool)"
+pyConformsShape _ ITInt    e = "(isinstance(" ++ e ++ ", int) and not isinstance(" ++ e ++ ", bool))"
+pyConformsShape d (ITTuple a b) e =
   "(isinstance(" ++ e ++ ", T) and " ++ pyConformsAt d a (pyAttrBase e ++ ".t1") ++ " and " ++ pyConformsAt d b (pyAttrBase e ++ ".t2") ++ ")"
-pyConformsShape d (ListOf t) e =
+pyConformsShape d (ITList t) e =
   let v = "_ce" ++ show d
   in "(isinstance(" ++ e ++ ", InferenceList) and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
-pyConformsShape d (TEither a b) e =
+pyConformsShape d (ITEither a b) e =
   "((isinstance(" ++ e ++ ", Left) and " ++ pyConformsAt d a (pyAttrBase e ++ ".val") ++ ") or (isinstance(" ++ e ++ ", Right) and " ++ pyConformsAt d b (pyAttrBase e ++ ".val") ++ "))"
-pyConformsShape d (TTensor sh t) e
+pyConformsShape d (ITTensor sh t) e
   | shapeRank sh == 1 =
       let v = "_ce" ++ show d
       in "(isinstance(" ++ e ++ ", list) and len(" ++ e ++ ") == " ++ show (shapeNumel sh)
@@ -1131,11 +1132,11 @@ pyAttrBase e@(c : _) | c == '-' || isDigit c = "(" ++ e ++ ")"
 pyAttrBase e = e
 
 -- | Whether 'pyConforms' iterates over (a component of) its operand.
-checksElements :: RType -> Bool
-checksElements (ListOf _) = True
-checksElements (TTensor _ _) = True
-checksElements (Tuple a b) = checksElements a || checksElements b
-checksElements (TEither a b) = checksElements a || checksElements b
+checksElements :: IRType -> Bool
+checksElements (ITList _) = True
+checksElements (ITTensor _ _) = True
+checksElements (ITTuple a b) = checksElements a || checksElements b
+checksElements (ITEither a b) = checksElements a || checksElements b
 checksElements _ = False
 
 

@@ -36,6 +36,7 @@ import SPLL.IR.Neural (noNeurals)
 import qualified Data.Bifunctor
 import StandardLibrary (invokeStandardFunction, stdListProd)
 import SPLL.IR.ADT (implicitFunctionApplicable)
+import SPLL.Typing.AlgebraicDataTypes (irADTDecl)
 
 -- | The placeholder value standing for "anything at all" in the slot typed
 -- @rt@ of a container an inverse reconstructs.
@@ -711,7 +712,7 @@ propagateValues adtsDecl name values = case sequence (propagateValuesLazily adts
 -- once the result type's whole domain has turned up) consumes this instead and
 -- stops early (task agreement-compile-time-quadratic-in-domain).
 propagateValuesLazily :: [ADTDecl] -> String -> [[Value]] -> [Either String Value]
-propagateValuesLazily adtsDecl name values = map (fmap (fmap failConversionRev) . generateDet noNeurals (IREnv [] adtsDecl []) []) letInBlocks
+propagateValuesLazily adtsDecl name values = map (fmap (fmap failConversionRev) . generateDet noNeurals (IREnv [] (map irADTDecl adtsDecl) []) []) letInBlocks
   where
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) applicableProd
@@ -720,7 +721,7 @@ propagateValuesLazily adtsDecl name values = map (fmap (fmap failConversionRev) 
     -- 'error', not a 'Left' this could catch. Enumerating a multi-constructor
     -- domain therefore has to drop those tuples before evaluating, leaving the
     -- accessor's domain as its own constructor's values.
-    applicableProd = filter (implicitFunctionApplicable adtsDecl name) valueProd
+    applicableProd = filter (implicitFunctionApplicable (map irADTDecl adtsDecl) name) valueProd
     valueProd = sequence values
     FPair FDecl {inputVars = paramNames, body = fwdExpr} _ = lookupFPair adtsDecl name
 

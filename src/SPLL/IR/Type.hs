@@ -4,6 +4,9 @@
 module SPLL.IR.Type
   ( IRType(..)
   , irTypeOfRType
+  , irConformanceType
+  , IRADTDecl(..)
+  , IRADTConstructorDecl
   ) where
 import SPLL.Typing.RType (RType(..), Shape)
 
@@ -50,3 +53,24 @@ irTypeOfRType rt = case rt of
   TVarR _ -> Nothing
   GreaterType _ _ -> Nothing
   NotSetYet -> Nothing
+
+-- | The type a runtime tag check ('SPLL.IntermediateRepresentation.IRConformsTo')
+-- tests against: total, where 'irTypeOfRType' is not. A part with no checkable
+-- runtime tag (a type variable, a frontend-only type state) becomes
+-- @'ITVar' 0@, which every runtime accepts, so the guard never rejects on it.
+irConformanceType :: RType -> IRType
+irConformanceType rt = case rt of
+  ListOf a -> ITList (irConformanceType a)
+  Tuple a b -> ITTuple (irConformanceType a) (irConformanceType b)
+  TEither a b -> ITEither (irConformanceType a) (irConformanceType b)
+  TArrow a b -> ITArrow (irConformanceType a) (irConformanceType b)
+  TTensor sh a -> ITTensor sh (irConformanceType a)
+  _ -> maybe (ITVar 0) id (irTypeOfRType rt)
+
+-- | An algebraic data type as the IR knows it: constructors with typed fields.
+data IRADTDecl = IRADTDecl
+  { irDataName :: String
+  , irConstructors :: [IRADTConstructorDecl]
+  } deriving (Show, Eq)
+
+type IRADTConstructorDecl = (String, [(String, IRType)])

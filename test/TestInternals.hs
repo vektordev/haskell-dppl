@@ -48,7 +48,8 @@ import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import SPLL.IR.Neural (noNeurals, neuralOracle, NeuralPrimitive(..), oracleSignatures)
-import SPLL.IR.Type (IRType(..))
+import SPLL.IR.Type (IRType(..), IRADTDecl(..))
+import SPLL.Typing.AlgebraicDataTypes (irADTDecl)
 import Data.Either (isLeft)
 import IRInterpreter (generateDet, generateRand)
 import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), CodeVariant(..), expectationProb, expectationDim, defaultBackends,
@@ -3789,7 +3790,7 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
     ctorA = IRVar "A"
     ctorB = IRApply (IRVar "B")
     flagDecl = ADTDecl "Flag" [("A", []), ("B", [("v", TFloat)])] Nothing
-    flagEnv = optEnvFromADTs [flagDecl]
+    flagEnv = optEnvFromADTs [irADTDecl flagDecl]
     simp = simplify emptyOptEnv
     simpA = simplify flagEnv
     assertNoConstantTests src =
@@ -3798,8 +3799,8 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
         Right prog -> case compile defaultCompilerConfig prog of
           Left err -> assertFailure ("Compile error: " ++ show err)
           Right (IREnv groups decls _) -> do
-            let ctors = [(c, length fs) | d <- decls, (c, fs) <- constructors d]
-                derived = ["is" ++ c | (c, _) <- ctors] ++ [f | d <- decls, (_, fs) <- constructors d, (f, _) <- fs]
+            let ctors = [(c, length fs) | d <- decls, (c, fs) <- irConstructors d]
+                derived = ["is" ++ c | (c, _) <- ctors] ++ [f | d <- decls, (_, fs) <- irConstructors d, (f, _) <- fs]
                 bodies = [ b | g <- groups
                              , Just (b, _) <- [genFun g, probFun g, integFun g, writeLogitsFun g, normalFun g] ]
                 offending = [ e | b <- bodies, e <- flat b, constantTest ctors derived e ]
@@ -3888,13 +3889,13 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- anywhere else would reach the emitter, which has a case only for the
       -- float test below.
       assertRefusal "type-conformance check (IRConformsTo)"
-        (IROp OpAnd (IRVar "b") (IRConformsTo TBool (IRVar "sample")))
-  , testCase "a type-variable leaf's float test IRConformsTo TFloat is accepted" $
+        (IROp OpAnd (IRVar "b") (IRConformsTo ITBool (IRVar "sample")))
+  , testCase "a type-variable leaf's float test IRConformsTo ITFloat is accepted" $
       -- IRCompiler.leafEqIR dispatches a type-variable leaf's comparison on
       -- it; a slot's dtype is bucket-uniform, so it is a structural check
       -- (task polymorphic-parameter-compared-as-float).
       assertAccepted
-        (IRIf (IRConformsTo TFloat (IRVar "sample"))
+        (IRIf (IRConformsTo ITFloat (IRVar "sample"))
               (IROp OpApprox (IRVar "sample") (IRVar "s"))
               (IROp OpEq (IRVar "sample") (IRVar "s")))
   , testCase "isAny is accepted (M4: ANY-ness is part of the bucket signature)" $
@@ -3942,7 +3943,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- 'batchedGuard' walks the whole tree, not just the root.
       assertRefusal "type-conformance check (IRConformsTo)"
         (IRLetIn "a" (IRConst (VFloat 1.0))
-          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRConformsTo TBool (IRVar "sample"))) (IRVar "b")))
+          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRConformsTo ITBool (IRVar "sample"))) (IRVar "b")))
   -- Heterogeneous batching, M1: the list *spine* operations are in the fragment
   -- (within a shape bucket they are uniform Python structure over [B] leaves),
   -- but the branch that would have to *choose* between two structures is not --
@@ -4017,7 +4018,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   -- control flow. Emitting it as a torch.where instead evaluates both arms, and
   -- the masked-away one reaches a sibling constructor's field accessor.
   , testCase "an ADT constructor test is a structural condition" $ do
-      let env = adtEnv [ADTDecl { dataName = "Opt"
+      let env = adtEnv [irADTDecl ADTDecl { dataName = "Opt"
                                 , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                                 , adtDepth = Nothing }]
       assertBool "isNada(x) is not classified as structural"
@@ -4124,16 +4125,16 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   , testCase "only all-nullary ADTs are enumerations" $
       assertEqual "enumAdtNames"
         ["Color"]
-        (enumAdtNames [ colorDecl
-                      , ADTDecl { dataName = "Opt"
+        (enumAdtNames [ irADTDecl colorDecl
+                      , irADTDecl ADTDecl { dataName = "Opt"
                                 , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                                 , adtDepth = Nothing } ])
   , testCase "an all-nullary ADT's constructor test is not structural" $ do
-      let env = adtEnvWith ["Color"] [colorDecl]
+      let env = adtEnvWith ["Color"] [irADTDecl colorDecl]
       assertBool "isRed(x) is still structural under enum collapse"
         (not (structural env (IRApply (IRVar "isRed") (IRVar "x"))))
       assertBool "isRed(x) must stay structural when Color is not collapsed"
-        (structural (adtEnv [colorDecl]) (IRApply (IRVar "isRed") (IRVar "x")))
+        (structural (adtEnv [irADTDecl colorDecl]) (IRApply (IRVar "isRed") (IRVar "x")))
   , testCase "an all-nullary ADT is emitted collapsed, its tests per element" $
       case generateFunctionsBatched False (enumEnv (IRIf (IRApply (IRVar "isRed") (IRVar "sample"))
                                                        (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0)))) of
@@ -4163,7 +4164,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- the binding) chooses between list shapes and must fall back; Size's
       -- only selects a float, so the refusal is not its doing and it keeps
       -- its one-bucket collapse. A per-program fallback loses both.
-      case generateFunctionsBatched False (enumEnvWith [colorDecl, sizeDecl]
+      case generateFunctionsBatched False (enumEnvWith [irADTDecl colorDecl, irADTDecl sizeDecl]
              (IRConstruct TgTuple
                 [ IRLetIn "cse_0" (IRApply (IRVar "isRed") (IRDestruct AcFst (IRVar "sample")))
                     (IRIf (IRVar "cse_0") (IRConst (VList EmptyList)) oneElemList)
@@ -4194,7 +4195,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       in case generateFunctionsBatched False (enumEnv body) of
            Right ls -> assertFailure ("batched mode accepted a structure-choosing select: " ++ unlines ls)
            Left msg -> assertEqual "refusal differs from the uncollapsed backend's"
-                         (either id (const "") (batchedGuard (adtEnv [colorDecl]) "main" "forward" body))
+                         (either id (const "") (batchedGuard (adtEnv [irADTDecl colorDecl]) "main" "forward" body))
                          msg
   , testCase "a list-building recursive generate degrades to a stub, not a refusal" $
       -- The one narrow exception to the hard whole-program refusal rule: a
@@ -4268,7 +4269,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                        , constructors = [("Small", []), ("Large", [])]
                        , adtDepth = Nothing }
     oneElemList = IRConstruct TgCons [IRConst (VFloat 1.0), IRConst (VList EmptyList)]
-    enumEnv = enumEnvWith [colorDecl]
+    enumEnv = enumEnvWith [irADTDecl colorDecl]
     enumEnvWith decls body = IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample" body, "")
@@ -4285,7 +4286,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
-      [ADTDecl { dataName = "Opt"
+      [irADTDecl ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
       []
@@ -4299,7 +4300,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
-      [ADTDecl { dataName = "Opt"
+      [irADTDecl ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
       []
@@ -4320,7 +4321,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
-      [ADTDecl { dataName = "Opt"
+      [irADTDecl ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
       []
@@ -4335,7 +4336,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
-      [ADTDecl { dataName = "Dup"
+      [irADTDecl ADTDecl { dataName = "Dup"
                , constructors = [("A1", [("f", TFloat)]), ("B1", [("f", TFloat)])]
                , adtDepth = Nothing }]
       []
@@ -6384,13 +6385,13 @@ structuralListingBound = 65536
 -- 'listedTag' at every corpus node within the bound where it answers.
 directListing :: [ADTDecl] -> String -> [MultiValue] -> Maybe (Maybe MultiValue)
 directListing ds name operands
-  | name `elem` implicitFunctionNames ds = Just $
+  | name `elem` implicitFunctionNames (map irADTDecl ds) = Just $
       -- Without the whole-value 'nubValues' 'listedTag' applies first: it
       -- cannot change 'valueListToMultiValue''s answer, which de-duplicates
       -- every leaf, and over 2^20 values it would be most of the cost.
-      case [ implicitFunctionImpl ds name t
+      case [ implicitFunctionImpl (map irADTDecl ds) name t
            | t <- mapM multiValueToValueList operands
-           , implicitFunctionApplicable ds name t ] of
+           , implicitFunctionApplicable (map irADTDecl ds) name t ] of
         [] -> Nothing
         vals -> Just (valueListToMultiValue vals)
   | otherwise = Nothing
@@ -7426,11 +7427,11 @@ shapedNeuralInputTests = testGroup "shaped neural inputs"
       assertBool "" ("opaque handle" `isInfixOf` inputLayoutString TSymbol)
   , testCase "the query-type guard checks a tensor's shape and elements" $ do
       let conforms ty v = evalClosedIR (IRConformsTo ty (IRConst v))
-          t3 = TTensor [EFixed 3] TFloat
+          t3 = ITTensor [EFixed 3] ITFloat
       conforms t3 (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool True)
       conforms t3 (VTensor [EFixed 2] (map VFloat [1, 2])) @?= Right (VBool False)
       conforms t3 (VTensor [EFixed 3] (map VInt [1, 2, 3])) @?= Right (VBool False)
-      conforms (TTensor [EFixed 3, EFixed 1] TFloat) (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool False)
+      conforms (ITTensor [EFixed 3, EFixed 1] ITFloat) (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool False)
       conforms t3 (VFloat 1) @?= Right (VBool False)
   ]
 

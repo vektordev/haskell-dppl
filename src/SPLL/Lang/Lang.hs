@@ -66,6 +66,7 @@ import SPLL.IR.Value
 import SPLL.Typing.PType (PType(Deterministic))
 import SPLL.Typing.RType
 import SPLL.IR.ADT
+import SPLL.Typing.AlgebraicDataTypes (irADTDecl)
 
 import qualified Data.Set as Set
 import Data.Maybe
@@ -615,7 +616,7 @@ getFunctionNames :: Program -> [String]
 getFunctionNames p = explicitFs ++ implicitFs
   where
     explicitFs = map fst (functions p)
-    implicitFs = implicitFunctionNames (adts p)
+    implicitFs = implicitFunctionNames (map irADTDecl (adts p))
 
 prettyPrintProg :: Program -> [String]
 prettyPrintProg = prettyPrintProgCustomTI prettyFullTypeInfo

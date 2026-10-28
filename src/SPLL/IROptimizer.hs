@@ -23,6 +23,7 @@ module SPLL.IROptimizer (
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
 import SPLL.IR.ADT (fieldAccessorOwners)
+import SPLL.IR.Type (IRADTDecl(..))
 import Data.Number.Erf (erfc)
 import Data.Bits (xor)
 import Data.Either (isLeft)
@@ -199,7 +200,7 @@ emptyOptEnv = OptEnv Set.empty Set.empty Map.empty Map.empty Set.empty
 
 -- | The ADT facts of an 'OptEnv' (no generate function is assumed
 -- deterministic).
-optEnvFromADTs :: [ADTDecl] -> OptEnv
+optEnvFromADTs :: [IRADTDecl] -> OptEnv
 optEnvFromADTs decls = emptyOptEnv
   { optCtorTests = Set.fromList ["is" ++ cn | (cn, _) <- ctors]
   , optCtors = Map.fromList [(cn, length fs) | (cn, fs) <- ctors]
@@ -209,7 +210,7 @@ optEnvFromADTs decls = emptyOptEnv
       , Just fs <- [lookup owner ctors]
       , Just i <- [findIndex ((== f) . fst) fs] ]
   }
-  where ctors = concatMap constructors decls
+  where ctors = concatMap irConstructors decls
 
 -- | The @_gen@ functions whose evaluation draws no randomness, so that sharing
 -- or duplicating a reference to one cannot collapse or multiply a random draw.

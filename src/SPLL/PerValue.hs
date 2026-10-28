@@ -57,6 +57,7 @@ module SPLL.PerValue
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (substituteVar, freeVarsExpr, autoDeriveMultiValue, multiValueIsFinite, multiValueToValueList, prettyRType)
 import SPLL.Typing.RType (RType(..))
+import SPLL.IR.Type (irConformanceType)
 import SPLL.IntermediateRepresentation
 import SPLL.CompilerConfig
 import SPLL.ReservedNames (perValuePointSuffix, perValuePriorSuffix, perValueGivenSuffix, perValueSlotSuffix,
@@ -387,7 +388,7 @@ perValueBody conf pl vals =
     sample = IRVar queryParamName
     guarded
       | checkQueryType conf =
-          IRIf (IRConformsTo (pvResultType pl) sample) core
+          IRIf (IRConformsTo (irConformanceType (pvResultType pl)) sample) core
                (IRError ("p(" ++ f ++ "): query value does not conform to return type " ++ show (pvResultType pl)))
       | otherwise = core
 

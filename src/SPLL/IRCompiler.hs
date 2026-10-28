@@ -52,6 +52,7 @@ import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable
 import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
+import SPLL.IR.Type (IRType(..), irConformanceType)
 import SPLL.Semiring
 import Control.Monad (foldM, forM, mfilter, unless, void, when, zipWithM, (>=>))
 import Debug.Trace (traceM)
@@ -542,7 +543,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
             guardUnderLambdas (IRLambda n b) = IRLambda n (guardUnderLambdas b)
             guardUnderLambdas bodyExpr
               | checkQueryType conf =
-                  IRIf (IRConformsTo returnRType (IRVar queryParamName))
+                  IRIf (IRConformsTo (irConformanceType returnRType) (IRVar queryParamName))
                        bodyExpr
                        (IRError (kind ++ "(" ++ name ++ "): query value does not conform to return type " ++ show returnRType))
               | otherwise = bodyExpr
@@ -674,7 +675,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
                     in Just (appendDoc guardNote . toProbDecl name . IRLambda queryParamName . guardQuery "p" <$> compileBody metaExtra)
                   else Nothing ]
     in [baseFunGroup] ++ tupleNormalFuns ++ extraFunGroups) (functions p))
-  progADTs
+  (map irADTDecl progADTs)
   -- The cutoff must live in the same space as the accumulated probability it's
   -- compared against: under logSpace that's log(thresh), not the raw linear
   -- threshold. The comparison operators themselves (OpLessThan/OpGreaterThan)
@@ -5170,7 +5171,7 @@ equalityGuardBody _    _ v sample = IROp OpEq sample v
 -- ('SPLL.CodeGenPyTorchBatched.structural').
 leafEqIR :: RType -> IRExpr -> IRExpr -> IRExpr
 leafEqIR TFloat    a b = IROp OpApprox a b
-leafEqIR (TVarR _) a b = IRIf (IRConformsTo TFloat a) (IROp OpApprox a b) (IROp OpEq a b)
+leafEqIR (TVarR _) a b = IRIf (IRConformsTo ITFloat a) (IROp OpApprox a b) (IROp OpEq a b)
 leafEqIR _         a b = IROp OpEq a b
 
 

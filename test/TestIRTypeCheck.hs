@@ -11,6 +11,7 @@ import SPLL.CompilerConfig
 import SPLL.IRTypeCheck
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.AlgebraicDataTypes (irADTDecl)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile)
 import SPLL.IR.Neural (oracleSignatures)
@@ -102,7 +103,7 @@ constructTests = testGroup "constructs"
       hasType "Int" (IRUnaryOp OpNeg (i 1))
       hasType "Float" (IRUnaryOp OpLog (f 1))
       hasType "Bool" (IRUnaryOp OpIsAny (IRConstruct TgTuple [f 1, i 2]))
-      hasType "Bool" (IRConformsTo TFloat (b True))
+      hasType "Bool" (IRConformsTo ITFloat (b True))
   , testCase "a closure value is typed from its body and environment" $
       hasType "Float -> Float"
         (IRConst (VClosure [("k", IRConst (VFloat 2))] "x" (IROp OpMult (IRVar "k") (IRVar "x"))))
@@ -190,7 +191,7 @@ rejectionTests = testGroup "rejections"
 -- | A one-function-per-group environment of probability-variant bodies
 -- (bound as @name_prob@).
 envOf :: [ADTDecl] -> [(String, IRExpr)] -> IREnv
-envOf decls fns = IREnv [ group n e | (n, e) <- fns ] decls []
+envOf decls fns = IREnv [ group n e | (n, e) <- fns ] (map irADTDecl decls) []
   where group n e = IRFunGroup { groupName = n, genFun = Nothing, probFun = Just (e, ""), integFun = Nothing
                                , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                                , refusedVariants = [], sampleDomain = Nothing, maskVariantOf = Nothing }

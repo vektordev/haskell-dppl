@@ -736,7 +736,8 @@ supportCheck mangle c rt iargs toks = case decodeSample mangle decls rt toks of
       Right (Just (Just (Answered _ _ True))) -> Left ("off the interpreter's support: " ++ show v)
       Right (Just (Just _)) -> Right "in support"
   where
-    env@(IREnv _ decls _) = acEnv c
+    env = acEnv c
+    decls = adts (acProgram c)
     forced a = length (show a) `seq` a
 
 -- | A whole-process bound on top of the Python driver's per-query alarm:

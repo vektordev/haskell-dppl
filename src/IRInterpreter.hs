@@ -23,6 +23,7 @@ import qualified Data.Map.Strict as Map
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.IR.ADT
+import SPLL.IR.Type (IRType(..), IRADTDecl(..))
 import Data.Vector.Internal.Check (HasCallStack)
 
 -- | 'AcTheta'/'AcSubtree' index into the theta tree their argument evaluates to.
@@ -185,7 +186,7 @@ generateDet oracle env = generate f oracle adts' (globalEnvFrom startingEnv) []
 -- piled up uncollected: gigabytes in a second of corpus sampling, killed by
 -- the OOM killer. 'failWith' keeps its own 'HasCallStack', so a failure still
 -- names its site in 'generate'.
-generate :: Monad m => RandomFunctions m a -> NeuralOracle -> [ADTDecl] -> GlobalEnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
+generate :: Monad m => RandomFunctions m a -> NeuralOracle -> [IRADTDecl] -> GlobalEnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
 --generate f oracle adts' globalEnv env args expr | trace ((show expr) {-++ " " ++ show env-}) False = undefined
 generate f oracle adts' globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
@@ -775,32 +776,28 @@ irLogCDF _ x = error ("Expression must be the log-cumulative of a valid distribu
 -- permissive for types that carry no meaningful runtime tag (type variables,
 -- functions, unset) and for marginal-query wildcards (VAny/VAnyExcept), so the
 -- guard only ever fires on an unambiguous mismatch.
-valueConformsTo :: RType -> GenericValue a -> Bool
+valueConformsTo :: IRType -> GenericValue a -> Bool
 valueConformsTo _ VAny             = True
 valueConformsTo _ (VAnyExcept _)   = True
 valueConformsTo _ (VError _)       = True
-valueConformsTo TBool      (VBool _)   = True
-valueConformsTo TInt       (VInt _)    = True
-valueConformsTo TSymbol    (VSymbol _) = True
-valueConformsTo TFloat     (VFloat _)  = True
-valueConformsTo TUnit      VUnit       = True
-valueConformsTo TThetaTree (VThetaTree _) = True
-valueConformsTo (ListOf t)   (VList xs)        = all (valueConformsTo t) (listToValues xs)
-valueConformsTo (Tuple a b)  (VTuple x y)      = valueConformsTo a x && valueConformsTo b y
-valueConformsTo (TEither a _) (VEither (Left x))  = valueConformsTo a x
-valueConformsTo (TEither _ b) (VEither (Right y)) = valueConformsTo b y
+valueConformsTo ITBool      (VBool _)   = True
+valueConformsTo ITInt       (VInt _)    = True
+valueConformsTo ITSymbol    (VSymbol _) = True
+valueConformsTo ITFloat     (VFloat _)  = True
+valueConformsTo ITUnit      VUnit       = True
+valueConformsTo ITThetaTree (VThetaTree _) = True
+valueConformsTo (ITList t)   (VList xs)        = all (valueConformsTo t) (listToValues xs)
+valueConformsTo (ITTuple a b)  (VTuple x y)      = valueConformsTo a x && valueConformsTo b y
+valueConformsTo (ITEither a _) (VEither (Left x))  = valueConformsTo a x
+valueConformsTo (ITEither _ b) (VEither (Right y)) = valueConformsTo b y
 -- A tensor conforms only at its exact shape, element by element: a wrongly
 -- shaped query is refused rather than answered (design tensors-in-core-language
 -- §2.2, item 2).
-valueConformsTo (TTensor sh t) (VTensor sh' xs) = sh == sh' && length xs == shapeNumel sh && all (valueConformsTo t) xs
-valueConformsTo (TADT _)     (VADT _ _)        = True
+valueConformsTo (ITTensor sh t) (VTensor sh' xs) = sh == sh' && length xs == shapeNumel sh && all (valueConformsTo t) xs
+valueConformsTo (ITADT _)     (VADT _ _)        = True
 -- Types with no checkable runtime tag: never reject.
-valueConformsTo (TVarR _)       _ = True
-valueConformsTo (TArrow _ _)    _ = True
-valueConformsTo (GreaterType _ _) _ = True
-valueConformsTo BottomTuple     _ = True
-valueConformsTo NullList        _ = True
-valueConformsTo NotSetYet       _ = True
+valueConformsTo (ITVar _)       _ = True
+valueConformsTo (ITArrow _ _)   _ = True
 -- Any remaining concrete-type / value pairing is a genuine mismatch.
 valueConformsTo _ _ = False
 
