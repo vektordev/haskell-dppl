@@ -34,6 +34,7 @@ import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
+import PrettyPrint (pPrintValue)
 import PredefinedFunctions
 import SPLL.Analysis (getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
@@ -618,10 +619,12 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         -- (x < 0.5, Uniform < x)@ compiled with exit 0 and no word on why
         -- the probability function was missing), and likewise at a binding no
         -- inference engine applies to (task engine-applicability-as-data).
+        -- Any other intractable root names the node its 'Bottom' starts at
+        -- ('bottomOrigin', task bottom-verdict-records-no-refusal-reason).
         intractableRefusal lbl suppressed
           | suppressed || admittedPT pt = []
           | otherwise = [ (lbl, VariantRefusal why cn)
-                        | Just (why, cn) <- [comparisonWithoutClosedForm binding <|> bindingWithoutEngine laws binding] ]
+                        | Just (why, cn) <- [comparisonWithoutClosedForm binding <|> bindingWithoutEngine laws binding <|> bottomOrigin binding] ]
         -- Generate per-component normal functions for tuple outputs
         tupleNormalGroups = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
         tupleNormalFuns = map fst tupleNormalGroups
@@ -962,6 +965,76 @@ bindingWithoutEngine laws e@(Expr _ f) = case f of
       ++ " affine Gaussian form flowing into one consumer or jointly into at most "
       ++ show ModalityInfer.jointAffineMaxSlots ++ " tuple fields, and the observation has no"
       ++ " set-valued inverse onto it. The binding is sample-only, and so is the function"
+
+-- | Where a 'Bottom' verdict starts, for a function whose root modality
+-- inference typed 'Bottom' and neither 'comparisonWithoutClosedForm' nor
+-- 'bindingWithoutEngine' explains (task bottom-verdict-records-no-refusal-reason:
+-- @Normal + Uniform@ compiled generate-only with no word on why). Descends
+-- through 'Bottom' nodes into their first 'Bottom' operand; the node none of
+-- whose operands is 'Bottom' is where the rule itself returned 'Bottom', and
+-- the diagnostic names it, its source position and its operands' laws. A
+-- curried call is one node, its spine head and its arguments the operands, so
+-- @f x y@ is named "the call of 'f'" rather than by its inner partial
+-- application. A call of a function that is itself sample-only says so: that
+-- function's own group carries the reason.
+bottomOrigin :: Expr -> Maybe (String, ChainName)
+bottomOrigin e@(Expr ti _)
+  | not (isBottom e) = Nothing
+  | (Expr hti (Var f), args) <- callSpine e, pType hti == Bottom =
+      Just (phrase ((if null args then "" else "the call of ") ++ "'" ++ f ++ "'")
+              ++ " is sample-only because '" ++ f ++ "' is: its own probability variant is refused", chainName ti)
+  | (Expr _ (Var f), args@(_:_)) <- callSpine e =
+      case filter isBottom args of
+        (a:_) -> bottomOrigin a
+        [] -> Just (rule ("the call of '" ++ f ++ "'") "arguments" args, chainName ti)
+  | otherwise = case node e of
+      -- The arguments first: in a let redex @(\x -> body) arg@ a 'Bottom'
+      -- argument is the origin, and the body only reads it.
+      Apply {} | (hd, args) <- callSpine e, (b:_) <- filter isBottom (args ++ [hd]) ->
+        bottomOrigin b
+      Apply {} | (hd, args) <- callSpine e -> Just (rule "the application" "operands" (hd : args), chainName ti)
+      _ -> case filter isBottom (getSubExprs e) of
+        (c:_) -> bottomOrigin c
+        [] -> Just (rule (nodeName e) "operands" (getSubExprs e), chainName ti)
+  where
+    isBottom x = pType (getTypeInfo x) == Bottom
+    -- The head and arguments of a curried application; a non-application is
+    -- its own head.
+    callSpine x = case node x of
+      Apply g a -> let (h, as) = callSpine g in (h, as ++ [a])
+      _ -> (x, [])
+    phrase what = what ++ maybe "" ((" at " ++) . spanPretty) (srcPos ti)
+    rule what kind ops =
+      phrase what ++ " has no inference rule for its " ++ kind
+      ++ (if null ops then "" else " " ++ listPhrase (map operand ops))
+      ++ ": NeST computes no density or CDF for this combination, so it is"
+      ++ " sample-only, and so is the function"
+    listPhrase xs = case reverse xs of
+      (l:r@(_:_)) -> intercalate ", " (reverse r) ++ " and " ++ l
+      _ -> concat xs
+    operand x = operandName x ++ " (" ++ lawName (pType (getTypeInfo x)) ++ ")"
+    operandName x = case node x of
+      Var n -> n
+      Constant v -> "the literal " ++ pPrintValue v
+      InjF (Named n) _ -> "a " ++ opName n ++ " expression"
+      Apply {} | (Expr _ (Var f), _) <- callSpine x -> "a call of '" ++ f ++ "'"
+      _ -> nodeName x
+    nodeName x = case node x of
+      InjF (Named n) _ -> opName n
+      IfThenElse {} -> "the if-then-else"
+      Lambda n _ -> "the lambda '\\" ++ n ++ "'"
+      ReadNN n _ -> "the neural read of '" ++ n ++ "'"
+      Var n -> "'" ++ n ++ "'"
+      _ -> printFlat x
+    opName n = maybe ("`" ++ n ++ "`") (\s -> "`" ++ s ++ "`") (lookup n surfaceOps)
+    surfaceOps = [("plus", "+"), ("mult", "*"), ("lt", "<"), ("gt", ">"), ("neg", "-")]
+    lawName p = case p of
+      Deterministic -> "deterministic"
+      PNormal -> "Gaussian"
+      PLogNormal -> "log-normal"
+      Integrate -> "random"
+      PArr {} -> "a function"
+      _ -> show p
 
 -- | The operands of a comparison against a random enumerable bound, when the
 -- 'toIRInference' equation of that name applies: @Just (enumIsLeft, enumSide,

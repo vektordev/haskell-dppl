@@ -220,6 +220,15 @@ calls a refused one (`main_prob` calling a refused `f_prob`), naming the callee
 and its reason, so no backend emits a call to a function that was never
 written (`Rejection.RefusedVariant`).
 
+A `Bottom` verdict records a reason the same way (`intractableRefusal` in
+`envToIRUnoptimized'`): the first that applies of a comparison with no closed
+form (`comparisonWithoutClosedForm`), a binding no engine applies to
+(`bindingWithoutEngine`), and otherwise the node the `Bottom` starts at
+(`bottomOrigin`: the `Bottom` node none of whose operands is `Bottom`, a
+curried call counted as one node), named with its source position and its
+operands' laws. `Normal + Uniform` answers "`+` at m.ppl:1:8 has no inference
+rule for its operands Normal (Gaussian) and Uniform (random)".
+
 A few sites *catch* a refusal instead of propagating it, where an engine
 tries an alternative after a failed attempt: the cumulative atom of a point
 inverse (`pointInverseCoV`), a call whose leading argument is bound only when
