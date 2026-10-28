@@ -8,4 +8,4 @@
 -- the plan engine (which would open both reads) is ever asked.
 -- Residue of task plan-pairwise-across-separate-neural-reads.
 slow
-expect-failure: no-code probability
+expect-failure: refused "NeST computes no density or CDF for this combination"

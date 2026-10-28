@@ -984,10 +984,7 @@ knownConfigDivergences =
   , KnownConfig "anySlotThroughPlusInverse" HelperExtract "extract (TCons (plus x 0.0) 1.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
   , KnownConfig "anySlotThroughPlusInverseTupleSplit" DrawIntro "draw-intro (plus h 0.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
   , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro (log x)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
-  , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro 2.0" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
-  -- Drawing the isRight test leaves the -O0 compile applying fromRight to a
-  -- Left ("fromRight of a Left"); -O2 agrees with the original.
-  , KnownConfig "enumeratedEitherSelectOnDomainConstant" DrawIntro "draw-intro (isRight m)" "-O0" "drawn-isright-test-reads-fromright-of-left-at-o0" ]
+  , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro 2.0" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic" ]
 
 knownConfigDivergence :: String -> Family -> String -> String -> Maybe KnownConfig
 knownConfigDivergence prog fam site cfg =
