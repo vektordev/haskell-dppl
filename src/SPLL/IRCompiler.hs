@@ -369,9 +369,12 @@ propagateRefusals (IREnv groups0 adts' consts) = IREnv (go groups0) adts' consts
       "prob" -> groupName g ++ "_prob"
       "integ" -> groupName g ++ "_integ"
       _ -> groupName g ++ "_writeLogits"
-    irVarNames e = case e of
-      IRVar n -> [n]
-      _ -> concatMap irVarNames (getIRSubExprs e)
+    -- Accumulator-passing, for the reason 'firstAnyExceptIR' gives.
+    irVarNames e0 = walk e0 []
+      where
+        walk e rest = case e of
+          IRVar n -> n : rest
+          _ -> foldr walk rest (getIRSubExprs e)
 
 -- | Refuse at compile time rather than hand back an 'IREnv' containing a
 -- generate-backed probability/integrate/normal/writeLogits body -- see

@@ -1070,7 +1070,7 @@ fitPlanToSupport support plan = case plan of
   Discretes ty (MultiDiscretes ds) -> case support of
     Just mv | not (multiValueContainsContinuous mv), multiValueIsFinite mv ->
       let vs = multiValueToValueList mv
-      in if all (`elem` ds) vs then (plan, []) else (Discretes ty (MultiDiscretes vs), [])
+      in if allValuesIn vs ds then (plan, []) else (Discretes ty (MultiDiscretes vs), [])
     _ | closedDomainCovered ty ds -> (plan, [])
       | otherwise                 -> (plan, [ty])
   TuplePlan a b -> case support of

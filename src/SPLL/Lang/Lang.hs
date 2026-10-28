@@ -39,6 +39,7 @@ module SPLL.Lang.Lang (
 , multiValueCardinality
 , valueListToMultiValue
 , nubValues
+, allValuesIn
 , valueInMultiValue
 , unionMultiValues
 , autoDeriveMultiValue
@@ -374,6 +375,21 @@ nubValues = go Set.empty []
       Nothing
         | v `elem` unkeyed -> go keyed unkeyed vs
         | otherwise -> v : go keyed (v : unkeyed) vs
+
+-- | Whether every value of the first list is a member of the second ('elem'),
+-- in O((n + m) log m) rather than O(n m), through the same 'ValueKey' as
+-- 'nubValues'. A value without a key is looked up with 'elem' among the
+-- second list's keyless values, which is exact for the same reason
+-- 'nubValues' is (task neural-int-read-compile-quadratic-in-domain: a
+-- writeLogits plan checked a V-value support against its V-value domain).
+allValuesIn :: Eq a => [GenericValue a] -> [GenericValue a] -> Bool
+allValuesIn vs ds = all member vs
+  where
+    keyed = Set.fromList [k | Just k <- map valueKey ds]
+    unkeyed = [d | d <- ds, isNothing (valueKey d)]
+    member v = case valueKey v of
+      Just k -> k `Set.member` keyed
+      Nothing -> v `elem` unkeyed
 
 -- | An ordered stand-in for a first-order value, for 'nubValues'. Two values
 -- with keys are '==' exactly when their keys are.

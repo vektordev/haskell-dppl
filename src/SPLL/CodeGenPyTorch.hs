@@ -24,7 +24,7 @@ import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd, nub)
 import Data.Char (toUpper, isDigit)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift), gets, modify)
 import Utils (Supply, demandUniqueNumber, evalSupply)
 
@@ -118,7 +118,13 @@ pyDouble f
 pyVal :: IRValue -> String
 pyVal (VList EmptyList) = "EmptyInferenceList()"
 pyVal (VList AnyList) = "AnyInferenceList()"
-pyVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ pyVal x ++ ", " ++ pyVal (VList xs) ++ ")"
+-- The cons spine is rendered as a difference string: @rest ++ ")"@ at every
+-- cell re-copied the whole tail, quadratic in a long constant list such as a
+-- V-value enumeration domain (task neural-int-read-compile-quadratic-in-domain).
+pyVal (VList l@(ListCont _ _)) = cells l ""
+  where
+    cells (ListCont x xs) = showString "ConsInferenceList(" . showString (pyVal x) . showString ", " . cells xs . showString ")"
+    cells rest = showString (pyVal (VList rest))
 pyVal (VInt i) = show i
 pyVal (VFloat f) = pyDouble f
 pyVal (VBool f) = if f then "True" else "False"
@@ -515,6 +521,36 @@ mergeElif stmts@(ifLine:rest) | "if " `isPrefixOf` ifLine && isSingleIfBlock stm
   ("elif " ++ drop 3 ifLine) : rest
 mergeElif stmts = "else:" : indentOnce stmts
 
+-- | The else part of an @if@ statement whose else branch is @right@, rendered
+-- by @gen@ (the branch's statement generator, 'generateStatementBlock' or
+-- 'generateLetInStatement' at the same target): what @mergeElif@ makes of
+-- @gen right >>= hoistDeepBlock right target@, without its scan.
+--
+-- 'mergeElif' has to scan the whole branch to see that it is one @if@
+-- block, so applied at every level of an @else: if@ chain it is quadratic in
+-- the chain's length -- a V-value enumeration's index chain, V = 50257 for a
+-- vocabulary (task neural-int-read-compile-quadratic-in-domain). But when the
+-- branch is itself an 'IRIf', @gen@ renders it as @condStmts ++ [if c:] ++
+-- indented arm ++ its own else part@, which is a single @if@ block exactly
+-- when its condition needs no prefix statements; so this decides that from
+-- @condStmts@ instead, running the same generators in the same order (the
+-- variable supply sees the same calls). While a method is being regenerated
+-- with deep blocks hoisted ('stHoistDeeperThan'), the whole branch may be
+-- hoisted, so that case keeps the plain route.
+elseBranch :: (IRExpr -> GlobalVariableSupply [String]) -> Maybe String -> IRExpr -> GlobalVariableSupply [String]
+elseBranch gen target right = do
+  hoisting <- gets (isJust . stHoistDeeperThan)
+  case right of
+    IRIf cond l r | not hoisting -> do
+      (condStmts, c) <- liftedLine cond
+      lStmts <- gen l >>= hoistDeepBlock l target
+      rest <- elseBranch gen target r
+      let arm = indentOnce lStmts ++ rest
+      return $ if null condStmts
+        then ("elif " ++ c ++ ":") : arm
+        else "else:" : indentOnce (condStmts ++ ["if " ++ c ++ ":"] ++ arm)
+    _ -> mergeElif <$> (gen right >>= hoistDeepBlock right target)
+
 containsIf :: IRExpr -> Bool
 containsIf (IRIf _ _ _)    = True
 containsIf (IROp _ l r)    = containsIf l || containsIf r
@@ -686,9 +722,9 @@ generateStatementBlock (IRLetIn name x body) = do
 generateStatementBlock (IRIf cond left right) = do
   (condStmts, cCond) <- liftedLine cond
   cLeft  <- generateStatementBlock left >>= hoistDeepBlock left Nothing
-  cRight <- generateStatementBlock right >>= hoistDeepBlock right Nothing
+  cRight <- elseBranch generateStatementBlock Nothing right
   let l1 = "if " ++ cCond ++ ":"
-  return $ condStmts ++ [l1] ++ indentOnce cLeft ++ mergeElif cRight
+  return $ condStmts ++ [l1] ++ indentOnce cLeft ++ cRight
 generateStatementBlock (IRConstruct TgTuple [IRConstruct TgTuple [f, s], bc]) = do
   fStmts  <- generateLetInStatement "_r0" f
   sStmts  <- generateLetInStatement "_r1" s
@@ -709,8 +745,8 @@ generateLetInStatement name lmd@(IRLambda _ _) =
 generateLetInStatement name (IRIf cond left right) = do
   (condStmts, c) <- liftedLine cond
   leftStmts  <- generateLetInStatement name left >>= hoistDeepBlock left (Just name)
-  rightStmts <- generateLetInStatement name right >>= hoistDeepBlock right (Just name)
-  return $ condStmts ++ ["if " ++ c ++ ":"] ++ indentOnce leftStmts ++ mergeElif rightStmts
+  rightStmts <- elseBranch (generateLetInStatement name) (Just name) right
+  return $ condStmts ++ ["if " ++ c ++ ":"] ++ indentOnce leftStmts ++ rightStmts
 generateLetInStatement name (IRConstruct TgTuple [f, s]) = do
   fStmts <- generateLetInStatement (name ++ "_0") f
   sStmts <- generateLetInStatement (name ++ "_1") s
