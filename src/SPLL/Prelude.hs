@@ -70,6 +70,8 @@ module SPLL.Prelude
   , CodeGenTarget(..)
   , codeGenToLang
   , emitCompiled
+  , memoRecursionActive
+  , memoRecursionIgnored
   , runGen
   , runProb
   , runInteg
@@ -130,7 +132,7 @@ import SPLL.IROptimizer (optimizeEnvWith)
 import SPLL.IRSelectPass (selectPassEnv)
 import SPLL.IRGatherPass (gatherPassEnv)
 import SPLL.IRLeafTablePass (leafTablePassEnv)
-import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched, generateFunctionsBatchedWith)
 import qualified SPLL.CodeGenPyTorch
 import qualified SPLL.CodeGenJulia
 import Debug.Trace
@@ -705,13 +707,30 @@ codeGenToLang target truncOut conf prog = compile conf prog >>= emitCompiled tar
 emitCompiled :: CodeGenTarget -> Bool -> CompilerConfig -> IREnv -> Either CompilerError String
 emitCompiled target truncOut conf compiled = case target of
   TargetPython
-    | batched conf -> intercalate "\n" <$> generateFunctionsBatched (not truncOut) compiled
+    | batched conf -> intercalate "\n" <$> generateFunctionsBatchedWith memo (not truncOut) compiled
     | otherwise    -> do
         anyExceptCodegenRefusal "Python" compiled
-        Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not truncOut) compiled)
+        Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctionsWith memo (not truncOut) compiled)
   TargetJulia -> do
     anyExceptCodegenRefusal "Julia" compiled
     Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
+
+  where memo = memoRecursionActive conf
+
+-- | Whether the Python backends emit the recursion memo
+-- ('CompilerConfig.memoRecursion'): requested, and not under topK, whose
+-- accumulated probability makes a call's answer depend on the path to it.
+memoRecursionActive :: CompilerConfig -> Bool
+memoRecursionActive conf = memoRecursion conf && isNothing (topKThreshold conf)
+
+-- | Why a requested @--memoRecursion@ is not in effect for this target, if it
+-- is not: the note the CLI prints as a compile warning.
+memoRecursionIgnored :: CodeGenTarget -> CompilerConfig -> Maybe String
+memoRecursionIgnored target conf
+  | not (memoRecursion conf) = Nothing
+  | TargetJulia <- target = Just "Warning: --memoRecursion is ignored by the Julia backend; recursive probability calls are not memoised."
+  | isJust (topKThreshold conf) = Just "Warning: --memoRecursion is ignored under --topKCutoff: a call's pruned probability depends on the path to it, so it cannot be shared."
+  | otherwise = Nothing
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Either CompilerError (Rand g IRValue)
 runGen _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)

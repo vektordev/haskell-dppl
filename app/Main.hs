@@ -7,7 +7,7 @@ import SPLL.Parser
 import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
 import SPLL.Lang.Types (CompilerError, GenericValue (VError))
-import SPLL.Prelude (runProb, runInteg, runGen, batchedRefusal, CodeGenTarget(..), compile, emitCompiled, marginalReport, renderMarginalReport, programWarnings, compiledWarnings, renderCompileWarning)
+import SPLL.Prelude (runProb, runInteg, runGen, batchedRefusal, CodeGenTarget(..), compile, emitCompiled, marginalReport, renderMarginalReport, programWarnings, compiledWarnings, renderCompileWarning, memoRecursionIgnored)
 import SPLL.Lang.Lang (adts)
 import Control.Monad.Random (evalRandIO)
 import Text.Megaparsec (runParser)
@@ -39,6 +39,7 @@ data GlobalOpts = GlobalOpts {
   materializationBudget :: Int,
   marginalsReport :: Bool,
   duplicationReport :: Bool,
+  memoRecursionMode :: Bool,
   commandOpts :: CommandOpts
 }
 
@@ -191,6 +192,9 @@ parseGlobalOpts = GlobalOpts
         <*> switch
             ( long "duplicationCensus"
             <> help "Print the duplication census before running the subcommand (design ir-duplication-census): the program is compiled at -O0, and for every function body the report gives M, the copy count of its most-copied subtree of at least 30 IR nodes (binders up to renaming), and its most-copied subtrees with the fresh-name tags that usually name the compiler site that built them. A count that grows with the program's nesting depth is an exponential compile blowup in the making. Analysis only -- it changes nothing about what is compiled.")
+        <*> switch
+            ( long "memoRecursion"
+            <> help "Memoise the probability and integrate functions of every function on a recursive call cycle, keyed on their argument values, for the duration of one top-level query (task recursive-prob-calls-not-shared-across-branches). A recursion that calls itself with the same arguments from several branches -- an HMM's likelihood over a latent state the query does not fix -- then costs one call per distinct (suffix, state) instead of one per path: linear instead of exponential. Python backends only (scalar and --batched); the Julia backend ignores it with a warning. Ignored under --topKCutoff, whose pruned probability depends on the path to a call. Off by default; without it the emitted code is unchanged.")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -274,9 +278,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR, marginalSlotsBudget=mSlots, materializationBudget=matBudget, marginalsReport=wantMarginals, duplicationReport=wantCensus}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR, marginalSlotsBudget=mSlots, materializationBudget=matBudget, marginalsReport=wantMarginals, duplicationReport=wantCensus, memoRecursionMode=memoRec}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=matBudget, marginalSlots=mSlots, extraSemirings=extraSR})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=matBudget, marginalSlots=mSlots, extraSemirings=extraSR, memoRecursion=memoRec})
   reportMarginals wantMarginals conf prog
   reportDuplicationCensus wantCensus conf prog
   -- The compile-time warnings that read only the program (today: functions
@@ -290,6 +294,7 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
         Left err -> handleError err
         Right (compiled, trans) -> do
           mapM_ (hPutStrLn stderr . renderCompileWarning) (compiledWarnings conf prog compiled)
+          mapM_ (hPutStrLn stderr) (memoRecursionIgnored lang conf)
           writeOutputFile outFile trans
           -- After the real compile, not before: the advisory is a closing note
           -- on a compile that succeeded, and there is nothing to advise about

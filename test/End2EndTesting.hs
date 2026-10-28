@@ -1090,13 +1090,18 @@ stripJulia = go
 -- @netNames@ (empty for a non-neural program) gets one identity-mock
 -- definition apiece -- see 'testJuliaAll'\'s note.
 testPython :: [NetMock] -> Either CompilerError IREnv -> [TestCase] -> Property
-testPython netNames compiledE tc = ioProperty $ do
+testPython = testPythonWith False
+
+-- | 'testPython' on the module emitted with the recursion memo switched on by
+-- the first argument (@--memoRecursion@).
+testPythonWith :: Bool -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> Property
+testPythonWith memo netNames compiledE tc = ioProperty $ do
   case compiledE of
     Left err -> return $ counterexample err False
     Right compiled -> do
       projectDir <- getCurrentDirectory
       code <- withSystemTempFile "spll_test.py" $ \tmpPath tmpHandle -> do
-        hPutStr tmpHandle (pythonTestScript projectDir netNames compiled tc)
+        hPutStr tmpHandle (pythonTestScriptWith memo projectDir netNames compiled tc)
         hClose tmpHandle
         (_, _, _, handle) <- createProcess (proc "python3" [tmpPath])
         waitForProcess handle
@@ -1112,10 +1117,13 @@ testPython netNames compiledE tc = ioProperty $ do
 -- is its temp dir rather than the project; pythonLib has to be put back on
 -- the path explicitly, which is what @projectDir@ is for.
 pythonTestScript :: FilePath -> [NetMock] -> IREnv -> [TestCase] -> String
-pythonTestScript projectDir netNames compiled tc =
+pythonTestScript = pythonTestScriptWith False
+
+pythonTestScriptWith :: Bool -> FilePath -> [NetMock] -> IREnv -> [TestCase] -> String
+pythonTestScriptWith memo projectDir netNames compiled tc =
   "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n" ++ mockDefs ++ pythonTestCode src tc
   where
-    src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
+    src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctionsWith memo True compiled)
     mockDefs = concatMap pyMockDef netNames
 
 -- | One writeLogits row as the text backends check it: the endpoint, its
@@ -1387,6 +1395,17 @@ pyImpossCheck name (Just expected) =
 -- @.tst@ header, with a stderr note for programs that were eligible without
 -- declaring it. Before that, the selection condition was
 -- @Python \`elem\` bs || not (null (neurals p))@.)
+
+-- | Recursive corpus programs the @Python MemoRecursion@ sweep leaves out, each
+-- with why. Not memo failures: the scalar harness cannot run them at all, with
+-- or without the flag, and the plain Python sweep never meets them because the
+-- fuzzers certify them ('textRouted').
+memoSweepExceptions :: [(String, String)]
+memoSweepExceptions =
+  -- The identity mock of a Symbol-input network hands the row's resolved
+  -- (index, logits) tuple straight back, which the emitted read cannot use:
+  -- the scalar twin of batched-harness-list-of-symbol-parameters.
+  [ ("neuralReadListWalkRecursion", "batched-harness-list-of-symbol-parameters") ]
 
 -- | Corpus programs batched mode does not take yet, each with the docs-repo
 -- ticket that owns the refusal. Exact: a listed program that becomes eligible
@@ -4221,12 +4240,18 @@ normalizationKey m p (Right env) = do
 -- | Key of 'testPython': the exact script it runs (emitted module, mocks,
 -- row checks with the tolerance spliced in), plus the Python runtime.
 pythonKey :: Manifest -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
-pythonKey _ _ (Left _) _ = return Nothing
-pythonKey m nets (Right env) tcs = do
+pythonKey = pythonKeyWith False
+
+-- | 'pythonKey' of the module 'testPythonWith' runs. The emitted script
+-- differs with the memo only where it decorates something, and the
+-- runtime's fingerprint covers the rest.
+pythonKeyWith :: Bool -> Manifest -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
+pythonKeyWith _ _ _ (Left _) _ = return Nothing
+pythonKeyWith memo m nets (Right env) tcs = do
   projectDir <- getCurrentDirectory
   h <- harnessFingerprint m
   py <- pythonFingerprint m
-  return $ Just $ hashKey [pythonCheckVersion, h, py, pythonTestScript projectDir nets env tcs]
+  return $ Just $ hashKey [pythonCheckVersion, h, py, pythonTestScriptWith memo projectDir nets env tcs]
 
 -- | Key of one program's part of a 'testJuliaAll' shard: its module and row
 -- checks as 'juliaBatchTestCode' renders them, under a fixed module name (the
@@ -4426,6 +4451,19 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
           let (n, c, tcs, nets) = routedQuery e
           in testProperty n (once $ cachedProperty manifest (check "Python") n (pythonKey manifest nets c tcs)
                                       (testPython nets c tcs))
+    -- The same rows under --memoRecursion (docs task
+    -- recursive-prob-calls-not-shared-across-branches), for every program
+    -- the memo changes: one with a recursive probability or integrate
+    -- method. Not gated on the fuzzers' certification, since they never run
+    -- the memo.
+    , corpusSweep corpus SweepSpec
+        { sweepName = path ++ ".Python MemoRecursion", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = \e -> Python `elem` ceBackends e && hasQueries e && memoChanges e
+                               && ceName e `notElem` map fst memoSweepExceptions
+        , sweepNote = "every p()/cdf() row of a recursive program against the emitted Python under --memoRecursion" } $ \e ->
+          let (n, c, tcs, nets) = routedQuery e
+          in testProperty n (once $ cachedProperty manifest (check "Python MemoRecursion") n (pythonKeyWith True manifest nets c tcs)
+                                      (testPythonWith True nets c tcs))
     -- writeLogits rows used to run on the interpreter only, which is how
     -- every text-backend writeLogits but a flat discrete one shipped
     -- crashing (task writelogits-text-backends-broken).
@@ -4517,6 +4555,7 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     isQuery x = isProbTestCase x || isCumulTestCase x
     queries e = filter isQuery (rows e)
     hasQueries e = any isQuery (ceCases e)
+    memoChanges e = either (const False) (not . null . memoMembers . memoPlan) (opt e)
     wlRows e = filter (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) (rows e)
     hasWriteLogits e = any (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) (ceCases e)
     writeLogitsRows e = map (writeLogitsRow (ceProgram e)) (wlRows e)

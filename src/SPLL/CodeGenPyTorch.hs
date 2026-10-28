@@ -3,6 +3,10 @@
 
 module SPLL.CodeGenPyTorch (
   generateFunctions,
+  generateFunctionsWith,
+  MemoPlan(..),
+  memoPlan,
+  memoDecorate,
   pyVal,
   envToLUT,
   normalRefName,
@@ -25,6 +29,8 @@ import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessa
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd, nub)
 import Data.Char (toUpper, isDigit)
 import Data.Maybe (fromMaybe)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift), gets, modify)
 import Utils (Supply, demandUniqueNumber, evalSupply)
 
@@ -217,8 +223,14 @@ onHead f (x:xs) = f x : xs
 onHead _ [] = []
 
 generateFunctions :: Bool -> IREnv -> [String]
+generateFunctions = generateFunctionsWith False
+
+-- | 'generateFunctions', with the recursion memo ('memoPlan') switched on by
+-- the first argument (CLI @--memoRecursion@). Off, the output is exactly
+-- 'generateFunctions''.
+generateFunctionsWith :: Bool -> Bool -> IREnv -> [String]
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
-generateFunctions genBoil env0 =
+generateFunctionsWith memo genBoil env0 =
     -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
     -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
     -- M1, strategy B).
@@ -230,6 +242,7 @@ generateFunctions genBoil env0 =
         -- the reference has to become a call. That holds for a nullary normal
         -- function as much as a generator: writeLogits of @main = Normal * 3.0@
         -- reads @main_normal@'s (mu, sigma) and indexed the method object.
+        decorators = if memo then memoDecorators (memoPlan env) else const []
         callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
                         | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
                         , null (fst (unwrapLambdas e)) ]
@@ -248,12 +261,12 @@ generateFunctions genBoil env0 =
       generateADTClasses adtsEnv ++
       map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
       (if null consts then [] else [""]) ++
-      concatMap (generateClass clsName lut callableNames (adtCallees pyMangle adtsEnv)) funcs ++
+      concatMap (generateClass clsName lut callableNames (adtCallees pyMangle adtsEnv) decorators) funcs ++
       ["", "# Example Initialization"] ++
       generateInitializations env
     else
       map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
-      concatMap (generateClass clsName lut callableNames (adtCallees pyMangle adtsEnv)) funcs
+      concatMap (generateClass clsName lut callableNames (adtCallees pyMangle adtsEnv) decorators) funcs
 
 
 stdLib :: [(String, String)]
@@ -360,14 +373,14 @@ generateADTAccessor fieldName ctorName =
                  ++ " + \" Got: \" + type(x).__name__)"
              , "return x." ++ pyMangle fieldName ]
 
-generateClass :: (String -> String) -> [(String, String)] -> [String] -> [String] -> IRFunGroup -> [String]
-generateClass clsName lut callableNames adtCalls (IRFunGroup name gen prob integ writeLogits normal doc _ _ _) = let
+generateClass :: (String -> String) -> [(String, String)] -> [String] -> [String] -> (String -> [String]) -> IRFunGroup -> [String]
+generateClass clsName lut callableNames adtCalls decorators (IRFunGroup name gen prob integ writeLogits normal doc _ _ _) = let
   funcStringFromMaybe fname func = case func of
     Just a -> generateFunction True (fname, replaceCallsDecl a)
     Nothing -> return []
   ((i, p, g, e, n), CodegenState { stGlobalMultis = globalVars }) = evalSupply $ runStateT (do
-    i' <- funcStringFromMaybe "integrate" integ
-    p' <- funcStringFromMaybe "forward" prob
+    i' <- memoDecorate (decorators (name ++ "_integ")) <$> funcStringFromMaybe "integrate" integ
+    p' <- memoDecorate (decorators (name ++ "_prob")) <$> funcStringFromMaybe "forward" prob
     g' <- funcStringFromMaybe "generate" gen
     e' <- funcStringFromMaybe "writeLogits" writeLogits
     n' <- funcStringFromMaybe "normal_params" normal
@@ -385,6 +398,66 @@ generateClass clsName lut callableNames adtCalls (IRFunGroup name gen prob integ
     | otherwise = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e ++ [""] ++ n
   replaceCallsDecl (expr, d) = (irMap (replaceCalls lut) expr, d)
   in commentLines ++ initLine:indentOnce globalVarDecls ++ indentOnce funcs
+
+-- ---------------------------------------------------------------------------
+-- The recursion memo (task recursive-prob-calls-not-shared-across-branches)
+-- ---------------------------------------------------------------------------
+--
+-- A recursive probability function called with the same arguments from
+-- several branches recomputes the whole subtree each time: an HMM's
+-- likelihood calls @gen.forward(sample[1:], s)@ for both hidden states from
+-- both hidden-state arms, 2^n calls where the forward algorithm needs 2n.
+-- Under @--memoRecursion@ the probability and integrate methods on a recursive
+-- call cycle are wrapped in the runtime's @nest_memo@, which answers a repeated
+-- call from a table keyed on the method and its argument values. The table
+-- lives for one top-level query: the first emitted method call opens it and
+-- drops it when it returns, so it never serves values computed under other
+-- weights. Methods off the cycle that reach it are wrapped in
+-- @nest_memo_scope@, which only opens the table, so that the calls one query
+-- makes into the cycle from several places share it. The keying rules (and
+-- why identity keys are safe there) are in the runtimes, next to @nest_memo@.
+
+-- | Which emitted methods the memo wraps, by raw IR name (@f_prob@,
+-- @f_integ@): those on a recursive call cycle, and those off it that reach
+-- one. Both are empty for a program without recursion.
+data MemoPlan = MemoPlan { memoMembers :: Set.Set String, memoScopes :: Set.Set String }
+  deriving (Eq, Show)
+
+memoPlan :: IREnv -> MemoPlan
+memoPlan (IREnv funcs _ _) = MemoPlan members scopes
+  where
+    methods = Map.fromList $
+         [ (n ++ "_prob", e)  | IRFunGroup{groupName=n, probFun=Just (e, _)} <- funcs ]
+      ++ [ (n ++ "_integ", e) | IRFunGroup{groupName=n, integFun=Just (e, _)} <- funcs ]
+    callees = Map.map (Set.filter (`Map.member` methods) . varNames) methods
+    varNames e = Set.fromList [ v | IRVar v <- universeIR e ]
+    universeIR e = e : concatMap universeIR (getIRSubExprs e)
+    reach m = go Set.empty (Set.toList (Map.findWithDefault Set.empty m callees))
+      where go seen [] = seen
+            go seen (x:xs)
+              | x `Set.member` seen = go seen xs
+              | otherwise = go (Set.insert x seen) (Set.toList (Map.findWithDefault Set.empty x callees) ++ xs)
+    reaches = Map.mapWithKey (\m _ -> reach m) methods
+    members = Map.keysSet (Map.filterWithKey Set.member reaches)
+    scopes
+      | Set.null members = Set.empty
+      | otherwise = Map.keysSet (Map.filterWithKey (\m r -> m `Set.notMember` members
+                                                         && not (Set.disjoint r members)) reaches)
+
+-- | The decorator lines for one raw method name under a plan.
+memoDecorators :: MemoPlan -> String -> [String]
+memoDecorators (MemoPlan members scopes) raw
+  | raw `Set.member` members = ["@nest_memo"]
+  | raw `Set.member` scopes  = ["@nest_memo_scope"]
+  | otherwise                = []
+
+-- | Put decorator lines on an emitted method: right above its @def@ line,
+-- after its comment lines.
+memoDecorate :: [String] -> [String] -> [String]
+memoDecorate [] ls = ls
+memoDecorate decos ls = case break ("def " `isPrefixOf`) ls of
+  (before, defLine : rest) -> before ++ decos ++ defLine : rest
+  _                        -> ls
 
 generateFunction :: Bool -> (String, IRFunDecl) -> GlobalVariableSupply [String]
 generateFunction classFunction (name, (expr, doc)) = do

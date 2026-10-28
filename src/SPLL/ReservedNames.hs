@@ -412,7 +412,7 @@ pythonRuntimeValueNames =
   , "itertools", "lcm", "ldexp", "lgamma", "listConcat", "listProd", "log", "log10"
   , "log1p", "log2", "log_cumulative_normal", "log_cumulative_uniform"
   , "log_density_normal", "log_density_uniform", "logical_not", "logsumexp", "mapList", "mix_signature"
-  , "math", "modf", "nan", "nextafter", "nn_gather", "perm", "pi", "poison"
+  , "math", "modf", "nan", "nest_memo", "nest_memo_scope", "nextafter", "nn_gather", "perm", "pi", "poison"
   , "pow", "prod", "radians", "rand", "randn", "random", "remainder"
   , "safe_div", "safe_exp", "safe_intdiv", "safe_log", "safe_mod", "sign", "signature", "sin", "sinh"
   , "split_branch", "split_retry", "split_uniform"

@@ -39,6 +39,7 @@
 -- refuses the shapes the split does not reach ('recOffenders').
 module SPLL.CodeGenPyTorchBatched
   ( generateFunctionsBatched
+  , generateFunctionsBatchedWith
   , batchedGuard
   , prepBatchedBody
   , usesStructureSplit
@@ -61,7 +62,7 @@ import SPLL.Lang.Lang (multiValueToValueList, multiValueCardinality)
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
-import SPLL.CodeGenPyTorch (envToLUT, normalRefName, replaceCalls, pyMangle, pyDouble, pyAttrBase, groupClassName, irFreeVars)
+import SPLL.CodeGenPyTorch (envToLUT, normalRefName, replaceCalls, pyMangle, pyDouble, pyAttrBase, groupClassName, irFreeVars, MemoPlan(..), memoPlan, memoDecorate)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
@@ -103,13 +104,18 @@ import Utils (Supply, demandUniqueNumber, evalSupply)
 -- Accepted per Viktor (2026-07-22) as the honest cost of a hard, uniform
 -- contract, rather than special-casing the stub back in for this one shape.
 generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
-generateFunctionsBatched genBoil env0 =
+generateFunctionsBatched = generateFunctionsBatchedWith False
+
+-- | 'generateFunctionsBatched', with the recursion memo switched on by the
+-- first argument (CLI @--memoRecursion@; 'SPLL.CodeGenPyTorch.memoPlan').
+generateFunctionsBatchedWith :: Bool -> Bool -> IREnv -> Either CompilerError [String]
+generateFunctionsBatchedWith memo genBoil env0 =
   -- A refusal is worded from the mangled environment below; report it in the
   -- names the user wrote ('unmangleDiagnostic').
-  first (unmangleDiagnostic pyMangle env0) (emitBatched genBoil env0)
+  first (unmangleDiagnostic pyMangle env0) (emitBatched memo genBoil env0)
 
-emitBatched :: Bool -> IREnv -> Either CompilerError [String]
-emitBatched genBoil env0 = do
+emitBatched :: Bool -> Bool -> IREnv -> Either CompilerError [String]
+emitBatched memo genBoil env0 = do
       -- Same identifier hygiene as the scalar backend: ADT names that are
       -- Python keywords are mangled in the emitted code, and every IR
       -- reference to them is renamed to match. The declarations keep the
@@ -122,6 +128,16 @@ emitBatched genBoil env0 = do
       -- rather than refusing the whole program.
       let BatchedProgram env@(IREnv funcs adts consts) evals pureNames methods = batchedProgram env0
       let lut = envToLUT env ++ [ (n ++ evalSuffix, n ++ "." ++ evalMethodName) | (n, _) <- evals ]
+          -- The recursion memo's decorators, by raw method name (the scalar
+          -- backend's 'memoPlan'; the runtime half is pythonLibBatched's
+          -- nest_memo, which keys a tensor by identity, so a [B] column is
+          -- shared only where the very same tensor recurs).
+          decorators raw
+            | not memo = []
+            | raw `Set.member` memoMembers plan = ["@nest_memo"]
+            | raw `Set.member` memoScopes plan = ["@nest_memo_scope"]
+            | otherwise = []
+          plan = memoPlan env
           -- Every group's generate method, raw (pre-rename) name and body: the
           -- self-contained recursion check ('hasGenCycle') walks these
           -- directly, mirroring 'checkCallGraph's raw-name convention.
@@ -158,7 +174,7 @@ emitBatched genBoil env0 = do
                                                  , sMethodSCCs = methodSCCs lut pureNames methods
                                                  , sNullaryCalls = nullaryCalls }
             () <- checkCallGraph env' pureNames methods
-            classes <- mapM (generateClass (groupClassName env) env' lut genArities genRaw pureNames evals) funcs
+            classes <- mapM (generateClass (groupClassName env) env' lut genArities genRaw pureNames evals decorators) funcs
             return (enums, classes)
           settle enums = case attempt enums of
             Right ok -> Right ok
@@ -327,11 +343,11 @@ renderConst (n, v) = case batchedVal v of
 -- (task neural-generate-parity: generate's ineligibility used to degrade to a
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
-generateClass :: (String -> String) -> SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> [String] -> [(String, IRFunDecl)] -> IRFunGroup -> Either Refusal [String]
-generateClass clsName env lut genArities genMethods pureNames evals (IRFunGroup name gen prob integ _ normal doc _ dom variantOf) = do
+generateClass :: (String -> String) -> SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> [String] -> [(String, IRFunDecl)] -> (String -> [String]) -> IRFunGroup -> Either Refusal [String]
+generateClass clsName env lut genArities genMethods pureNames evals decorators (IRFunGroup name gen prob integ _ normal doc _ dom variantOf) = do
   let method m raw d
         | Just ls <- retiredMethod variantOf m d = Right ls
-        | otherwise = generateMethod (enterMethod raw env) lut m name d
+        | otherwise = memoDecorate (decorators raw) <$> generateMethod (enterMethod raw env) lut m name d
       -- A pure callee is emitted only where a prob/integ path reaches it
       -- ('pureCallees').
       reached raw = if raw `elem` pureNames then id else const Nothing

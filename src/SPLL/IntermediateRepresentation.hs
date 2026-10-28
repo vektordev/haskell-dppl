@@ -720,7 +720,17 @@ data CompilerConfig = CompilerConfig {
   -- 'integFun', a CDF query that reaches a top-level call under a non-default
   -- family is refused by name at compile time rather than routed to the
   -- callee's sum-product CDF.
-  extraSemirings :: [SemiringFamily]
+  extraSemirings :: [SemiringFamily],
+  -- | When True (CLI --memoRecursion; task
+  -- recursive-prob-calls-not-shared-across-branches), the Python backends
+  -- memoise the probability and integrate methods of every function on a
+  -- recursive call cycle, keyed on their argument values, for the duration of
+  -- one top-level query: an HMM's likelihood then costs the forward
+  -- algorithm's O(n) calls instead of O(2^n). A codegen option only -- the IR
+  -- is the same either way, and with the flag off the emitted code is
+  -- byte-identical to a compile without it. Ignored under 'topKThreshold'
+  -- (the accumulated probability differs per path) and by the Julia backend.
+  memoRecursion :: Bool
 } deriving (Show)
 
 -- | The probability-mode semiring families 'extraSemirings' can request
@@ -829,7 +839,7 @@ defaultMarginalSlots :: Int
 defaultMarginalSlots = 4
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False, materializationCardinality=defaultMaterializationCardinality, marginalSlots=defaultMarginalSlots, extraSemirings=[]}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False, materializationCardinality=defaultMaterializationCardinality, marginalSlots=defaultMarginalSlots, extraSemirings=[], memoRecursion=False}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 

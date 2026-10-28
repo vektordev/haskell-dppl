@@ -12,6 +12,7 @@
 # with the scalar lib.
 
 import math
+import functools
 import torch
 
 # --- the runtime's float dtype (task python-codegen-silent-precision-traps) ---
@@ -1388,3 +1389,155 @@ def dense_query(dense_fn, kernel, domain, samples, args=(), dense=None):
     parts.append(bucketed(kernel, [samples[i] for i in miss], *args))
     idxs.append(miss)
   return _scatter(parts, idxs, len(samples))
+
+# --- the recursion memo (CLI --memoRecursion) --------------------------------
+# Task recursive-prob-calls-not-shared-across-branches. A recursive probability
+# function called with equal arguments from several branches recomputes the
+# whole subtree each time (an HMM's likelihood calls gen.forward(sample[1:], s)
+# for both states from both state arms: 2^n calls where the forward algorithm
+# needs 2n). Under --memoRecursion the compiler wraps every probability and
+# integrate method on a recursive call cycle in `nest_memo`, and every other
+# one that reaches such a cycle in `nest_memo_scope`.
+#
+# Scope: one table per top-level query. The first wrapped call opens it and
+# drops it when that call returns (or raises), so a table never outlives the
+# weights and autograd graph its entries were computed under. Nested calls
+# share it, including several entries into one cycle from one query.
+#
+# Key: the method (function and instance) and a key per argument.
+#   * None, bool, int, float, str: by type and value (a float's sign too, so
+#     -0.0 and 0.0 key apart; NaN never matches itself, which only costs a
+#     miss). The "ANY" sentinel is a str, so it keys apart from every concrete
+#     value; an ANY list keys as its own constant.
+#   * Tuples, Left/Right, constructor values: by their parts' keys.
+#   * Linked lists: by value, with O(1) work per call. A cons cell's key is
+#     computed once per table (`_memo_list_key`) from its head's key and its
+#     tail cell's key, and holds a precomputed hash, so `sample[1:]` -- the
+#     very tail cell -- is keyed by one dictionary lookup.
+#   * Anything else (a tensor, a closure, a network's output) by identity.
+#     Identity is only sound while the object is alive, since Python reuses
+#     the id of a freed object (a temporary batch slice would otherwise give
+#     a silent wrong hit), so the table holds a reference to every object it
+#     keys by identity until it is dropped. A varying tensor argument then
+#     simply never hits; a pass-through one (a learned rate handed down the
+#     recursion unchanged) is the same object at every level and shares.
+# A hit returns the very object the first call returned -- for a torch result,
+# the same autograd node, so gradients are unchanged.
+#
+# Not used under topK (the compiler drops the flag there): a pruned
+# probability depends on the path to a call, not only on its arguments.
+
+_memo_scope = None
+
+class _MemoScope:
+  __slots__ = ("table", "pins", "lists")
+  def __init__(self):
+    self.table = {}
+    self.pins = {}   # id -> object, for every object keyed by identity
+    self.lists = {}  # id(cons cell) -> its key (the cell is pinned too)
+
+class _MemoListKey:
+  __slots__ = ("head", "tail", "h")
+  def __init__(self, head, tail):
+    self.head = head
+    self.tail = tail
+    self.h = hash((head, tail))  # the tail's hash is its stored one: O(1)
+  def __hash__(self):
+    return self.h
+  def __eq__(self, other):
+    a, b = self, other
+    while isinstance(a, _MemoListKey) and isinstance(b, _MemoListKey):
+      if a is b:
+        return True
+      if a.h != b.h or a.head != b.head:
+        return False
+      a, b = a.tail, b.tail
+    return (not isinstance(a, _MemoListKey)) and (not isinstance(b, _MemoListKey)) and a == b
+
+def _memo_pin(x, scope):
+  scope.pins[id(x)] = x
+  return ("id", id(x))
+
+def _memo_list_key(x, scope):
+  lists = scope.lists
+  path = []
+  node = x
+  while True:
+    if isinstance(node, ConsInferenceList):
+      k = lists.get(id(node))
+      if k is not None:
+        break
+      path.append(node)
+      node = node.next
+    elif isinstance(node, AnyInferenceList):
+      k = ("any-list",)
+      break
+    elif isinstance(node, EmptyInferenceList):
+      k = ("empty-list",)
+      break
+    else:
+      return _memo_pin(x, scope)
+  for n in reversed(path):
+    k = _MemoListKey(_memo_key(n.value, scope), k)
+    lists[id(n)] = k
+    scope.pins[id(n)] = n
+  return k
+
+def _memo_key(x, scope):
+  t = type(x)
+  if x is None:
+    return ("none",)
+  if t is bool or t is int or t is str:
+    return (t, x)
+  if t is float:
+    return (t, x, math.copysign(1.0, x))
+  if isinstance(x, InferenceList):
+    return _memo_list_key(x, scope)
+  if t is T:
+    return ("T", _memo_key(x.t1, scope), _memo_key(x.t2, scope))
+  if t is Left or t is Right:
+    return (t, _memo_key(x.val, scope))
+  if t is tuple or t is list:
+    return (t, tuple(_memo_key(v, scope) for v in x))
+  fields = getattr(x, "_fields", None)
+  if type(fields) is list and t.__bases__ == (object,):
+    return ("ctor", t, tuple(_memo_key(v, scope) for v in fields))
+  if t.__bases__ == (object,) and "__eq__" in t.__dict__ and not getattr(x, "__dict__", True):
+    return ("ctor", t)  # a nullary constructor value
+  return _memo_pin(x, scope)
+
+def nest_memo_scope(fn):
+  @functools.wraps(fn)
+  def scoped(*args, **kwargs):
+    global _memo_scope
+    if _memo_scope is not None:
+      return fn(*args, **kwargs)
+    _memo_scope = _MemoScope()
+    try:
+      return fn(*args, **kwargs)
+    finally:
+      _memo_scope = None
+  return scoped
+
+def nest_memo(fn):
+  missing = object()
+  @functools.wraps(fn)
+  def memoised(self, *args, **kwargs):
+    global _memo_scope
+    scope = _memo_scope
+    if kwargs:
+      return fn(self, *args, **kwargs)
+    if scope is None:
+      _memo_scope = scope = _MemoScope()
+      try:
+        return memoised(self, *args)
+      finally:
+        _memo_scope = None
+    key = (fn, self, tuple(_memo_key(a, scope) for a in args))
+    hit = scope.table.get(key, missing)
+    if hit is not missing:
+      return hit
+    result = fn(self, *args)
+    scope.table[key] = result
+    return result
+  return memoised

@@ -37,6 +37,7 @@ import TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rew
 import TestPythonPrelude (pythonPreludeTests)
 import TestSamplingPrimitives (samplingPrimitiveTests)
 import TestCLI (cliTests)
+import TestMemoRecursion (memoRecursionTests)
 import BackendCoverage (backendCoverageTests, irGeneratorCoverageTests)
 import GenerateCensus (generateCensusTests)
 import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
@@ -670,6 +671,7 @@ main = do
     , pythonPreludeTests
     , samplingPrimitiveTests
     , cliTests
+    , memoRecursionTests
     , batchedEnumBucketingTests
     , batchedPerElementEvaluatorTests
     , branchCountBackends
