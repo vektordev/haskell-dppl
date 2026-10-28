@@ -260,3 +260,29 @@ call sites happens to sit behind an inverse's `applicability` guard — but that
 is a property of today's set of `InjF` inverses, not an enforced invariant, so
 it is wrapped too. Pinned by `test/cases/distributions/uniformLog.tst`'s `cdf(1000.0)` row and
 `test/cases/arithmetic/multExp.tst`'s `cdf(-5.0)`.
+
+## `--memoRecursion`: a per-query table for recursive calls
+
+A recursive probability function called with equal arguments from several
+branches recomputes the subtree each time: an HMM whose hidden state the query
+does not fix costs 2^n calls. Under `--memoRecursion` (`CompilerConfig`
+`memoRecursion`, off by default) both Python backends decorate every
+probability and integrate method on a recursive call cycle with `nest_memo`,
+and every other one that reaches such a cycle with `nest_memo_scope`
+(`CodeGenPyTorch.memoPlan`). The table lives for one top-level query: the
+first decorated call opens it and drops it on return, so it never serves a
+value computed under other weights. The HMM then costs 2n+1 calls.
+
+Arguments are keyed by value (scalars by type and value, tuples, `Left`/`Right`
+and constructors by their parts, linked lists through a per-cell key with a
+stored hash, so `sample[1:]` costs one lookup). Anything else (a tensor, a
+closure) is keyed by identity, and the table holds a reference to it, since
+Python reuses a freed object's id. A varying tensor therefore never hits, while
+a pass-through one shares. A hit returns the same object, which for a torch
+result is the same autograd node.
+
+The flag is dropped under `--topKCutoff`, where a pruned probability depends on
+the path to a call, and by the Julia backend. The CLI warns in both cases.
+Without the flag, and for a program without recursion, the emitted code is
+byte-identical. Tests: `test/TestMemoRecursion.hs` (call counts and exactness
+through the binary) and the `End2End.Python MemoRecursion` corpus sweep.

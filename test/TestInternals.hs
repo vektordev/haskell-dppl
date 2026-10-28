@@ -7095,7 +7095,10 @@ reservedNameTests = testGroup "reserved names"
       -- for the whole module (a definition `t` broke every tuple).
       forM_ ["pythonLib.py", "pythonLibBatched.py"] $ \lib -> do
         src <- readFile lib
-        let defined = [ takeWhile (`notElem` "(: ") rest | l <- lines src, Just rest <- [stripPrefix' "class " l] ]
+        -- A leading underscore is refused in SPLL source, so a private class
+        -- (the recursion memo's _MemoScope) cannot be clashed with.
+        let defined = [ c | l <- lines src, Just rest <- [stripPrefix' "class " l]
+                          , let c = takeWhile (`notElem` "(: ") rest, take 1 c /= "_" ]
         assertBool ("no classes found in " ++ lib) (not (null defined))
         forM_ defined $ \c ->
           assertBool (lib ++ " defines class " ++ c ++ ", missing from pythonRuntimeClassNames")

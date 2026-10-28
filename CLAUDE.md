@@ -48,8 +48,9 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   (dump AST/IR after each stage), `--logSpace`, `--batched`, `--marginals`,
   `--duplicationCensus` (copies of large subtrees in the -O0 IR),
   `--marginalSlots N`, `--materializationBudget N`, `--noTypeCheck`,
-  `--pruneAnyChecks`, `--no{Integrate,Probability,Generate}`. Subcommand
-  flags: `--help`.
+  `--pruneAnyChecks`, `--memoRecursion` (per-query table for recursive
+  calls, Python only; `docs/backends.md`),
+  `--no{Integrate,Probability,Generate}`. Subcommand flags: `--help`.
 - Use `stack`, never `cabal`. `package.yaml` is the source, the `.cabal` is
   generated.
 
