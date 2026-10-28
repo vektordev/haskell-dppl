@@ -28,6 +28,7 @@ aliasedDrawThroughScalingHelper main.integ=6 main.prob=6
 anyLeafReadAgainAsCondition main__m10.prob=4
 anyLeafReadAgainInCondition main__m10.prob=9
 anyLeafReadAgainInOutput main__m01.prob=5 main__m10.prob=3
+anyLeafReadAgainThroughAlias main__m10.prob=9 main__m11.prob=4
 anyMarkPassedAsRecursiveState ev.integ=4 ev.prob=4 gen.prob=3
 applyEnumComparison selF.prob=3
 applyEnumForwardOnly notB.prob=3

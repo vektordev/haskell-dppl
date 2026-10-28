@@ -790,8 +790,13 @@ A leaf qualifies when it is read by at least two occurrences, or by one in a
 computing position (`varFieldReads`: anything other than field
 constructors, `if` arms and let bodies down from the body's root), and when
 the bound value states its domain (`fieldDomainOf`: a `DiscreteValues` tag,
-through a tuple constructor, `if` arms, a let body, or a called top-level
-function's body). At most 64 fixed witnesses (`wildcardLeafSumBound`), and the query
+through a tuple constructor, a `fst`/`snd` projection, `if` arms, a let body,
+or the body of a called or nullary top-level function). The reads are
+followed through spellings that only rename the value, so equivalent programs
+agree: a projection of the variable bound by an inner `draw y = ..` is read
+wherever `y` is, and one passed to a top-level function wherever the callee's
+body reads that parameter (at most four calls deep, past which the argument
+counts as one computing read). At most 64 fixed witnesses (`wildcardLeafSumBound`), and the query
 must be a point query of a value-typed body. Any other binding keeps its code.
 Each `ANY` leaf of a recursion's state doubles the calls, so the runtime is
 exponential in the number of masked leaves (no memo). Corpus

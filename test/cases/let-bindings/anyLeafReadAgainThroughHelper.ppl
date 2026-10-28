@@ -1,0 +1,3 @@
+pairUp e = (e, snd e)
+mark = (Normal, if Uniform < 0.3 then 0 else 1)
+main = draw e = fst (mark, 0.0) in pairUp e

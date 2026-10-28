@@ -1035,12 +1035,22 @@ juliaFreeReferences src = nub [ x | x <- used, x `notElem` defined ]
   where
     code = stripJulia src
     ls = lines code
-    defined = concatMap definedOn ls ++ letBound code
+    defined = concatMap definedOn ls ++ letBound code ++ lambdaBound code
     -- an inline @let name = ...;@, which codegen emits for an IR let mid-expression
     letBound str = case str of
       [] -> []
       ('l':'e':'t':' ':more) -> takeWhile isIdentChar more : letBound more
       (_:more) -> letBound more
+    -- the parameters of an anonymous lambda, @((a, b) -> body)@
+    -- ('generateLambdaExpression'): a function-valued one is called as
+    -- @(a)(x)@ in the body
+    lambdaBound str = case str of
+      [] -> []
+      ('(':'(':more)
+        | (inner, ')':' ':'-':'>':_) <- break (== ')') more
+        , all (\ch -> isIdentChar ch || ch == ',' || ch == ' ') inner
+        -> [ takeWhile isIdentChar (dropWhile (== ' ') prm) | prm <- splitOn ',' inner ] ++ lambdaBound more
+      (_:more) -> lambdaBound more
     definedOn l = case words l of
       -- the function and its parameters: a higher-order parameter is called
       -- as @(f)(x)@, which the parenthesised-callee rule below reads as a use
