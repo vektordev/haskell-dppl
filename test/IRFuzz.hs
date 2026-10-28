@@ -1458,6 +1458,13 @@ batchedRepro p a0 = (repro [("a0", ITFloat)] (presultType True)
                        (IRConstruct TgTuple [p, IRConstruct TgTuple [IRConst (VFloat 0), IRConst (VBool False)]]) [a0])
                     { icKind = ProbBody, icShape = Just (SRLinear, True) }
 
+-- | 'batchedRepro' over one Int argument, queried at 0: a key the batched
+-- kernel receives as a tensor.
+batchedIntKeyRepro :: IRExpr -> IRCase
+batchedIntKeyRepro p = (repro [("a0", ITInt)] (presultType True)
+                         (IRConstruct TgTuple [p, IRConstruct TgTuple [IRConst (VFloat 0), IRConst (VBool False)]]) [VInt 0])
+                       { icKind = ProbBody, icShape = Just (SRLinear, True) }
+
 -- | A one-query generate case over no arguments, with a short stream, for a
 -- pin.
 genRepro :: [(String, IRType)] -> IRType -> IRExpr -> IRCase
@@ -1751,18 +1758,21 @@ knownDisagreements =
   , KnownFamily "logsumexp-reduction-nan-and-infinity-differ-across-engines" ["batched"]
       (AsIf (const (irMap batchedLogSumExp)))
       (batchedRepro (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRDensity IRNormal Linear (IRVar "a0")]]) (VFloat (1 / 0)))
-  -- A rank-1 tensor's elements are read as floats: a tensor of booleans is
-  -- built as a float tensor (so an element read out of it is no condition
-  -- for @torch.where@), and one of tuples fails.
+  -- A rank-1 tensor's elements are read as floats at a batched key: a tensor
+  -- of booleans is stacked as a float tensor (so an element read out of it is
+  -- no condition for @torch.where@), and one of tuples fails. At a Python-int
+  -- key the element itself is read, so the key here is the batched argument
+  -- (narrowed by task grid-constraint-network-enumerated-jointly, whose
+  -- @tensor_index@ change fixed the constant-key repros).
   , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
       (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
                          || raisedWith "float() argument must be a string or a real number, not '" a))
-      (batchedRepro (IRIf (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VBool False)], IRConst (VInt 0)])
-                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
+      (batchedIntKeyRepro (IRIf (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VBool False)], IRVar "a0"])
+                                (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))))
   , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
       (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
                          || raisedWith "float() argument must be a string or a real number, not '" a))
-      (batchedRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRConst (VInt 0)])) (VFloat 1))
+      (batchedIntKeyRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRVar "a0"])))
   -- The batched sum of one element is that element, where the IR's sum
   -- adds it to 0.0, which turns a negative zero into 0.0. Recognised by the
   -- answer agreeing once zeros are compared without their sign.
