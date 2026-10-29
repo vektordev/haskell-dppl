@@ -207,6 +207,44 @@ it walks the body with the value in place, in `worldsShape` and
 `set-witness/setWitness*InPlace`. Two reads (`draw x = Normal in x + x`) are
 never in place; the affine engine owns that.
 
+**Why this order** (acceptance 6 of `dispatch-on-law-certificates`, measured at
+`1a09132` plus the in-place engine). For each pair of engines whose
+certificates both appear on some binding of a corpus program, the corpus
+programs where they do were compiled to Python with the second engine moved
+just ahead of the first, and their `.tst` rows run (End2End, interpreter,
+against a control run in the current order). An engine that answers is
+"first applicable wins", so the swap only matters where both apply:
+
+| seam (current order) | co-apply | swapped order: code changed, size | variants lost / gained | `.tst` rows newly failing |
+|---|---|---|---|---|
+| enumeration < plan | 92 | 61, +9.1 MB | 1 / 2 | run exceeded 8 GB (the 423x plan pessimisation under budget, see `enumeration.md`) |
+| enumeration < point inversion | 11 | 11, +91 KB | 9 / 1 | 1 program |
+| enumeration < set-valued witnesses | 74 | 70, +373 KB | 33 / 2 | 15 programs |
+| enumeration < in place | 83 | 69, -701 KB | 7 / 2 | 1 program (run incomplete) |
+| plan < point inversion | 14 | 10, -20 KB | 1 / 0 | 1 program |
+| plan < affine, plan < joint affine | 1 | 0 | none | none |
+| plan < set-valued witnesses | 50 | 20, -218 KB | 10 / 0 | 7 programs |
+| plan < in place | 87 | 46, -680 KB | 11 / 1 | 4 programs, 2 lose probability (run incomplete) |
+| point inversion < affine | 20 | 19, -8 KB | none | none |
+| point inversion < joint affine | 30 | 27, -211 KB | none | none |
+| point inversion < set-valued witnesses | 110 | 97, +8.1 MB | 24 / 2 | 20 programs |
+| point inversion < in place | 77 | 66, -364 KB | 4 / 1 | 2 programs |
+| affine < joint affine | 28 | 11, -23 KB | none | none |
+| affine < set-valued witnesses | 27 | 5, -6 KB | 1 / 0 | 1 program |
+| affine < in place | 34 | 9, -20 KB | none | none |
+| joint affine < set-valued witnesses, joint affine < in place | 29, 32 | 0 | none | none |
+| set-valued witnesses < in place | 159 | 33, -92 KB | 1 / 3 | none |
+
+Every seam the current order wins on answers or capability is kept for that
+reason. Four make no difference to answers or refusals, only to code size,
+and there the alternative is smaller: point inversion < affine and < joint
+affine, affine < joint affine, affine < in place. Set-valued witnesses < in
+place trades one variant for three. The order stays as it is (the in-place
+engine last moves no code of a program another engine measures); flipping
+those seams is a separate change. The enumeration rows are approximate: the
+measurement build moved enumeration into the binding list, where the
+`Apply` arm's earlier equations normally take it.
+
 The plan traversal and the set-witness IR can still decline what their
 predicate admits (a transported sentinel, an x-free factor reading a random
 local, a plan node outside the traversal), so their predicates are necessary
