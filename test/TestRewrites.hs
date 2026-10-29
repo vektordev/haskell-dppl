@@ -137,14 +137,6 @@ knownDivergences =
   , Known "maskSwappedWrapper" DrawIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" AliasIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" HelperExtract "" variantsSilenceReread
-  -- An aliased third step of the trajectory (`draw s3 = .. in draw y = s3 in
-  -- draw s4 = y + .. in (s1, (s2, (y, s4)))`) answers the (_, _, _, ANY)
-  -- marginal as impossible. Pre-existing; exposed when gaussianTrajectory4
-  -- joined the corpus. (The same entries used to cover a doubled Jacobian
-  -- on an aliased first step, fixed with task
-  -- aliased-draw-scaled-sibling-double-jacobian.)
-  , Known "gaussianTrajectory4" DrawIntro "" aliasChainMarginalTail
-  , Known "gaussianTrajectory4" AliasIntro "" aliasChainMarginalTail
   -- The M3 families (task transformation-differential-testing-m3-catalog-expansion).
   -- The same impossible (0.7, 0.6) answered 1.0 as the other families above.
   , Known "maskSwappedWrapper" TupleLaw "pair-fst" variantsSilenceReread
@@ -160,7 +152,6 @@ knownDivergences =
   where
     hiddenNegation = "if-complement-drops-hidden-negation-density"
     nanComparison = "nan-operand-comparison-measured-through-cdf"
-    aliasChainMarginalTail = "aliased-chain-step-marginal-tail-impossible"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
 

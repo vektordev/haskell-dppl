@@ -6720,15 +6720,22 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
                        , integFun = fmap stripFun (integFun fg)
                        , normalFun = fmap stripFun (normalFun fg)
                        , genFun = fmap stripGen (genFun fg) }
-    stripFun (expr, doc) = (strip (const True) True Set.empty expr, doc)
-    stripGen (expr, doc) = (strip callsInference False Set.empty expr, doc)
+    -- In an inference body any call may return a packed result (a closure
+    -- parameter applied to the sample is one), except a call of a generate
+    -- function: its value is a sample, whatever its shape. The deterministic-
+    -- application leaf binds @mk_gen(s1)(s2)(s3)(s4)@ to compare it against
+    -- the query, and a four-deep tuple read as a callee's result lost its
+    -- last fields (task trajectory-tail-bound-as-tuple-type-error).
+    stripFun (expr, doc) = (strip (not . callsNamed generateNames) True Set.empty expr, doc)
+    stripGen (expr, doc) = (strip (callsNamed inferenceNames) False Set.empty expr, doc)
 
     inferenceNames = Set.fromList (concat [ [groupName fg ++ "_prob" | isJust (probFun fg)]
                                            ++ [groupName fg ++ "_integ" | isJust (integFun fg)]
                                          | fg <- funcs ])
-    callsInference e = case e of
-      IRApply f _ -> callsInference f
-      IRVar n -> n `Set.member` inferenceNames
+    generateNames = Set.fromList [ groupName fg ++ "_gen" | fg <- funcs, isJust (genFun fg) ]
+    callsNamed names e = case e of
+      IRApply f _ -> callsNamed names f
+      IRVar n -> n `Set.member` names
       _ -> False
 
     -- Scope-aware rewrite. @callResults@ holds the variables currently bound to
@@ -6768,7 +6775,7 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       -- higher-order/namedFunctionCurriedWitness).
       IRLetIn n v irBody ->
         let v' = go callResults v
-            callee = holdsCalleeResult isCall callResults v'
+            callee = holdsCalleeResult isCall callResults v
         in IRLetIn n (if callee then stripLocalArms v' else v')
                      (go (rebind n callee callResults) irBody)
       IRLambda n irBody ->
@@ -6792,12 +6799,45 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- collapsed? Only an application does; a locally assembled 'IRConstruct'
     -- keeps its four fields. Both branch forms must agree, and an alias
     -- inherits the classification of what it aliases.
+    --
+    -- A redex of a literal lambda is classified by what the lambda returns
+    -- (it is read before rewriting, as the lambda arm above leaves it). A
+    -- packed result triple, which that arm collapses ('stripOuterTriple'),
+    -- answers at the callee's width; any other tuple the body assembles is a
+    -- value and keeps every field; a body ending in anything else falls back
+    -- to @isCall@. In a probability function @isCall@ is @const True@, and
+    -- the deterministic-application leaf binds
+    -- @(\\p2 -> (s1, (p2, (s3, 0.0)))) (s1 + s2)@ to compare it against the
+    -- sample: read as a callee's result, the third and fourth fields of that
+    -- value were shifted like a result's bc and flag (task
+    -- trajectory-tail-bound-as-tuple-type-error).
     holdsCalleeResult isCall env v = case v of
+      IRApply (IRLambda _ irBody) _
+        | tails <- returnedTuples irBody, not (null tails) ->
+            any isPackedTriple tails
       IRApply _ _      -> isCall v
       IRVar x          -> x `Set.member` env
       IRLetIn n b irBody -> holdsCalleeResult isCall (rebind n (holdsCalleeResult isCall env b) env) irBody
       IRIf _ t f       -> holdsCalleeResult isCall env t || holdsCalleeResult isCall env f
       _                -> False
+
+    -- The tuples a lambda body returns, through its let-bindings, both arms
+    -- of an 'IRIf' and nested literal-lambda redexes (a let too); empty when
+    -- some arm ends in anything but a tuple construction.
+    returnedTuples e = case e of
+      IRLetIn _ _ irBody -> returnedTuples irBody
+      IRApply (IRLambda _ irBody) _ -> returnedTuples irBody
+      IRIf _ t f -> case (returnedTuples t, returnedTuples f) of
+        (ts@(_:_), fs@(_:_)) -> ts ++ fs
+        (ts, []) | isError f -> ts
+        ([], fs) | isError t -> fs
+        _ -> []
+      IRConstruct TgTuple _ -> [e]
+      _ -> []
+    isError (IRError _) = True
+    isError _ = False
+    isPackedTriple (IRConstruct TgTuple [_, IRConstruct TgTuple [_, IRConstruct TgTuple [_, _]]]) = True
+    isPackedTriple _ = False
 
     -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers,
     -- and through the query-type guard's IRIf (whose then-branch carries the real triple;
@@ -7635,10 +7675,10 @@ invertToWorldsStep meta occs exprBody target = do
       -- value in place, as 'worldsShape' walks it (task
       -- dispatch-on-law-certificates). The two-stage inversion below keeps
       -- the case of x in `e` alone.
-      Expr _ (Apply (Expr _ (Lambda y b)) e)
+      Expr _ (Apply (Expr _ (Lambda y b)) _)
         | subtreeHasOcc occs b, readOnceInPlace y b ->
-            invertToWorlds meta occs (substituteVar y e b) target
-      Expr _ (Apply (Expr lamTI (Lambda _ b)) e)
+            invertToWorlds meta occs (enterInPlace exprBody) target
+      Expr _ (Apply (Expr lamTI (Lambda y b)) e)
         -- x in `e` only. With x in `b` as well, x-sets from `e` and y-sets
         -- from `b` would have to be mixed in one intersection, and with x in
         -- `b` alone the worlds on `b` would reference the inner binding's
@@ -7649,7 +7689,13 @@ invertToWorldsStep meta occs exprBody target = do
             -- 'equivalentLambda' resolution of a Var to a top-level function
             -- is involved).
             let occsY = fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences (fcData meta)))
-            invertThroughBinding meta occs occsY b e target
+            twoStage <- invertThroughBinding meta occs occsY b e target
+            -- Where the two stages do not invert (a body projecting the
+            -- bound pair, @draw v = (x, 0.0) in fst v@), a binding read in
+            -- place is entered in place, as 'worldsShape' falls back to.
+            case twoStage of
+              Nothing | readOnceInPlace y b -> invertToWorlds meta occs (enterInPlace exprBody) target
+              _ -> return twoStage
       -- A call -- of a named function, a function parameter, a let-bound
       -- lambda -- is the same binding as a @let@ (task
       -- binding-resolver-one-application-rule): the observation is inverted
@@ -7665,9 +7711,13 @@ invertToWorldsStep meta occs exprBody target = do
       -- other field's value is discarded, so its randomness marginalises to
       -- one and its reads of x constrain nothing. Reached only where the
       -- whole subtree did not transport ('transportDirect' has no interval
-      -- step through @fst@, and none for several occurrences).
-      Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]) -> invertToWorlds meta occs a target
-      Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]) -> invertToWorlds meta occs b target
+      -- step through @fst@, and none for several occurrences). An inner
+      -- binding read in place that holds the pair is entered first
+      -- ('enterInPlace'), as 'worldsShape' does.
+      Expr _ (InjF (Named "fst") [p])
+        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace p -> invertToWorlds meta occs a target
+      Expr _ (InjF (Named "snd") [p])
+        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace p -> invertToWorlds meta occs b target
       Expr _ (InjF (Named op) args)
         | op `notElem` structuralInjFs, not (isFieldConstructor (adtDecls meta) op)
         , [a] <- filter (subtreeHasOcc occs) args

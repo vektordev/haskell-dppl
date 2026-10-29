@@ -387,19 +387,26 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
         | op `elem` ["and", "or"] -> (\x y -> WSConnective [x, y]) <$> walk os a WTPoint <*> walk os b WTPoint
         | op == "TCons", tgt == WTPoint -> WSTuple <$> walk os a WTPoint <*> walk os b WTPoint
       Expr _ (InjF (Named "not") [a]) -> WSConnective . (: []) <$> walk os a WTPoint
+      -- An inner binding read once with no binder on the way is its value
+      -- at that read ('readOnceInPlace', the in-place engine's predicate), so
+      -- the body can be walked with the value in place ('enterInPlace'). That
+      -- is the walk where the body reads x too, or reads an x-free value it
+      -- compares x against; where x is in the value alone, it is the
+      -- fallback when the two-stage walk through the binding fails, as for a
+      -- body that projects the bound pair (@draw v = (x, 0.0) in fst v@).
       Expr _ (Apply (Expr lamTI (Lambda y b)) v)
         | hasOcc os v && not (hasOcc os b) ->
             through os (fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
-        -- The body reads x too, or reads an x-free value it compares x
-        -- against: an inner binding read once with no binder on the way is
-        -- its value at that read ('readOnceInPlace', the in-place engine's
-        -- predicate), so the body is walked with the value in place.
-        | hasOcc os b, readOnceInPlace y b -> walk os (substituteVar y v b) tgt
-        | otherwise -> Nothing
+              <|> inPlace
+        | otherwise -> inPlace
+        where inPlace = if readOnceInPlace y b then walk os (enterInPlace e) tgt else Nothing
       Expr _ (Apply _ _) -> call os e tgt
-      -- A projection of a literal pair is that field.
-      Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]) -> walk os a tgt
-      Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]) -> walk os b tgt
+      -- A projection of a literal pair is that field, also where an inner
+      -- binding read in place holds the pair ('enterInPlace').
+      Expr _ (InjF (Named "fst") [p])
+        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace p -> walk os a tgt
+      Expr _ (InjF (Named "snd") [p])
+        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace p -> walk os b tgt
       -- One invertible step over the one operand the variable reaches, which
       -- does not transport as a whole: the step transported onto the
       -- operand, then the operand walked at the same kind of target.

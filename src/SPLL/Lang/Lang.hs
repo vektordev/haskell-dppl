@@ -28,6 +28,7 @@ module SPLL.Lang.Lang (
 , allNamesExpr
 , substituteVar
 , readOnceInPlace
+, enterInPlace
 , renameFreeVar
 , containsRandomSource
 , predicateExpr
@@ -179,6 +180,17 @@ readOnceInPlace x body = go body == Just (1 :: Int)
       | y /= x, x `Set.member` freeVarsExpr b = Nothing
       | otherwise = go a
     go (Expr _ f) = sum <$> traverse go (foldr (:) [] f)
+
+-- | An expression with the inner bindings it opens with entered in place:
+-- @let y = e in b@, where @b@ reads @y@ once with no binder on the way
+-- ('readOnceInPlace'), is @b[y := e]@, repeatedly. The set-witness walk's
+-- entry into an inner binding, for a pattern that matches the shape of a
+-- value: a projection of a literal pair still sees the pair when a @draw@
+-- binds it first (@fst (draw v = (x, 0.0) in v)@).
+enterInPlace :: Expr -> Expr
+enterInPlace (Expr _ (Apply (Expr _ (Lambda y b)) e))
+  | readOnceInPlace y b = enterInPlace (substituteVar y e b)
+enterInPlace e = e
 
 -- | @renameFreeVar old new e@ renames the free occurrences of @old@ in @e@ to
 -- @new@; each keeps its own annotation, so chain names are untouched. The
