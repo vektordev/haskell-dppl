@@ -7664,10 +7664,10 @@ invertToWorldsStep meta occs exprBody target = do
       -- value in place, as 'worldsShape' walks it (task
       -- dispatch-on-law-certificates). The two-stage inversion below keeps
       -- the case of x in `e` alone.
-      Expr _ (Apply (Expr _ (Lambda y b)) e)
+      Expr _ (Apply (Expr _ (Lambda y b)) _)
         | subtreeHasOcc occs b, readOnceInPlace y b ->
-            invertToWorlds meta occs (substituteVar y e b) target
-      Expr _ (Apply (Expr lamTI (Lambda _ b)) e)
+            invertToWorlds meta occs (enterInPlace exprBody) target
+      Expr _ (Apply (Expr lamTI (Lambda y b)) e)
         -- x in `e` only. With x in `b` as well, x-sets from `e` and y-sets
         -- from `b` would have to be mixed in one intersection, and with x in
         -- `b` alone the worlds on `b` would reference the inner binding's
@@ -7678,7 +7678,13 @@ invertToWorldsStep meta occs exprBody target = do
             -- 'equivalentLambda' resolution of a Var to a top-level function
             -- is involved).
             let occsY = fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences (fcData meta)))
-            invertThroughBinding meta occs occsY b e target
+            twoStage <- invertThroughBinding meta occs occsY b e target
+            -- Where the two stages do not invert (a body projecting the
+            -- bound pair, @draw v = (x, 0.0) in fst v@), a binding read in
+            -- place is entered in place, as 'worldsShape' falls back to.
+            case twoStage of
+              Nothing | readOnceInPlace y b -> invertToWorlds meta occs (enterInPlace exprBody) target
+              _ -> return twoStage
       -- A call -- of a named function, a function parameter, a let-bound
       -- lambda -- is the same binding as a @let@ (task
       -- binding-resolver-one-application-rule): the observation is inverted
@@ -7694,9 +7700,13 @@ invertToWorldsStep meta occs exprBody target = do
       -- other field's value is discarded, so its randomness marginalises to
       -- one and its reads of x constrain nothing. Reached only where the
       -- whole subtree did not transport ('transportDirect' has no interval
-      -- step through @fst@, and none for several occurrences).
-      Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]) -> invertToWorlds meta occs a target
-      Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]) -> invertToWorlds meta occs b target
+      -- step through @fst@, and none for several occurrences). An inner
+      -- binding read in place that holds the pair is entered first
+      -- ('enterInPlace'), as 'worldsShape' does.
+      Expr _ (InjF (Named "fst") [p])
+        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace p -> invertToWorlds meta occs a target
+      Expr _ (InjF (Named "snd") [p])
+        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace p -> invertToWorlds meta occs b target
       Expr _ (InjF (Named op) args)
         | op `notElem` structuralInjFs, not (isFieldConstructor (adtDecls meta) op)
         , [a] <- filter (subtreeHasOcc occs) args
