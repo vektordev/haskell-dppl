@@ -445,7 +445,7 @@ offending code is unreachable, so this checks what the rows cannot.
   programs.
 - **Not covered**: `--topK`. Under it, 187 corpus programs fail the checker
   because every `writeLogits` function reads `main_prob` as if it took no
-  cutoff (docs task `topk-writelogits-contract-violation`).
+  cutoff (docs task `writelogits-calls-prob-without-topk-arguments`).
 - **Known violations.** `ir-contract: violated "<substring>"` in a `.tst`
   (ordinary or known-issues) requires some check to be rejected with a
   message containing the substring, and fails the day the program checks, like

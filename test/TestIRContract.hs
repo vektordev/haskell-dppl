@@ -32,7 +32,7 @@
 -- checked.
 --
 -- Not covered: @--topK@, whose @writeLogits@ functions read @main_prob@ as if
--- it took no cutoff (docs task topk-writelogits-contract-violation).
+-- it took no cutoff (docs task writelogits-calls-prob-without-topk-arguments).
 module TestIRContract
   ( irContractTests
   , slowIrContractTests
