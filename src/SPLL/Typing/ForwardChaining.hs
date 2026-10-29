@@ -31,6 +31,7 @@ module SPLL.Typing.ForwardChaining
   , hasRandomLeaf
   , permissiveDet
   , findEquivalentExpression
+  , boundArgument
   , findExprWithCN
   , unwrapLambdas
   , untag
@@ -1275,6 +1276,20 @@ findEquivalentExpression fcData startCN = go [startCN] startCN
     isFinalExpr (ApplyInfo _ _) = False
     isFinalExpr (VarInfo _) = False
     isFinalExpr _ = True
+
+-- | The argument a variable occurrence is bound to, by the equivalence
+-- clause an application gave it ('associateVariable'): for the occurrence
+-- @cn@ of a parameter (tagged with its invocation where the body was copied
+-- per call), the chain name of the argument that invocation passed, itself
+-- tagged where the call sits in another copied body. 'Nothing' for a name no
+-- application binds (a top-level function, a lambda-in-place parameter not
+-- yet related).
+boundArgument :: FCData -> ChainName -> Maybe ChainName
+boundArgument fcData cn =
+  case [ pre | EquivalenceHornClause [pre] _ (VariableEquivalence _) 1
+                 <- Map.findWithDefault [] cn (fcEquivByConclusion fcData) ] of
+    [pre] -> Just pre
+    _ -> Nothing
 
 -- Build the 'lambdaVarOccurrences' map for a whole program: every Lambda node
 -- paired with the (shadowing-aware) occurrences of its bound variable in its

@@ -25,6 +25,7 @@ module SPLL.Lang.Lang (
 , containedVars
 , varsOfExpr
 , freeVarsExpr
+, allNamesExpr
 , substituteVar
 , readOnceInPlace
 , renameFreeVar
