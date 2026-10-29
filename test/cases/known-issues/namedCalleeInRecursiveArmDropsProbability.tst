@@ -1,0 +1,12 @@
+-- A recursive walk that passes a named helper's result (`wrap acc`) as its
+-- next state, in one arm of a branch on an enumerated draw, while the other
+-- arm builds the state from that draw (`acc + t + 1`). Ideally p(True) = 0.3
+-- (t = 0: acc 1; t = 1: acc 2), and it was at dfe4a01. From 814c061 (the
+-- named-callee binding floor, task named-callee-binding-not-floored) `go`
+-- and `main` lose probability and integrate; main's recorded reason only
+-- chains to go's own refused variant (-v lists no engine
+-- failure); generate stays. Inlining `wrap` (`acc + 1`) compiles all variants.
+-- Verified at 6a3e4a8 on dev. Docs task
+-- named-callee-floor-drops-recursive-walk-probability. Found by
+-- experiments_nest handwritten-arithmetic-roundtrip probe 2 (tree walk).
+expect-failure: refused "is sample-only because 'go' is: its own probability variant is refused"
