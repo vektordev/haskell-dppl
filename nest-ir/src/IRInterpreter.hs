@@ -457,17 +457,19 @@ generate f oracle adts' globalEnv env [] (IRConstruct TgLeft [expr]) = do
 generate f oracle adts' globalEnv env [] (IRConstruct TgRight [expr]) = do
   x <- generate f oracle adts' globalEnv env [] expr
   return $ VEither (Right x)
+-- Projecting from a closure is a type error, not a lifted projection: every
+-- pending argument was applied above ('args' is empty here), so a closure means
+-- a call missing arguments (task writelogits-calls-prob-without-topk-arguments:
+-- a projection lifted under the lambda answered a closure for a probability).
 generate f oracle adts' globalEnv env args (IRDestruct AcFst expr) = do
   val <- generate f oracle adts' globalEnv env args expr
   case val of
     VTuple first _ -> return first
-    VClosure cEnv n cExpr -> return $ VClosure cEnv n (IRDestruct AcFst cExpr)
     _ -> failWith f ("Type error: Expression of Fst is not a tuple: " ++ show val)
 generate f oracle adts' globalEnv env args (IRDestruct AcSnd expr) = do
   val <- generate f oracle adts' globalEnv env args expr
   case val of
     VTuple _ second -> return second
-    VClosure cEnv n cExpr -> return $ VClosure cEnv n (IRDestruct AcSnd cExpr)
     _ -> failWith f ("Type error: Expression of Snd is not a tuple: " ++ show val)
 generate f oracle adts' globalEnv env args (IRDestruct AcHead listExpr) = do
   listVal <- generate f oracle adts' globalEnv env args listExpr
