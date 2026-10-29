@@ -140,6 +140,14 @@ data CompilerMetadata = CompilerMetadata {
   -- the fresh names 'enterBindingScope' gives them: a call through one is a
   -- binding of that lambda's parameter ('callBindingAt').
   boundLambdas :: [(String, Expr)],
+  -- | The callee bodies 'enterBindingScope' has made meaningful here, each
+  -- as the chain names of its nodes and the renames of its leading
+  -- parameters to their fresh names. An engine compiles such a body renamed,
+  -- but a forward-chaining anchor in it is fetched by chain name from the
+  -- program as written ('materializeAnchors'), so the anchor is renamed the
+  -- same way ('anchorAtCall'); otherwise it reads the caller's namesake of
+  -- the parameter (task theta-anchor-through-callee-local-binding).
+  enteredScopes :: [(Set.Set ChainName, [(String, String)])],
   -- | The modality engine's certificate for every node of the program, by
   -- chain name ('SPLL.Typing.ModalityInfer.inferProgram'; design
   -- law-carrying-modality §B). Not a 'TypeInfo' field: a 'Law' holds closures.
@@ -709,7 +717,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct reinferC Set.empty [] laws Map.empty True
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct reinferC Set.empty [] [] laws Map.empty True
     reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
@@ -1724,9 +1732,17 @@ enterBindingScope meta0 b = case bindScope b of
       argIR <- toIRGenerate meta0 arg
       setVariables [(fresh, argIR)]
       return (param, fresh, rType (getTypeInfo arg))
-    let meta = bindRenamed meta0 [ (fresh, rty, arg) | ((_, arg), (_, fresh, rty)) <- zip leading renames ]
+    let meta = enteredScope (bindBody b) [ (param, fresh) | (param, fresh, _) <- renames ]
+                 (bindRenamed meta0 [ (fresh, rty, arg) | ((_, arg), (_, fresh, rty)) <- zip leading renames ])
     let scopedBody = foldr (\(param, fresh, _) -> renameFreeVar param fresh) (bindBody b) renames
     return (Just (withBindingLaw meta b (bindVar b), scopedBody))
+
+-- | Record a callee body entered here with these leading parameters renamed
+-- to fresh names ('enteredScopes'), for the anchors materialized in it.
+enteredScope :: Expr -> [(String, String)] -> CompilerMetadata -> CompilerMetadata
+enteredScope _ [] meta = meta
+enteredScope calleeBody renames meta =
+  meta { enteredScopes = (nodeChainNames calleeBody, renames) : enteredScopes meta }
 
 -- | The metadata once each of these fresh variables is let-bound to its
 -- (deterministic) argument: in scope, recovered, and where the argument is a
@@ -4535,18 +4551,55 @@ materializeAnchors meta expr = foldM bindAnchor expr usedAnchors
 -- the call sits in another copied body. Going by the clause rather than by
 -- name is what keeps the anchor from reading whatever the caller happens to
 -- bind under the parameter's name, or crashing on an unbound name when it
--- binds none (task callee-body-name-sensitive-across-call). An untagged
--- anchor sits in the scope being compiled and is left as it is.
+-- binds none (task callee-body-name-sensitive-across-call).
+--
+-- A variable bound inside the copied body itself (a @draw t2 = ts in ..@
+-- around the anchor) has its clause only untagged: the copy follows the
+-- equivalences of the nodes it chains through, and the anchor is not one of
+-- them. Its value lies in the same function body as the occurrence, so in
+-- the same per-invocation copy, and is resolved under the same tag. A value
+-- in another function's body is not: tags are only unique per function, so
+-- the tag is never carried across one (task
+-- theta-anchor-through-callee-local-binding).
+--
+-- An untagged anchor sits in the scope being compiled and is left as it is,
+-- except where it lies in a callee body an engine entered here
+-- ('enteredScopes'): there a leading parameter is read under its fresh
+-- name, and a variable the body binds itself by its value, which the
+-- materialized anchor is not under the binder of.
 anchorAtCall :: CompilerMetadata -> String -> Expr -> Expr
-anchorAtCall _ "" e = e
+anchorAtCall meta "" e0 = go Set.empty e0
+  where
+    go bound e@(Expr t (Var n))
+      | not (n `Set.member` bound)
+      , (nodes, renames) : _ <- [ sc | sc@(nodes, _) <- enteredScopes meta, cn `Set.member` nodes ]
+      = case boundArgument (fcData meta) cn of
+          Just valCN | valCN `Set.member` nodes -> anchorAtCall meta "" (exprWithCN meta valCN)
+          _ -> Expr t (Var (fromMaybe n (lookup n renames)))
+      where cn = chainName (getTypeInfo e)
+    go bound (Expr t (Lambda x b)) = Expr t (Lambda x (go (Set.insert x bound) b))
+    go bound (Expr t f) = Expr t (fmap (go bound) f)
 anchorAtCall meta tag e0 = go Set.empty e0
   where
     go bound e@(Expr _ (Var n))
       | not (n `Set.member` bound)
-      , Just argCN <- boundArgument (fcData meta) (chainName (getTypeInfo e) ++ tag)
+      , Just argCN <- boundArgument (fcData meta) (cn ++ tag)
       = anchorAtCall meta (getTag argCN) (exprWithCN meta (untag argCN))
+      | not (n `Set.member` bound)
+      , Just valCN <- boundArgument (fcData meta) cn
+      , null (getTag valCN)
+      , Just f <- functionOf cn
+      , functionOf valCN == Just f
+      = anchorAtCall meta tag (exprWithCN meta valCN)
+      where cn = chainName (getTypeInfo e)
     go bound (Expr t (Lambda x b)) = Expr t (Lambda x (go (Set.insert x bound) b))
     go bound (Expr t f) = Expr t (fmap (go bound) f)
+    functionOf cn = listToMaybe
+      [ f | (f, fBody) <- functions (compilingProgram meta), cn `Set.member` nodeChainNames fBody ]
+
+-- | The chain names of every node of an expression.
+nodeChainNames :: Expr -> Set.Set ChainName
+nodeChainNames e = Set.insert (chainName (getTypeInfo e)) (Set.unions (map nodeChainNames (getSubExprs e)))
 
 createHOInverse :: CompilerMetadata -> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse meta (fVar, f) = do
@@ -7392,7 +7445,8 @@ callBindingAt meta occs callNode
         aIR <- toIRGenerate meta a
         setVariables [(fresh, aIR)]
         return (p, fresh, rType (getTypeInfo a))
-      let meta' = bindRenamed meta [ (fresh, rty, a) | ((_, a), (_, fresh, rty)) <- zip others renames ]
+      let meta' = enteredScope calleeBody [ (p, fresh) | (p, fresh, _) <- renames ]
+                    (bindRenamed meta [ (fresh, rty, a) | ((_, a), (_, fresh, rty)) <- zip others renames ])
           freshNames = [ fresh | (_, fresh, _) <- renames ]
           calleeBody' = reinferRecovered meta' freshNames
                     (foldr (\(p, fresh, _) -> renameFreeVar p fresh) calleeBody renames)

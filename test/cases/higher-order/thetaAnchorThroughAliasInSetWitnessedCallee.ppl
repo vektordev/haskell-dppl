@@ -1,0 +1,2 @@
+inner thetas x = draw t2 = thetas in (x + (theta t2 @ 0)) < 2.7
+main t2 thetas = (inner thetas) Uniform

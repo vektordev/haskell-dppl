@@ -78,10 +78,13 @@ import End2EndTesting (programRuntimeFields)
 --   decreasingRecursion* rows, and 7 after task alias-of-recursive-helper-
 --   parameter-refuses-with-random-argument (Analysis's unrolling of a
 --   recursion on constants substitutes a let-bound closed constant too:
---   recursiveLengthOfRecursiveList, recursiveCountOfRecursiveBoolList).
+--   recursiveLengthOfRecursiveList, recursiveCountOfRecursiveBoolList),
+--   and 4 after task theta-anchor-through-callee-local-binding (a theta
+--   anchor in a callee reached through an alias resolves to the alias's
+--   value; thetaParameterRenamedAcrossCurriedCall,
+--   thetaParameterRenamedDrawFedRecursion, thetaArgumentNotCallerNamesake).
 --   Those left belong to open tickets, so the family stays log-only until
 --   they resolve:
---   theta-anchor-through-callee-local-binding (the three theta* rows),
 --   gaussian-catch-all-dispatch-on-codegen-law (normalThroughFunctionParam,
 --   paramPairHelperFst), and an ANY-mask variant refused after an alias in
 --   aliasedChainStepMarginalTail and drawnArgumentChainInNamedCallee
@@ -170,10 +173,6 @@ knownDivergences =
   , Known "anyLeafReadAgainThroughHelper" TupleLaw "pair-fst" wildcardLeafNoDomain
   , Known "anyLeafReadAgainThroughAlias" TupleLaw "pair-fst" wildcardLeafNoDomain
   , Known "aliasChainOfStructuredDrawAnyMarginal" TupleLaw "pair-fst" wildcardLeafNoDomain
-  -- A theta anchor in a helper the callee calls reads the caller's
-  -- namesake of the parameter, as the direct callee did before task
-  -- callee-body-name-sensitive-across-call: p(2.5) answers 0.0 for 1.0.
-  , Known "thetaArgumentNotCallerNamesake" HelperExtract "" thetaThroughCalleeLocal
   ]
   where
     hiddenNegation = "if-complement-drops-hidden-negation-density"
@@ -181,7 +180,6 @@ knownDivergences =
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
     wildcardLeafNoDomain = "wildcard-leaf-without-domain-reaches-reads-as-value"
-    thetaThroughCalleeLocal = "theta-anchor-through-callee-local-binding"
 
 -- | A divergence only a composition of rewrites reaches, for the sequence
 -- property: a sequence on the program whose steps include every family listed
