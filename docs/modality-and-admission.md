@@ -173,9 +173,9 @@ order:
 |---|---|---|
 | enumeration | `Analysis.enumerableApplication` (a conditional head, `isConditional`, over a random enumerable argument) | the domain |
 | plan-guided enumeration | `AutoNeural.planReadOf` (a neural read whose declaration yields a plan) | the network |
-| point inversion | `ForwardChaining.pointWitnessCert` (`toInvExprMaybe`, seeded at the lambda's body) | the inverse, and the root-seeded witness verdict |
 | joint affine marginalisation | `ModalityInfer.jointAffineBindingCert` (an affine form with latents, read by a spine of affine bindings ending in a tuple of at most 3 affine fields) | the form |
 | affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |
+| point inversion | `ForwardChaining.pointWitnessCert` (`toInvExprMaybe`, seeded at the lambda's body) | the inverse, and the root-seeded witness verdict |
 | set-valued witnesses | `ForwardChaining.worldsShape`, `invertToWorlds`' shape walk without its IR | the shape |
 | in place | `Lang.readOnceInPlace` (the body reads the variable once, under no lambda and in no nested `let`'s body) | none: the argument is measured at the read |
 
@@ -213,8 +213,8 @@ Corpus `let-bindings/drawSingleReadInPlace*`,
 never in place; the affine engine owns that.
 
 **Why this order** (acceptance 6 of `dispatch-on-law-certificates`, measured at
-`1a09132` plus the in-place engine, in the order before the size-only flip
-below: affine ahead of joint affine). For each pair of engines whose
+`1a09132` plus the in-place engine, in the order before the size-only flips
+below: point inversion, affine, joint affine). For each pair of engines whose
 certificates both appear on some binding of a corpus program, the corpus
 programs where they do were compiled to Python with the second engine moved
 just ahead of the first, and their `.tst` rows run (End2End, interpreter,
@@ -243,22 +243,41 @@ applicable wins", so the swap only matters where both apply:
 
 Every seam the order wins on answers or capability is kept for that reason.
 Four made no difference to answers or refusals, only to code size, and there
-the alternative was smaller. They were taken one at a time, largest gain
-first, each re-measured against the order as it stood (task
-`engine-order-flip-size-only-seams`, at `76152ac`: every corpus program
-compiled to Python in each of the six orders of point inversion, affine and
-joint affine, the code compared, the -O0 duplication census taken, and the
-default suite run in the order kept). A flip also had to leave every
-duplication-census pin where it was or lower:
+the alternative was smaller. Three of them (point inversion < affine, point
+inversion < joint affine, affine < joint affine) order the same three engines,
+so they were settled together (tasks `engine-order-flip-size-only-seams` and
+`engine-order-point-inversion-behind-joint-affine-census-rise`, at `76152ac`:
+every corpus program compiled to Python in each of the six orders of point
+inversion (PI), affine (A) and joint affine (JA), the code compared, the -O0
+duplication census taken, and the default suite run in the order kept):
 
-| size-only seam | outcome | re-measured |
-|---|---|---|
-| point inversion < joint affine | kept. No total order puts joint affine ahead of point inversion without also crossing affine. Every such order is smaller (by 197.9 to 200.0 KB over 34 to 39 programs, answers unchanged), but each raises `higher-order/arrowApplyIfSelected`'s census from 4 to 8 (`main.prob`) and from at most 2 to 8 (`main.integ`): the affine engine's result is an `if` mixture whose condition probability, 31 nodes, the -O0 IR copies 8 times. The -O0 IR halves, and M stays 8 with 3 or 4 arms | moving point inversion behind joint affine from the order below: 32 programs, -158.5 KB |
-| point inversion < affine | kept: moving affine ahead of point inversion raises the same census, and alone (before the flip below) `let-bindings/aliasedChainStepMarginalTail`'s from 25 to 48 | 19 programs, -10.5 KB |
-| affine < joint affine | **flipped**: joint affine is tried before affine | 13 programs, -39.3 KB (3 grow, by at most 622 B); no variant, refusal or `.tst` row changed; census pins only fall |
-| affine < in place | kept: it cannot hold in a total order. In place must follow set-valued witnesses (that seam trades variants) and affine must precede them (that seam loses one), so affine precedes in place. The compiler also tries in place after the set-witness fallback (`IRCompiler.applyBinding`) | not measured |
+| order | programs changed vs PI, A, JA | Python size | census |
+|---|---|---|---|
+| PI, JA, A | 13 | -39.3 KB | 6 programs' pins fall, none rise |
+| JA, PI, A | 39 | -197.9 KB | `arrowApplyIfSelected` 4 -> 8 |
+| A, PI, JA | 19 | -10.5 KB | `aliasedChainStepMarginalTail` 25 -> 48, `arrowApplyIfSelected` 4 -> 8 |
+| A, JA, PI | 34 | -200.0 KB | `arrowApplyIfSelected` 4 -> 8 |
+| **JA, A, PI** (kept) | 39 | -198.3 KB | `arrowApplyIfSelected` 4 -> 8 |
 
-So the order is enumeration, plan, point inversion, joint affine, affine,
+No order changes a variant, a refusal, an exit code or a default-suite `.tst`
+row. Re-measured at `579c687` from PI, JA, A: JA, A, PI changes 34 programs,
+-164.7 KB, none growing, and of the census pins only `arrowApplyIfSelected`'s
+rises; A, JA, PI is 1.8 KB smaller still, but grows two programs and also
+raises `let-bindings/affineChainEndpoint` from 3 to 5 (`main.prob`), undoing
+part of what joint affine ahead of affine lowered. So JA, A, PI is kept. Its
+one census rise is accepted (a reviewed pin,
+`arrowApplyIfSelected main.integ=8 main.prob=8`): with the affine engine
+answering each arm of `(if 0.1 < 0.5 then (\x -> x + 1.0) else (\x -> x *
+2.0)) Normal`, the `if` mixture's condition probability, 31 nodes, is copied
+8 times in the -O0 IR (task `if-mixture-binds-condition-probability-once`
+would bind it once). The -O0 IR still halves, and M stays 8 with 3 or 4 arms.
+The fourth size-only seam, affine < in place, cannot hold in a total order:
+in place must follow set-valued witnesses (that seam trades variants) and
+affine must precede them (that seam loses one), so affine precedes in place.
+The compiler also tries in place after the set-witness fallback
+(`IRCompiler.applyBinding`).
+
+So the order is enumeration, plan, joint affine, affine, point inversion,
 set-valued witnesses, in place. Set-valued witnesses < in place trades one
 variant for three and stays. The enumeration rows are approximate: the
 measurement build moved enumeration into the binding list, where the

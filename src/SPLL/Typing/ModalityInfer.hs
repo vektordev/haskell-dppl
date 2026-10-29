@@ -529,9 +529,9 @@ data EngineCert
 data Engine
   = EnumerationEngine
   | PlanEngine
-  | PointInversionEngine
   | JointAffineEngine
   | AffineEngine
+  | PointInversionEngine
   | WorldsEngine
   | InPlaceEngine
   deriving (Eq, Ord, Enum, Bounded, Show)
