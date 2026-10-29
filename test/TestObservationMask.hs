@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 -- | The observation tree, leaf slots, correlation classes, and the masked
 -- program (task @observation-mask-analysis@, design
@@ -37,6 +38,7 @@ import qualified Data.Set as Set
 import System.Random (mkStdGen)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertFailure, assertEqual, assertBool)
+import SPLL.IRTypeCheck (CheckedIR, pattern CheckedEnv)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -281,7 +283,7 @@ maskTableTests = testGroup "per-mask capability (the masked program's PType)"
 
 -- | Prune one function of a program and compile the result from the post-RInfer
 -- seam, which is where a pruned program enters the pipeline.
-prunedEnv :: String -> Mask -> String -> IO (Program, IREnv)
+prunedEnv :: String -> Mask -> String -> IO (Program, CheckedIR)
 prunedEnv fname m src = do
   prog <- parseOrFail src
   case rtypedProgram prog of
@@ -369,7 +371,7 @@ flatten e = e : concatMap flatten (getSubExprs e)
 data VariantProgram = VariantProgram
   { vpName  :: String
   , vpProg  :: Program
-  , vpEnv   :: IREnv
+  , vpEnv   :: CheckedIR
   , vpFns   :: [(String, [Slot])]   -- ^ dispatching functions and their enumerated slots
   }
 
@@ -380,7 +382,7 @@ corpusWithVariants entries =
   return [ VariantProgram (ceName e) prog env fns
          | e <- entries
          , let prog = ceProgram e
-         , (Right env@(IREnv groups _ _), Right report) <- [(compile defaultCompilerConfig prog, marginalReport defaultCompilerConfig prog)]
+         , (Right env@(CheckedEnv (IREnv groups _ _)), Right report) <- [(compile defaultCompilerConfig prog, marginalReport defaultCompilerConfig prog)]
          , let bases = Set.fromList [ b | g <- groups, Just b <- [maskVariantOf g] ]
                fns = [ (fmName r, fmEnumerated r) | r <- report, fmName r `Set.member` bases ]
          , not (null fns) ]
@@ -490,7 +492,7 @@ variantUnitTests =
       let tight = defaultCompilerConfig { marginalSlots = 2 }
       case compile tight prog of
         Left err -> assertFailure err
-        Right (IREnv groups _ _) ->
+        Right (CheckedEnv (IREnv groups _ _)) ->
           assertEqual "variant groups" [] [ groupName g | g <- groups, isJust (maskVariantOf g) ]
       case map renderCompileWarning (programWarnings tight prog) of
         [w] -> do
@@ -502,7 +504,7 @@ variantUnitTests =
       prog <- parseOrFail progW
       case compile defaultCompilerConfig { pruneAnyChecks = True } prog of
         Left err -> assertFailure err
-        Right (IREnv groups _ _) ->
+        Right (CheckedEnv (IREnv groups _ _)) ->
           assertEqual "groups" ["main"] (map groupName groups)
 
   , testCase "a variant name a user function already holds: no variants, no clash" $ do
@@ -511,7 +513,7 @@ variantUnitTests =
       prog <- parseOrFail (progW ++ "\n" ++ clash ++ " = 1.0")
       case compile defaultCompilerConfig prog of
         Left err -> assertFailure err
-        Right (IREnv groups _ _) -> do
+        Right (CheckedEnv (IREnv groups _ _)) -> do
           assertEqual ("one group named " ++ clash) 1 (length [ () | g <- groups, groupName g == clash ])
           assertEqual "no variant groups" [] [ groupName g | g <- groups, isJust (maskVariantOf g) ]
 
@@ -734,7 +736,7 @@ correlatedWarningTests = testGroup "correlated writeLogits slots warning"
       prog <- parseOrFail src
       case compile defaultCompilerConfig prog of
         Left err -> assertFailure err
-        Right (IREnv groups _ _) ->
+        Right (CheckedEnv (IREnv groups _ _)) ->
           assertEqual "main's writeLogits" (Just False)
             (isJust . writeLogitsFun <$> find ((== "main") . groupName) groups)
       ws <- compiledWarningsOf src

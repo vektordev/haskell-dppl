@@ -18,6 +18,12 @@
 -- the batched post-passes; one that fails at @pre-optimizer@ was broken by
 -- the compiler. The failure says which.
 --
+-- Since step C3 the compiler enforces the contract itself: 'SPLL.Prelude.compile'
+-- checks the IR it compiled (a rejection is a compile error, the @handover@
+-- stage here) and every pass checks its own output (a rejection raises, the
+-- @pass@ stage). The two checks above stay: they are independent of
+-- 'compile', so a regression in the checker's wiring is caught too.
+--
 -- A program whose violation is known carries @ir-contract: violated
 -- "<substring>"@ in its @.tst@ (docs/testing.md): the sweep then requires a
 -- rejection whose message contains the substring, and fails when the program
@@ -111,13 +117,21 @@ checksOf configs p = do
     one (name, conf) = do
       r <- try (evaluate (forceChecks (stagesOf conf)))
       return $ case r of
-        Left (_ :: SomeException) -> []
+        -- A pass that broke the contract raises (SPLL.IRTypeCheck.passOver).
+        Left (e :: SomeException)
+          | violation (show e) -> [ (name ++ " pass", Just (takeWhile (/= '\n') (show e))) ]
+          | otherwise -> []
         Right cs -> [ (name ++ " " ++ stage, m) | (stage, m) <- cs ]
+    violation = isInfixOf "violates the IR contract"
     stagesOf conf = case compileStages conf p of
       (snaps, Right final) ->
         [ ("pre-optimizer", verdictOf e) | StageSnapshot "After Select Pass" (StageIR e) <- snaps ]
         ++ [ ("final", verdictOf final) ]
-      (_, Left _) -> []
+      -- 'Prelude.compile' checks the IR once it has been compiled and the
+      -- per-value bodies installed; a rejection there is a compile error.
+      (_, Left err)
+        | violation err -> [ ("handover", Just err) ]
+        | otherwise -> []
     verdictOf :: IREnv -> Maybe String
     verdictOf e = either (Just . showIRTypeError) (const Nothing) (checkIREnvWith externals e)
     forceChecks cs = sum [ maybe 0 length m | (_, m) <- cs ] `seq` cs

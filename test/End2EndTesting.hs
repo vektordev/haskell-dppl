@@ -1,7 +1,9 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module End2EndTesting where
 
+import TestSupport (mustCheck)
 import System.Directory (getCurrentDirectory, findExecutable)
 import System.IO.Temp (withSystemTempFile)
 import System.IO (hPutStr, hClose, hPutStrLn, stderr)
@@ -47,6 +49,7 @@ import CorpusSweep
 import TestDuplicationCensus (duplicationCensusSweep)
 import CertifiedCensus (programCensus, uncertifiedConstructs, batchedProgramCensus, batchedUncertifiedConstructs)
 import qualified Data.Map as Map
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 
 -- | M1 differential test (design pytorch-tensorizer): the IR select pass is a
 -- behavioural no-op under scalar lowering, since the interpreter and scalar
@@ -263,7 +266,7 @@ planEngineCorpus =
   , "planEnumRecScan", "planEnumRecThreaded"
   , "planMultiReaderInnerDraw", "planMultiReaderPlusIf", "planMultiReaderTuplePair" ]
 
-planMatchesDense :: String -> Program -> Either CompilerError IREnv -> Either CompilerError IREnv -> TestCase -> Property
+planMatchesDense :: String -> Program -> Either CompilerError CheckedIR -> Either CompilerError CheckedIR -> TestCase -> Property
 planMatchesDense n p planEnv denseEnv tc = case tc of
   ProbTestCase  name sample params _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
   CumulTestCase name sample params _ -> cmp (name ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
@@ -282,14 +285,14 @@ planMatchesDense n p planEnv denseEnv tc = case tc of
 -- cases (writeLogits/argmax) are skipped: the pass only touches prob/integ bodies.
 -- Takes the program's scalar/batched compiles already done, shared across
 -- every query point of that program.
-selectNoOp :: Program -> Either CompilerError IREnv -> Either CompilerError IREnv -> TestCase -> Property
+selectNoOp :: Program -> Either CompilerError CheckedIR -> Either CompilerError CheckedIR -> TestCase -> Property
 selectNoOp p scalarEnv batchedEnv (ProbTestCase  name sample params _) =
   selectNoOpCmp scalarEnv batchedEnv name (\c -> runProbC  p c params sample)
 selectNoOp p scalarEnv batchedEnv (CumulTestCase name sample params _) =
   selectNoOpCmp scalarEnv batchedEnv name (\c -> runIntegC p c params sample)
 selectNoOp _ _ _ _ = property True
 
-selectNoOpCmp :: Either CompilerError IREnv -> Either CompilerError IREnv -> String -> (IREnv -> Either CompilerError IRValue) -> Property
+selectNoOpCmp :: Either CompilerError CheckedIR -> Either CompilerError CheckedIR -> String -> (CheckedIR -> Either CompilerError IRValue) -> Property
 selectNoOpCmp scalarEnv batchedEnv name run = ioProperty $ do
   scalar  <- forceResult (scalarEnv >>= run)
   batchedRes <- forceResult (batchedEnv >>= run)
@@ -352,7 +355,7 @@ checkExpectation probLabel name Impossible outProb _outDim res =
   counterexample (probLabel ++ " differs for test case " ++ name ++ ". Expected: 0.0 Got: " ++ show outProb) (abs outProb < probTolerance) .&&.
     checkImposs name (Just True) res
 
-testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
+testInterpreter :: Program -> Either CompilerError CheckedIR -> TestCase -> Property
 testInterpreter p compiledE (ProbTestCase name sample params expct) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
@@ -428,7 +431,7 @@ argmaxPatience = 10000
 argmaxParams :: Program -> [IRValue] -> [IRValue]
 argmaxParams p params = shapeNeuralParams p [VTuple (VInt 1) (VTuple par (VInt seed)) | (par, seed) <- zip params [0..]]
 
-argmaxLoop :: RandomGen g => Program -> IREnv -> String -> [IRValue] -> IRValue -> Double -> [IRValue] -> Double -> Int -> Rand g Property
+argmaxLoop :: RandomGen g => Program -> CheckedIR -> String -> [IRValue] -> IRValue -> Double -> [IRValue] -> Double -> Int -> Rand g Property
 argmaxLoop p compiled name mockedParams res resP bucket knownMass consecutiveDuplicates
   | 1 - knownMass < resP = return (property True)
   | consecutiveDuplicates >= argmaxPatience = return $ counterexample
@@ -478,7 +481,7 @@ parMapIO f xs = do
 -- | A neural program's distribution is normalized at seeded inputs: discrete
 -- probabilities sum to one, continuous densities are not degenerate
 -- ('normalizationBranch' picks which).
-discreteProbsNormalized :: Program -> Either CompilerError IREnv -> Property
+discreteProbsNormalized :: Program -> Either CompilerError CheckedIR -> Property
 discreteProbsNormalized p compiledE = case compiledE of
   Left err -> counterexample ("Compilation failed: " ++ err) False
   Right compiled -> ioProperty $ do
@@ -534,7 +537,7 @@ normalizationProb v = error ("not a probability result: " ++ show v)
 -- the size of that support (it enumerates it), not on sampleCnt, so evaluating it
 -- once per *distinct* sampled value (weighted by how often it occurred) gives the
 -- exact same sum but skips the redundant repeat evaluations.
-normalizationResults :: Program -> IREnv -> IO (Either String ([Int], [IRValue]))
+normalizationResults :: Program -> CheckedIR -> IO (Either String ([Int], [IRValue]))
 normalizationResults p compiled = case (genFun (lookupIREnv "main" compiled), probFun (lookupIREnv "main" compiled)) of
     -- A program with no probability function cannot have its normalization
     -- checked -- and for an inference compiler, a program we can only sample
@@ -958,7 +961,7 @@ juliaTestFlags = ["--compile=min"]
 -- the .tst rows' mock-NN parameters are already resolved to raw logit vectors
 -- by 'resolveNeuralTestCase' before they reach here, so the network itself
 -- only has to be pass-through. Empty for a non-neural program.
-testJuliaAll :: [(Either CompilerError IREnv, [TestCase], [NetMock])] -> Property
+testJuliaAll :: [(Either CompilerError CheckedIR, [TestCase], [NetMock])] -> Property
 testJuliaAll programCases = ioProperty $ do
   let results = [(c, tcs, nets) | (c, tcs, nets) <- programCases, not (null tcs)]
   case [err | (Left err, _, _) <- results] of
@@ -1007,7 +1010,7 @@ juliaFreeNamesTests corpus = corpusSweepAll corpus SweepSpec
       (once $ testJuliaFreeNamesEscaped
          [ (ceName e, c, networkMocks (ceProgram e)) | e <- es, Right c <- [compile defaultCompilerConfig (ceProgram e)] ])
 
-testJuliaFreeNamesEscaped :: [(String, IREnv, [NetMock])] -> Property
+testJuliaFreeNamesEscaped :: [(String, CheckedIR, [NetMock])] -> Property
 testJuliaFreeNamesEscaped programs = ioProperty $ do
   results <- forM programs $ \(n, c, nets) -> do
     r <- try (evaluate (forceList (SPLL.CodeGenJulia.generateFunctions c))) :: IO (Either SomeException [String])
@@ -1100,12 +1103,12 @@ stripJulia = go
 --
 -- @netNames@ (empty for a non-neural program) gets one identity-mock
 -- definition apiece -- see 'testJuliaAll'\'s note.
-testPython :: [NetMock] -> Either CompilerError IREnv -> [TestCase] -> Property
+testPython :: [NetMock] -> Either CompilerError CheckedIR -> [TestCase] -> Property
 testPython = testPythonWith False
 
 -- | 'testPython' on the module emitted with the recursion memo switched on by
 -- the first argument (@--memoRecursion@).
-testPythonWith :: Bool -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> Property
+testPythonWith :: Bool -> [NetMock] -> Either CompilerError CheckedIR -> [TestCase] -> Property
 testPythonWith memo netNames compiledE tc = ioProperty $ do
   case compiledE of
     Left err -> return $ counterexample err False
@@ -1127,10 +1130,10 @@ testPythonWith memo netNames compiledE tc = ioProperty $ do
 -- question in reverse. The script is meant to run as a file, so sys.path[0]
 -- is its temp dir rather than the project; pythonLib has to be put back on
 -- the path explicitly, which is what @projectDir@ is for.
-pythonTestScript :: FilePath -> [NetMock] -> IREnv -> [TestCase] -> String
+pythonTestScript :: FilePath -> [NetMock] -> CheckedIR -> [TestCase] -> String
 pythonTestScript = pythonTestScriptWith False
 
-pythonTestScriptWith :: Bool -> FilePath -> [NetMock] -> IREnv -> [TestCase] -> String
+pythonTestScriptWith :: Bool -> FilePath -> [NetMock] -> CheckedIR -> [TestCase] -> String
 pythonTestScriptWith memo projectDir netNames compiled tc =
   "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n" ++ mockDefs ++ pythonTestCode src tc
   where
@@ -1162,7 +1165,7 @@ writeLogitsRow p tc = case tc of
 
 -- | Each row calls the endpoint's emitted @writeLogits@ method and raises on a
 -- wrong length or slot, so exit 0 means every row matched.
-testPythonWriteLogits :: [NetMock] -> Either CompilerError IREnv -> [WriteLogitsRow] -> Property
+testPythonWriteLogits :: [NetMock] -> Either CompilerError CheckedIR -> [WriteLogitsRow] -> Property
 testPythonWriteLogits netNames compiledE rows = ioProperty $ case compiledE of
   Left err -> return $ counterexample err False
   Right compiled -> do
@@ -1178,7 +1181,7 @@ testPythonWriteLogits netNames compiledE rows = ioProperty $ case compiledE of
 
 -- | The script 'testPythonWriteLogits' runs: the emitted module, one identity
 -- mock per network, and the row checks.
-pythonWriteLogitsScript :: FilePath -> [NetMock] -> IREnv -> [WriteLogitsRow] -> String
+pythonWriteLogitsScript :: FilePath -> [NetMock] -> CheckedIR -> [WriteLogitsRow] -> String
 pythonWriteLogitsScript projectDir netNames compiled rows = script
   where
     src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
@@ -1198,7 +1201,7 @@ pythonWriteLogitsScript projectDir netNames compiled rows = script
 
 -- | The Julia twin of 'testPythonWriteLogits', every program in one julia
 -- process (one module each), like 'testJuliaAll'.
-testJuliaWriteLogitsAll :: [(Either CompilerError IREnv, [WriteLogitsRow], [NetMock])] -> Property
+testJuliaWriteLogitsAll :: [(Either CompilerError CheckedIR, [WriteLogitsRow], [NetMock])] -> Property
 testJuliaWriteLogitsAll programs = ioProperty $ case [err | (Left err, _, _) <- programs] of
   (err:_) -> return $ counterexample err False
   [] -> do
@@ -1216,7 +1219,7 @@ testJuliaWriteLogitsAll programs = ioProperty $ case [err | (Left err, _, _) <- 
 
 -- | The modules and row checks 'testJuliaWriteLogitsAll' runs, one module
 -- per program, without the runtime's @include@ line.
-juliaWriteLogitsBody :: [(IREnv, [WriteLogitsRow], [NetMock])] -> String
+juliaWriteLogitsBody :: [(CheckedIR, [WriteLogitsRow], [NetMock])] -> String
 juliaWriteLogitsBody programs = concatMap (\(idx, (c, rows, nets)) ->
           let m = "WLProg" ++ show (idx :: Int)
           in "module " ++ m ++ "\nusing ..JuliaSPPLLib\n"
@@ -1690,7 +1693,7 @@ batchedEligibilityCensus p tcs = do
       srcLines <- generateFunctionsBatched True env
       groups <- maybe (Left "query samples are not structure-of-arrays batchable") Right
                       (batchGroups (collapsedEnumCtors (adts prog) (intercalate "\n" srcLines)) (not (null netNames)) qtcs)
-      let census = batchedUncertifiedConstructs (batchedProgramCensus (Right env :: Either () IREnv))
+      let census = batchedUncertifiedConstructs (batchedProgramCensus (Right env :: Either () CheckedIR))
       return ((intercalate "\n" srcLines, groups, netNames), census)
 
 -- ===========================================================================
@@ -2074,7 +2077,7 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
         x
     comprehensionSource k = sourceOf (envWith (comprehensionSum k))
     envOf n = envWith (sumOf n)
-    envWith body = IREnv [IRFunGroup { groupName = "main", refusedVariants = [], genFun = Nothing
+    envWith body = mustCheck $ IREnv [IRFunGroup { groupName = "main", refusedVariants = [], genFun = Nothing
                                 , probFun = Just (IRLambda "x" body, "")
                                 , integFun = Nothing, writeLogitsFun = Nothing
                                 , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing, maskVariantOf = Nothing }] [] []
@@ -2303,7 +2306,7 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
 
 -- | The scalar Python module for an 'IREnv', with torch's @Module@ replaced by
 -- a stub so that a plain @python3@ can import it.
-torchFreePythonModule :: IREnv -> String
+torchFreePythonModule :: CheckedIR -> String
 torchFreePythonModule env =
   unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
                   (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))))
@@ -2387,7 +2390,7 @@ deepIndentationHoistTests = testGroup "deep indentation hoist (python-nested-con
     -- 'generateLetInStatement' rather than 'generateStatementBlock': the arms
     -- assign @r@ instead of returning.
     letBound n = IRLetIn "r" (chain "x" n) (IROp OpPlus (IRVar "r") (lit 1.0))
-    chainEnv body n = IREnv [IRFunGroup { groupName = "main", refusedVariants = [], genFun = Nothing
+    chainEnv body n = mustCheck $ IREnv [IRFunGroup { groupName = "main", refusedVariants = [], genFun = Nothing
                                         , probFun = Just (IRLambda "x" (body n), "")
                                         , integFun = Nothing, writeLogitsFun = Nothing
                                         , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing, maskVariantOf = Nothing }] [] []
@@ -3980,7 +3983,7 @@ branchCountBackendTests = do
         [ testProperty n (once (counterexample
             (n ++ " no longer compiles to a shared enumeration pass under countBranches; \
                   \pick a program that does, or this group tests nothing")
-            (any sharesOneMapAcrossTwoReduces (irEnvBodies env))))
+            (any sharesOneMapAcrossTwoReduces (irEnvBodies (checkedEnv env)))))
         | (n, _, env, _) <- loaded ]
     -- The paired node's log-space reduction (log-sum-exp on the probability
     -- component, a plain sum on the branch count) is a second code path in
@@ -4024,7 +4027,7 @@ irNodes e = e : concatMap irNodes (getIRSubExprs e)
 
 -- | A program, its branch-counted compile, and one row per pinned query point
 -- carrying the interpreter's @(prob, dim, branchCount)@ for it.
-type BranchCountCase = (String, Program, IREnv, [(TestCase, Double, Int, Double)])
+type BranchCountCase = (String, Program, CheckedIR, [(TestCase, Double, Int, Double)])
 
 loadBranchCountCase :: String -> IO BranchCountCase
 loadBranchCountCase name = do
@@ -4053,7 +4056,7 @@ irAnyNode f e = f e || any (irAnyNode f) (getIRSubExprs e)
 -- With countBranches on the emitted result is @(prob, (dim, (bc, imposs)))@,
 -- one field deeper than the default @(prob, (dim, imposs))@ the other backend
 -- harnesses in this module read.
-branchCountPython :: String -> IREnv -> [(TestCase, Double, Int, Double)] -> Property
+branchCountPython :: String -> CheckedIR -> [(TestCase, Double, Int, Double)] -> Property
 branchCountPython name env rows = ioProperty $ do
   let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env)
       checks = concatMap (\(tc, p, d, bc) ->
@@ -4189,7 +4192,7 @@ interpreterRowInputs p tc = case tc of
   _                                     -> ""
 
 -- | Key of an interpreter-run 'testInterpreter' sweep over one program.
-interpreterKey :: Manifest -> Program -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
+interpreterKey :: Manifest -> Program -> Either CompilerError CheckedIR -> [TestCase] -> IO (Maybe String)
 interpreterKey _ _ (Left _) _ = return Nothing
 interpreterKey m p (Right env) tcs = do
   h <- harnessFingerprint m
@@ -4204,7 +4207,7 @@ interpreterKey m p (Right env) tcs = do
 -- differentials skip or compare it), plus the program's runtime fields, the
 -- rows, the tolerance and the interpreter. A compile that crashes while shown
 -- has no key, so the check executes.
-differentialKey :: Manifest -> String -> Program -> [Either CompilerError IREnv] -> [TestCase] -> IO (Maybe String)
+differentialKey :: Manifest -> String -> Program -> [Either CompilerError CheckedIR] -> [TestCase] -> IO (Maybe String)
 differentialKey m version p envs tcs = do
   h <- harnessFingerprint m
   i <- interpreterFingerprint m
@@ -4213,7 +4216,7 @@ differentialKey m version p envs tcs = do
 
 -- | Key of 'testPythonWriteLogits': the exact script it runs, plus the
 -- Python runtime.
-pythonWriteLogitsKey :: Manifest -> [NetMock] -> Either CompilerError IREnv -> [WriteLogitsRow] -> IO (Maybe String)
+pythonWriteLogitsKey :: Manifest -> [NetMock] -> Either CompilerError CheckedIR -> [WriteLogitsRow] -> IO (Maybe String)
 pythonWriteLogitsKey _ _ (Left _) _ = return Nothing
 pythonWriteLogitsKey m nets (Right env) rows = do
   projectDir <- getCurrentDirectory
@@ -4224,7 +4227,7 @@ pythonWriteLogitsKey m nets (Right env) rows = do
 -- | Key of one program's part of 'testJuliaWriteLogitsAll': its module and
 -- row checks as 'juliaWriteLogitsBody' renders them alone (the module number
 -- depends on the batch), plus the Julia runtime.
-juliaWriteLogitsKey :: Manifest -> Either CompilerError IREnv -> [WriteLogitsRow] -> [NetMock] -> IO (Maybe String)
+juliaWriteLogitsKey :: Manifest -> Either CompilerError CheckedIR -> [WriteLogitsRow] -> [NetMock] -> IO (Maybe String)
 juliaWriteLogitsKey _ (Left _) _ _ = return Nothing
 juliaWriteLogitsKey m (Right env) rows nets = do
   h <- harnessFingerprint m
@@ -4240,7 +4243,7 @@ batchedKey m torch check (n, src, gs, nets) = do
   return $ Just $ hashKey [batchedCheckVersion, check, h, torch, n, src, show gs, show nets]
 
 -- | Key of 'discreteProbsNormalized' on one program.
-normalizationKey :: Manifest -> Program -> Either CompilerError IREnv -> IO (Maybe String)
+normalizationKey :: Manifest -> Program -> Either CompilerError CheckedIR -> IO (Maybe String)
 normalizationKey _ _ (Left _) = return Nothing
 normalizationKey m p (Right env) = do
   h <- harnessFingerprint m
@@ -4251,13 +4254,13 @@ normalizationKey m p (Right env) = do
 
 -- | Key of 'testPython': the exact script it runs (emitted module, mocks,
 -- row checks with the tolerance spliced in), plus the Python runtime.
-pythonKey :: Manifest -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
+pythonKey :: Manifest -> [NetMock] -> Either CompilerError CheckedIR -> [TestCase] -> IO (Maybe String)
 pythonKey = pythonKeyWith False
 
 -- | 'pythonKey' of the module 'testPythonWith' runs. The emitted script
 -- differs with the memo only where it decorates something, and the
 -- runtime's fingerprint covers the rest.
-pythonKeyWith :: Bool -> Manifest -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
+pythonKeyWith :: Bool -> Manifest -> [NetMock] -> Either CompilerError CheckedIR -> [TestCase] -> IO (Maybe String)
 pythonKeyWith _ _ _ (Left _) _ = return Nothing
 pythonKeyWith memo m nets (Right env) tcs = do
   projectDir <- getCurrentDirectory
@@ -4269,7 +4272,7 @@ pythonKeyWith memo m nets (Right env) tcs = do
 -- checks as 'juliaBatchTestCode' renders them, under a fixed module name (the
 -- shard's numbering depends on which other programs share it), plus the
 -- Julia runtime and flags.
-juliaKey :: Manifest -> Either CompilerError IREnv -> [TestCase] -> [NetMock] -> IO (Maybe String)
+juliaKey :: Manifest -> Either CompilerError CheckedIR -> [TestCase] -> [NetMock] -> IO (Maybe String)
 juliaKey _ (Left _) _ _ = return Nothing
 juliaKey m (Right env) tcs nets = do
   h <- harnessFingerprint m
@@ -4567,7 +4570,7 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     isQuery x = isProbTestCase x || isCumulTestCase x
     queries e = filter isQuery (rows e)
     hasQueries e = any isQuery (ceCases e)
-    memoChanges e = either (const False) (not . null . memoMembers . memoPlan) (opt e)
+    memoChanges e = either (const False) (not . null . memoMembers . memoPlan . checkedEnv) (opt e)
     wlRows e = filter (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) (rows e)
     hasWriteLogits e = any (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) (ceCases e)
     writeLogitsRows e = map (writeLogitsRow (ceProgram e)) (wlRows e)

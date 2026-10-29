@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | The IR fuzz generator (docs-repo design @ir-fuzz-generator@), milestones
@@ -44,6 +45,7 @@ module IRFuzz
   , genIRCase
   , shrinkIRCase
   , irCaseEnv
+  , irCaseChecked
   , irCaseFunction
   , irCaseWellTyped
   , renderIRCase
@@ -99,7 +101,7 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
-import SPLL.IRTypeCheck (checkIREnv, showIRType, showIRTypeError)
+import SPLL.IRTypeCheck (checkIREnv, showIRType, showIRTypeError, CheckedIR, checkIR, checkedEnv, pattern CheckedEnv)
 import SPLL.IR.Type (IRType(..), IRADTDecl(..))
 import SPLL.Semiring
 import SPLL.IRCompiler (stripBranchCount)
@@ -193,6 +195,14 @@ caseBodies c = icBody c : map hBody (icHelpers c)
 -- | The case with one rewrite applied to every body.
 onBodies :: (IRExpr -> IRExpr) -> IRCase -> IRCase
 onBodies f c = c { icBody = f (icBody c), icHelpers = [ h { hBody = f (hBody h) } | h <- icHelpers c ] }
+
+-- | The case checked, for the consumers that accept nothing else (the
+-- interpreter, the select pass, the code generators). A case the checker
+-- rejects is a generator bug, which 'irCaseWellTyped' reports; reaching a
+-- consumer with one is a broken fixture.
+irCaseChecked :: IRCase -> CheckedIR
+irCaseChecked c = either (\err -> error ("IRFuzz: a drawn case violates the IR contract: " ++ showIRTypeError err)) id
+                         (checkIR [] (irCaseEnv c))
 
 irCaseEnv :: IRCase -> IREnv
 irCaseEnv c = IREnv (map helperGroup (icHelpers c) ++ [group]) (icADTs c) (icConsts c)
@@ -1312,7 +1322,7 @@ interpreterMicros = 2 * 1000 * 1000
 
 interpretIRCase :: IRCase -> [IRValue] -> IO InterpOutcome
 interpretIRCase c args = do
-  r <- try (timeout interpreterMicros (evaluate (forced (run (irCaseEnv c) (map IRConst args) (irCaseFunction c)))))
+  r <- try (timeout interpreterMicros (evaluate (forced (run (irCaseChecked c) (map IRConst args) (irCaseFunction c)))))
   case r of
     Left (e :: SomeException)
       | Just (SomeAsyncException _) <- fromException e -> throwIO e
@@ -2178,7 +2188,7 @@ runCases backend emit ext driver run cases = withSystemTempDirectory ("nest-irfu
 
 -- | The text backends emit a module per case; 'irCaseEnv' has no networks.
 emitPython :: Int -> IRCase -> IO (Either String String)
-emitPython _ c = fmap (fmap stubTorch) (forcedSource (return (Py.generateFunctions True (irCaseEnv c))))
+emitPython _ c = fmap (fmap stubTorch) (forcedSource (return (Py.generateFunctions True (irCaseChecked c))))
   where stubTorch = unpack . replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") . pack
 
 methodOf :: BodyKind -> String
@@ -2294,7 +2304,7 @@ runIRCasesJulia julia cases = runCases "julia" emit ".jl" juliaIRDriver
   where
     emit i c = fmap (fmap (\src -> "module Prog" ++ show i ++ "\nusing ..JuliaSPPLLib\n"
                                   ++ "rand() = Main._jrand()\nrandn() = Main._jrandn()\n" ++ src ++ "\nend\n"))
-                  (forcedSource (return (Jl.generateFunctions (irCaseEnv c))))
+                  (forcedSource (return (Jl.generateFunctions (irCaseChecked c))))
 
 -- ---------------------------------------------------------------------------
 -- The batched arm (M4)
@@ -2324,7 +2334,7 @@ runIRCasesJulia julia cases = runCases "julia" emit ".jl" juliaIRDriver
 -- points with the interpreter's answers.
 data BatchedIRCase = BatchedIRCase
   { bicCase    :: IRCase
-  , bicEnv     :: IREnv                    -- ^ after the select pass
+  , bicEnv     :: CheckedIR                   -- ^ after the select pass
   , bicSource  :: String
   , bicRest    :: [IRValue]                -- ^ the broadcast parameters
   , bicPoints  :: [(IRValue, IRValue)]     -- ^ (first parameter, interpreter's answer)
@@ -2340,7 +2350,7 @@ prepareBatchedIRCase c
           firsts = nub' [ a | (a : _) <- icArgs c ]
       answered <- mapM (\a -> (,) a <$> interpretIRCase c (a : rest)) firsts
       let points = [ (a, v) | (a, Interpreted v) <- answered ]
-          env = selectPassEnv (irCaseEnv c)
+          env = selectPassEnv (irCaseChecked c)
       if null points then return (Left "no point the interpreter answers with a value")
       else if partialSelect then return (Left "a drawn select has a partial arm (outside the select's precondition)")
       else do
@@ -2532,7 +2542,7 @@ irGeneratorConstructs = sort (nub (concatMap checkedIRConstructs fixedSample))
 irGeneratorBatchedConstructs :: IO [String]
 irGeneratorBatchedConstructs = do
   prepared <- mapM prepareBatchedIRCase fixedSample
-  return (sort (nub [ l | Right bc <- prepared, l <- irEnvConstructs inferenceBodies (bicEnv bc) ]))
+  return (sort (nub [ l | Right bc <- prepared, l <- irEnvConstructs inferenceBodies (checkedEnv (bicEnv bc)) ]))
 
 -- | Constructs of 'irConstructs'' inventory, or shapes of them, with no
 -- production, and why.
@@ -2825,11 +2835,11 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
   -- backend emits.
   , testCase "a fixed-seed sample puts drawn and select-pass selects through the batched backend" $ do
       let emitted = [ (c, env) | c <- fixedSample, icKind c `elem` [ProbBody, IntegBody]
-                               , let env = selectPassEnv (irCaseEnv c)
+                               , let env = selectPassEnv (irCaseChecked c)
                                , either (const False) (const True) (generateFunctionsBatched True env) ]
           selects e = length [ () | IRSelect{} <- universe e ]
           drawn = [ c | (c, _) <- emitted, any ((> 0) . selects) (caseBodies c) ]
-          made = [ c | (c, IREnv gs _ _) <- emitted
+          made = [ c | (c, CheckedEnv (IREnv gs _ _)) <- emitted
                      , sum [ selects b | g <- gs, Just (b, _) <- [probFun g, integFun g] ] > sum (map selects (caseBodies c)) ]
       assertBool ("batched-emitted PResult cases with a drawn select: " ++ show (length drawn)) (length drawn >= 5)
       assertBool ("batched-emitted PResult cases with a select the pass made: " ++ show (length made)) (length made >= 5)

@@ -32,6 +32,7 @@ module SPLL.IntermediateRepresentation (
 , isEffectfulVar
 , isPureGiven
 , lookupIREnv
+, AsIREnv(..)
 , reduceIREnv
 , irPrintFlat
 , valueToIR
@@ -610,9 +611,21 @@ valueToIR = fmap (error "Cannot convert VClosure to IR")
 multiValueToIR :: GenericMultiValue a -> GenericMultiValue b
 multiValueToIR = fmap (error "Cannot convert VClosure to IR")
 
-lookupIREnv :: String -> IREnv -> IRFunGroup
-lookupIREnv name (IREnv env _ _) =
-  case filter (\IRFunGroup{groupName=a} -> a == name) env of
+-- | Read-only access to the environment inside an IR value that may be
+-- wrapped ('SPLL.IRTypeCheck.CheckedIR'). The inspection helpers below take
+-- any such value; none of them can build one, so they cannot bypass the check.
+class AsIREnv a where
+  asIREnv :: a -> IREnv
+
+instance AsIREnv IREnv where
+  asIREnv = id
+
+lookupIREnv :: AsIREnv e => String -> e -> IRFunGroup
+lookupIREnv name e =
+  case asIREnv e of
+   IREnv env _ _ -> lookupIn env
+  where
+   lookupIn env = case filter (\IRFunGroup{groupName=a} -> a == name) env of
     [] -> error ("function " ++ show name ++ "not found in environment")
     [a] -> a
     lst -> head lst
@@ -633,10 +646,11 @@ lookupIREnv name (IREnv env _ _) =
 -- backends retire such a variant's offending body first
 -- ('retireUnrenderableVariants'), since a mask the backend cannot render must
 -- not take the whole function down with it.
-firstAnyExceptIR :: IREnv -> Maybe IRExpr
-firstAnyExceptIR (IREnv groups _ _) =
+firstAnyExceptIR :: AsIREnv e => e -> Maybe IRExpr
+firstAnyExceptIR env0 =
   listToMaybe (filter isAnyExceptConst (concatMap allSubExprsOf funBodies))
   where
+    IREnv groups _ _ = asIREnv env0
     funBodies = concatMap groupBodies [ g | g <- groups, isNothing (maskVariantOf g) ]
     groupBodies IRFunGroup{genFun=g, probFun=p, integFun=i, writeLogitsFun=e, normalFun=n} =
       map fst (mapMaybe id [g, p, i, e, n])
@@ -654,7 +668,7 @@ firstAnyExceptIR (IREnv groups _ _) =
 -- points readers at. The batched backend needs no equivalent call: it already
 -- refuses every marginal-query construct, 'VAnyExcept' included, through its
 -- own @emittable@/@reason@ guard.
-anyExceptCodegenRefusal :: String -> IREnv -> Either CompilerError ()
+anyExceptCodegenRefusal :: AsIREnv e => String -> e -> Either CompilerError ()
 anyExceptCodegenRefusal lang env = case firstAnyExceptIR env of
   Nothing -> Right ()
   Just ir -> Left $ unlines

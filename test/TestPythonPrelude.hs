@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE LambdaCase #-}
 -- | The Python runtime libraries under torch (task
 -- python-codegen-silent-precision-traps).
@@ -26,7 +27,6 @@ import System.Process (readProcessWithExitCode)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, testCaseInfo, assertFailure)
 
-import SPLL.IntermediateRepresentation (IREnv)
 import SPLL.CompilerConfig (CompilerConfig(..), defaultCompilerConfig)
 import SPLL.Prelude (compile)
 import SPLL.Parser (tryParseProgram)
@@ -34,6 +34,7 @@ import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.CodeGenPyTorch (generateFunctions)
 import qualified SPLL.CodeGenJulia as Julia
 import End2EndTesting (findTorchPython, noTorch)
+import SPLL.IRTypeCheck (CheckedIR)
 
 pythonPreludeTests :: TestTree
 pythonPreludeTests = testGroup "PythonPrelude (python-codegen-silent-precision-traps)"
@@ -56,7 +57,7 @@ pythonPreludeTests = testGroup "PythonPrelude (python-codegen-silent-precision-t
 
 -- | Compile a program to a list of emitted source lines, failing the test on
 -- any parse or compile error.
-emitted :: CompilerConfig -> (IREnv -> Either String [String]) -> String -> IO [String]
+emitted :: CompilerConfig -> (CheckedIR -> Either String [String]) -> String -> IO [String]
 emitted cfg gen src = do
   p <- either (assertFailure . ("parse: " ++) . show) return (tryParseProgram "" src)
   env <- either (assertFailure . ("compile: " ++) . show) return (compile cfg p)

@@ -4,6 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
 
+import SPLL.IRTypeCheck (checkedEnv)
 import Test.QuickCheck hiding (verbose)
 import Test.Tasty (TestTree, testGroup, defaultMain, localOption)
 import Test.Tasty.QuickCheck (testProperties, QuickCheckMaxRatio(..))
@@ -446,7 +447,7 @@ prop_TopKConstantPresentInEnv :: Property
 prop_TopKConstantPresentInEnv = once $ ioProperty $ do
   let conf = defaultCompilerConfig { topKThreshold = Just 0.005 }
       irEnv = expectCompiled (compile conf testDice)
-      IREnv _ _ consts = irEnv
+      IREnv _ _ consts = checkedEnv irEnv
   return $ case lookup "TOP_K_CUTOFF" consts of
     Just (VFloat v) -> counterexample ("Expected 0.005, got " ++ show v) (abs (v - 0.005) < 1e-12)
     Just other      -> counterexample ("Expected VFloat, got " ++ show other) False
@@ -456,7 +457,7 @@ prop_TopKConstantPresentInEnv = once $ ioProperty $ do
 prop_TopKConstantAbsentWithoutFlag :: Property
 prop_TopKConstantAbsentWithoutFlag = once $ ioProperty $ do
   let irEnv = expectCompiled (compile defaultCompilerConfig testDice)
-      IREnv _ _ consts = irEnv
+      IREnv _ _ consts = checkedEnv irEnv
   return $ counterexample "TOP_K_CUTOFF should not appear when topK is disabled"
     (isNothing (lookup "TOP_K_CUTOFF" consts))
 

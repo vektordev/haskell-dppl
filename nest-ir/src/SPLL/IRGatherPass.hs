@@ -31,6 +31,7 @@
 -- this keeps that trivially pure and cheap.
 module SPLL.IRGatherPass
   ( gatherPassEnv
+  , gatherPassIREnv
   , gatherPassExpr
   , isGatheredRead
   , usesOneHotGather
@@ -39,11 +40,16 @@ module SPLL.IRGatherPass
 import Data.List (sort)
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (CheckedIR, passOver)
 import SPLL.IR.Value (GenericValue(..))
 
 -- | Run the rewrite over every variant of every function group.
-gatherPassEnv :: IREnv -> IREnv
-gatherPassEnv (IREnv groups adts globals) =
+gatherPassEnv :: CheckedIR -> CheckedIR
+gatherPassEnv = passOver "gather pass" gatherPassIREnv
+
+-- | 'gatherPassEnv' on the bare environment.
+gatherPassIREnv :: IREnv -> IREnv
+gatherPassIREnv (IREnv groups adts globals) =
   IREnv (map onGroup groups) adts globals
   where
     onGroup g = g

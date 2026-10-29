@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module TestInternals (
@@ -5,6 +6,7 @@ module TestInternals (
   slowInternalsTests
 ) where
 
+import SPLL.IRTypeCheck (CheckedIR, pattern CheckedEnv)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 
@@ -65,7 +67,7 @@ import Control.Monad (forM, forM_, replicateM, when)
 import Data.Number.Erf (erf)
 import Utils (splitByString, reflexiveEq)
 import Data.Maybe (isJust)
-import TestSupport (expectVariantRefused)
+import TestSupport (expectVariantRefused, mustCheck)
 import Data.Functor.Identity (runIdentity)
 import qualified PredefinedFunctions as PF
 import SPLL.Validator (validateProgram)
@@ -2014,7 +2016,7 @@ test_shortGaussianTrajectoryVariantsCompact = testCase "shortGaussianTrajectoryV
     Left err -> assertFailure ("parse error: " ++ show err)
     Right prog -> case compile defaultCompilerConfig prog of
       Left e -> assertFailure ("compile error: " ++ show e)
-      Right ir@(IREnv groups _ _) -> do
+      Right ir@(CheckedEnv (IREnv groups _ _)) -> do
         let probSize g = maybe 0 (length . show . fst) (probFun g)
             variants = [ g | g <- groups, maskVariantOf g == Just "main" ]
             base = probSize (lookupIREnv "main" ir)
@@ -2702,7 +2704,7 @@ test_perValueVetoIndexedRead = testGroup "perValueVetoIndexedRead"
     check lbl conf = testCase lbl $ do
       prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
                 (tryParseProgram "perValueVetoIndexedRead" src)
-      IREnv groups _ _ <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+      CheckedEnv (IREnv groups _ _) <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
                             (compile conf prog)
       let bodies = [ (groupName g, b) | g <- groups, Just (b, _) <- [probFun g, integFun g] ]
           offenders = [ (n, c) | (n, b) <- bodies, let c = oneHot b, c > 0 ]
@@ -2765,7 +2767,7 @@ compileAllocPoint :: String -> CompilerConfig -> (Int -> String) -> Int -> IO Po
 compileAllocPoint = compileAllocPointWith (SPLL.CodeGenPyTorch.generateFunctions True)
 
 -- | 'compileAllocPoint' with the given backend's codegen in place of Python's.
-compileAllocPointWith :: (IREnv -> [String]) -> String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
+compileAllocPointWith :: (CheckedIR -> [String]) -> String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
 compileAllocPointWith codegen name conf src n = do
   prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
             (tryParseProgram name (src n))
@@ -3506,7 +3508,7 @@ tupleCdfCorrelatedRefusedTests = testGroup "tuple cdf through a draw read more t
       let compiled = compile defaultCompilerConfig prog
       expectVariantRefused "main" "integ" "read more than once" compiled
       case compiled of
-        Right (IREnv gs _ _) ->
+        Right (CheckedEnv (IREnv gs _ _)) ->
           assertBool "the probability variant is not refused"
             (null [ () | g <- gs, groupName g == "main", Just _ <- [lookup "prob" (refusedVariants g)] ])
         Left _ -> return ()
@@ -3613,18 +3615,18 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
       let call = IRApply (IRVar "genT_gen") (IRVar "thetas")
           body = IRIf (IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.6)))
                       (IRConst (VFloat 0.0))
-                      (IRConstruct TgTuple [call, call])
+                      (IROp OpPlus call call)
       assertEqual "both recursive draws survive" 2
-        (countIRVar "genT_gen" (optimizedGen "genT" [genGroup "genT" body]))
+        (countIRVar "genT_gen" (optimizedGen "genT" [genGroup "genT" (IRLambda "thetas" body)]))
   -- ...and the positive control: the identical shape with a *deterministic*
   -- callee is shared, so the refusal above is about effects, not about calls.
   , testCase "CSE still shares calls into a deterministic generate group" $ do
       let call = IRApply (IRVar "detT_gen") (IRVar "thetas")
           body = IRIf (IROp OpLessThan (IRVar "thetas") (IRConst (VFloat 0.6)))
                       (IRConst (VFloat 0.0))
-                      (IRConstruct TgTuple [call, call])
-          env  = [ genGroup "caller" body
-                 , genGroup "detT" (IRConst (VFloat 1.0)) ]
+                      (IROp OpPlus call call)
+          env  = [ genGroup "caller" (IRLambda "thetas" body)
+                 , genGroup "detT" (IRLambda "thetas" (IRConst (VFloat 1.0))) ]
       assertEqual "the deterministic call is read once through a shared binding" 1
         (countIRVar "detT_gen" (optimizedGen "caller" env))
   -- distributeIf keeps one copy of a condition the tuple evaluated once per
@@ -3671,7 +3673,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
           body = IRIf (IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.6)))
                       (IRVar "cont")
                       (call (IRConstruct TgCons [IRConst (VInt 1), call (IRVar "cont")]))
-          opt = optimizedGen "genS" [genGroup "genS" body]
+          opt = optimizedGen "genS" [genGroup "genS" (IRLambda "thetas" (IRLambda "cont" body))]
       assertEqual "both call sites keep their own head" 2 (countIRVar "genS_gen" opt)
       assertBool "no binding holds a partially applied generator"
         (not (any hoistedGenPrefix (irLetBindings opt)))
@@ -3685,8 +3687,8 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
     -- Optimize a whole environment (so 'deterministicGens' sees the call graph)
     -- and hand back the named group's generate body.
     optimizedGen n groups =
-      case optimizeEnv defaultOptimizerConfig (IREnv groups [] []) of
-        IREnv groups' _ _ ->
+      case optimizeEnv defaultOptimizerConfig (mustCheck (IREnv groups [] [])) of
+        CheckedEnv (IREnv groups' _ _) ->
           case [b | g <- groups', groupName g == n, Just (b, _) <- [genFun g]] of
             (b:_) -> b
             []    -> error ("optimizedGen: no generate body for " ++ n)
@@ -3809,7 +3811,7 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
         Left err -> assertFailure ("Parse error: " ++ show err)
         Right prog -> case compile defaultCompilerConfig prog of
           Left err -> assertFailure ("Compile error: " ++ show err)
-          Right (IREnv groups decls _) -> do
+          Right (CheckedEnv (IREnv groups decls _)) -> do
             let ctors = [(c, length fs) | d <- decls, (c, fs) <- irConstructors d]
                 derived = ["is" ++ c | (c, _) <- ctors] ++ [f | d <- decls, (_, fs) <- irConstructors d, (f, _) <- fs]
                 bodies = [ b | g <- groups
@@ -4201,7 +4203,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       let body = IRConstruct TgTuple
                    [ IRIf (IRApply (IRVar "isRed") (IRVar "sample")) (IRConst (VList EmptyList)) oneElemList
                    , IRBuiltin BMap
-                       [ IRLambda "d" (IRIf (IRVar "sample") (IRConst (VList EmptyList)) oneElemList)
+                       [ IRLambda "d" (IRIf (IROp OpEq (IRVar "sample") (IRVar "sample")) (IRConst (VList EmptyList)) oneElemList)
                        , IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat 1.0)] ] ]
       in case generateFunctionsBatched False (enumEnv body) of
            Right ls -> assertFailure ("batched mode accepted a structure-choosing select: " ++ unlines ls)
@@ -4281,7 +4283,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                        , adtDepth = Nothing }
     oneElemList = IRConstruct TgCons [IRConst (VFloat 1.0), IRConst (VList EmptyList)]
     enumEnv = enumEnvWith [irADTDecl colorDecl]
-    enumEnvWith decls body = IREnv
+    enumEnvWith decls body = mustCheck $ IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample" body, "")
                   , genFun = Nothing, integFun = Nothing
@@ -4289,7 +4291,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
       decls
       []
-    nullaryCtorEnv ctorRef = IREnv
+    nullaryCtorEnv ctorRef = mustCheck $ IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IRApply (IRVar "isNada") ctorRef)
@@ -4303,7 +4305,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       []
     -- The same declaration, with a method whose accessor is legal only in the
     -- constructor-tested arm.
-    nullaryCtorEnv' q = IREnv
+    nullaryCtorEnv' q = mustCheck $ IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IRApply (IRVar "isJust1") q)
@@ -4318,7 +4320,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- The same declaration, with a method summing over an enumerated domain of
     -- ADT constants -- the shape a neural ADT read's enumeration compiles to --
     -- whose body reads a field only under the constructor test.
-    adtDomainEnv = IREnv
+    adtDomainEnv = mustCheck $ IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IROp OpMult (IRVar "sample")
@@ -4339,7 +4341,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- One field name, @f@, declared by both constructors. 'fieldAccessorOwners'
     -- resolves it to the first, @A1@, which is what the interpreter's
     -- 'findField' and the type environment's 'lookupRType' already mean.
-    dupFieldEnv = IREnv
+    dupFieldEnv = mustCheck $ IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IRApply (IRVar "isA1") (IRVar "sample"))
@@ -4355,7 +4357,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- under a *let-bound alias* of the structural isLeft(sample) test -- the
     -- exact shape 'IROptimizer's CSE produces (`let cse_0 = (if isLeft(sample)
     -- then True else False) in ...`).
-    structuralAliasEnv q = IREnv
+    structuralAliasEnv q = mustCheck $ IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRLetIn "cse_0"
@@ -4367,7 +4369,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       [] []
     -- A one-group environment whose only method is generate, with the given
     -- body (either self-referential or not).
-    recGenEnv body = IREnv
+    recGenEnv body = mustCheck $ IREnv
       [IRFunGroup { groupName = "rec", refusedVariants = [], genFun = Just (body, "")
                   , probFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
@@ -4659,10 +4661,10 @@ setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (b
       unitProg <- parseOrFail "main = Uniform"
       unitEnv <- either (\e -> assertFailure (show e)) return (compile defaultCompilerConfig unitProg)
       shiftedEnv <- parseOrFail "main = Uniform + 5.0" >>= either (\e -> assertFailure (show e)) return . compile defaultCompilerConfig
-      let IREnv ugs ud uc = unitEnv
-          IREnv sgs _ _ = shiftedEnv
+      let CheckedEnv (IREnv ugs ud uc) = unitEnv
+          CheckedEnv (IREnv sgs _ _) = shiftedEnv
           shiftedGen = genFun (head [ g | g <- sgs, groupName g == "main" ])
-          offEnv = IREnv [ if groupName g == "main" then g { genFun = shiftedGen } else g | g <- ugs ] ud uc
+          offEnv = mustCheck $ IREnv [ if groupName g == "main" then g { genFun = shiftedGen } else g | g <- ugs ] ud uc
           offCase = AgreementCase unitProg offEnv [] [] (gens TFloat)
           mistyped = AgreementCase unitProg unitEnv [] [] (gens TInt)
           check run = do
@@ -5891,7 +5893,7 @@ test_neuralOracleInterpretation = testCase
               VFloat x -> VList (ListCont (VFloat (x * 10)) EmptyList)
               _ -> error "net: not a float" }
         oracle = neuralOracle [("net", net)]
-        eval = generateDet oracle (IREnv [] [] []) []
+        eval = generateDet oracle (mustCheck (IREnv [] [] [])) []
         arg = IRConst (VFloat 2)
         expected = Right (VList (ListCont (VFloat 20) EmptyList))
     eval (IRApply (IRVar "net") arg) @?= expected
@@ -5949,7 +5951,7 @@ test_hasTailDescentRecognisesNewShape = testCase
                     ("under a value-dependent branch the batch is not split at" `isInfixOf` msg)
       Right _  -> assertFailure "batched mode accepted a non-descending recursive call under an unsplit select"
   where
-    recEnv tailArg = IREnv
+    recEnv tailArg = mustCheck $ IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IROp OpEq (IRVar "sample") (IRConst (VList EmptyList)))
@@ -5996,7 +5998,7 @@ test_valueDependentRecursionSplits = testGroup "value-dependent recursion (batch
                 (IRConst (VFloat 0.5))
                 (IRApply (IRApply (IRVar "main_prob") (IRVar "sample"))
                          (IROp OpPlus (IRVar "x") (IRConst (VFloat 1.0))))))
-    env groups = IREnv
+    env groups = mustCheck $ IREnv
       [ IRFunGroup { groupName = n, refusedVariants = []
                    , probFun = Just (b, ""), genFun = Nothing, integFun = Nothing
                    , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
@@ -6062,7 +6064,7 @@ test_batchedPureCallees = testGroup "pure callees of a prob path (batched)"
                          , probFun = Nothing, genFun = Nothing, integFun = Nothing
                          , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                          , sampleDomain = Nothing, maskVariantOf = Nothing }
-    env groups = IREnv groups [] []
+    env groups = mustCheck $ IREnv groups [] []
 
 -- ======== Utils.splitByString ========
 
@@ -6516,13 +6518,13 @@ valueSetTests = testGroup "valueListToMultiValue is a set at every level"
 noGenerateNeuralSamplerTests :: TestTree
 noGenerateNeuralSamplerTests = testGroup "--noGenerate drops the neural read-logits sampler"
   [ testCase "under --noGenerate no group, _auto helpers included, has a genFun" $ do
-      IREnv groups _ _ <- compiled defaultCompilerConfig { noGenerate = True }
+      CheckedEnv (IREnv groups _ _) <- compiled defaultCompilerConfig { noGenerate = True }
       let autos = autoGroups groups
       assertBool "expected a camNN_auto and a depthNN_auto group" (sort (map groupName autos) == ["camNN_auto", "depthNN_auto"])
       assertEqual "groups still carrying a genFun" [] [groupName g | g <- groups, isJust (genFun g)]
       assertBool "the helper's probability reader must survive" (all (isJust . probFun) autos)
   , testCase "without --noGenerate the _auto helper keeps its sampler" $ do
-      IREnv groups _ _ <- compiled defaultCompilerConfig
+      CheckedEnv (IREnv groups _ _) <- compiled defaultCompilerConfig
       assertBool "an _auto group lost its genFun" (all (isJust . genFun) (autoGroups groups))
   ]
   where
@@ -6825,11 +6827,11 @@ slowInternalsTests = testGroup "Internals (slow)"
 
 -- | Evaluate a closed IR expression with no neural networks or globals.
 evalClosedIR :: IRExpr -> Either String IRValue
-evalClosedIR = generateDet noNeurals (IREnv [] [] []) []
+evalClosedIR = generateDet noNeurals (mustCheck (IREnv [] [] [])) []
 
 -- | Sample a closed IR expression with no neural networks or globals.
 sampleClosedIR :: IRExpr -> IRValue
-sampleClosedIR e = evalRand (generateRand noNeurals (IREnv [] [] []) [] e) (mkStdGen 0)
+sampleClosedIR e = evalRand (generateRand noNeurals (mustCheck (IREnv [] [] [])) [] e) (mkStdGen 0)
 
 -- ===========================================================================
 -- Inverse-CDF categorical index (neural-categorical-sampler-nests-v-deep)

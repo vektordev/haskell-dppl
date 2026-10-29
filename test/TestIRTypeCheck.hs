@@ -33,7 +33,7 @@ compilerOutputTests = testGroup "compiler output"
   where
     accepts name p = testCase name $ case compile defaultCompilerConfig p of
       Left err -> assertFailure ("does not compile: " ++ show err)
-      Right env -> case checkIREnvWith (oracleSignatures (programMockOracle p)) env of
+      Right env -> case checkIREnvWith (oracleSignatures (programMockOracle p)) (checkedEnv env) of
         Left err -> assertFailure (showIRTypeError err)
         Right _ -> return ()
     acceptsSource name src = case tryParseProgram name src of

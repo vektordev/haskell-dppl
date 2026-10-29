@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- | Soundness tests for the milestone-4 modality inference engine
 -- ('SPLL.Typing.ModalityInfer'), task @modality-inference-engine@.
 --
@@ -37,6 +38,7 @@ import SPLL.CompilerConfig (defaultCompilerConfig)
 import SPLL.IntermediateRepresentation (IREnv(..), IRFunGroup(..))
 import Data.Maybe (isJust, isNothing)
 import CorpusSweep
+import SPLL.IRTypeCheck (pattern CheckedEnv)
 
 -- | Run the modality pipeline on a source string and return the typed program.
 -- Goes through 'addTypeInfo' (RInfer → FC certificate → ModalityInfer) so the
@@ -544,7 +546,7 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
             [ (cn, gCap g) | (cn, g) <- grounds, gCap g `elem` [DensityOnly, IntegralOnly] ]
           case compile defaultCompilerConfig prog of
             Left e -> assertFailure ("compile failed: " ++ show e)
-            Right (IREnv gs _ _) -> case [ g | g <- gs, groupName g == "main" ] of
+            Right (CheckedEnv (IREnv gs _ _)) -> case [ g | g <- gs, groupName g == "main" ] of
               [g] -> do
                 assertBool "generate is compiled" (isJust (genFun g))
                 assertBool "no probability function" (isNothing (probFun g))

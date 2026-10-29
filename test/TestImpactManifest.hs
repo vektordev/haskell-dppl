@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- | The impact-analysis manifest ('ImpactManifest') and the keys the corpus
 -- sweeps compute for it (End2EndTesting). Docs-repo task
 -- emitted-code-test-impact-analysis.
@@ -15,7 +16,6 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, (@?=))
 
 import SPLL.Prelude (compile)
-import SPLL.IntermediateRepresentation (IREnv)
 import SPLL.CompilerConfig (defaultCompilerConfig, CompilerConfig(..))
 import ImpactManifest
 import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
@@ -23,6 +23,7 @@ import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstruct
                         selectDemotionLabel, pureCalleeLabel, partialSplitLabel)
 import End2EndTesting (interpreterKey, pythonKey, juliaKey, loadCorpusPair, networkMocks)
 import TestCaseParser (corpusPplPath, isProbTestCase, isCumulTestCase)
+import SPLL.IRTypeCheck (CheckedIR)
 
 impactManifestTests :: TestTree
 impactManifestTests = testGroup "ImpactManifest"
@@ -54,7 +55,7 @@ censusRouting = do
     (any (`elem` samplingConstructs) census)
   assertEqual "a corpus program's census is certified" [] (uncertifiedConstructs census)
   assertEqual "a refused compile contributes nothing" census
-    (programCensus [compile defaultCompilerConfig p, Left "refused" :: Either String IREnv])
+    (programCensus [compile defaultCompilerConfig p, Left "refused" :: Either String CheckedIR])
   assertEqual "a construct the fuzzers never reach is uncertified" ["Accessor:AcNotDrawn"]
     (uncertifiedConstructs ("Accessor:AcNotDrawn" : census))
   assertEqual "the certified list certifies itself" [] (uncertifiedConstructs certifiedConstructs)
@@ -106,7 +107,7 @@ batchedCensusRouting = do
     assertBool (n ++ " calls a pure callee, so it is not certified: " ++ show c)
       (pureCalleeLabel `elem` batchedUncertifiedConstructs c)
   assertBool "a module without one carries no pure-callee label" (pureCalleeLabel `notElem` plain)
-  assertEqual "a refused compile contributes nothing" [] (batchedProgramCensus (Left "refused" :: Either String IREnv))
+  assertEqual "a refused compile contributes nothing" [] (batchedProgramCensus (Left "refused" :: Either String CheckedIR))
   assertEqual "the batched certified list certifies itself" [] (batchedUncertifiedConstructs batchedCertifiedConstructs)
 
 -- | Run a property once, quietly, and report whether it passed.

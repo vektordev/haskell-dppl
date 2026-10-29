@@ -34,6 +34,8 @@
 -- Two such constraints on one variable can be jointly unsatisfiable (a
 -- variable that is both a tensor reduced by 'BReduce' and an operand of
 -- 'OpPlus'), and the checker does not see that.
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 module SPLL.IRTypeCheck
   ( IRType(..)
   , IRTypeError(..)
@@ -42,6 +44,12 @@ module SPLL.IRTypeCheck
   , checkIREnv
   , checkIREnvWith
   , inferIRExpr
+  , CheckedIR
+  , pattern CheckedEnv
+  , checkIR
+  , checkedEnv
+  , checkedExternals
+  , passOver
   ) where
 
 import SPLL.IntermediateRepresentation
@@ -700,6 +708,52 @@ checkIREnvWith externals env@(IREnv _ decls _) = flip evalStateT initState $ do
   let bindings = reduceIREnv env
   globals <- checkBindings decls base bindings
   return [ (n, t) | n <- nub (map fst bindings), Just (Scheme _ _ t) <- [Map.lookup n globals] ]
+
+-- | An environment the checker accepted. The constructor is not exported:
+-- the only way to obtain one is 'checkIR' (or a pass over one, 'passOver'),
+-- so the optimizer, the batched passes, the interpreter and the code
+-- generators, which accept nothing else, run on IR that satisfies the
+-- contract (design ir-package-boundary, step C3). The externals the
+-- environment was checked against travel with it, so a pass can check its
+-- own output again.
+data CheckedIR = CheckedIR [(String, IRType)] IREnv
+
+-- | The environment of a 'CheckedIR'.
+checkedEnv :: CheckedIR -> IREnv
+checkedEnv (CheckedIR _ env) = env
+
+-- | Match a 'CheckedIR' as its environment (read only: it cannot build one).
+pattern CheckedEnv :: IREnv -> CheckedIR
+pattern CheckedEnv env <- (checkedEnv -> env)
+{-# COMPLETE CheckedEnv #-}
+
+-- | The externals (neural networks, ...) a 'CheckedIR' was checked against.
+checkedExternals :: CheckedIR -> [(String, IRType)]
+checkedExternals (CheckedIR ex _) = ex
+
+instance AsIREnv CheckedIR where
+  asIREnv = checkedEnv
+
+instance Show CheckedIR where
+  show = show . checkedEnv
+
+-- | The handover from the frontend to the IR: check an environment against
+-- the IR's contract, given the types of the externals it may call.
+checkIR :: [(String, IRType)] -> IREnv -> Either IRTypeError CheckedIR
+checkIR externals env = CheckedIR externals env <$ checkIREnvWith externals env
+
+-- | Lift a rewrite of the environment to a pass over 'CheckedIR'. The result
+-- is checked again, so a pass that breaks the contract is caught at the pass
+-- that broke it and not at a later consumer. A rejection here is a bug in the
+-- named pass, an internal invariant, hence 'error' (a rejection of the
+-- frontend's output is a 'Left' from 'checkIR').
+passOver :: String -> (IREnv -> IREnv) -> CheckedIR -> CheckedIR
+passOver name f (CheckedIR externals env) =
+  let env' = f env
+  in case checkIREnvWith externals env' of
+       Right _  -> CheckedIR externals env'
+       Left err -> error ("internal error: the " ++ name ++ " produced IR that violates the IR contract: "
+                          ++ showIRTypeError err)
 
 -- | The type of one closed expression against the standard library, the
 -- given ADTs' implicit functions and the given externals. Constraints still

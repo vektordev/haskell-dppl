@@ -8,7 +8,6 @@
 -- raised again rather than split the check.
 {-# OPTIONS_GHC -fmax-pmcheck-models=4000 #-}
 module SPLL.IRCompiler (
-  envToIR,
   envToIRUnoptimized,
   generateBackedSites,
   requireNoGenerateBacked,
@@ -35,7 +34,6 @@ import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.IROptimizer
-import SPLL.IRSelectPass (selectPassEnv)
 import PrettyPrint (pPrintValue)
 import PredefinedFunctions
 import SPLL.Analysis (getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
@@ -284,22 +282,6 @@ modeInverse cumulative decl deriv
   | cumulative, Just (floorB, ceilB, app) <- roundedQuotientInverse decl =
       (IRIf (IROp OpGreaterThan deriv const0) floorB ceilB, app)
   | otherwise = (body decl, applicability decl)
-
-envToIR :: CompilerConfig -> FCData -> LawTable -> Program -> IREnv
-envToIR conf fcDat laws p
-  | any (null . chainName . getTypeInfo . snd) (functions p) =
-      error "envToIR: one or more top-level expressions have empty chainNames — did you call annotateProg before envToIR?"
-  | otherwise =
-      -- This entry point has no error channel of its own, so a refusal from
-      -- 'requireNoGenerateBacked' can only be thrown here. 'Prelude.compile',
-      -- the entry point everything actually uses, threads the 'Left' instead
-      -- (task compiler-throws-instead-of-returning-left).
-      let unopt    = either error id (envToIRUnoptimized conf fcDat laws p)
-          stripped = if countBranches conf then unopt else stripBranchCount unopt
-          -- Batched mode: retag elementwise ifs to selects before optimizing
-          -- (design pytorch-tensorizer). Mirrors 'Prelude.compile'.
-          selected = if batched conf then selectPassEnv stripped else stripped
-      in optimizeEnvWith (optimizerConfig conf) (Set.fromList [n | (n, _, _) <- neurals p]) selected
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).

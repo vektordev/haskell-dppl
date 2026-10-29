@@ -55,6 +55,7 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import SPLL.IR.Value (shapeRank, shapeNumel)
 import SPLL.IR.Type (IRType(ITFloat), IRADTDecl(..))
 import SPLL.IR.Value (CompilerError, GenericValue(..), GenericList(..), GenericMultiValue(..), multiValueToValueList, multiValueCardinality)
@@ -103,13 +104,14 @@ import Utils (Supply, demandUniqueNumber, evalSupply)
 -- mode entirely (measured: 92→91 eligible corpus programs, 461→457 points).
 -- Accepted per Viktor (2026-07-22) as the honest cost of a hard, uniform
 -- contract, rather than special-casing the stub back in for this one shape.
-generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
+generateFunctionsBatched :: Bool -> CheckedIR -> Either CompilerError [String]
 generateFunctionsBatched = generateFunctionsBatchedWith False
 
 -- | 'generateFunctionsBatched', with the recursion memo switched on by the
 -- first argument (CLI @--memoRecursion@; 'SPLL.CodeGenPyTorch.memoPlan').
-generateFunctionsBatchedWith :: Bool -> Bool -> IREnv -> Either CompilerError [String]
-generateFunctionsBatchedWith memo genBoil env0 =
+generateFunctionsBatchedWith :: Bool -> Bool -> CheckedIR -> Either CompilerError [String]
+generateFunctionsBatchedWith memo genBoil checked =
+ let env0 = checkedEnv checked in
   -- A refusal is worded from the mangled environment below; report it in the
   -- names the user wrote ('unmangleDiagnostic').
   first (unmangleDiagnostic pyMangle env0) (emitBatched memo genBoil env0)

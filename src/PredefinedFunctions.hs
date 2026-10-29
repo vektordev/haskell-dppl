@@ -32,6 +32,7 @@ import SPLL.Lang.Lang
 import Data.Maybe (fromJust, fromMaybe)
 import SPLL.Lang.Types
 import IRInterpreter
+import SPLL.IRTypeCheck (checkIR, showIRTypeError)
 import SPLL.IR.Neural (noNeurals)
 import qualified Data.Bifunctor
 import StandardLibrary (invokeStandardFunction, stdListProd)
@@ -712,8 +713,12 @@ propagateValues adtsDecl name values = case sequence (propagateValuesLazily adts
 -- once the result type's whole domain has turned up) consumes this instead and
 -- stops early (task agreement-compile-time-quadratic-in-domain).
 propagateValuesLazily :: [ADTDecl] -> String -> [[Value]] -> [Either String Value]
-propagateValuesLazily adtsDecl name values = map (fmap (fmap failConversionRev) . generateDet noNeurals (IREnv [] (map irADTDecl adtsDecl) []) []) letInBlocks
+propagateValuesLazily adtsDecl name values = map (fmap (fmap failConversionRev) . generateDet noNeurals adtOnlyEnv []) letInBlocks
   where
+    -- An environment of just the ADTs' implicit functions; checking it is the
+    -- handover for this interpreter use (it holds no function groups).
+    adtOnlyEnv = either (\err -> error ("propagateValuesLazily: " ++ showIRTypeError err)) id
+                   (checkIR [] (IREnv [] (map irADTDecl adtsDecl) []))
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) applicableProd
     -- An ADT field accessor / constructor test is partial: it is undefined on a

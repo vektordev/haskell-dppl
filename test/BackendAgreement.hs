@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Backend agreement (docs-repo task @backend-agreement-fuzzing@): the
@@ -89,6 +90,7 @@ module BackendAgreement
   , allBodies
   ) where
 
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import Control.Exception (SomeException, SomeAsyncException(..), try, evaluate, fromException, throwIO)
 import Data.Char (toLower, isSpace)
 import Data.List (intercalate, isPrefixOf, find)
@@ -195,7 +197,7 @@ data Answer = Answered Double Int Bool      -- ^ probability, dim, impossible
 -- through ('End2EndTesting.resolveNeuralParams').
 data AgreementCase = AgreementCase
   { acProgram     :: Program
-  , acEnv         :: IREnv
+  , acEnv         :: CheckedIR
   , acBackendArgs :: [IRValue]
   , acNets        :: [String]
   , acQueries     :: [(Query, Answer)]
@@ -222,7 +224,7 @@ renderDisagreement d = unlines
 -- answer (a refusal, a missing variant, a malformed result). Pure; the
 -- caller forces it under its own timeout. @args@ are @main@'s; a body query
 -- takes its own and is answered by 'interpreterBodyAnswer' instead.
-interpreterAnswer :: Program -> IREnv -> [IRValue] -> Query -> Maybe Answer
+interpreterAnswer :: Program -> CheckedIR -> [IRValue] -> Query -> Maybe Answer
 interpreterAnswer p env args q = case run of
   Just (Right r@(VProbDim pr d)) -> Just (Answered pr d (fromMaybe False (resultImpossible r)))
   _ -> Nothing
@@ -255,7 +257,7 @@ answersAgree _ _ = False
 -- envelope, not the resolved vector the query carries). 'Nothing' where it
 -- does not answer: no such body, a 'Left', or a result that is not a flat
 -- vector of floats. Pure, like 'interpreterAnswer'.
-interpreterBodyAnswer :: Program -> IREnv -> [IRValue] -> Query -> Maybe Answer
+interpreterBodyAnswer :: Program -> CheckedIR -> [IRValue] -> Query -> Maybe Answer
 interpreterBodyAnswer p env args q = case q of
   QNormal g _ -> do
     (body, _) <- normalFun (lookupIREnv g env)
@@ -805,7 +807,7 @@ data BatchedGroup = BatchedGroup
 -- module and its groups.
 data BatchedCase = BatchedCase
   { bcCase   :: AgreementCase
-  , bcEnv    :: IREnv
+  , bcEnv    :: CheckedIR
   , bcSource :: String
   , bcGroups :: [BatchedGroup]
   }
@@ -905,7 +907,7 @@ batchedRefusalReason msg0 = take 90 $ case breakOn "outside the tensor fragment:
 -- probability and integrate body, from the batched compile (so after the
 -- select pass: @IRSelect@ rather than @IRIf@ where it applied).
 batchedComparedBodies :: BatchedCase -> [IRExpr]
-batchedComparedBodies = inferenceBodies . bcEnv
+batchedComparedBodies = inferenceBodies . checkedEnv . bcEnv
 
 -- | The batched driver: every case in one torch process, each module in its
 -- own namespace with its network mocks ('End2EndTesting.batchedMockExpr'),
@@ -1012,12 +1014,13 @@ runBatchedPythonBatch py cases = withSystemTempDirectory "nest-batched" $ \dir -
 -- kind was answered for, and, when any writeLogits query was, the per-tuple-
 -- component normal functions a writeLogits body calls.
 comparedBodies :: AgreementCase -> [IRExpr]
-comparedBodies c = inferenceBodies env ++
+comparedBodies c = inferenceBodies (checkedEnv env) ++
   [ b | g <- gs, Just (b, _) <- [normalFun g], groupName g `elem` normals ] ++
   [ b | g <- gs, Just (b, _) <- [writeLogitsFun g], groupName g `elem` logits ] ++
   [ b | not (null logits), g <- gs, Just _ <- [componentNormalName (groupName g)], Just (b, _) <- [normalFun g] ]
   where
-    env@(IREnv gs _ _) = acEnv c
+    env = acEnv c
+    IREnv gs _ _ = checkedEnv env
     normals = [ g | (QNormal g _, _) <- acQueries c ]
     logits = [ g | (QWriteLogits g _, _) <- acQueries c ]
 

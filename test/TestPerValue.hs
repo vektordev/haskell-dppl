@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 -- | Per-value queries (task per-value-query-over-enumerated-slot,
 -- "SPLL.PerValue"): a function whose signature marks one result slot
@@ -37,6 +38,7 @@ import System.Process (readProcessWithExitCode)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertFailure, assertEqual, assertBool, Assertion)
 import Text.Megaparsec (errorBundlePretty)
+import SPLL.IRTypeCheck (CheckedIR, pattern CheckedEnv)
 
 perValueTests :: TestTree
 perValueTests = testGroup "PerValue"
@@ -191,7 +193,7 @@ parseOrFail src = case tryParseProgram "<per-value>" src of
   Left err -> assertFailure (errorBundlePretty err) >> error "unreachable"
   Right p -> return p
 
-compileOrFail :: CompilerConfig -> Program -> IO IREnv
+compileOrFail :: CompilerConfig -> Program -> IO CheckedIR
 compileOrFail conf p = case compile conf p of
   Left err -> assertFailure err >> error "unreachable"
   Right env -> return env
@@ -212,12 +214,12 @@ decodePerValue (VTuple (VTensor _ ps) (VTuple (VTensor _ ds) (VTuple (VTensor _ 
         bool x = Left ("not a bool: " ++ show x)
 decodePerValue v = Left ("not a per-value result: " ++ show v)
 
-perValueQuery :: Program -> IREnv -> String -> [IRValue] -> IRValue -> IO PerValue
+perValueQuery :: Program -> CheckedIR -> String -> [IRValue] -> IRValue -> IO PerValue
 perValueQuery p env f args q = case runProbNamedC p env f args q of
   Left err -> assertFailure (f ++ " at " ++ show q ++ ": " ++ err) >> error "unreachable"
   Right v -> either (\e -> assertFailure e >> error "unreachable") return (decodePerValue v)
 
-pointQuery :: Program -> IREnv -> String -> [IRValue] -> IRValue -> IO (Double, Int, Bool)
+pointQuery :: Program -> CheckedIR -> String -> [IRValue] -> IRValue -> IO (Double, Int, Bool)
 pointQuery p env f args q = case runProbNamedC p env f args q of
   Left err -> assertFailure (f ++ " at " ++ show q ++ ": " ++ err) >> error "unreachable"
   Right v@(VProbDim pr d) | Just imp <- resultImpossible v -> return (pr, d, imp)
@@ -230,7 +232,7 @@ sumTolerance = 1e-12
 -- | The two defining properties at one query: every element is the point
 -- query of @point@ with the slot set to that value, and the sum is the point
 -- query with the slot ANY. Returns the vector, for further checks.
-checkAgreement :: Program -> IREnv -> String -> String -> [SigStep] -> [IRValue] -> IRValue -> IO PerValue
+checkAgreement :: Program -> CheckedIR -> String -> String -> [SigStep] -> [IRValue] -> IRValue -> IO PerValue
 checkAgreement p env f point path args q = do
   r <- perValueQuery p env f args q
   assertBool (f ++ ": empty domain") (not (null (pvValues r)))
@@ -247,12 +249,12 @@ checkAgreement p env f point path args q = do
   where zip4 (a:as) (b:bs) (c:cs) (d:ds) = (a, b, c, d) : zip4 as bs cs ds
         zip4 _ _ _ _ = []
 
-groupNamed :: IREnv -> String -> Maybe IRFunGroup
-groupNamed (IREnv gs _ _) n = case [ g | g <- gs, groupName g == n ] of
+groupNamed :: CheckedIR -> String -> Maybe IRFunGroup
+groupNamed (CheckedEnv (IREnv gs _ _)) n = case [ g | g <- gs, groupName g == n ] of
   (g : _) -> Just g
   [] -> Nothing
 
-refusalOf :: IREnv -> String -> String -> Maybe String
+refusalOf :: CheckedIR -> String -> String -> Maybe String
 refusalOf env f lbl = groupNamed env f >>= fmap refusalReason . lookup lbl . refusedVariants
 
 -- | Does the IR contain a node satisfying the predicate?
@@ -284,7 +286,7 @@ isReduce _ = False
 callsVar :: String -> IRExpr -> Bool
 callsVar n = irAny (\x -> case x of IRVar m -> m == n; _ -> False)
 
-probBody :: IREnv -> String -> IO IRExpr
+probBody :: CheckedIR -> String -> IO IRExpr
 probBody env f = case groupNamed env f >>= probFun of
   Just (body, _) -> return body
   Nothing -> assertFailure ("no probability function for " ++ f) >> error "unreachable"
@@ -614,7 +616,7 @@ batchedGuessWho = do
 
 -- | Run one per-value function's checks in one python3 process: every element
 -- against the point query at that value, and the sum against the ANY query.
-python :: Program -> IREnv -> String -> String -> [SigStep] -> [IRValue] -> [IRValue] -> Assertion
+python :: Program -> CheckedIR -> String -> String -> [SigStep] -> [IRValue] -> [IRValue] -> Assertion
 python p env f point path args qs = do
   projectDir <- getCurrentDirectory
   let src = unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
@@ -644,7 +646,7 @@ python p env f point path args qs = do
     stepIx SigSnd = 1
 
 -- | The Julia twin of 'python', every program in one julia process.
-julia :: [(Program, IREnv, String, String, [SigStep], [IRValue], [IRValue])] -> Assertion
+julia :: [(Program, CheckedIR, String, String, [SigStep], [IRValue], [IRValue])] -> Assertion
 julia programs = do
   projectDir <- getCurrentDirectory
   let body = concat

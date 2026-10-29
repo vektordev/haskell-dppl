@@ -431,7 +431,11 @@ externals) on two environments of the same compile: the IR before the
 optimizer, after the select pass (`"After Select Pass"`, which is where
 `IRSelect` enters under `--batched`), and the final one. A failure names
 the stage: `pre-optimizer` is a compiler violation, `final` alone an optimizer
-or batched post-pass one. A corpus row can pass over a violating IR whose
+or batched post-pass one. Since `CheckedIR` (step C3 of ir-package-boundary)
+`Prelude.compile` checks the IR itself, once, after the per-value install, and
+every pass checks its output: the first is a compile error (stage `handover`
+here), the second raises (stage `pass`). The two checks above are independent
+of that wiring. A corpus row can pass over a violating IR whose
 offending code is unreachable, so this checks what the rows cannot.
 
 - **Default tier**, `IRContract.Corpus`: every non-`slow` program, compiled at

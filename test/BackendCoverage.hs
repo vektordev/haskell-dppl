@@ -33,6 +33,7 @@
 -- draws through the interpreter.
 module BackendCoverage (backendCoverageTests, irGeneratorCoverageTests, fuzzCoverageExceptions, batchedFuzzCoverageExceptions, irGeneratorDeferred) where
 
+import SPLL.IRTypeCheck (checkedEnv)
 import Control.Exception (SomeException, try, evaluate)
 import Control.Monad (forM)
 import Data.Either (rights)
@@ -273,7 +274,7 @@ corpusConstructsWith :: CompilerConfig -> (IREnv -> [IRExpr]) -> [CorpusEntry] -
 corpusConstructsWith conf which entries =
   fmap concat $ forM entries $ \e -> do
       let p = ceProgram e
-      r <- timeout (30 * 1000 * 1000) $ try (evaluate (forceList (either (const []) (irEnvConstructs which) (compile conf p))))
+      r <- timeout (30 * 1000 * 1000) $ try (evaluate (forceList (either (const []) (irEnvConstructs which . checkedEnv) (compile conf p))))
       return $ case r of
         Just (Right cs) -> [(ceName e, cs)]
         Just (Left (_ :: SomeException)) -> []

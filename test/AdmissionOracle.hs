@@ -60,6 +60,7 @@ import SPLL.Typing.PType (PType(..))
 import SPLL.IntermediateRepresentation
 import SPLL.CompilerConfig
 import SPLL.Prelude (compile, admissionTyped, runGenNamedC, runProbNamedC, runIntegNamedC)
+import SPLL.IRTypeCheck (checkedEnv)
 
 -- | Which compiled variant a check exercised.
 data Mode = ModeCompile | ModeGenerate | ModeProbability | ModeIntegrate
@@ -214,7 +215,7 @@ admissionCheckAt conf p mainArgSets = do
             | otherwise = [ (nm, pt,  ModeGenerate) | (nm, pt) <- verdicts ]
       return [ Check nm pt m (Crash ("compile (generate-only " ++ (if genOk then "succeeds" else "crashes too") ++ "): " ++ msg)) | (nm, pt, m) <- blamed ]
 
-    checkFunction tp env (nm, pt) = case find ((== nm) . groupName) (groups env) of
+    checkFunction tp env (nm, pt) = case find ((== nm) . groupName) (groups (checkedEnv env)) of
       Nothing -> return [Check nm pt ModeCompile (Refusal "no compiled group")]
       Just grp
         -- An admitted variant absent WITH a recorded reason is the IR compiler

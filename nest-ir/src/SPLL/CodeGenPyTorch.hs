@@ -20,6 +20,7 @@ module SPLL.CodeGenPyTorch (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, pythonNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.PythonNesting (tooDeepForPython, spillDeep, adtCallees, renameFree, pythonMaxIndent, blockIndent, bindIterable, hasAssignmentExpr)
@@ -228,15 +229,16 @@ onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
 onHead _ [] = []
 
-generateFunctions :: Bool -> IREnv -> [String]
+generateFunctions :: Bool -> CheckedIR -> [String]
 generateFunctions = generateFunctionsWith False
 
 -- | 'generateFunctions', with the recursion memo ('memoPlan') switched on by
 -- the first argument (CLI @--memoRecursion@). Off, the output is exactly
 -- 'generateFunctions''.
-generateFunctionsWith :: Bool -> Bool -> IREnv -> [String]
+generateFunctionsWith :: Bool -> Bool -> CheckedIR -> [String]
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
-generateFunctionsWith memo genBoil env0 =
+generateFunctionsWith memo genBoil checked =
+  let env0 = checkedEnv checked in
     -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
     -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
     -- M1, strategy B).

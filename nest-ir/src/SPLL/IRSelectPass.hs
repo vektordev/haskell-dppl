@@ -17,6 +17,7 @@
 -- milestones.
 module SPLL.IRSelectPass
   ( selectPassEnv
+  , selectPassIREnv
   , selectPassExpr
   , isTensorFragment
   , desugarSelectEnv
@@ -24,12 +25,17 @@ module SPLL.IRSelectPass
   ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (CheckedIR, passOver)
 
 -- | Run the select pass over an environment's probability and integration
 -- functions. Generate functions are left untouched: batched sampling is a
 -- separate milestone (M4), and their random draws are not select material.
-selectPassEnv :: IREnv -> IREnv
-selectPassEnv (IREnv groups adts globals) =
+selectPassEnv :: CheckedIR -> CheckedIR
+selectPassEnv = passOver "select pass" selectPassIREnv
+
+-- | 'selectPassEnv' on the bare environment.
+selectPassIREnv :: IREnv -> IREnv
+selectPassIREnv (IREnv groups adts globals) =
   IREnv (map selectPassGroup groups) adts globals
 
 selectPassGroup :: IRFunGroup -> IRFunGroup

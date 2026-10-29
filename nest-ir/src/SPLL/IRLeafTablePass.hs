@@ -47,6 +47,7 @@
 -- once per value already.
 module SPLL.IRLeafTablePass
   ( leafTablePassEnv
+  , leafTablePassIREnv
   , leafTablePassExpr
   ) where
 
@@ -56,14 +57,19 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (CheckedIR, passOver)
 import SPLL.IROptimizer (allNamesIR)
 import SPLL.IR.Value (GenericValue(..))
 import SPLL.ReservedNames (neuralReadLogitsSuffix)
 
 -- | Run the rewrite over the probability and integrate bodies of every
 -- function group. @neurals@ are the program's neural declaration names.
-leafTablePassEnv :: Set.Set String -> IREnv -> IREnv
-leafTablePassEnv neurals (IREnv groups adts globals) =
+leafTablePassEnv :: Set.Set String -> CheckedIR -> CheckedIR
+leafTablePassEnv neurals = passOver "leaf-table pass" (leafTablePassIREnv neurals)
+
+-- | 'leafTablePassEnv' on the bare environment.
+leafTablePassIREnv :: Set.Set String -> IREnv -> IREnv
+leafTablePassIREnv neurals (IREnv groups adts globals) =
   IREnv (map onGroup groups) adts globals
   where
     onGroup g = g
