@@ -1,0 +1,2 @@
+loop r = draw q = r in if q < 1 then 0 else if False then loop (q - 1) else fst (head [(7, 0)])
+main = loop (if Uniform < 0.5 then 2 else 1)

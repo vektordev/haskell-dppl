@@ -1,0 +1,1 @@
+main = draw e = (Normal, if Uniform < 0.3 then 0 else 1) in draw e2 = e in draw y = e2 in (y, if snd y == 0 then 1.0 else 2.0)

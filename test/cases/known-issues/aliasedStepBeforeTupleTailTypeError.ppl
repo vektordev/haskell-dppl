@@ -1,0 +1,6 @@
+mk a b = (a, (b, (1.0, 2.0)))
+main =
+  draw s1 = Normal in
+  draw s2 = s1 + Normal in
+  draw y = s2 in
+  mk s1 y

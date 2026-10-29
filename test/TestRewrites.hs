@@ -67,14 +67,20 @@ import End2EndTesting (programRuntimeFields)
 -- does not deliver:
 --
 -- * 'AliasIntro': was assigned to M1, reinfer-body-under-recovered-bindings,
---   which cut its logged frontier from 75 to 50 but did not close it. What is
---   left is not re-inference's class (a variable's stale type after it is
---   recovered): an alias between a curried function's parameters
---   (@constructEquivalenceClauses@, ~21), tagged or higher-order invocations
---   (~15), an alias of a function parameter handed to the Gaussian catch-all
---   with nothing recovered (2), and a witness seeded through an aliased chain
---   refusing an ANY marginal. Those belong to M2 and M6, so the family stays
---   log-only until the later of the two lands;
+--   which cut its logged frontier from 75 to 50 but did not close it. At
+--   8924628 promoting it fails 22 corpus programs and 1 sequence seed (20261015), all
+--   refusals of the rewritten program that the original answers. They belong
+--   to open tickets, so the family stays log-only until those resolve:
+--   alias-between-curried-lambdas-refuses-enumerable-and-function-arguments
+--   (leadingRandomArgumentCurried, namedHof*, observePredicateParameterLambda,
+--   witnessThroughDetIfNamed(Last)), alias-of-recursive-helper-parameter-
+--   refuses-with-random-argument (recursive*, decreasingRecursion*,
+--   recursionDepthFromSample, leadingRandomStateMarkovChain,
+--   listIndexFromSample), theta-anchor-through-callee-local-binding (the two
+--   theta* rows), gaussian-catch-all-dispatch-on-codegen-law
+--   (normalThroughFunctionParam, paramPairHelperFst,
+--   correlatedGaussianLetSharesLatent), alias-before-helper-built-tuple-tail-
+--   approx-type-error and alias-chain-of-structured-draw-any-marginal-refused;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
 -- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates. Its
 --   in-place engine (a binding read once, with no binder on the way, measured
