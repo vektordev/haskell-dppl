@@ -6748,7 +6748,18 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- collapsed? Only an application does; a locally assembled 'IRConstruct'
     -- keeps its four fields. Both branch forms must agree, and an alias
     -- inherits the classification of what it aliases.
+    --
+    -- A redex of a literal lambda is a let, and is read as one: it holds a
+    -- callee result only if the lambda's body does. In a probability
+    -- function every other application counts as a call (@isCall@ is
+    -- @const True@ there), and the deterministic-application leaf binds
+    -- @(\\p2 -> (s1, (p2, (s3, 0.0)))) (s1 + s2)@ to compare it against the
+    -- sample: read as a callee's result, its third and fourth fields were
+    -- shifted like a result's bc and flag (task
+    -- trajectory-tail-bound-as-tuple-type-error).
     holdsCalleeResult isCall env v = case v of
+      IRApply (IRLambda n irBody) b ->
+        holdsCalleeResult isCall (rebind n (holdsCalleeResult isCall env b) env) irBody
       IRApply _ _      -> isCall v
       IRVar x          -> x `Set.member` env
       IRLetIn n b irBody -> holdsCalleeResult isCall (rebind n (holdsCalleeResult isCall env b) env) irBody
