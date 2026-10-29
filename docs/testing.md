@@ -435,17 +435,15 @@ or batched post-pass one. A corpus row can pass over a violating IR whose
 offending code is unreachable, so this checks what the rows cannot.
 
 - **Default tier**, `IRContract.Corpus`: every non-`slow` program, compiled at
-  the default config and with `--batched`; and `IRContract.KnownIssues`, the
-  known-issues programs (but not the performance pins, which have no program
-  to check). About 4 s wall, 20 s summed. The checker itself is cheap (about a
+  the default config, with `--batched` and with `--topK 0.1`; and
+  `IRContract.KnownIssues`, the known-issues programs (but not the performance
+  pins, which have no program to check). About 6 s wall (`--topK` adds about
+  2 s). The checker itself is cheap (about a
   second over the whole corpus); the cost is the compile, which the sweep does
   not share with other sweeps.
 - **Slow tier**, `Slow.IRContractConfigs (slow)`: `--logSpace` and
-  `--countBranches` for every program, and all four configs for the `slow`
+  `--countBranches` for every program, and all five configs for the `slow`
   programs.
-- **Not covered**: `--topK`. Under it, 187 corpus programs fail the checker
-  because every `writeLogits` function reads `main_prob` as if it took no
-  cutoff (docs task `writelogits-calls-prob-without-topk-arguments`).
 - **Known violations.** `ir-contract: violated "<substring>"` in a `.tst`
   (ordinary or known-issues) requires some check to be rejected with a
   message containing the substring, and fails the day the program checks, like

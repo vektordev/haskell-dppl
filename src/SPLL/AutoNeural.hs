@@ -34,7 +34,7 @@ import SPLL.Typing.RType
 import SPLL.IR.Type (IRType(..))
 import SPLL.IRTypeBridge (irTypeOfRType)
 import SPLL.Lang.Lang
-import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName)
+import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName, topKCutoffName)
 import StandardLibrary
 import SPLL.Semiring (Semiring (..), mkSemiring, fromLinearSR, scaledNormalDensity, sumAllSR)
 
@@ -690,10 +690,11 @@ makeWriteLogitsPlan :: (IRValue -> IRValue)  -- ^ wrap: rebuild the full sample 
                -> String                -- ^ prob function name
                -> String                -- ^ normal function name for this position
                -> Maybe IRExpr          -- ^ arm normaliser: P(enclosing arm), or Nothing at the root
+               -> [IRExpr]              -- ^ extra arguments of a prob call after the sample (topK's)
                -> PartitionPlan
                -> [IRExpr]              -- ^ outer parameters in scope
                -> IRExpr
-makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan of
+makeWriteLogitsPlan wrap probFnName normalFnName norm probExtra plan outerArgs = case plan of
   Discretes _ (MultiDiscretes vals) ->
     irList [ slot (marginal (wrap (valueToIR v))) | v <- vals ]
 
@@ -760,10 +761,10 @@ makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan
   -- ('requiredNormalFns'), so every writeLogits over one is refused before this.
   TensorPlan _ _ -> error "makeWriteLogitsPlan: a tensor plan has no writeLogits (refused by requiredNormalFns)"
   where
-    rec w nf n p = makeWriteLogitsPlan w probFnName nf n p outerArgs
+    rec w nf n p = makeWriteLogitsPlan w probFnName nf n probExtra p outerArgs
     irList       = irListE
     emptyList    = IRConst (VList EmptyList)
-    marginal s   = IRDestruct AcFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs)
+    marginal s   = IRDestruct AcFst (foldl IRApply (IRVar probFnName) (IRConst s : probExtra ++ outerArgs))
     slot p       = maybe p (IROp OpDiv p) norm
 
     -- An arm whose probability is exactly zero is dead: its conditional slots would be
@@ -871,11 +872,24 @@ concatIR xs = case filter (not . isEmptyIR) xs of
 -- writeLogits(p1)(p2)... derives the logit vector from compiled SPLL inference functions
 -- (main_prob, main_normal) — it does NOT call the NN or accept a sample argument.
 makeWriteLogits :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> [String] -> IRExpr
-makeWriteLogits _adtDecls _conf plan probFnName normalFnName paramNames =
+makeWriteLogits _adtDecls conf plan probFnName normalFnName paramNames =
   foldr IRLambda body paramNames
   where
     outerArgs = map IRVar paramNames
-    body = makeWriteLogitsPlan id probFnName normalFnName Nothing plan outerArgs
+    body = makeWriteLogitsPlan id probFnName normalFnName Nothing (topKProbArgs conf) plan outerArgs
+
+-- | The arguments a writeLogits body passes its prob function after the sample.
+-- Under 'topKThreshold' a prob function also takes the accumulated path
+-- probability and the runtime cutoff (as every other caller passes them,
+-- 'IRCompiler.unpruned'). writeLogits wants each slot's exact marginal, so the
+-- accumulated probability is infinite -- no arm is cut whatever the cutoff --
+-- and the cutoff is the compiled-in default (task
+-- writelogits-calls-prob-without-topk-arguments). A normal function takes
+-- neither.
+topKProbArgs :: CompilerConfig -> [IRExpr]
+topKProbArgs conf = case topKThreshold conf of
+  Nothing -> []
+  Just _  -> [IRConst (VFloat (1 / 0)), IRVar topKCutoffName]
 
 -- Find the flat logit-vector index for a given value within a plan.
 -- For TuplePlan, searches the left sub-plan first, then the right at offset getSize a.

@@ -30,9 +30,6 @@
 -- never skipped by the impact manifest: the verdict depends on the checker,
 -- which the manifest's keys do not cover, and a skipped program would not be
 -- checked.
---
--- Not covered: @--topK@, whose @writeLogits@ functions read @main_prob@ as if
--- it took no cutoff (docs task writelogits-calls-prob-without-topk-arguments).
 module TestIRContract
   ( irContractTests
   , slowIrContractTests
@@ -62,9 +59,11 @@ import CorpusSweep
 import TestCaseParser (ExpectFailure(..), TstFile(..), corpusRoot, parseTstFileFromString)
 
 -- | The configurations a program is compiled under, by tier. The default tier
--- covers the scalar and the batched pipeline (the latter adds @IRSelect@).
+-- covers the scalar and the batched pipeline (the latter adds @IRSelect@),
+-- and the scalar one under @--topK@ (a prob function's extra accumulated
+-- probability and cutoff parameters, which every caller must pass).
 -- The Slow tier adds the log-space and branch-counting variants of every
--- program, and all four for the programs that are @slow@ themselves.
+-- program, and all five for the programs that are @slow@ themselves.
 contractConfigs :: Tier -> Bool -> [(String, CompilerConfig)]
 contractConfigs Default _ = scalarAndBatched
 contractConfigs _ slowProgram =
@@ -75,7 +74,8 @@ contractConfigs _ slowProgram =
 scalarAndBatched :: [(String, CompilerConfig)]
 scalarAndBatched =
   [ ("default", defaultCompilerConfig)
-  , ("batched", defaultCompilerConfig { batched = True }) ]
+  , ("batched", defaultCompilerConfig { batched = True })
+  , ("topK", defaultCompilerConfig { topKThreshold = Just 0.1 }) ]
 
 -- | One check: which config and stage, and the checker's message if it
 -- rejected the environment.

@@ -32,7 +32,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, batchedPerElementEvaluatorTests, branchCountBackendTests, topKRuntimeCutoffTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, batchedPerElementEvaluatorTests, branchCountBackendTests, topKRuntimeCutoffTests, topKWriteLogitsTests)
 import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
 import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rewriteIntegrationTests, ofToggleCorpusTests)
@@ -666,6 +666,7 @@ main = do
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests
     , topKRuntimeCutoffTests
+    , topKWriteLogitsTests
     , wideNeuralDomainTests
     , deepExpressionSpillTests
     , deepIndentationHoistTests

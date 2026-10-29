@@ -4695,3 +4695,63 @@ topKRuntimeCutoffTests = testGroup "topK runtime cutoff"
       return $ case ec of
         ExitSuccess -> compare1 ("julia " ++ name) out src
         ExitFailure _ -> counterexample ("julia " ++ name ++ " failed:\n" ++ out ++ err) False
+
+-- | Under topK a prob function also takes the accumulated probability and the
+-- cutoff, and an auto-generated writeLogits must pass them like every other
+-- caller (task writelogits-calls-prob-without-topk-arguments): it called
+-- @cond.forward(True)@, a TypeError in Python, and the interpreter answered a
+-- closure. The fixture's True mass is 0.2 + 0.4: its 0.2 arm is pruned at
+-- cutoff 0.3 from the root, so a pruned call would give 0.4. writeLogits wants
+-- the exact marginal, [0.6, 0.4], in every backend.
+topKWriteLogitsTests :: TestTree
+topKWriteLogitsTests = testGroup "topK writeLogits"
+  [ testProperty "interpreter: unpruned marginals" $ once $ check "interpreter" (interp (env False))
+    -- What writeLogits answers under logSpace is not this task's (it reads the
+    -- prob function's log probabilities); topK must only not change it.
+  , testProperty "interpreter, logSpace: topK does not change writeLogits" $ once $
+      let got = interp (env True)
+          base = interp (compileWith defaultCompilerConfig { logSpace = True })
+      in counterexample ("topK " ++ show got ++ " /= no topK " ++ show base)
+           (length got == length base && and (zipWith (\a b -> abs (a - b) <= writeLogitsSlotTolerance) got base))
+  , testProperty "the fixture is not vacuous: a root prob query prunes the 0.2 arm" $ once $
+      case runProbC prog (env False) [] (VBool True) of
+        Right (VProbDim p _) -> counterexample ("P(True) under topK = " ++ show p) (abs (p - 0.4) <= probTolerance)
+        other -> counterexample ("unexpected " ++ show other) False
+  , testProperty "emitted Python calls prob with the topK arguments" $ once $ ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorchProperty "topK writeLogits (Python)"
+        Just py -> do
+          cwd <- getCurrentDirectory
+          let code = unlines (SPLL.CodeGenPyTorch.generateFunctions True (env False))
+              script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ code
+                ++ "\nprint(' '.join(str(float(x)) for x in main.writeLogits()))\n"
+          runScript "python" py [] "topk_writelogits.py" script
+  , testProperty "emitted Julia calls prob with the topK arguments" $ once $ ioProperty $ do
+      projectDir <- getCurrentDirectory
+      let code = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions (env False))
+          script = "include(\"" ++ projectDir ++ "/juliaLib.jl\")\nusing .JuliaSPPLLib\n"
+            ++ "module P\nusing ..JuliaSPPLLib\n" ++ code ++ "\nend\n"
+            ++ "println(join([string(Float64(x)) for x in P.main_writeLogits()], \" \"))\n"
+      runScript "julia" "julia" juliaTestFlags "topk_writelogits.jl" script
+  ]
+  where
+    src = "main = if Uniform < 0.2 then True else Uniform < 0.5"
+    prog = either (error . show) id (tryParseProgram "" src)
+    compileWith c = either (error . show) id (compile c prog)
+    env logS = compileWith defaultCompilerConfig { topKThreshold = Just 0.3, logSpace = logS }
+    want = [0.6, 0.4] :: [Double]
+    interp e = case runWriteLogitsC prog e "main" [] of
+      Right (VList l) -> [ x | VFloat x <- toList l ]
+      other -> error ("writeLogits returned " ++ show other)
+    check tag got = counterexample (tag ++ ": got " ++ show got ++ ", want " ++ show want)
+      (length got == length want && and (zipWith (\a b -> abs (a - b) <= writeLogitsSlotTolerance) got want))
+    runScript tag exe flags file script = do
+      (ec, out, err) <- withSystemTempFile file $ \tmpPath h -> do
+        hPutStr h script >> hClose h
+        readProcessWithExitCode exe (flags ++ [tmpPath]) ""
+      return $ case ec of
+        ExitSuccess -> case lines out of
+          [] -> counterexample (tag ++ ": no output\n" ++ err) False
+          ls -> check tag (map read (words (last ls)))
+        ExitFailure _ -> counterexample (tag ++ " failed:\n" ++ out ++ err) False
