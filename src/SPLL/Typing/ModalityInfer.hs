@@ -1201,7 +1201,10 @@ letBinding ctx env lti x body arg argLaw
     -- also a conditional body ('enumerableApplication' walks the body,
     -- which made a let chain's calls quadratic in its length).
     bctx = ctx { icPoint = \v -> if v == x then pointBound else icPoint ctx v }
-    pointBound = isJust (enumerableDomain (tags (getTypeInfo arg)))
+    -- An alias of a point is one too, so a chain of aliases needs no engine
+    -- at any link ('pointHere').
+    pointBound = pointHere ctx env arg
+              || isJust (enumerableDomain (tags (getTypeInfo arg)))
               || isJust (planProjectedReadOf (icProg ctx) arg)
               || isJust (toInvExprMaybeWith (const True) (const True) (icFC ctx) (icADTs ctx) (chainName lti))
     needsEngine = gCap (outerI (lawMod argLaw)) /= Exact
