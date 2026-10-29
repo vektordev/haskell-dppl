@@ -87,7 +87,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 import SPLL.Lang.Types
-import SPLL.Lang.Lang (freeVarsExpr, substituteVar, renameFreeVar, getSubExprs, setSubExprs, resolveNeuralAnnotation, neuralValueType)
+import SPLL.Lang.Lang (freeVarsExpr, allNamesExpr, substituteVar, renameFreeVar, getSubExprs, setSubExprs, resolveNeuralAnnotation, neuralValueType)
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.RInfer (tryAddRTypeInfo)
 import SPLL.ReservedNames (destructBinderPrefix, observeBinderPrefix, etaBinderPrefix)
@@ -136,12 +136,6 @@ programNames :: Program -> Set.Set String
 programNames p = Set.unions
   (Set.fromList (map fst (functions p)) : Set.fromList [n | (n, _, _) <- neurals p]
    : map (allNamesExpr . snd) (functions p))
-
--- | Every name an expression mentions, free or bound.
-allNamesExpr :: Expr -> Set.Set String
-allNamesExpr (Expr _ (Var v)) = Set.singleton v
-allNamesExpr (Expr _ (Lambda x b)) = Set.insert x (allNamesExpr b)
-allNamesExpr (Expr _ f) = foldr (Set.union . allNamesExpr) Set.empty f
 
 -- | The first @prefix<k>@ not in the avoid set.
 freshName :: String -> Set.Set String -> String

@@ -4991,8 +4991,28 @@ materializeAnchors meta expr = foldM bindAnchor expr usedAnchors
     -- The free var is a (possibly invocation-tagged) anchor chain name; the
     -- source node to generate its value from is the untagged original.
     bindAnchor irBody cn = do
-      anchorIR <- toIRGenerate meta (findExprWithCN fns (untag cn))
+      anchorIR <- toIRGenerate meta (anchorAtCall meta (getTag cn) (findExprWithCN fns (untag cn)))
       return (IRLetIn cn anchorIR irBody)
+
+-- | An anchor node as its value is computed at this call site. An anchor in a
+-- callee's per-invocation copy (tag @t@) reads the callee's parameters, which
+-- are not in scope here: each such occurrence is replaced by the argument
+-- the invocation passed ('boundArgument'), itself resolved the same way where
+-- the call sits in another copied body. Going by the clause rather than by
+-- name is what keeps the anchor from reading whatever the caller happens to
+-- bind under the parameter's name, or crashing on an unbound name when it
+-- binds none (task callee-body-name-sensitive-across-call). An untagged
+-- anchor sits in the scope being compiled and is left as it is.
+anchorAtCall :: CompilerMetadata -> String -> Expr -> Expr
+anchorAtCall _ "" e = e
+anchorAtCall meta tag e0 = go Set.empty e0
+  where
+    go bound e@(Expr _ (Var n))
+      | not (n `Set.member` bound)
+      , Just argCN <- boundArgument (fcData meta) (chainName (getTypeInfo e) ++ tag)
+      = anchorAtCall meta (getTag argCN) (exprWithCN meta (untag argCN))
+    go bound (Expr t (Lambda x b)) = Expr t (Lambda x (go (Set.insert x bound) b))
+    go bound (Expr t f) = Expr t (fmap (go bound) f)
 
 createHOInverse :: CompilerMetadata -> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse meta (fVar, f) = do
@@ -5440,9 +5460,13 @@ enumerateBinding meta l v preTable compileBody = do
   -- would read the loop variable instead: its measure became @b == b@, always
   -- true, and the draw's weight vanished from the sum. Such a parameter is
   -- renamed to a fresh name first (task
-  -- rewrite-invariance-net-draw-apply-helper-alias).
+  -- rewrite-invariance-net-draw-apply-helper-alias). A name the argument
+  -- binds clashes as well: the measure is compiled at the loop variable, so a
+  -- binder of the same name inside the argument (@observe .. (\m -> m > 0)@
+  -- passed to @f m = ..@) shadows it, and the measure compared the argument's
+  -- own value with itself (task callee-body-name-sensitive-across-call).
   (boundVar, lBodyExpr) <-
-    if paramVar `Set.member` freeVarsExpr v
+    if paramVar `Set.member` allNamesExpr v
       then do
         fresh <- mkVariable paramVar
         return (fresh, renameFreeVar paramVar fresh (findExprWithCN fExprs bodyCn))
