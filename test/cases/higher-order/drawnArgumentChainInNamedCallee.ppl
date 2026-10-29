@@ -1,0 +1,2 @@
+f s1 = (s1, draw s2 = s1 + Normal in (s2, s2 + Normal))
+main = draw s1 = Normal in f s1

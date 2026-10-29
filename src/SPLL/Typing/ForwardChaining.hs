@@ -709,9 +709,19 @@ toValueExprWith pointStep clauses paramClauses adtsDecls = let pathTo = toValueP
     { invValue    = toLetInBlockWith pointWild clauses adtsDecls relevantSortedClauses
     , invCoV    = wrapInLetInBlockWith pointWild clauses adtsDecls relevantSortedClauses deriv
     , invGuard    = guardChain pointStep wild clauses adtsDecls relevantSortedClauses
+    -- Over the needed steps only, as 'computesOnCertainWildcard' is: the
+    -- path may hold steps toward other occurrences ('neededClauses'), which
+    -- the caller prunes from the inverse ('pruneDeadLetIns'), and a wildcard
+    -- one of them reads says nothing about the witness. Counted, it sent a
+    -- witness observed at a concrete slot down the unevaluable-witness route,
+    -- whose open body drops the binding's own density: @f s1 = (s1, draw s2 =
+    -- s1 + Normal in (s2, s2 + Normal)); main = draw s1 = Normal in f s1@ at
+    -- @(0.0, (0.5, ANY))@ answered phi(0.5) at dim 1 (tasks
+    -- aliased-parameter-plus-zero-marginal-loses-dim,
+    -- named-callee-binding-not-floored).
     , invReadsAny = if any (computesOnCertainWildcard adtsDecls wild) (neededClauses relevantSortedClauses)
                       then IRConst (VBool True)
-                      else readsAnyChain clauses adtsDecls relevantSortedClauses
+                      else readsAnyChain clauses adtsDecls (neededClauses relevantSortedClauses)
     , invCumValue = toLetInBlockWith (\c e -> passWild c (maybe e fst (cumStep c))) clauses adtsDecls relevantSortedClauses
     , invCumGuard = guardChainWith cumStep wild clauses adtsDecls relevantSortedClauses
     }
