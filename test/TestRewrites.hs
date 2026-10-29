@@ -79,10 +79,11 @@ import End2EndTesting (programRuntimeFields)
 --   listIndexFromSample), theta-anchor-through-callee-local-binding (the two
 --   theta* rows), gaussian-catch-all-dispatch-on-codegen-law
 --   (normalThroughFunctionParam, paramPairHelperFst,
---   correlatedGaussianLetSharesLatent), alias-before-helper-built-tuple-tail-
---   approx-type-error and alias-chain-of-structured-draw-any-marginal-refused
---   (resolved 2026-10-29 by the readsAnyChain fix of
---   aliased-parameter-plus-zero-marginal-loses-dim);
+--   correlatedGaussianLetSharesLatent); alias-chain-of-structured-draw-any-
+--   marginal-refused (resolved 2026-10-29 by the readsAnyChain fix of
+--   aliased-parameter-plus-zero-marginal-loses-dim) and alias-before-helper-
+--   built-tuple-tail-approx-type-error (resolved 2026-10-29, stripBranchCount
+--   classifying a literal-lambda redex by its body) are closed;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
 -- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates. Its
 --   in-place engine (a binding read once, with no binder on the way, measured

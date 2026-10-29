@@ -28,6 +28,7 @@ aliasedDrawScaledChain main.prob=4
 aliasedDrawThroughScalingHelper main.integ=6 main.prob=6
 aliasedParameterPlusZeroMarginalDim main.integ=5 main.prob=6
 aliasedParameterTwiceMarginalDim main.integ=5 main.prob=6
+aliasedStepBeforeHelperBuiltTupleTail main.prob=4
 anyLeafReadAgainAsCondition main__m10.prob=4
 anyLeafReadAgainInCondition main__m10.prob=9
 anyLeafReadAgainInOutput main__m01.prob=5 main__m10.prob=3

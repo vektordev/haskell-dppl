@@ -6343,10 +6343,20 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- rewrite of collapseMixture) and, read as a callee result, the shifted
     -- flag projection read @(1.0, False)@ as a Bool (the regression of
     -- 415173b, task trajectory-tail-bound-as-tuple-type-error).
+    --
+    -- A redex whose body ends in something other than a tuple is classified
+    -- by that body, its parameter bound to what the argument is: the
+    -- deterministic-application leaf binds @(\\y -> mk_gen(s1)(y)) s2@ where
+    -- a @draw y = s2@ alias precedes a helper call, and the redex itself is
+    -- no call of a generate function, so @isCall@ read the sampled four-tuple
+    -- as a callee's result and shifted its last two fields (task
+    -- alias-before-helper-built-tuple-tail-approx-type-error).
     holdsCalleeResult isCall outer env v = case v of
-      IRApply (IRLambda _ irBody) _
+      IRApply (IRLambda n irBody) arg
         | tails <- returnedTuples irBody, not (null tails) ->
             outer && any isPackedTriple tails
+        | otherwise ->
+            holdsCalleeResult isCall outer (rebind n (holdsCalleeResult isCall outer env arg) env) irBody
       IRApply _ _      -> isCall v
       IRVar x          -> x `Set.member` env
       IRLetIn n b irBody -> holdsCalleeResult isCall outer (rebind n (holdsCalleeResult isCall outer env b) env) irBody
