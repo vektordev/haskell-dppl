@@ -15,6 +15,7 @@ module TestCaseParser (
   codeVariantName,
   GrowthSpec(..),
   GrowthMetric(..),
+  isEvalMetric,
   PointCap(..),
   CompileFlag(..),
   defaultPointCap,
@@ -474,7 +475,15 @@ data GrowthMetric
   | MetricIRSize     -- ^ characters of the shown IR environment (deterministic)
   | MetricAlloc      -- ^ bytes the compile allocates (this thread's counter; near-deterministic)
   | MetricWallTime   -- ^ seconds of wall time (noisy; the fallback)
+  | MetricEvalAlloc  -- ^ bytes the interpreter allocates answering the pin's @query:@ row
+                     --   on the compiled program (the emitted code's runtime; near-deterministic)
+  | MetricEvalTime   -- ^ seconds the interpreter takes answering that row (noisy)
   deriving (Show, Eq)
+
+-- | Whether a metric runs the compiled program (and so needs a @query:@ row)
+-- rather than measuring the compile.
+isEvalMetric :: GrowthMetric -> Bool
+isEvalMetric m = m `elem` [MetricEvalAlloc, MetricEvalTime]
 
 -- | The hard per-compile limit of a performance pin: a compile that runs past
 -- either is killed and recorded as "exceeded" rather than waited for.
@@ -498,6 +507,10 @@ data GrowthSpec = GrowthSpec
   , growthMetric :: GrowthMetric
   , growthFlags  :: [CompileFlag]
   , growthCap    :: PointCap
+  , growthQuery  :: Maybe String
+    -- ^ The @query:@ line of an @eval-alloc@/@eval-time@ pin, verbatim: one
+    -- @p(...)@ or @cdf(...)@ query without an @=@ expectation, itself a
+    -- template over the knob (expanded per point, like the @.ppl@).
   } deriving (Show, Eq)
 
 -- | A double-quoted diagnostic substring, e.g. @"set-valued witness
@@ -536,6 +549,7 @@ data PerfLine
   | PerfMetric GrowthMetric
   | PerfFlags [CompileFlag]
   | PerfCap PointCap
+  | PerfQuery String
 
 -- | @expect-failure: growth above linear@ / @growth above polynomial K@,
 -- followed by a required @knob:@ line and optional @metric:@, @flags:@, @cap:@.
@@ -554,11 +568,16 @@ pGrowthPin = do
   metric <- atMostOne "metric:" MetricCodeSize [ m | PerfMetric m <- perf ]
   flags <- atMostOne "flags:" [] [ f | PerfFlags f <- perf ]
   cap <- atMostOne "cap:" defaultPointCap [ c | PerfCap c <- perf ]
+  query <- atMostOne "query:" Nothing [ Just q | PerfQuery q <- perf ]
+  case (isEvalMetric metric, query) of
+    (True, Nothing) -> fail "an `eval-alloc`/`eval-time` growth pin needs a `query:` line (the p()/cdf() query it runs)"
+    (False, Just _) -> fail "a `query:` line belongs to an `eval-alloc`/`eval-time` growth pin only"
+    _ -> return ()
   if degree < 1 then fail "a growth pin's polynomial degree must be at least 1" else return ()
   if length vals < 2 || or (zipWith (>=) vals (drop 1 vals)) || any (< 1) vals
     then fail "a growth pin's knob values must be at least two positive, strictly increasing integers"
     else return ()
-  return (ExpectGrowthAbove (GrowthSpec degree knob vals metric flags cap))
+  return (ExpectGrowthAbove (GrowthSpec degree knob vals metric flags cap query))
 
 -- | @expect-failure: code-size above 40 KB@, followed by optional @flags:@
 -- and @cap:@ lines. Units are decimal: B, KB (1000 B), MB (10^6 B).
@@ -569,8 +588,8 @@ pCodeSizePin = do
   bytes <- pByteSize
   pNewline
   perf <- many (try pPerfLine)
-  if not (null [ () | PerfKnob _ _ <- perf ] && null [ () | PerfMetric _ <- perf ])
-    then fail "a `code-size above` pin takes no `knob:` or `metric:` line (it measures one program's emitted Python)"
+  if not (null [ () | PerfKnob _ _ <- perf ] && null [ () | PerfMetric _ <- perf ] && null [ () | PerfQuery _ <- perf ])
+    then fail "a `code-size above` pin takes no `knob:`, `metric:` or `query:` line (it measures one program's emitted Python)"
     else return ()
   flags <- atMostOne "flags:" [] [ f | PerfFlags f <- perf ]
   cap <- atMostOne "cap:" defaultPointCap [ c | PerfCap c <- perf ]
@@ -584,8 +603,8 @@ pHangPin = do
   symbol "hang"
   pNewline
   perf <- many (try pPerfLine)
-  if not (null [ () | PerfKnob _ _ <- perf ] && null [ () | PerfMetric _ <- perf ])
-    then fail "a `hang` pin takes no `knob:` or `metric:` line (it compiles one program)"
+  if not (null [ () | PerfKnob _ _ <- perf ] && null [ () | PerfMetric _ <- perf ] && null [ () | PerfQuery _ <- perf ])
+    then fail "a `hang` pin takes no `knob:`, `metric:` or `query:` line (it compiles one program)"
     else return ()
   flags <- atMostOne "flags:" [] [ f | PerfFlags f <- perf ]
   cap <- atMostOne "cap:" defaultPointCap [ c | PerfCap c <- perf ]
@@ -607,7 +626,7 @@ pSeconds :: MonadParser m => m Double
 pSeconds = L.lexeme sc (try L.float <|> (fromInteger <$> L.decimal))
 
 pPerfLine :: MonadParser m => m PerfLine
-pPerfLine = choice [pKnobLine, pMetricLine, pFlagsLine, pCapLine] <* pNewline
+pPerfLine = choice [pKnobLine, pMetricLine, pFlagsLine, pCapLine, pQueryLine] <* pNewline
   where
     pKnobLine = do
       symbol "knob:"
@@ -619,9 +638,17 @@ pPerfLine = choice [pKnobLine, pMetricLine, pFlagsLine, pCapLine] <* pNewline
       PerfMetric <$> choice
         [ MetricCodeSize <$ symbol "code-size"
         , MetricIRSize <$ symbol "ir-size"
+        , MetricEvalAlloc <$ try (symbol "eval-alloc")
+        , MetricEvalTime <$ try (symbol "eval-time")
         , MetricAlloc <$ symbol "alloc"
         , MetricWallTime <$ symbol "wall-time"
         ]
+    -- The rest of the line, verbatim: the query is a template (its `{{ }}`
+    -- would not lex as a row), parsed per point by "TestKnownIssues".
+    pQueryLine = do
+      _ <- string "query:"
+      hspace
+      PerfQuery <$> some (satisfy (`notElem` ("\r\n" :: String)))
     -- Not 'symbol'/'sc': those skip `--` as a line comment, which would eat
     -- every long flag. Flags are separated by horizontal space only.
     pFlagsLine = do

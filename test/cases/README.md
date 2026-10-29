@@ -100,7 +100,23 @@ flags: -O 0 --noIntegrate
 repeats `BODY` (inclusive bounds, an optional separator, nestable). Metrics
 are `code-size` (the default, emitted Python bytes), `ir-size`, `alloc`
 (bytes allocated by the compile) and `wall-time`. Prefer the deterministic
-ones. `flags:` takes the CLI spellings `-O N`, `--noIntegrate`,
+ones.
+
+A program that compiles fast and small but whose emitted code is exponential
+to *run* takes `metric: eval-alloc` (or `eval-time`) and a `query:` line. Each
+point compiles and then answers that query on the IR interpreter, which runs
+the IR the backends emit; the metric is the query's own allocation (seconds).
+The query is one `p(...)`/`cdf(...)` row without `=` (its value is not
+checked) and is a template too:
+
+```
+-- defineBoundSumsComparedEvalGrowth.tst (the .ppl's neural domain is [0..D-1])
+expect-failure: growth above polynomial 4
+knob: D = 3, 4, 6, 8
+metric: eval-alloc
+query: p(True{{for t in 1..6}}, (2, [{{for i in 1..D sep ", "}}1.0{{end}}]){{end}})
+```
+ `flags:` takes the CLI spellings `-O N`, `--noIntegrate`,
 `--noProbability`, `--noGenerate`, `--pruneAnyChecks` and
 `--materializationBudget N`. The harness climbs the knob values in order and
 stops at the first consecutive pair whose log-log slope exceeds the degree
