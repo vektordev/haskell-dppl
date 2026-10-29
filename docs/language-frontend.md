@@ -23,6 +23,31 @@ every name from it (`test/cases/let-bindings/drawDestructured*`). `let` stays re
 with a diagnostic naming both forms. Prose elsewhere in this file (and in
 `docs/`) says "`let`" for the eager binding; read it as `draw`.
 
+**A top-level declaration is lazy, like `define`.** A nullary declaration
+`c = e` is a function of no arguments, and every reference to it is a call
+of its own. If `e` is random, each reference draws afresh:
+
+```
+c = Uniform < 0.5
+main = (c, c)          -- p((True, True)) = 0.25, not 0.5
+```
+
+Use `draw x = c in (x, x)` for one shared sample (`p((True, True)) = 0.5`).
+This holds for any random top-level value, including a randomly selected
+function (`pick = if Uniform < 0.5 then f else g`). `(pick 1.0, pick 2.0)`
+selects twice, at the same type or at two types. Monomorphization (below)
+changes nothing about this.
+
+**Only top-level declarations are polymorphic.** `draw x = e in body` is a
+lambda application, and a lambda-bound name gets one type (Hindley-Milner).
+So `draw f = pick in (f 1.0, f 2)` is a type error ("Couldn't match type
+'Float' with 'Int'"), never two independent draws. A drawn value is always
+one sample used at one type. To use a random function at two types, either
+reference the top-level declaration at each use (independent draws) or
+write two `draw`s. (A `draw` that binds a randomly selected function crashes
+ForwardChaining today, even at one type: docs-repo task
+`forward-chaining-named-function-returns-selected-lambda`.)
+
 ## `observe` (Maybe-valued conditioning)
 
 `observe base pred` is parser sugar, not a dedicated `Expr` constructor —
@@ -225,7 +250,10 @@ at two types is never blamed for an error elsewhere.
 There is no monomorphism restriction: a nullary declaration
 (`empty = []`) is generalised and cloned per use type like any other. Every
 reference to a nullary declaration is already a call of its own (a random one
-draws afresh), so cloning changes no law.
+draws afresh; see "A top-level declaration is lazy" above), so cloning changes
+no law. A Haskell-style restriction would make no difference to sharing:
+`pick` used twice at one type draws twice too. It would only turn the
+two-type use into a type error. Local `draw` bindings are never generalised.
 
 Naming: a declaration used at one type keeps its name; one used at several
 becomes `add__int`/`add__float` (`mangleName`, a fixed-arity prefix encoding of
