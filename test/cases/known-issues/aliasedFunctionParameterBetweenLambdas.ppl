@@ -1,0 +1,2 @@
+app f = draw g = f in \x -> g x
+main = app (\x -> x + 1.0) Normal
