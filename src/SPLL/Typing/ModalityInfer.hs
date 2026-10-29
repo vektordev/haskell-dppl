@@ -1202,7 +1202,7 @@ bindingCerts ctx lam arg argLaw = mapMaybe certOf engineOrder
     certOf k = case k of
       EnumerationEngine    -> CertEnumerable <$> enumerableApplication fc prog lam arg
       PlanEngine           -> (\(n, _, _, _) -> CertPlan n) <$> planProjectedReadOf prog arg
-      PointInversionEngine -> CertWitnessed <$> pointWitnessCert fc (icADTs ctx) (icObs ctx) lamCN
+      PointInversionEngine -> CertWitnessed <$> pointWitnessCert pointValue fc (icADTs ctx) (icObs ctx) lamCN
       AffineEngine         -> CertAffine <$> affineBindingCert x arg argLaw body
       JointAffineEngine    -> CertJointAffine <$> jointAffineBindingCert x arg argLaw body
       WorldsEngine         -> CertWorlds <$> worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) permissiveDet) occs body
@@ -1214,6 +1214,11 @@ bindingCerts ctx lam arg argLaw = mapMaybe certOf engineOrder
       Expr _ (Lambda v b) -> (v, b)
       _ -> error "bindingCerts: the head of a let is a lambda"
     occs = maybe [] id (Map.lookup lamCN (lambdaVarOccurrences fc))
+    -- A let value inside the body is a known point where its law, inferred
+    -- in the body, is Deterministic.
+    pointValue cn = Map.lookup cn bodyPTypes == Just Deterministic
+    bodyPTypes = Map.fromList [ (chainName ti, pType ti) | Expr ti _ <- universeE body ]
+    universeE e = e : concatMap universeE (getSubExprs e)
 
 -- | The affine collapse's certificate for binding @x@ to @arg@ over @body@:
 -- the argument's affine form ('affineOf'), when it has latents and every

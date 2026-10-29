@@ -246,6 +246,8 @@ witnessThroughDetIfNamed f.integ=6 f.prob=6 main.prob=12
 witnessThroughDetIfNamedLast f.integ=6 f.prob=6 main.prob=12
 witnessThroughDetIfScalar main.prob=5
 witnessThroughDetIfThen main.prob=10
+witnessThroughDrawBoundIfElse main.prob=12
+witnessThroughDrawBoundIfThen main.prob=12
 wrappedHoAdt main.prob=4
 writeLogits_continuous_under_sum side.integ=4 side.prob=8
 writeLogits_dead_arm side.integ=3 side.prob=6
