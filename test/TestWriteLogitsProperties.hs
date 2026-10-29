@@ -43,9 +43,10 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (constructVList)
 import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, planLayoutString, PartitionPlan(..), adtFlagSlots, stripDeadSlotFills)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Typing.RType (RType(..), shapeNumel)
 import IRInterpreter (generateDet)
-import MockNN (evaluateMockNN)
+import MockNN (evaluateMockNN, programMockOracle)
 import TestCaseParser (TestCase(..), Backend(..))
 import TestTolerances (probTolerance)
 import CorpusSweep
@@ -1200,7 +1201,7 @@ densityAgreementCase name p target explicitArgs = testCase caseName $ do
   let args = writeLogitsArgsFor p explicitArgs
       plan = endpointPlan p target
       planReader = makeProb (adts p) defaultCompilerConfig plan
-      readBack vec x = generateDet (neurals p) (writeLogitsDecls p) compiled [IRConst vec, IRConst x] planReader
+      readBack vec x = generateDet (programMockOracle p) compiled [IRConst vec, IRConst x] planReader
   case runWriteLogitsC p compiled target args of
     Left err  -> assertFailure (name ++ ": writeLogits failed: " ++ show err)
     Right vec -> do

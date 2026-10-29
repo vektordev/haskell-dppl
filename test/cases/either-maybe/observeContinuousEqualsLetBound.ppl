@@ -6,6 +6,6 @@
 -- (task sampling-matches-pdf-continuous-equality-density, which before its
 -- 2026-09-29 review had the letfree sibling answer `1 - density` there). The
 -- `Right` rows' dim of 0 is not the density convention's: `observe` binds `v`
--- to a value enumerable over {0, 2}, and an enumerated sum reports a mass
--- whatever its body (task enumerated-sum-over-density-body).
+-- to a value enumerable over {0, 2}, and the enumerated sum drops the dim of
+-- each value's weight (task enumerated-weight-density-reported-as-mass).
 main = observe (draw x = Normal in if x == 0.0 then 0 else 2) (\v -> v < 2)

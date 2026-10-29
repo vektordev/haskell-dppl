@@ -29,11 +29,14 @@ module SPLL.IRCompiler (
 
 import SPLL.ReservedNames (distributionPrimitiveNames, queryParamName, accProbParamName, topKCutoffName, topKCutoffParamName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
 import SPLL.IntermediateRepresentation
+import SPLL.OptimizerProjection (optimizerConfig)
+import SPLL.CompilerConfig
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
+import PrettyPrint (pPrintValue)
 import PredefinedFunctions
 import SPLL.Analysis (getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
@@ -45,10 +48,12 @@ import SPLL.AutoNeural hiding (planReadOf, planProjectedReadOf)
 import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
-import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf, lawValue)
+import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf, lawValue, Engine(..), engineOrder, engineLabel)
 import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
+import SPLL.IR.Type (IRType(..))
+import SPLL.IRTypeBridge (irConformanceType)
 import SPLL.Semiring
 import Control.Monad (foldM, forM, mfilter, unless, void, when, zipWithM, (>=>))
 import Debug.Trace (traceM)
@@ -80,10 +85,6 @@ data CompilerMetadata = CompilerMetadata {
   adtDecls :: [ADTDecl],
   compilingProgram :: Program,
   accProb :: IRExpr,
-  -- | Variables already recovered by an enclosing body-factor fold. Body
-  -- expressions are re-fetched from the (original) program at every fold
-  -- level, so the deterministic re-typing must be replayed with the full set.
-  recoveredVars :: [String],
   -- | The decomposability verdict per binary InjF node of the whole program,
   -- keyed by chain name (unique program-wide): True = the node's two operands
   -- may share an enumerated latent, so its marginal must NOT be tabulated by
@@ -98,7 +99,7 @@ data CompilerMetadata = CompilerMetadata {
   -- | The latent identities (the chain names of their draws, as
   -- 'bindLatent' keys them) that enclosing enumeration loops have fixed:
   -- inside @enumerateAppliedLambda@'s loop over @let x = v@, @v@ holds one
-  -- value. The latent counterpart of 'recoveredVars'.
+  -- value. The latent counterpart of a recovered variable ('recoveredVars').
   fixedLatents :: Set.Set ChainName,
   -- | The @_gen@ function names whose evaluation draws no randomness, from
   -- 'SPLL.Typing.Determinism.functionSummaries'. Consumed by
@@ -126,16 +127,6 @@ data CompilerMetadata = CompilerMetadata {
   -- 'compilerConfig meta', for exactly this reason) automatically compiling
   -- under the overridden family with no change of its own.
   semiringFamily :: SemiringFamily,
-  -- | The compiled coefficients of the 'lawEnv' bindings marginalised as
-  -- affine Gaussian forms rather than witnessed (task
-  -- affine-gaussian-closure-lost-across-let-bindings; design
-  -- affine-gaussian-forms). Which bindings those are is their certificate's
-  -- call ('affineMarginalisable' reads the argument's 'JAffine' law,
-  -- law-carrying-modality M4); this holds only the IR the certificate has no
-  -- room for. A variable here has no runtime value in the emitted code: it is
-  -- only ever read through 'affineFormOf', i.e. inside the one Gaussian
-  -- density leaf that consumes it. Folded into 'lawEnv' at M7.
-  affineEnv :: [(String, AffineForm)],
   -- | What 'reinferRecovered' needs to re-run modality inference on a body
   -- under the recovered variables; built once per compile.
   reinferContext :: ReinferCtx,
@@ -150,21 +141,32 @@ data CompilerMetadata = CompilerMetadata {
   -- | The modality engine's certificate for every node of the program, by
   -- chain name ('SPLL.Typing.ModalityInfer.inferProgram'; design
   -- law-carrying-modality §B). Not a 'TypeInfo' field: a 'Law' holds closures.
-  -- Read by nothing that dispatches yet (milestone M3).
+  -- Read through 'nodeLaw'. It certifies the program as written: a node
+  -- re-inferred under recovered variables ('reinferRecovered') gets new types,
+  -- not a new entry here.
   lawTable :: LawTable,
-  -- | The law of every variable bound by an enclosing binder of the code
-  -- being compiled: a lambda's parameter ('extendMetaForLambda') and, at
-  -- every 'Binding', the bound parameter at the argument's law
-  -- ('withBindingLaw'). Extended by the modality engine's own binder rule
-  -- ('bindingLawEnv'), so it is the environment 'inferE' had there. Read by
-  -- nothing that dispatches yet (milestone M3).
-  lawEnv :: LawEnv
+  -- | Every variable bound by an enclosing binder of the code being
+  -- compiled ('BoundVar'): a lambda's parameter ('extendMetaForLambda') and,
+  -- at every 'Binding', the bound parameter at the argument's law
+  -- ('withBindingLaw'), by the modality engine's own binder rule
+  -- ('bindingLawEnv'), so its laws are the environment 'inferE' had there.
+  -- It also records what an engine did with a variable: fixed it
+  -- ('recoverVars') or marginalised it as an affine form ('marginaliseAs').
+  lawEnv :: LawEnv,
+  -- | Whether every enclosing enumerated sum keeps its terms' dims
+  -- ('enumSumTerms'; task enumerated-sum-over-density-body). True outside
+  -- any enumeration; an enumeration whose body's type has no static bound on
+  -- its dim ('floatLeafBound') sums its terms as masses and clears it for
+  -- everything below. 'forwardOrInfer' reads it: a delegated body that may
+  -- be a density needs its run-time guard only when some enclosing sum
+  -- would report it as a mass.
+  dimAwareEnum :: Bool
 }
 
 -- | A value's law as an affine combination of independent standard-normal
 -- latents, @c + Σᵢ aᵢ·εᵢ@. The latents are keyed by the chain name of the
 -- env-free Gaussian leaf that introduced them, so two reads of one
--- 'affineEnv' variable share their latents (@x + x@ is @2ε@, not
+-- marginalised variable ('affineVars') share their latents (@x + x@ is @2ε@, not
 -- @ε₁ + ε₂@), while every other leaf is a fresh draw.
 data AffineForm = AffineForm
   { afConst  :: IRExpr
@@ -297,7 +299,7 @@ envToIR conf fcDat laws p
           -- Batched mode: retag elementwise ifs to selects before optimizing
           -- (design pytorch-tensorizer). Mirrors 'Prelude.compile'.
           selected = if batched conf then selectPassEnv stripped else stripped
-      in optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals p]) selected
+      in optimizeEnvWith (optimizerConfig conf) (Set.fromList [n | (n, _, _) <- neurals p]) selected
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).
@@ -369,9 +371,12 @@ propagateRefusals (IREnv groups0 adts' consts) = IREnv (go groups0) adts' consts
       "prob" -> groupName g ++ "_prob"
       "integ" -> groupName g ++ "_integ"
       _ -> groupName g ++ "_writeLogits"
-    irVarNames e = case e of
-      IRVar n -> [n]
-      _ -> concatMap irVarNames (getIRSubExprs e)
+    -- Accumulator-passing, for the reason 'firstAnyExceptIR' gives.
+    irVarNames e0 = walk e0 []
+      where
+        walk e rest = case e of
+          IRVar n -> n : rest
+          _ -> foldr walk rest (getIRSubExprs e)
 
 -- | Refuse at compile time rather than hand back an 'IREnv' containing a
 -- generate-backed probability/integrate/normal/writeLogits body -- see
@@ -528,7 +533,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
             guardUnderLambdas (IRLambda n b) = IRLambda n (guardUnderLambdas b)
             guardUnderLambdas bodyExpr
               | checkQueryType conf =
-                  IRIf (IRConformsTo returnRType (IRVar queryParamName))
+                  IRIf (IRConformsTo (irConformanceType returnRType) (IRVar queryParamName))
                        bodyExpr
                        (IRError (kind ++ "(" ++ name ++ "): query value does not conform to return type " ++ show returnRType))
               | otherwise = bodyExpr
@@ -588,7 +593,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
               Just (toNormalDecl name . cutoffBinding <$> compileNormalExpr (meta progTypeEnv) binding)
             else
               Nothing
-        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom, maskVariantOf=Nothing,
+        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=fmap multiValueToIR sampleDom, maskVariantOf=Nothing,
           integFun = presentVariant integE,
           probFun = presentVariant probE,
           genFun = presentVariant genE,
@@ -607,10 +612,12 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         -- (x < 0.5, Uniform < x)@ compiled with exit 0 and no word on why
         -- the probability function was missing), and likewise at a binding no
         -- inference engine applies to (task engine-applicability-as-data).
+        -- Any other intractable root names the node its 'Bottom' starts at
+        -- ('bottomOrigin', task bottom-verdict-records-no-refusal-reason).
         intractableRefusal lbl suppressed
           | suppressed || admittedPT pt = []
           | otherwise = [ (lbl, VariantRefusal why cn)
-                        | Just (why, cn) <- [comparisonWithoutClosedForm binding <|> bindingWithoutEngine laws binding] ]
+                        | Just (why, cn) <- [comparisonWithoutClosedForm binding <|> bindingWithoutEngine laws binding <|> bottomOrigin binding] ]
         -- Generate per-component normal functions for tuple outputs
         tupleNormalGroups = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
         tupleNormalFuns = map fst tupleNormalGroups
@@ -658,7 +665,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
                     in Just (appendDoc guardNote . toProbDecl name . IRLambda queryParamName . guardQuery "p" <$> compileBody metaExtra)
                   else Nothing ]
     in [baseFunGroup] ++ tupleNormalFuns ++ extraFunGroups) (functions p))
-  progADTs
+  (map irADTDecl progADTs)
   -- The cutoff must live in the same space as the accumulated probability it's
   -- compared against: under logSpace that's log(thresh), not the raw linear
   -- threshold. The comparison operators themselves (OpLessThan/OpGreaterThan)
@@ -710,7 +717,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty [] laws Map.empty
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct reinferC Set.empty [] laws Map.empty True
     reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
@@ -941,16 +948,97 @@ bindingWithoutEngine :: LawTable -> Expr -> Maybe (String, ChainName)
 bindingWithoutEngine laws e@(Expr _ f) = case f of
   Apply (Expr lti (Lambda x _)) _
     | Just (ModalityInfer.Law _ (ModalityInfer.JBinding [])) <- Map.lookup (chainName lti) laws ->
-        Just (why x lti, chainName lti)
+        Just (why ("the binding of '" ++ x ++ "'") lti, chainName lti)
+  -- A named callee's binding, recorded on its call (task
+  -- named-callee-binding-not-floored). The argument first: it is evaluated
+  -- before the call binds it.
+  Apply g a
+    | Nothing <- bindingWithoutEngine laws a
+    , Just (ModalityInfer.Law _ (ModalityInfer.JBinding [])) <- Map.lookup (ModalityInfer.callBindingKey (chainName ti)) laws ->
+        Just (why ("the parameter bound by the call" ++ callee g) ti, chainName ti)
   _ -> listToMaybe (mapMaybe (bindingWithoutEngine laws) (getSubExprs e))
   where
-    why x lti = "no inference engine applies to the binding of '" ++ x ++ "'"
+    ti = getTypeInfo e
+    callee g = case fst (flattenApplySpine g) of
+      Expr _ (Var n) -> " of '" ++ n ++ "'"
+      _ -> ""
+    why what lti = "no inference engine applies to " ++ what
       ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
       ++ ": its value is random and the body reads it, but it is not enumerable,"
       ++ " not a neural plan read, not point-invertible from the observation, has no"
       ++ " affine Gaussian form flowing into one consumer or jointly into at most "
       ++ show ModalityInfer.jointAffineMaxSlots ++ " tuple fields, and the observation has no"
       ++ " set-valued inverse onto it. The binding is sample-only, and so is the function"
+
+-- | Where a 'Bottom' verdict starts, for a function whose root modality
+-- inference typed 'Bottom' and neither 'comparisonWithoutClosedForm' nor
+-- 'bindingWithoutEngine' explains (task bottom-verdict-records-no-refusal-reason:
+-- @Normal + Uniform@ compiled generate-only with no word on why). Descends
+-- through 'Bottom' nodes into their first 'Bottom' operand; the node none of
+-- whose operands is 'Bottom' is where the rule itself returned 'Bottom', and
+-- the diagnostic names it, its source position and its operands' laws. A
+-- curried call is one node, its spine head and its arguments the operands, so
+-- @f x y@ is named "the call of 'f'" rather than by its inner partial
+-- application. A call of a function that is itself sample-only says so: that
+-- function's own group carries the reason.
+bottomOrigin :: Expr -> Maybe (String, ChainName)
+bottomOrigin e@(Expr ti _)
+  | not (isBottom e) = Nothing
+  | (Expr hti (Var f), args) <- callSpine e, pType hti == Bottom =
+      Just (phrase ((if null args then "" else "the call of ") ++ "'" ++ f ++ "'")
+              ++ " is sample-only because '" ++ f ++ "' is: its own probability variant is refused", chainName ti)
+  | (Expr _ (Var f), args@(_:_)) <- callSpine e =
+      case filter isBottom args of
+        (a:_) -> bottomOrigin a
+        [] -> Just (rule ("the call of '" ++ f ++ "'") "arguments" args, chainName ti)
+  | otherwise = case node e of
+      -- The arguments first: in a let redex @(\x -> body) arg@ a 'Bottom'
+      -- argument is the origin, and the body only reads it.
+      Apply {} | (hd, args) <- callSpine e, (b:_) <- filter isBottom (args ++ [hd]) ->
+        bottomOrigin b
+      Apply {} | (hd, args) <- callSpine e -> Just (rule "the application" "operands" (hd : args), chainName ti)
+      _ -> case filter isBottom (getSubExprs e) of
+        (c:_) -> bottomOrigin c
+        [] -> Just (rule (nodeName e) "operands" (getSubExprs e), chainName ti)
+  where
+    isBottom x = pType (getTypeInfo x) == Bottom
+    -- The head and arguments of a curried application; a non-application is
+    -- its own head.
+    callSpine x = case node x of
+      Apply g a -> let (h, as) = callSpine g in (h, as ++ [a])
+      _ -> (x, [])
+    phrase what = what ++ maybe "" ((" at " ++) . spanPretty) (srcPos ti)
+    rule what kind ops =
+      phrase what ++ " has no inference rule for its " ++ kind
+      ++ (if null ops then "" else " " ++ listPhrase (map operand ops))
+      ++ ": NeST computes no density or CDF for this combination, so it is"
+      ++ " sample-only, and so is the function"
+    listPhrase xs = case reverse xs of
+      (l:r@(_:_)) -> intercalate ", " (reverse r) ++ " and " ++ l
+      _ -> concat xs
+    operand x = operandName x ++ " (" ++ lawName (pType (getTypeInfo x)) ++ ")"
+    operandName x = case node x of
+      Var n -> n
+      Constant v -> "the literal " ++ pPrintValue v
+      InjF (Named n) _ -> "a " ++ opName n ++ " expression"
+      Apply {} | (Expr _ (Var f), _) <- callSpine x -> "a call of '" ++ f ++ "'"
+      _ -> nodeName x
+    nodeName x = case node x of
+      InjF (Named n) _ -> opName n
+      IfThenElse {} -> "the if-then-else"
+      Lambda n _ -> "the lambda '\\" ++ n ++ "'"
+      ReadNN n _ -> "the neural read of '" ++ n ++ "'"
+      Var n -> "'" ++ n ++ "'"
+      _ -> printFlat x
+    opName n = maybe ("`" ++ n ++ "`") (\s -> "`" ++ s ++ "`") (lookup n surfaceOps)
+    surfaceOps = [("plus", "+"), ("mult", "*"), ("lt", "<"), ("gt", ">"), ("neg", "-")]
+    lawName p = case p of
+      Deterministic -> "deterministic"
+      PNormal -> "Gaussian"
+      PLogNormal -> "log-normal"
+      Integrate -> "random"
+      PArr {} -> "a function"
+      _ -> show p
 
 -- | The operands of a comparison against a random enumerable bound, when the
 -- 'toIRInference' equation of that name applies: @Just (enumIsLeft, enumSide,
@@ -1620,7 +1708,7 @@ pointQueryTable meta e dom@(v0 : vs) = do
   where
     inferAt v = toIRInference meta False e (IRConst (valueToIR v))
     compiledSize count o = count (unP (rProb (openValue o))) + openBlockSize count o
-    foldedSize o = irLogicNodeCount (postProcess (compilerConfig meta) (closeExpr o (unP . rProb)))
+    foldedSize o = irLogicNodeCount (postProcess (optimizerConfig (compilerConfig meta)) (closeExpr o (unP . rProb)))
     bindCell p = do
       cellName <- mkVariable "mat_leaf"
       setVariables [(cellName, p)]
@@ -1871,7 +1959,7 @@ leadingArgBinding meta expr0
           b0 = resolveBinding meta prefix ai
       fresh <- mkVariable param
       let wVar = Expr ((getTypeInfo ai) { pType = Deterministic }) (Var fresh)
-      return (Just b0 { bindVar = fresh, bindBody = replaceArg (length args - 1 - i) wVar expr
+      return (Just b0 { bindVar = fresh, bindBody = replaceSpineArg (length args - 1 - i) wVar expr
                       , bindOccs = [chainName (getTypeInfo ai)], bindOuterVars = []
                       , bindLeadingArg = True, bindScope = Just [], bindTopLevel = Nothing })
   | otherwise = return Nothing
@@ -1885,11 +1973,13 @@ leadingArgBinding meta expr0
     -- The spine's own nodes, head first: @[f, f a1, f a1 a2, ..]@.
     spinePrefixes e@(Expr _ (Apply g _)) = spinePrefixes g ++ [e]
     spinePrefixes e = [e]
-    -- Replace the argument @k@ applications up from the end of the spine.
-    replaceArg :: Int -> Expr -> Expr -> Expr
-    replaceArg 0 w (Expr t (Apply g _)) = Expr t (Apply g w)
-    replaceArg k w (Expr t (Apply g a)) = Expr t (Apply (replaceArg (k - 1) w g) a)
-    replaceArg _ _ e = e
+
+-- | Replace the argument @k@ applications up from the end of a curried call
+-- spine (@k = 0@ is the last argument).
+replaceSpineArg :: Int -> Expr -> Expr -> Expr
+replaceSpineArg 0 w (Expr t (Apply g _)) = Expr t (Apply g w)
+replaceSpineArg k w (Expr t (Apply g a)) = Expr t (Apply (replaceSpineArg (k - 1) w g) a)
+replaceSpineArg _ _ e = e
 
 -- | Make a binding's body meaningful in this scope: each leading parameter of
 -- 'bindScope' is renamed to a fresh variable let-bound to its argument, and
@@ -1917,10 +2007,9 @@ bindRenamed :: CompilerMetadata -> [(String, RType, Expr)] -> CompilerMetadata
 bindRenamed meta [] = meta
 bindRenamed meta binds =
   meta { typeEnv = [ (fresh, (rty, hasInf rty)) | (fresh, rty, _) <- binds ] ++ typeEnv meta
-       , recoveredVars = [ fresh | (fresh, _, _) <- binds ] ++ recoveredVars meta
        , boundLambdas = [ (fresh, lam) | (fresh, _, arg) <- binds, Just lam <- [visibleLambda arg] ]
                         ++ boundLambdas meta
-       , lawEnv = foldr (\(fresh, _, arg) -> Map.insert fresh (nodeLaw meta arg)) (lawEnv meta) binds }
+       , lawEnv = foldr (\(fresh, _, arg) -> Map.insert fresh ((boundAt (nodeLaw meta arg)) { bvRecovered = True })) (lawEnv meta) binds }
   where
     hasInf (TArrow (TArrow _ _) _) = True
     hasInf _ = False
@@ -2024,10 +2113,68 @@ extendMetaForLambda meta t name =
         other -> error ("extendMetaForLambda: parameter '" ++ name ++ "' of a non-function type " ++ show other)
       hasInference = case paramRType of { TArrow (TArrow _ _) _ -> True; _ -> False }
   in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta
-          , lawEnv = Map.insert name (lambdaParamLaw t) (lawEnv meta) }
+          , lawEnv = Map.insert name (boundAt (lambdaParamLaw t)) (lawEnv meta) }
 
--- | The binder environment the modality engine had at a node: a variable's law.
-type LawEnv = ModalityInfer.Env
+-- | The compiler's binder environment ('lawEnv'), by variable.
+type LawEnv = Map.Map String BoundVar
+
+-- | A variable bound by an enclosing binder: the law the modality engine had
+-- for it there, and what the engine compiling its binding did with it.
+data BoundVar = BoundVar
+  { bvLaw :: Law
+  , bvForm :: Maybe AffineForm
+    -- ^ Marginalised as an affine Gaussian form (task
+    -- affine-gaussian-closure-lost-across-let-bindings; design
+    -- affine-gaussian-forms): the form's coefficients, as IR. Which bindings
+    -- those are is their certificate's call ('affineMarginalisable' reads the
+    -- argument's 'JAffine' law); this holds only the IR the certificate has no
+    -- room for. Such a variable has no runtime value in the emitted code: it
+    -- is only ever read through 'affineFormOf', inside the one Gaussian
+    -- density leaf that consumes it.
+  , bvRecovered :: Bool
+    -- ^ Fixed by an enclosing engine: a point-inversion witness, an
+    -- enumeration loop, a residue factor. It holds one value, so a body is
+    -- re-inferred with it 'Exact' ('reinferRecovered'). Body expressions are
+    -- re-fetched from the (original) program at every fold level, so the
+    -- re-inference is replayed with the full set.
+  }
+
+-- | A variable at its law, nothing done with it yet.
+boundAt :: Law -> BoundVar
+boundAt l = BoundVar l Nothing False
+
+-- | The modality engine's environment: the laws of 'lawEnv'.
+envLaws :: CompilerMetadata -> ModalityInfer.Env
+envLaws = Map.map bvLaw . lawEnv
+
+-- | The variables an enclosing engine has fixed ('bvRecovered').
+recoveredVars :: CompilerMetadata -> [String]
+recoveredVars meta = [ v | (v, bv) <- Map.toList (lawEnv meta), bvRecovered bv ]
+
+-- | Record these variables as fixed ('bvRecovered'). One no binder put in
+-- 'lawEnv' (an engine's own loop variable) enters at a point law.
+recoverVars :: [String] -> CompilerMetadata -> CompilerMetadata
+recoverVars ns meta = meta { lawEnv = foldr (Map.alter (Just . maybe fresh mark)) (lawEnv meta) ns }
+  where
+    fresh = (boundAt (bareLawOfPType Deterministic)) { bvRecovered = True }
+    mark bv = bv { bvRecovered = True }
+
+-- | Record variable @x@ as marginalised with this affine form ('bvForm'). One
+-- no binder put in 'lawEnv' (a callee's parameter the affine algebra enters,
+-- 'affineCallForm') enters at a Gaussian law.
+marginaliseAs :: String -> AffineForm -> CompilerMetadata -> CompilerMetadata
+marginaliseAs x f meta = meta { lawEnv = Map.alter (Just . maybe fresh mark) x (lawEnv meta) }
+  where
+    fresh = (boundAt (bareLawOfPType PNormal)) { bvForm = Just f }
+    mark bv = bv { bvForm = Just f }
+
+-- | The affine form of a marginalised variable ('bvForm').
+affineFormOfVar :: CompilerMetadata -> String -> Maybe AffineForm
+affineFormOfVar meta x = Map.lookup x (lawEnv meta) >>= bvForm
+
+-- | The variables marginalised as affine forms ('bvForm').
+affineVars :: CompilerMetadata -> Set.Set String
+affineVars meta = Map.keysSet (Map.filter (isJust . bvForm) (lawEnv meta))
 
 -- | The metadata for compiling a binding's body: its parameter, under the
 -- name @var@ the body reads it by, bound in 'lawEnv' at the argument's law,
@@ -2035,8 +2182,10 @@ type LawEnv = ModalityInfer.Env
 -- certificate ('lawTable'); an argument the table does not hold (a node an
 -- engine synthesized) is taken at the law its annotation projects.
 withBindingLaw :: CompilerMetadata -> Binding -> String -> CompilerMetadata
-withBindingLaw meta b var = meta { lawEnv = bindingLawEnv (reinferContext meta) headCN var (bindArg b) argLaw (lawEnv meta) }
+withBindingLaw meta b var = meta { lawEnv = Map.insert var (boundAt varLaw) (lawEnv meta) }
   where
+    varLaw = Map.findWithDefault (bareLawOfPType (pType (getTypeInfo (bindArg b)))) var
+               (bindingLawEnv (reinferContext meta) headCN var (bindArg b) argLaw (envLaws meta))
     headCN = chainName (getTypeInfo (bindHead b))
     argLaw = nodeLaw meta (bindArg b)
 
@@ -2080,6 +2229,115 @@ occursUnderFieldCtor adtDs x = go False
     go under e@(Expr _ (InjF (Named n) _)) | isFieldConstructor adtDs n = any (go True) (getSubExprs e)
                                            | otherwise = any (go under) (getSubExprs e)
     go under e = any (go under) (getSubExprs e)
+
+-- | How many fixed witnesses 'applyBinding''s sum over the wildcard leaves of
+-- a point witness may take, the product of the leaves' domain sizes.
+wildcardLeafSumBound :: Int
+wildcardLeafSumBound = 64
+
+-- | One step into a tuple: its first or its second field.
+data FieldStep = FieldFst | FieldSnd deriving (Eq, Show)
+
+fieldStepIR :: FieldStep -> IRExpr -> IRExpr
+fieldStepIR FieldFst = IRDestruct AcFst
+fieldStepIR FieldSnd = IRDestruct AcSnd
+
+-- | @setFieldIR p k w@: the tuple @w@ with the field at path @p@ replaced by @k@.
+setFieldIR :: [FieldStep] -> IRExpr -> IRExpr -> IRExpr
+setFieldIR [] k _ = k
+setFieldIR (FieldFst : r) k w = IRConstruct TgTuple [setFieldIR r k (IRDestruct AcFst w), IRDestruct AcSnd w]
+setFieldIR (FieldSnd : r) k w = IRConstruct TgTuple [IRDestruct AcFst w, setFieldIR r k (IRDestruct AcSnd w)]
+
+-- | The paths to the leaves of a (nested) tuple type; a non-tuple is its own
+-- single leaf.
+tupleLeafPaths :: RType -> [[FieldStep]]
+tupleLeafPaths (Tuple a b) = map (FieldFst :) (tupleLeafPaths a) ++ map (FieldSnd :) (tupleLeafPaths b)
+tupleLeafPaths _ = [[]]
+
+-- | Each free occurrence of variable @x@ in @e@, as the tuple path its
+-- @fst@/@snd@ projections read, and whether it sits in an output position:
+-- reached from the root through field constructors, @if@ arms and let
+-- bodies only, so its value is compared against the observation (as a
+-- wildcard where the observation is one) rather than computed with.
+--
+-- The reads are followed through the spellings that only rename the value
+-- (slow-tier follow-up of task any-mark-passed-as-recursive-call-state, the
+-- rewrite-invariance net): a projection of @x@ bound by a @draw y = ..@
+-- reads @x@ wherever the body reads @y@, and a projection of @x@ passed to a
+-- top-level function reads @x@ wherever that function's body reads the
+-- parameter (in output position only where the call itself is, and at most
+-- @fuel@ calls deep). Where the fuel runs out, the argument counts as one
+-- computing read of the whole projection, which is the conservative answer:
+-- an extra read only costs the sum, it never makes it wrong.
+varFieldReads :: Program -> [ADTDecl] -> String -> Expr -> [(Bool, [FieldStep])]
+varFieldReads prog adtDs x0 = readsOf (4 :: Int) x0 True
+  where
+    -- the reads of @x@ in @e@, where @e@'s value is an output iff @out@
+    readsOf fuel x = go
+      where
+        go out e | Just (n, p) <- projectionOf e = [(out, p) | n == x]
+        go _ (Expr _ (Lambda n b)) = if n == x then [] else go False b
+        go out (Expr _ (Apply (Expr _ (Lambda y b)) arg))
+          | Just (n, p) <- projectionOf arg, n == x =
+              aliased p (readsOf fuel y out b) ++ (if y == x then [] else go out b)
+          | y == x = go False arg
+          | otherwise = go False arg ++ go out b
+        go out (Expr _ (IfThenElse c a b)) = go False c ++ go out a ++ go out b
+        go out (Expr _ (InjF (Named n) args)) | isFieldConstructor adtDs n = concatMap (go out) args
+        go out e
+          | fuel > 0
+          , (Expr _ (Var f), args@(_ : _)) <- flattenApplySpine e
+          , f /= x
+          , Just (params, fBody) <- lookup f (functions prog) >>= paramsN (length args) =
+              concat [ case projectionOf a of
+                         Just (n, p) | n == x -> aliased p (readsOf (fuel - 1) prm out fBody)
+                         _ -> go False a
+                     | (a, prm) <- zip args params ]
+        go _ e = concatMap (go False) (getSubExprs e)
+    aliased p rs = [ (o, p ++ q) | (o, q) <- rs ]
+    projectionOf (Expr _ (Var n)) = Just (n, [])
+    projectionOf (Expr _ (InjF (Named "fst") [a])) = fmap (++ [FieldFst]) <$> projectionOf a
+    projectionOf (Expr _ (InjF (Named "snd") [a])) = fmap (++ [FieldSnd]) <$> projectionOf a
+    projectionOf _ = Nothing
+    paramsN :: Int -> Expr -> Maybe ([String], Expr)
+    paramsN 0 b = Just ([], b)
+    paramsN n (Expr _ (Lambda v b)) = (\(vs, r) -> (v : vs, r)) <$> paramsN (n - 1) b
+    paramsN _ _ = Nothing
+
+-- | The finite set of values the field at path @p@ of @e@'s value can take,
+-- where the program states one: the node's own enumerable domain, else
+-- through a tuple constructor, a @fst@/@snd@ projection, both arms of an
+-- @if@, a let body, or the body of a called (or nullary) top-level function
+-- (at most @fuel@ calls deep). A superset is
+-- sound for a sum over it (a value the field cannot take has no mass).
+fieldDomainOf :: Program -> Int -> Expr -> [FieldStep] -> Maybe [Value]
+fieldDomainOf prog = go
+  where
+    go fuel e path
+      | fuel <= (0 :: Int) = Nothing
+      | Just mv <- enumerableDomain (tags (getTypeInfo e)) = project mv path
+      | otherwise = case e of
+          Expr _ (InjF (Named "TCons") [a, b]) -> case path of
+            FieldFst : r -> go fuel a r
+            FieldSnd : r -> go fuel b r
+            [] -> Nothing
+          Expr _ (IfThenElse _ a b) -> (\xs ys -> nub (xs ++ ys)) <$> go fuel a path <*> go fuel b path
+          Expr _ (InjF (Named "fst") [a]) -> go fuel a (FieldFst : path)
+          Expr _ (InjF (Named "snd") [a]) -> go fuel a (FieldSnd : path)
+          Expr _ (Apply (Expr _ (Lambda _ b)) _) -> go fuel b path
+          _ | (Expr _ (Var f), args) <- flattenApplySpine e
+            , Just fBody <- lookup f (functions prog)
+            , Just b <- stripN (length args) fBody -> go (fuel - 1) b path
+          _ -> Nothing
+    project mv [] | multiValueIsFinite mv = Just (multiValueToValueList mv)
+                  | otherwise = Nothing
+    project (MultiTuple a _) (FieldFst : r) = project a r
+    project (MultiTuple _ b) (FieldSnd : r) = project b r
+    project _ _ = Nothing
+    stripN :: Int -> Expr -> Maybe Expr
+    stripN 0 b = Just b
+    stripN n (Expr _ (Lambda _ b)) = stripN (n - 1) b
+    stripN _ _ = Nothing
 
 -- | Re-annotate an expression for dispatch, given that the named variables
 -- have been recovered by enclosing constructs -- a witness fold, an
@@ -2502,7 +2760,7 @@ toIRNormalParams _ e = refuse (chainName (getTypeInfo e)) $ "toIRNormalParams: c
 momentsOf :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 momentsOf meta e@(Expr ti nd)
   | semiringFamily meta /= SRSumProduct = refuse cn "collapse: moment matching needs the sum-product semiring"
-  | any (`elem` map fst (affineEnv meta)) (Set.toList (freeVarsExpr e)) =
+  | mentionsAffineVar meta e =
       refuse cn "collapse: the operand reads a marginalised random binding, so it has no moments given its variables"
   | ModalityInfer.collapsePoint isTop e = do
       v <- toIRGenerate meta e
@@ -2554,13 +2812,13 @@ momentsOf meta e@(Expr ti nd)
       return (IRVar v)
     bindPair (m, s) = (,) <$> bind "collapse_m" m <*> bind "collapse_s" s
 
--- | True if the expression reads a variable bound in 'affineEnv'.
+-- | True if the expression reads a variable marginalised as an affine form
+-- ('affineVars').
 mentionsAffineVar :: CompilerMetadata -> Expr -> Bool
-mentionsAffineVar meta e =
-  not (null (affineEnv meta)) && any (`Set.member` freeVarsExpr e) (map fst (affineEnv meta))
+mentionsAffineVar meta e = not (Set.disjoint (freeVarsExpr e) (affineVars meta))
 
 -- | The affine form of an expression 'isAffineOver' accepts. Subterms reading
--- no 'affineEnv' variable are leaves: a Deterministic one is a constant, and a
+-- no marginalised variable ('affineVars') are leaves: a Deterministic one is a constant, and a
 -- Gaussian one is compiled by the ordinary scalar extractor and enters as one
 -- fresh latent keyed by its own chain name. Only the four rules of design
 -- affine-gaussian-forms §3 look inside a node.
@@ -2577,7 +2835,7 @@ affineFormOf meta e@(Expr ti nd)
   | InjF (Named n) [_] <- nd, isCollapse n = do
       (mu, s) <- toIRNormalParams meta e
       return (AffineForm mu (Map.singleton (chainName ti) s))
-  | Var n <- nd, Just form <- lookup n (affineEnv meta) = return form
+  | Var n <- nd, Just form <- affineFormOfVar meta n = return form
   | InjF (Named "plus") [a, b] <- nd = do
       fa <- affineFormOf meta a
       fb <- affineFormOf meta b
@@ -2602,7 +2860,7 @@ isAffineConstant :: CompilerMetadata -> Expr -> Bool
 isAffineConstant meta e = pType (getTypeInfo e) == Deterministic && not (mentionsAffineVar meta e)
 
 -- | @isAffineOver meta names e@: 'affineFormOf' can build a form for @e@ once
--- every name in @names@ is in 'affineEnv'. The static twin of that function;
+-- every name in @names@ is marginalised ('affineVars'). The static twin of that function;
 -- keep the two in step.
 isAffineOver :: CompilerMetadata -> Set.Set String -> Expr -> Bool
 isAffineOver meta names e@(Expr ti nd)
@@ -2665,7 +2923,7 @@ affineCall meta e
 
 -- | The affine form of a call ('affineCall'): the callee's body under its
 -- parameters, a constant argument let-bound under a fresh name, any other
--- entering 'affineEnv' with its own form. The latents the body itself draws
+-- marginalised with its own form ('marginaliseAs'). The latents the body itself draws
 -- are keyed by the call site as well as by their own chain name, so two calls
 -- of one function draw independent latents (forward chaining's per-invocation
 -- identity, in the affine algebra's terms); the arguments' latents keep their
@@ -2684,9 +2942,8 @@ affineCallForm meta callCN pas calleeBody = do
         return (Right (p, fa))
   let renames = [ r | Left r <- bound ]
       forms = [ f | Right f <- bound ]
-      meta' = meta { typeEnv = [ (fresh, (rty, False)) | (_, fresh, rty) <- renames ] ++ typeEnv meta
-                   , recoveredVars = [ fresh | (_, fresh, _) <- renames ] ++ recoveredVars meta
-                   , affineEnv = forms ++ affineEnv meta }
+      meta' = recoverVars [ fresh | (_, fresh, _) <- renames ]
+                (foldr (uncurry marginaliseAs) meta { typeEnv = [ (fresh, (rty, False)) | (_, fresh, rty) <- renames ] ++ typeEnv meta } forms)
       calleeBody' = reinferRecovered meta' [ fresh | (_, fresh, _) <- renames ]
                 (foldr (\(p, fresh, _) -> renameFreeVar p fresh) calleeBody renames)
   form <- affineFormOf meta' calleeBody'
@@ -2706,7 +2963,7 @@ collapseAffine (AffineForm c coeffs) = case Map.elems coeffs of
 -- its law is an affine Gaussian form (the argument's 'JAffine' law, read by
 -- 'affineOf') and all of its uses flow into a single Gaussian density leaf.
 -- Answers the bound variable and the body to compile, with the variable to be
--- put in 'affineEnv'. 'isAffineOver' stays as the check that this compiler
+-- marginalised ('marginaliseAs'). 'isAffineOver' stays as the check that this compiler
 -- can build the form's IR ('affineFormOf' is its twin), which a certificate
 -- issued over the program as written cannot promise inside a callee entered
 -- at a call site.
@@ -2733,7 +2990,7 @@ affineMarginalisable meta rt b
   = Just (x, lamBody)
   | otherwise = Nothing
   where
-    envNames = Set.fromList (map fst (affineEnv meta))
+    envNames = affineVars meta
     -- The form of @v@ is built here, in the binding's scope, and read at the
     -- consumer; a binder in between that shadows one of @v@'s free variables
     -- would change what that IR refers to, so it is refused.
@@ -2760,7 +3017,7 @@ data JointAffine = JointAffine
     -- is not a tuple is one field at the empty path.
   , jaNames  :: Set.Set String
     -- ^ Every variable read through an affine form at the fields: the
-    -- enclosing 'affineEnv', the bound variable and the spine's.
+    -- enclosing marginalised ones, the bound variable and the spine's.
   }
 
 -- | When no single affine consumer takes a Gaussian binding
@@ -2783,7 +3040,7 @@ jointAffineApplicable meta rt b
   | otherwise = Nothing
   where
     v = bindArg b
-    envNames = Set.fromList (map fst (affineEnv meta))
+    envNames = affineVars meta
     -- @bound@ holds the free variables of the values met so far: their forms
     -- are built in their own scope and read at the fields, so a binder in
     -- between must not shadow one.
@@ -2833,7 +3090,7 @@ stepInto :: IRExpr -> Bool -> IRExpr
 stepInto s b = IRDestruct (if b then AcSnd else AcFst) s
 
 -- | The joint affine engine ('jointAffineApplicable'). Every spine variable
--- enters 'affineEnv' with its form. The fields reading the spine are grouped
+-- is marginalised with its form. The fields reading the spine are grouped
 -- into classes that covary (a covariance links two fields unless it is a
 -- constant zero); a class of one is a scalar Gaussian leaf, and a larger one
 -- a multivariate Gaussian density ('jointGaussianDensity') over its observed
@@ -2848,11 +3105,10 @@ jointAffineApply meta cumulative binding ja sample = do
       x = bindVar binding
       cn = chainName (getTypeInfo (bindHead binding))
   form0 <- affineFormOf meta (bindArg binding)
-  let meta0 = (withBindingLaw (extendMetaForLambda meta (getTypeInfo (bindHead binding)) x) binding x)
-                { affineEnv = (x, form0) : affineEnv meta }
+  let meta0 = marginaliseAs x form0 (withBindingLaw (extendMetaForLambda meta (getTypeInfo (bindHead binding)) x) binding x)
   meta' <- foldM (\m (lti, y, val) -> do
                     f <- affineFormOf m val
-                    return ((extendMetaForLambda m lti y) { affineEnv = (y, f) : affineEnv m }))
+                    return (marginaliseAs y f (extendMetaForLambda m lti y)))
                  meta0 (jaSpine ja)
   let (affine, indep) = partition (readsAffine (jaNames ja) . snd) (jaFields ja)
   forms <- mapM (affineFormOf meta' . snd >=> shareForm) affine
@@ -3152,12 +3408,12 @@ gaussianLeaf :: CompilerMetadata -> Expr -> Bool
 gaussianLeaf meta e = readsMarginalised meta e || not (hasOwnInferenceHandler meta e)
 
 -- | Does this scalar expression read a binding marginalised as an affine form
--- ('affineEnv'), with an affine form over it ('isAffineOver')?
+-- ('affineVars'), with an affine form over it ('isAffineOver')?
 readsMarginalised :: CompilerMetadata -> Expr -> Bool
 readsMarginalised meta e =
   not (isTArrowType (rType (getTypeInfo e)))
     && mentionsAffineVar meta e
-    && isAffineOver meta (Set.fromList (map fst (affineEnv meta))) e
+    && isAffineOver meta (affineVars meta) e
 
 -- | A Gaussian (or lognormal) leaf whose scale can be zero at run time is a
 -- point mass there, not a density: @z * Normal@ with @z = 0@ is the Dirac at
@@ -3204,6 +3460,9 @@ scaleMayVanish = not . nonzero
     nonzero (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IROp OpPlus (IROp OpMult a _) (IROp OpMult b _))))) =
       nonzero a || nonzero b
     nonzero _ = False
+
+failConversion :: Expr -> IRExpr
+failConversion = error "Cannot convert VClosure"
 
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
@@ -3283,6 +3542,11 @@ toIRInference meta cumulative e@(Expr TypeInfo {rType=rt} _) sample
       if cumulative
         then return (mass (compareValueExpr (semiringOf meta) rt (IRConst (valueToIR v)) sample))
         else return (indicatorP (semiringOf meta) (equalityGuard rt (IRConst (valueToIR v)) sample))
+-- A conjunction of clauses over enumerable draws whose clauses share the draws
+-- in a cycle: variable elimination over the draws ('ConstraintNet'), instead
+-- of the nested joint enumeration the stack would otherwise get.
+toIRInference meta False e sample
+  | Just net <- constraintNet meta e = compileConstraintNet meta net sample
 toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, gaussianLeaf meta e = do
   (mu, sigma0) <- toIRNormalParams meta e
   degenerateScaleGuard meta False TFloat mu sigma0 sample $ \sigma ->
@@ -3772,7 +4036,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
 toIRInference meta cumulative (Expr ti (Apply l v)) sample
   | Just l' <- curriedEnumerableCallee meta l v
   , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)) =
-  enumerateCurriedArgument meta cumulative ti l' v sample
+  enumerateCurriedArgument meta cumulative (\x -> Expr ti (Apply l' x)) v sample
 -- Deterministic curried call spine rooted at a known top-level function: build
 -- the WHOLE application (the query sample, plus every source-level argument)
 -- as one contiguous 'IRApply' chain and let-bind it exactly once, instead of
@@ -3849,20 +4113,53 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply l v)) sample 
   -- ('leadingArgBinding'), as for a random last argument. Tried second, so a
   -- call they answer keeps its emitted code.
   leading <- if cumulative then return Nothing else leadingArgBinding meta expr
-  case leading of
-    Nothing -> viaCallee
-    Just b -> do
-      first <- (Right <$> scoped viaCallee) `catchError` (return . Left)
+  let viaBinding = case leading of
+        Nothing -> viaCallee
+        Just b -> do
+          first <- (Right <$> scoped viaCallee) `catchError` (return . Left)
+          case first of
+            Right o -> inline o
+            Left _ -> applyBinding meta cumulative rt b sample
+  -- The call's one random argument, in a leading position and enumerable
+  -- (@cont (trans fog) n@), is marginalised over its domain as a random last
+  -- argument is ('enumerateCurriedArgument'), where the arms above refuse:
+  -- the binding engines none enumerate a finite domain, so which refusal a
+  -- call met depended on where its author put the random parameter (task
+  -- random-leading-argument-into-recursion-refused). Tried last, so a call
+  -- they answer keeps its emitted code; where all refuse, the enumeration's
+  -- own refusal is the one reported. Not for the cumulative variant, which
+  -- the binding path does not take either: there it would admit integrate
+  -- variants that were absent before (corpus observePredicateParameterLambda),
+  -- which batched mode cannot tensorize. Both restrictions work around
+  -- symptoms and are not design choices. The engine order now depends on the
+  -- argument's position, and nested leading calls compile in exponential time
+  -- through these retries. Docs-repo tasks
+  -- leading-argument-enumeration-as-binding-engine and
+  -- nested-leading-random-argument-compile-exponential.
+  case leadingEnumerableArgument meta expr of
+    Just (mkBody, ai) | not cumulative
+                      , enumerationWithinMaterializationBudget meta (tags (getTypeInfo ai)) -> do
+      first <- (Right <$> scoped viaBinding) `catchError` (return . Left)
       case first of
         Right o -> inline o
-        Left _ -> applyBinding meta cumulative rt b sample
+        Left _ -> enumerateCurriedArgument meta False mkBody ai sample
+    _ -> viaBinding
 -- Probabilistic bound expression
-toIRInference meta cumulative (Expr TypeInfo{rType=_, chainName=_} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
+toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
   vIR <- (unP . rProb) <$> toIRInference meta cumulative v sample
-  applied <- mkVariable "call"
-  setVariables [(applied, IRApply lIR vIR)]
-  return (unpackResult applied)
+  -- The result is not a tuple if the return value is a closure, as in the
+  -- deterministic arms above: @app g x@ with @g@ random reaches here as
+  -- @(app g) x@, and @app g@ is a function still awaiting @x@. Unpacking it
+  -- projected @fst@ out of a closure (task
+  -- named-hof-random-function-argument-miscompiled); the enclosing
+  -- application applies it and unpacks the PResult it then returns.
+  case rt of
+    TArrow _ _ -> return (detP (IRApply lIR vIR))
+    _ -> do
+      applied <- mkVariable "call"
+      setVariables [(applied, IRApply lIR vIR)]
+      return (unpackResult applied)
 toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt, chainName=_} (Apply l v)) sample | pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
@@ -4372,7 +4669,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     -- evaluated before any membership test can run. Gating via 'IRIf' rather
     -- than 'OpAnd' matters here: both operands of an IR boolean op are
     -- evaluated, so an 'OpAnd' would still divide by zero.
-    let possibleExpr = IRIf appTest (IRIsPossible enumListR invExpr) (IRConst (VBool False))
+    let possibleExpr = IRIf appTest (IRIsPossible (multiValueToIR enumListR) invExpr) (IRConst (VBool False))
     -- Without topK, pLeft is read once, inside the 'possible' arm below, and the
     -- optimizer's let-inlining moves its bindings there: a cell whose inverted
     -- value lies outside the right-hand domain never descends into @left@.
@@ -4705,8 +5002,28 @@ materializeAnchors meta expr = foldM bindAnchor expr usedAnchors
     -- The free var is a (possibly invocation-tagged) anchor chain name; the
     -- source node to generate its value from is the untagged original.
     bindAnchor irBody cn = do
-      anchorIR <- toIRGenerate meta (findExprWithCN fns (untag cn))
+      anchorIR <- toIRGenerate meta (anchorAtCall meta (getTag cn) (findExprWithCN fns (untag cn)))
       return (IRLetIn cn anchorIR irBody)
+
+-- | An anchor node as its value is computed at this call site. An anchor in a
+-- callee's per-invocation copy (tag @t@) reads the callee's parameters, which
+-- are not in scope here: each such occurrence is replaced by the argument
+-- the invocation passed ('boundArgument'), itself resolved the same way where
+-- the call sits in another copied body. Going by the clause rather than by
+-- name is what keeps the anchor from reading whatever the caller happens to
+-- bind under the parameter's name, or crashing on an unbound name when it
+-- binds none (task callee-body-name-sensitive-across-call). An untagged
+-- anchor sits in the scope being compiled and is left as it is.
+anchorAtCall :: CompilerMetadata -> String -> Expr -> Expr
+anchorAtCall _ "" e = e
+anchorAtCall meta tag e0 = go Set.empty e0
+  where
+    go bound e@(Expr _ (Var n))
+      | not (n `Set.member` bound)
+      , Just argCN <- boundArgument (fcData meta) (chainName (getTypeInfo e) ++ tag)
+      = anchorAtCall meta (getTag argCN) (exprWithCN meta (untag argCN))
+    go bound (Expr t (Lambda x b)) = Expr t (Lambda x (go (Set.insert x bound) b))
+    go bound (Expr t f) = Expr t (fmap (go bound) f)
 
 createHOInverse :: CompilerMetadata -> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse meta (fVar, f) = do
@@ -4980,7 +5297,22 @@ equalityGuardBody self (TEither lr rr) v sample =
   IRIf (IRDestruct AcIsLeft v)
     (IRIf (IRDestruct AcIsLeft sample) (self lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (IRConst $ VBool False))
     (IRIf (IRDestruct AcIsLeft sample) (IRConst $ VBool False) (self rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)))
+-- A function has no equality (the IR contract's 'OpEq' takes none, and the
+-- interpreter has no case for a closure). A function in a component of a
+-- tuple or Either is compared only where its query slot is not a wildcard,
+-- and no query value holds a concrete closure, so this is a run-time error
+-- that a reachable comparison would raise, as the cdf's is
+-- ('functionCdfMessage'). Before, @(\y -> (\x -> x, y)) 1.0@ at
+-- @(ANY, 1.0)@ emitted @fst sample == fst v@ at the function type behind the
+-- slot's wildcard test (task ir-contract-violations-in-compiler-output).
+equalityGuardBody _    (TArrow _ _) _ _ = IRError functionProbMessage
 equalityGuardBody _    _ v sample = IROp OpEq sample v
+
+-- | The runtime diagnostic for a p() query that compares a function-valued component.
+functionProbMessage :: String
+functionProbMessage =
+  "p(): no probability is defined at a function value -- functions carry no "
+  ++ "equality to compare a query value against."
 
 -- | Bool-valued IR comparing two leaves of type @rt@ (callers pass the query
 -- sample first). A float is compared with 'OpApprox' (see 'equalityGuard' for
@@ -4998,7 +5330,7 @@ equalityGuardBody _    _ v sample = IROp OpEq sample v
 -- ('SPLL.CodeGenPyTorchBatched.structural').
 leafEqIR :: RType -> IRExpr -> IRExpr -> IRExpr
 leafEqIR TFloat    a b = IROp OpApprox a b
-leafEqIR (TVarR _) a b = IRIf (IRConformsTo TFloat a) (IROp OpApprox a b) (IROp OpEq a b)
+leafEqIR (TVarR _) a b = IRIf (IRConformsTo ITFloat a) (IROp OpApprox a b) (IROp OpEq a b)
 leafEqIR _         a b = IROp OpEq a b
 
 
@@ -5139,15 +5471,18 @@ enumerateBinding meta l v preTable compileBody = do
   -- would read the loop variable instead: its measure became @b == b@, always
   -- true, and the draw's weight vanished from the sum. Such a parameter is
   -- renamed to a fresh name first (task
-  -- rewrite-invariance-net-draw-apply-helper-alias).
+  -- rewrite-invariance-net-draw-apply-helper-alias). A name the argument
+  -- binds clashes as well: the measure is compiled at the loop variable, so a
+  -- binder of the same name inside the argument (@observe .. (\m -> m > 0)@
+  -- passed to @f m = ..@) shadows it, and the measure compared the argument's
+  -- own value with itself (task callee-body-name-sensitive-across-call).
   (boundVar, lBodyExpr) <-
-    if paramVar `Set.member` freeVarsExpr v
+    if paramVar `Set.member` allNamesExpr v
       then do
         fresh <- mkVariable paramVar
         return (fresh, renameFreeVar paramVar fresh (findExprWithCN fExprs bodyCn))
       else return (paramVar, findExprWithCN fExprs bodyCn)
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
-  let sr = semiringOf meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   -- Inside an enclosing enumeration, the argument's measure is tabulated once
   -- per domain value ahead of this loop rather than recomputed in it (task
@@ -5175,13 +5510,14 @@ enumerateBinding meta l v preTable compileBody = do
     -- reads this (the over-budget nested application in 'toIREnumerate'); there
     -- the plan traversal must see the loop variable as fixed, not as an enclosing
     -- random binding shared across factors ('planFactorExternals').
-    let bodyMeta = meta{ typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta
-                       , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
+    let bodyMeta = recoverVars [boundVar] meta{ typeEnv=newTypeEnv
+                       , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta)
+                       , dimAwareEnum = keepsDims }
     bodyRes <- compileBody bodyMeta lBodyExpr
-    return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
-  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
-  setVariables outerBinds
-  enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+    return (pBranch, bodyRes))
+  enumSumTerms meta dimBound boundVar discreteVVals irTuple
+  where
+    (keepsDims, dimBound) = enumSumDims meta (rType (getTypeInfo l))
 
 -- | A draw's argument as 'enumerateBinding' measures it: with the enclosing
 -- enumerated latents fixed. Inside their loops each holds one value, and a
@@ -5355,6 +5691,213 @@ factoredDrawStack meta cumulative ds sample = do
     productOf = foldl1 (prodP sr)
 
 
+-- | A conjunction of Boolean clauses over enumerable draws, compiled by
+-- variable elimination (task grid-constraint-network-enumerated-jointly).
+--
+-- > draw x1 = readD a in .. draw x9 = readD i in
+-- > diff3 x1 x2 x3 && diff3 x4 x5 x6 && .. && diff3 x3 x6 x9
+--
+-- Every draw sits in two clauses (a row and a column), so after
+-- 'SPLL.DrawSinking' most of them still sit above the whole conjunction, and
+-- the nested enumeration walks close to the joint of all nine reads: @10^9@
+-- terms per call, more than ten minutes. The probability that the conjunction
+-- holds is a sum over the draws of a product of factors, one per draw (its
+-- measure) and one indicator per clause, which variable elimination sums one
+-- draw at a time: summing out a draw multiplies the factors that mention it
+-- into a table over the draws they also mention ('eliminationOrder' picks the
+-- draw whose table is smallest). The tables are nested rank-1 tensors indexed
+-- by domain position ('BIota'), built at run time, so the code stays linear in
+-- the program and the cost is the sum of the table sizes times the eliminated
+-- domain.
+--
+-- The shape is a tree of @&&@ whose inner nodes may carry draws (where
+-- sinking left them) and whose leaves are the clauses. It is sound to hoist
+-- every draw to the top: each is still one sample covering every use of its
+-- name, which the checks below make unique and not captured; and a draw's
+-- measure is a factor of the joint whether or not the clause that reads it is
+-- evaluated. The leaves must be deterministic given the draws (re-inferred
+-- with the draws pinned), and no draw may read another draw or a random
+-- enclosing local, so the draws are independent and their factors unary.
+--
+-- @P(False)@ is the total measure (the product of the draws' own totals)
+-- minus @P(True)@, a subtraction on exact sums, which is why the rule is
+-- declined under topK (and under branch counting, whose counts it does not
+-- reproduce) and under a semiring that has no subtraction (max-product). It is
+-- taken only where it pays: the clause hypergraph has a cycle (an acyclic
+-- network is what sinking already factorises) and the elimination costs less
+-- than a quarter of the joint enumeration.
+data ConstraintNet = ConstraintNet
+  { cnDraws   :: [(String, Expr)]
+    -- ^ each draw's binder and value, in the order the walk met them
+  , cnClauses :: [(Expr, [Int])]
+    -- ^ each clause and the draws it reads (indices into 'cnDraws')
+  , cnOrder   :: [Int]
+    -- ^ the elimination order
+  }
+
+constraintNet :: CompilerMetadata -> Expr -> Maybe ConstraintNet
+constraintNet meta e0 = do
+  let conf = compilerConfig meta
+      sr = semiringOf meta
+  need (not (countBranches conf) && isNothing (topKThreshold conf))
+  need (srReduceOp sr `elem` [ROpAdd, ROpLogSumExp])
+  need (rType (getTypeInfo e0) == TBool && rootShape e0)
+  (draws, leaves) <- collect e0
+  let names = map fst draws
+      nameSet = Set.fromList names
+      domains = [ take 1 [ mv | DiscreteValues mv <- tags (getTypeInfo v) ] | (_, v) <- draws ]
+  need (length draws >= 2 && Set.size nameSet == length names)
+  need (Set.null (nameSet `Set.intersection` freeVarsExpr e0))
+  need (all ((== 1) . length) domains)
+  need (all (Set.null . Set.intersection nameSet . freeVarsExpr . snd) draws)
+  let sizes = [ length (multiValueToValueList mv) | [mv] <- domains ]
+      idx = Map.fromList (zip names [0 :: Int ..])
+      clauses = [ (c, sort [ j | x <- Set.toList (freeVarsExpr c), Just j <- [Map.lookup x idx] ]) | c <- leaves ]
+  need (all ((== TBool) . rType . getTypeInfo) leaves)
+  -- a pruned observation's hole is a unit factor, not a value to compare
+  need (null [ () | Expr _ (Constant VAny) <- concatMap subtreesOf leaves ])
+  need (cyclicIncidence (length draws) (map snd clauses))
+  let (order, veCost) = eliminationOrder sizes (map snd clauses)
+  need (4 * veCost < product (map toInteger sizes))
+  -- The semantic checks last: they re-run modality inference.
+  need (not (any (readsRandomLocal nameSet) (map snd draws ++ leaves)))
+  let pins = names ++ recoveredVars meta
+  need (all (\c -> pType (getTypeInfo (reinferRecovered meta pins c)) == Deterministic) leaves)
+  return (ConstraintNet draws clauses order)
+  where
+    need b = if b then Just () else Nothing
+    rootShape (Expr _ (Apply (Expr _ (Lambda _ _)) _)) = True
+    rootShape (Expr _ (InjF (Named "and") [_, _])) = True
+    rootShape _ = False
+    collect (Expr _ (Apply l@(Expr _ (Lambda x b)) v))
+      | isDraw l v = do
+          (ds, cs) <- collect b
+          return ((x, v) : ds, cs)
+    collect (Expr _ (InjF (Named "and") [p, q])) = do
+      (d1, c1) <- collect p
+      (d2, c2) <- collect q
+      return (d1 ++ d2, c1 ++ c2)
+    collect leaf = Just ([], [leaf])
+    -- The lambda is literal, and its body is walked here rather than
+    -- resolved through chain names, so 'calleeBodyInScope' does not apply
+    -- (it would see the names the enclosing draws of the net bind as unbound).
+    isDraw l v = pType (getTypeInfo v) /= Deterministic
+      && isEnumerableApplication meta l v
+      && enumerationWithinMaterializationBudget meta (tags (getTypeInfo v))
+      && isNothing (agreementShape meta l v)
+    -- as in 'drawStack': a local neither fixed by an enclosing engine nor
+    -- typed 'Deterministic' at every occurrence couples what reads it
+    readsRandomLocal netVars ex = any (isRandomLocal netVars) (Set.toList (randomReads ex))
+    isRandomLocal netVars u = not (u `Set.member` netVars) && u `notElem` recoveredVars meta
+      && case lookup u (typeEnv meta) of
+           Just (t, False) -> not (isTArrowType t)
+           _ -> False
+    randomReads ex = Set.fromList [ n | Expr ti (Var n) <- subtreesOf ex, pType ti /= Deterministic ]
+    subtreesOf ex = ex : concatMap subtreesOf (getSubExprs ex)
+
+-- | Whether the incidence graph of @n@ variables and the clauses over them
+-- (each a list of variables) has a cycle: more edges than a forest on its
+-- nodes could hold.
+cyclicIncidence :: Int -> [[Int]] -> Bool
+cyclicIncidence n scopes0 =
+  let scopes = filter (not . null) scopes0
+      nodes = n + length scopes
+      edges = [ (n + c, v) | (c, s) <- zip [0 ..] scopes, v <- s ]
+      adj = Map.fromListWith (++) (concat [ [(a, [b]), (b, [a])] | (a, b) <- edges ])
+      graph = [ (u, u, Map.findWithDefault [] u adj) | u <- [0 .. nodes - 1] ]
+      comps = length (stronglyConnComp graph)
+  in length edges > nodes - comps
+
+-- | A greedy elimination order for variables of the given domain sizes under
+-- factors over the given scopes (one unary factor per variable is implied),
+-- and its cost: the sum, over the eliminations, of the size of the table
+-- built times the eliminated domain. Each step eliminates the variable whose
+-- factors span the fewest assignments.
+eliminationOrder :: [Int] -> [[Int]] -> ([Int], Integer)
+eliminationOrder sizes scopes0 =
+  go (Set.fromList [0 .. n - 1]) (map Set.fromList (filter (not . null) scopes0)) [] 0
+  where
+    n = length sizes
+    sz v = toInteger (sizes !! v)
+    span' fs v = Set.insert v (Set.unions [ s | s <- fs, v `Set.member` s ])
+    weight fs v = product (map sz (Set.toList (span' fs v)))
+    go remaining fs acc cost
+      | Set.null remaining = (reverse acc, cost)
+      | otherwise =
+          let v = snd (minimum [ (weight fs u, u) | u <- Set.toList remaining ])
+              (touch, rest) = partition (Set.member v) fs
+              merged = Set.delete v (Set.unions touch)
+              fs' = if Set.null merged then rest else merged : rest
+          in go (Set.delete v remaining) fs' (v : acc) (cost + weight fs v)
+
+-- | A factor of a 'ConstraintNet' during elimination.
+data NetFactor
+  = NFUnary Int            -- ^ a draw's measure, indexed by its position
+  | NFClause IRExpr [Int]  -- ^ a clause, reading the draws by name
+  | NFTable Varname [Int]  -- ^ a table built by an elimination, nested in scope order
+
+netFactorScope :: NetFactor -> [Int]
+netFactorScope (NFUnary k) = [k]
+netFactorScope (NFClause _ s) = s
+netFactorScope (NFTable _ s) = s
+
+-- | The probability of a 'ConstraintNet' by variable elimination; see
+-- 'ConstraintNet'. Every table is let-bound in the current scope, ahead of
+-- the result, which reads the sample only at its root.
+compileConstraintNet :: CompilerMetadata -> ConstraintNet -> IRExpr -> CompilerMonad PResult
+compileConstraintNet meta net sample = do
+  let draws = cnDraws net
+      doms = [ head [ mv | DiscreteValues mv <- tags (getTypeInfo v) ] | (_, v) <- draws ]
+      sizes = map (length . multiValueToValueList) doms
+      reduceSum t = IRBuiltin (BReduce (srReduceOp sr) 0) [t]
+      iota k = IRBuiltin (BIota [EFixed (sizes !! k)]) []
+  domVars <- forM draws (const (mkVariable "net_dom"))
+  setVariables (zip domVars (map tensorDomainSR doms))
+  unaryVars <- forM (zip draws doms) $ \((_, v), mv) -> do
+    xv <- mkVariable "net_val"
+    o <- scoped (unP . rProb <$> toIRInference meta False (drawMeasured meta v) (IRVar xv))
+    u <- mkVariable "net_unary"
+    setVariables [(u, IRBuiltin BMap [IRLambda xv (closeExpr o id), tensorDomainSR mv])]
+    return u
+  let metaC = recoverVars (map fst draws) meta { typeEnv = [ (x, (rType (getTypeInfo v), False)) | (x, v) <- draws ] ++ typeEnv meta }
+  clauseIRs <- mapM (toIRGenerate metaC . fst) (cnClauses net)
+  let eliminate fs k = do
+        let (touch, rest) = partition (elem k . netFactorScope) fs
+            newScope = sort (nub (concatMap netFactorScope touch)) \\ [k]
+        ivs <- Map.fromList <$> forM (k : newScope) (\v -> (,) v <$> mkVariable "net_i")
+        let ix v = IRVar (ivs Map.! v)
+            weightOf (NFUnary j) = Just (IRBuiltin (BIndex 0) [IRVar (unaryVars !! j), ix j])
+            weightOf (NFTable t s) = Just (foldl (\acc v -> IRBuiltin (BIndex 0) [acc, ix v]) (IRVar t) s)
+            weightOf NFClause{} = Nothing
+            conds = [ c | NFClause c _ <- touch ]
+            prod = foldl1 (srTimes sr) (mapMaybe weightOf touch)
+            guarded = if null conds then prod else IRIf (foldr1 andIR conds) prod (srZero sr)
+            -- the clauses read the draws by name: bound from the indices
+            readVars = nub (concat [ s | NFClause _ s <- touch ])
+            summand = foldr (\v acc -> IRLetIn (fst (draws !! v)) (IRBuiltin (BIndex 0) [IRVar (domVars !! v), ix v]) acc)
+                            guarded readVars
+            inner = reduceSum (IRBuiltin BMap [IRLambda (ivs Map.! k) summand, iota k])
+            table = foldr (\v acc -> IRBuiltin BMap [IRLambda (ivs Map.! v) acc, iota v]) inner newScope
+        t <- mkVariable "net_table"
+        setVariables [(t, table)]
+        return (NFTable t newScope : rest)
+  final <- foldM eliminate ([ NFUnary k | k <- [0 .. length draws - 1] ]
+                            ++ [ NFClause c s | (c, (_, s)) <- zip clauseIRs (cnClauses net) ])
+                   (cnOrder net)
+  let constConds = [ c | NFClause c [] <- final ]
+      scalars = [ IRVar t | NFTable t [] <- final ]
+      holds = foldl1 (srTimes sr) scalars
+      truth = if null constConds then holds else IRIf (foldr1 andIR constConds) holds (srZero sr)
+  tVar <- mkVariable "net_true"
+  zVar <- mkVariable "net_total"
+  setVariables [ (tVar, truth)
+               , (zVar, foldl1 (srTimes sr) [ reduceSum (IRVar u) | u <- unaryVars ]) ]
+  opaqueMass sr (IRIf (IRUnaryOp OpIsAny sample) (IRVar zVar)
+                   (IRIf sample (IRVar tVar) (measureDiffSR sr (IRVar zVar) (IRVar tVar))))
+             const0
+  where
+    sr = semiringOf meta
+
 -- | The enumerable @draw@s an expression reads through the shapes
 -- 'latentCellSum' walks: a draw (an applied literal lambda whose argument is
 -- random and enumerable within the dense budget given the draws above it),
@@ -5422,8 +5965,7 @@ latentCellSum meta cumulative densityDim e k
             return (fresh, renameFreeVar x fresh b)
           else return (x, b)
       let sr = semiringOf meta
-          bodyMeta = meta{ typeEnv = (boundVar, (rType (getTypeInfo v), False)) : typeEnv meta
-                         , recoveredVars = boundVar : recoveredVars meta
+          bodyMeta = recoverVars [boundVar] meta{ typeEnv = (boundVar, (rType (getTypeInfo v), False)) : typeEnv meta
                          , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
       innerO <- scoped (do
         pRaw <- (unP . rProb) <$> toIRInference meta False (reinferReading meta (recoveredVars meta) v) (IRVar boundVar)
@@ -5481,31 +6023,129 @@ curriedEnumerableCallee meta l v
     returnsFunction (TArrow _ (TArrow _ _)) = True
     returnsFunction _ = False
 
--- | @sum_x P(v = x) * P(l x = sample)@ over @v@'s domain, for the curried spine
--- 'curriedEnumerableCallee' accepted. The counterpart of
+-- | A saturated call @f a1 .. an@ of a conditional top-level function whose
+-- one non-deterministic argument @ai@ is enumerable and is not the last one
+-- (that case is 'curriedEnumerableCallee''s): every other argument is
+-- deterministic given the enclosing latents. Answers the call with @ai@
+-- replaced by a given expression, and @ai@ itself. Two or more random
+-- arguments decline, leaving the call to 'leadingArgBinding'.
+leadingEnumerableArgument :: CompilerMetadata -> Expr -> Maybe (Expr -> Expr, Expr)
+leadingEnumerableArgument meta expr0
+  | not (isTArrowType (rType (getTypeInfo expr)))
+  , (hd@(Expr _ (Var f)), args@(_:_:_)) <- flattenApplySpine expr
+  , Just (TArrow _ _, True) <- lookup f (typeEnv meta)
+  , [i] <- [ k | (k, a) <- zip [0 ..] args, pType (getTypeInfo a) /= Deterministic ]
+  , i < length args - 1
+  , ai <- args !! i
+  , isEnumerable (tags (getTypeInfo ai))
+  , headIsConditional (fcData meta) (compilingProgram meta) hd
+  = Just (\x -> replaceSpineArg (length args - 1 - i) x expr, ai)
+  | otherwise = Nothing
+  where
+    expr = reinferRecovered meta (recoveredVars meta) expr0
+
+-- | @sum_x P(v = x) * P(body x = sample)@ over @v@'s domain, where @body x@ is
+-- the call with @v@'s position fixed at @x@: for the curried spine
+-- 'curriedEnumerableCallee' accepted, @l x@; for a leading argument,
+-- 'leadingEnumerableArgument''s spine. The counterpart of
 -- 'enumerateAppliedLambda', which marginalises a 'let'-bound argument through
 -- its lambda body; a partial application has no lambda body of its own to
 -- resolve, so the loop body is the application itself with a fresh loop
 -- variable in the argument position. Inside the loop every argument is fixed,
 -- so 'toIREnumerate' compiles it forward and compares (or, for a helper that
 -- draws fresh randomness, hands it to the ordinary inference rules).
-enumerateCurriedArgument :: CompilerMetadata -> Bool -> TypeInfo -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
-enumerateCurriedArgument meta cumulative appTi l v sample = do
+enumerateCurriedArgument :: CompilerMetadata -> Bool -> (Expr -> Expr) -> Expr -> IRExpr -> CompilerMonad PResult
+enumerateCurriedArgument meta cumulative mkBody v sample = do
   boundVar <- mkVariable "enum_arg"
   let vTi = getTypeInfo v
       loopVar = Expr (vTi {pType = Deterministic, tags = []}) (Var boundVar)
-      loopBody = Expr appTi (Apply l loopVar)
-      bodyMeta = meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
-                      , recoveredVars = boundVar : recoveredVars meta }
-      sr = semiringOf meta
+      loopBody = mkBody loopVar
+      (keepsDims, dimBound) = enumSumDims meta (rType (getTypeInfo loopBody))
+      bodyMeta = recoverVars [boundVar] meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
+                      , dimAwareEnum = keepsDims }
   irTuple <- scoped (do
     pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
     bodyRes <- toIREnumerate bodyMeta cumulative loopBody sample
-    return (onProb (\p -> srTimes sr p pBranch) bodyRes)) <&> generateLetInBlock meta
+    return (pBranch, bodyRes))
   let discreteVVals = head [x | DiscreteValues x <- tags vTi]
-  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
-  setVariables outerBinds
-  enumSumP sr (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+  enumSumTerms meta dimBound boundVar discreteVVals irTuple
+
+-- | How an enumerated sum whose body measures a value of type @rt@ combines
+-- its terms (task enumerated-sum-over-density-body). The first component is
+-- 'dimAwareEnum' for the body: whether this sum, and every one enclosing it,
+-- reports the body's dim faithfully. The second is the static dim bound the
+-- dim-aware sum ('enumMinDimP') is built with, 'Nothing' when every term is
+-- a mass anyway (a float-free type, which 'floatFree' covers).
+--
+-- A type with no static bound ('floatLeafBound' 'Nothing': a list of reals)
+-- keeps the old sum, which reports a mass: there 'forwardOrInfer''s run-time
+-- guard stays, and raises on a density rather than mislabelling it.
+enumSumDims :: CompilerMetadata -> RType -> (Bool, Maybe Int)
+enumSumDims meta rt = case floatLeafBound (adtDecls meta) (resultOf rt) of
+  Nothing -> (False, Nothing)
+  Just d -> (dimAwareEnum meta, if d > 0 then Just d else Nothing)
+  where
+    -- The bound is taken on what the enumerated body returns, which for a
+    -- lambda being applied is its codomain.
+    resultOf (TArrow _ b) = b
+    resultOf t = t
+
+-- | Sum the scoped terms of an enumerated variable's domain, each the body's
+-- result and the mass @pBranch@ of its value, over the domain: the body
+-- weighted by that mass. With a dim bound ('enumSumDims') and a body whose
+-- dim is not statically 0 ('packedStaticDim') the sum keeps the terms' dims
+-- ('enumMinDimP'); otherwise it is the plain mass sum 'enumSumP'. A
+-- forward-and-compare indicator's dim is always statically 0, so those sums
+-- emit what they did before. In the dim-aware sum a value with no mass is an
+-- impossible term rather than a possible zero: the lowest possible dim
+-- decides the sum's dim, and a zero-weight atom must not outvote a real
+-- density (the tag over-approximates the support).
+enumSumTerms :: CompilerMetadata -> Maybe Int -> Varname -> MultiValue -> Open (IRExpr, PResult) -> CompilerMonad PResult
+enumSumTerms meta dimBound boundVar vals o = do
+  let sr = semiringOf meta
+      bc = countBranches (compilerConfig meta)
+      weighted (pBranch, r) = onProb (\p -> srTimes sr p pBranch) r
+      sumWith f o' = do
+        let irTuple = generateLetInBlock meta o'
+            (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+        setVariables outerBinds
+        f boundVar vals innerTuple
+  case dimBound of
+    Just d | packedStaticDim (generateLetInBlock meta (snd <$> o)) /= Just 0 -> do
+      o' <- scoped (do
+        (pBranch, r) <- inline o
+        w <- mkVariable "enum_weight"
+        setVariables [(w, pBranch)]
+        return (impossibleWhen (IROp OpEq (IRVar w) (srZero sr)) (weighted (IRVar w, r))))
+      sumWith (enumMinDimP sr bc id d) o'
+    _ -> sumWith (enumSumP sr bc id) (weighted <$> o)
+
+-- | The dim of a packed result ('packResult' under its let block) when it is
+-- a compile-time constant: read through the block's bindings, tuple
+-- projections of constructed tuples (and of both arms of a guarded block), an
+-- @if@ whose arms agree and a sum of dims. 'Nothing' when the dim depends on anything else (a run-time
+-- projection of a call, a binding outside the block, an @ANY@ test).
+packedStaticDim :: IRExpr -> Maybe Int
+packedStaticDim e = case flattenLetIns e of
+  (binds, IRConstruct TgTuple [_, IRConstruct TgTuple [d, _]]) -> staticInt (Map.fromList binds) d
+  _ -> Nothing
+  where
+    staticInt env x = case resolve env x of
+      IRConst (VInt n) -> Just n
+      IRIf _ a b -> do
+        n <- staticInt env a
+        m <- staticInt env b
+        if n == m then Just n else Nothing
+      IROp OpPlus a b -> (+) <$> staticInt env a <*> staticInt env b
+      _ -> Nothing
+    resolve env x = case x of
+      IRVar v | Just b <- Map.lookup v env -> resolve (Map.delete v env) b
+      IRLetIn v b rest -> resolve (Map.insert v b env) rest
+      IRDestruct AcFst t | IRConstruct TgTuple [a, _] <- resolve env t -> resolve env a
+      IRDestruct AcSnd t | IRConstruct TgTuple [_, b] <- resolve env t -> resolve env b
+      -- a projection of a guarded block ('closeResult'): project both arms
+      IRDestruct acc t | IRIf c a b <- resolve env t -> IRIf c (IRDestruct acc a) (IRDestruct acc b)
+      _ -> x
 
 
 -- ===== Agreement fusion (task categorical-product-ov-fusion) =====
@@ -5903,6 +6543,7 @@ toIREnumerate meta cumulative e@(Expr _ (Apply l v)) sample
     else case agreementShape meta l v of
       Just ag -> enumerateAgreement meta cumulative ag sample
       Nothing
+        | not cumulative, Just net <- constraintNet meta e -> compileConstraintNet meta net sample
         | Just ds <- drawStack meta e -> factoredDrawStack meta cumulative ds sample
         | otherwise -> enumerateAppliedLambda meta cumulative l v sample
   where
@@ -5981,37 +6622,57 @@ forwardOrInfer meta cumulative whole sample operands forward
   | otherwise = do
       mapM_ (\(what, src, ir) -> requireDeterministicUnderEnum meta what src ir) operands
       res <- toIRInference meta cumulative (reinferRecovered meta (recoveredVars meta) whole) sample
-      -- Every enclosing enumerated sum ('enumSumP') reports its result as a
-      -- mass, dim 0, because until now its body always was one: a
-      -- forward-and-compare indicator. A delegated body can be a density
-      -- (@if b then Normal else Normal + 3.0@), and summing densities as if
-      -- they were masses would report the wrong dim -- and, where the dim
-      -- differs across enumerated values, the wrong mixture winner.
-      --
-      -- Whether it is one is in general a RUNTIME fact: @(x, Uniform)@ is a
-      -- mass exactly when the query marginalises the second slot with @ANY@
-      -- (the fuzz-found @enumDeadLetFreshDrawTuple@ reaches this through
-      -- @fst@), and topK pruning makes the dim a runtime choice even where it
-      -- would otherwise fold. So the probability is guarded at run time: a
-      -- possible result with a non-zero dim raises instead of being summed as
-      -- a mass. The guard is skipped where it is statically true -- a
-      -- cumulative result (a CDF value is a mass by construction), or a type
-      -- with no 'TFloat' leaf, which no density ever measures (this is what
-      -- keeps a helper call, whose dim is a runtime projection of the callee's
-      -- result, guard-free) -- and the optimizer folds it away where the dim
-      -- is a literal 0. Summing densities properly is follow-up task
-      -- enumerated-sum-over-density-body.
-      if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole))
+      -- A delegated body can be a density (@if b then Normal else Normal +
+      -- 3.0@), and whether it is one is in general a RUNTIME fact: @(x,
+      -- Uniform)@ is a mass exactly when the query marginalises the second
+      -- slot with @ANY@ (the fuzz-found @enumDeadLetFreshDrawTuple@ reaches
+      -- this through @fst@), and topK pruning makes the dim a runtime choice
+      -- even where it would otherwise fold. The enclosing enumerated sums
+      -- keep their terms' dims ('enumTerm', 'enumMinDimP'; task
+      -- enumerated-sum-over-density-body), so the result is returned as it
+      -- is -- unless one of them sums its terms as masses ('dimAwareEnum'
+      -- off: its body's type has no static dim bound, a list of reals). Then
+      -- the probability is guarded at run time: a possible result with a
+      -- non-zero dim raises instead of being summed as a mass. The guard is
+      -- also skipped where it is statically true -- a cumulative result (a
+      -- CDF value is a mass by construction), or a type with no 'TFloat'
+      -- leaf, which no density ever measures -- and the optimizer folds it
+      -- away where the dim is a literal 0.
+      if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole)) || dimAwareEnum meta
         then return res
         else do
           let isMass = orIR (rImposs res) (IROp OpEq (rDim res) dim0)
               refusal = IRError $ "probability-mode inference of an enumerated conditional (chain name "
                           ++ chainName (getTypeInfo whole) ++ ") met a continuous density: given the"
                           ++ " enumerated latents the query measures a fresh continuous draw, and an"
-                          ++ " enumerated sum over density-valued terms is not implemented (task"
-                          ++ " enum-let-latent-gates-fresh-draw; follow-up enumerated-sum-over-density-body)"
+                          ++ " enumerated sum over density-valued terms of a type with no static dim bound"
+                          ++ " (a list of reals) is not implemented (tasks enum-let-latent-gates-fresh-draw,"
+                          ++ " enumerated-sum-over-density-body)"
           return (onProb (\p -> IRIf isMass p refusal) res)
   where thd3 (_, _, x) = x
+
+-- | A static upper bound on the dim of a point probability of a value of the
+-- type: its number of real leaves, the larger alternative for a sum type.
+-- 'Nothing' when there is none (a list or tensor of reals, a recursive ADT
+-- with a real field) or the type is not recognised. Used by the enumerated
+-- sums ('enumSumTerms') to find the lowest dim among their terms
+-- ('enumMinDimP'), which needs the bound to build its ladder.
+floatLeafBound :: [ADTDecl] -> RType -> Maybe Int
+floatLeafBound decls = go Set.empty
+  where
+    go seen t
+      | floatFree decls t = Just 0
+      | otherwise = case t of
+          TFloat -> Just 1
+          Tuple a b -> (+) <$> go seen a <*> go seen b
+          TEither a b -> max <$> go seen a <*> go seen b
+          TADT n
+            | Set.member n seen -> Nothing
+            | otherwise -> case find ((== n) . dataName) decls of
+                Just d -> fmap (maximum . (0 :)) $ sequence
+                            [ sum <$> mapM (go (Set.insert n seen) . snd) fs | (_, fs) <- constructors d ]
+                Nothing -> Nothing
+          _ -> Nothing
 
 -- | True when no value of the type contains a 'TFloat' leaf, so a point
 -- probability of it is always a mass (dim 0). Conservative: anything it does
@@ -6059,15 +6720,22 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
                        , integFun = fmap stripFun (integFun fg)
                        , normalFun = fmap stripFun (normalFun fg)
                        , genFun = fmap stripGen (genFun fg) }
-    stripFun (expr, doc) = (strip (const True) True Set.empty expr, doc)
-    stripGen (expr, doc) = (strip callsInference False Set.empty expr, doc)
+    -- In an inference body any call may return a packed result (a closure
+    -- parameter applied to the sample is one), except a call of a generate
+    -- function: its value is a sample, whatever its shape. The deterministic-
+    -- application leaf binds @mk_gen(s1)(s2)(s3)(s4)@ to compare it against
+    -- the query, and a four-deep tuple read as a callee's result lost its
+    -- last fields (task trajectory-tail-bound-as-tuple-type-error).
+    stripFun (expr, doc) = (strip (not . callsNamed generateNames) True Set.empty expr, doc)
+    stripGen (expr, doc) = (strip (callsNamed inferenceNames) False Set.empty expr, doc)
 
     inferenceNames = Set.fromList (concat [ [groupName fg ++ "_prob" | isJust (probFun fg)]
                                            ++ [groupName fg ++ "_integ" | isJust (integFun fg)]
                                          | fg <- funcs ])
-    callsInference e = case e of
-      IRApply f _ -> callsInference f
-      IRVar n -> n `Set.member` inferenceNames
+    generateNames = Set.fromList [ groupName fg ++ "_gen" | fg <- funcs, isJust (genFun fg) ]
+    callsNamed names e = case e of
+      IRApply f _ -> callsNamed names f
+      IRVar n -> n `Set.member` names
       _ -> False
 
     -- Scope-aware rewrite. @callResults@ holds the variables currently bound to
@@ -6097,9 +6765,19 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       IRDestruct AcSnd (IRDestruct AcSnd (IRDestruct AcSnd (IRVar x))) | x `Set.member` callResults -> IRDestruct AcSnd (IRDestruct AcSnd (IRVar x))
       -- Binding forms: rebind the name, so shadowing cannot leak a stale
       -- classification into an inner scope.
+      --
+      -- A value that holds a callee result in one arm is read as one in every
+      -- arm, so an arm that packs a result locally (an impossible fallback
+      -- beside a guarded call) is collapsed to the callee's width too. Left
+      -- at full width, one 'IRIf' answered two layouts and the shifted flag
+      -- projection read a tuple on the local arm (task
+      -- ir-contract-violations-in-compiler-output,
+      -- higher-order/namedFunctionCurriedWitness).
       IRLetIn n v irBody ->
         let v' = go callResults v
-        in IRLetIn n v' (go (rebind n (holdsCalleeResult isCall callResults v') callResults) irBody)
+            callee = holdsCalleeResult isCall callResults v
+        in IRLetIn n (if callee then stripLocalArms v' else v')
+                     (go (rebind n callee callResults) irBody)
       IRLambda n irBody ->
         IRLambda n ((if outer then stripOuterTriple else id) (go (rebind n False callResults) irBody))
       -- A tensor map's lambda is an enumeration LOOP binder, not a function
@@ -6121,12 +6799,45 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- collapsed? Only an application does; a locally assembled 'IRConstruct'
     -- keeps its four fields. Both branch forms must agree, and an alias
     -- inherits the classification of what it aliases.
+    --
+    -- A redex of a literal lambda is classified by what the lambda returns
+    -- (it is read before rewriting, as the lambda arm above leaves it). A
+    -- packed result triple, which that arm collapses ('stripOuterTriple'),
+    -- answers at the callee's width; any other tuple the body assembles is a
+    -- value and keeps every field; a body ending in anything else falls back
+    -- to @isCall@. In a probability function @isCall@ is @const True@, and
+    -- the deterministic-application leaf binds
+    -- @(\\p2 -> (s1, (p2, (s3, 0.0)))) (s1 + s2)@ to compare it against the
+    -- sample: read as a callee's result, the third and fourth fields of that
+    -- value were shifted like a result's bc and flag (task
+    -- trajectory-tail-bound-as-tuple-type-error).
     holdsCalleeResult isCall env v = case v of
+      IRApply (IRLambda _ irBody) _
+        | tails <- returnedTuples irBody, not (null tails) ->
+            any isPackedTriple tails
       IRApply _ _      -> isCall v
       IRVar x          -> x `Set.member` env
       IRLetIn n b irBody -> holdsCalleeResult isCall (rebind n (holdsCalleeResult isCall env b) env) irBody
       IRIf _ t f       -> holdsCalleeResult isCall env t || holdsCalleeResult isCall env f
       _                -> False
+
+    -- The tuples a lambda body returns, through its let-bindings, both arms
+    -- of an 'IRIf' and nested literal-lambda redexes (a let too); empty when
+    -- some arm ends in anything but a tuple construction.
+    returnedTuples e = case e of
+      IRLetIn _ _ irBody -> returnedTuples irBody
+      IRApply (IRLambda _ irBody) _ -> returnedTuples irBody
+      IRIf _ t f -> case (returnedTuples t, returnedTuples f) of
+        (ts@(_:_), fs@(_:_)) -> ts ++ fs
+        (ts, []) | isError f -> ts
+        ([], fs) | isError t -> fs
+        _ -> []
+      IRConstruct TgTuple _ -> [e]
+      _ -> []
+    isError (IRError _) = True
+    isError _ = False
+    isPackedTriple (IRConstruct TgTuple [_, IRConstruct TgTuple [_, IRConstruct TgTuple [_, _]]]) = True
+    isPackedTriple _ = False
 
     -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers,
     -- and through the query-type guard's IRIf (whose then-branch carries the real triple;
@@ -6143,6 +6854,13 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     stripOuterTriple (IRConstruct TgTuple [a, IRConstruct TgTuple [b, IRConstruct TgTuple [_, imp]]]) =
       IRConstruct TgTuple [a, IRConstruct TgTuple [b, imp]]
     stripOuterTriple e                         = e
+
+    -- 'stripOuterTriple' through the arms of a bound value only: a lambda in
+    -- a bound value is a closure, not that value's result.
+    stripLocalArms (IRLetIn n v irBody) = IRLetIn n v (stripLocalArms irBody)
+    stripLocalArms (IRIf c t e) = IRIf c (stripLocalArms t) (stripLocalArms e)
+    stripLocalArms e@(IRConstruct TgTuple _) = stripOuterTriple e
+    stripLocalArms e = e
 
 -- ===== Set-valued witnesses (design set-valued-witnesses) =====
 --
@@ -6951,7 +7669,16 @@ invertToWorldsStep meta occs exprBody target = do
       -- catch-all. The occurrence of x sits in `e`, so `e` is never x-free and
       -- the deterministic-given-scope admission cannot apply; the fix is to
       -- invert THROUGH the binding rather than to look past it.
-      Expr _ (Apply (Expr lamTI (Lambda _ b)) e)
+      -- An inner binding the body reads once, with no binder on the way
+      -- ('readOnceInPlace'), where x is in the body (with or without `e`):
+      -- the read has the value's own law, so the body is inverted with the
+      -- value in place, as 'worldsShape' walks it (task
+      -- dispatch-on-law-certificates). The two-stage inversion below keeps
+      -- the case of x in `e` alone.
+      Expr _ (Apply (Expr _ (Lambda y b)) _)
+        | subtreeHasOcc occs b, readOnceInPlace y b ->
+            invertToWorlds meta occs (enterInPlace exprBody) target
+      Expr _ (Apply (Expr lamTI (Lambda y b)) e)
         -- x in `e` only. With x in `b` as well, x-sets from `e` and y-sets
         -- from `b` would have to be mixed in one intersection, and with x in
         -- `b` alone the worlds on `b` would reference the inner binding's
@@ -6962,7 +7689,13 @@ invertToWorldsStep meta occs exprBody target = do
             -- 'equivalentLambda' resolution of a Var to a top-level function
             -- is involved).
             let occsY = fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences (fcData meta)))
-            invertThroughBinding meta occs occsY b e target
+            twoStage <- invertThroughBinding meta occs occsY b e target
+            -- Where the two stages do not invert (a body projecting the
+            -- bound pair, @draw v = (x, 0.0) in fst v@), a binding read in
+            -- place is entered in place, as 'worldsShape' falls back to.
+            case twoStage of
+              Nothing | readOnceInPlace y b -> invertToWorlds meta occs (enterInPlace exprBody) target
+              _ -> return twoStage
       -- A call -- of a named function, a function parameter, a let-bound
       -- lambda -- is the same binding as a @let@ (task
       -- binding-resolver-one-application-rule): the observation is inverted
@@ -6978,9 +7711,13 @@ invertToWorldsStep meta occs exprBody target = do
       -- other field's value is discarded, so its randomness marginalises to
       -- one and its reads of x constrain nothing. Reached only where the
       -- whole subtree did not transport ('transportDirect' has no interval
-      -- step through @fst@, and none for several occurrences).
-      Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]) -> invertToWorlds meta occs a target
-      Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]) -> invertToWorlds meta occs b target
+      -- step through @fst@, and none for several occurrences). An inner
+      -- binding read in place that holds the pair is entered first
+      -- ('enterInPlace'), as 'worldsShape' does.
+      Expr _ (InjF (Named "fst") [p])
+        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace p -> invertToWorlds meta occs a target
+      Expr _ (InjF (Named "snd") [p])
+        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace p -> invertToWorlds meta occs b target
       Expr _ (InjF (Named op) args)
         | op `notElem` structuralInjFs, not (isFieldConstructor (adtDecls meta) op)
         , [a] <- filter (subtreeHasOcc occs) args
@@ -7335,8 +8072,7 @@ residueFactor :: CompilerMetadata -> Expr -> String -> RType -> IRExpr -> IRExpr
 residueFactor meta subtree boundName boundRT value target = do
   let recovered = boundName : recoveredVars meta
   let retyped = reinferRecovered meta recovered subtree
-  let fMeta = meta { typeEnv = (boundName, (boundRT, False)) : typeEnv meta
-                   , recoveredVars = recovered }
+  let fMeta = recoverVars [boundName] meta { typeEnv = (boundName, (boundRT, False)) : typeEnv meta }
   block <- scoped (toIRInference fMeta False retyped target) <&> generateLetInBlock fMeta
   fv <- mkVariable "residue_factor"
   return (WFactor (openWith [(fv, IRLetIn boundName value block)] (unpackResult fv)))
@@ -7582,14 +8318,50 @@ data PlanRef = PlanRef PartitionPlan Int
 -- difference (mass, dim 0); 'PLeafPt' pins it to a point, measured as the
 -- leaf's density times the |change-of-variables| factor (dim 1), under
 -- membership guards accumulated from intersected intervals.
+--
+-- 'PLeafEq' (task per-value-neural-equality-unrolled-sum) is a 'PLeafCon' in
+-- disguise: a discrete region over the contiguous Int domain @[lo .. hi]@
+-- (slot @i@ holding value @lo + i@) constrained to equal (@True@) or differ
+-- from (@False@) the run-time value @x@, a variable or an accessor chain over
+-- one. Its last field is that same constraint spelled as per-slot guards,
+-- which is what it becomes the moment it meets another constraint on its
+-- region ('expandLeafEq'). Left alone it is measured as one indexed read
+-- @raw[x - lo]@ under a range guard (or that read's complement) instead of a
+-- V-term guarded sum: the difference between O(1) and O(V) per evaluation,
+-- and O(V) against O(V^2) for a per-value query over the domain.
 data PLeafCon = PLeafCon Int [(Int, IRExpr)]
               | PLeafIvl Int WBound WBound
               | PLeafPt  Int IRExpr IRExpr [IRExpr]
+              | PLeafEq  Int Int Int IRExpr Bool [(Int, IRExpr)]
 
 plcBase :: PLeafCon -> Int
 plcBase (PLeafCon b _)    = b
 plcBase (PLeafIvl b _ _)  = b
 plcBase (PLeafPt b _ _ _) = b
+plcBase (PLeafEq b _ _ _ _ _) = b
+
+-- | A 'PLeafEq' as the per-slot 'PLeafCon' it stands for; anything else
+-- unchanged.
+expandLeafEq :: PLeafCon -> PLeafCon
+expandLeafEq (PLeafEq b _ _ _ _ slots) = PLeafCon b slots
+expandLeafEq c = c
+
+-- | The constraint "the discrete leaf at @off@, over @vals@, equals (or, with
+-- @pol@ False, differs from) @x@", given as its per-slot guards @slots@: a
+-- 'PLeafEq' where the domain is a contiguous Int range and @x@ is cheap to
+-- read three times, else the 'PLeafCon' of those guards.
+discreteEqCon :: Int -> [Value] -> IRExpr -> Bool -> [(Int, IRExpr)] -> PLeafCon
+discreteEqCon off vals x pol slots
+  | simpleRead x
+  , (lo : _) <- ints
+  , length ints == length vals
+  , ints == [lo .. lo + length ints - 1] = PLeafEq off lo (lo + length ints - 1) x pol slots
+  | otherwise = PLeafCon off slots
+  where
+    ints = [ k | VInt k <- vals ]
+    simpleRead (IRVar _)        = True
+    simpleRead (IRDestruct _ e) = simpleRead e
+    simpleRead _                = False
 
 -- | A guarded conjunction of per-leaf constraints; the plan-leaf analogue of
 -- 'WWorld'. Contributes (product of constrained leaf masses) when all guards
@@ -7717,6 +8489,7 @@ pwOverCoupled (PlanWorld _ cons pairs _ _ _)
     coupled = concat [[a, b] | (a, b) <- pairs]
     contCon = [plcBase c | c <- cons, isCont c]
     isCont PLeafCon{} = False
+    isCont PLeafEq{}  = False
     isCont _          = True
     overCoupled = [ b | b <- coupled
                       , length (filter (== b) coupled) > 1 || b `elem` contCon ]
@@ -7803,6 +8576,22 @@ planRawRead raws k = case [ r | r@(start, _) <- raws, start <= k ] of
   [] -> error ("planRawRead: offset " ++ show k ++ " precedes every neural read's range " ++ show raws)
   rs -> let (start, v) = last rs in IRBuiltin BListIndex [IRVar v, IRConst (VInt (k - start))]
 
+-- | The logit for the Int value @x@ of a region starting at flat offset
+-- @base@ whose slot 0 holds the value @lo@: 'planRawRead' with a run-time
+-- index, @raw[x - lo]@ within the region.
+planRawReadAt :: PlanRaws -> Int -> Int -> IRExpr -> IRExpr
+planRawReadAt raws base lo x = case [ r | r@(start, _) <- raws, start <= base ] of
+  -- Invariant, as in 'planRawRead'.
+  [] -> error ("planRawReadAt: offset " ++ show base ++ " precedes every neural read's range " ++ show raws)
+  rs -> let (start, v) = last rs
+            off = base - start - lo
+        in IRBuiltin BListIndex [IRVar v, if off == 0 then x else IROp OpPlus x (IRConst (VInt off))]
+
+-- | Bool IR: does the Int @x@ lie in @[lo .. hi]@?
+intInRange :: Int -> Int -> IRExpr -> IRExpr
+intInRange lo hi x = IROp OpAnd (IROp OpLessThan (IRConst (VInt (lo - 1))) x)
+                              (IROp OpLessThan x (IRConst (VInt (hi + 1))))
+
 -- ('CompilerM', the unapplied form: 'CompilerMonad' would be an unsaturated
 -- synonym application here.)
 type PlanM a = StateT PlanState CompilerM a
@@ -7824,6 +8613,10 @@ andGuard a b | a == constTrueIR = b
 -- the mergeExpr convention). A region cannot be discrete in one constraint
 -- and continuous in another (the plan fixes each region's kind).
 intersectLeafCon :: PLeafCon -> PLeafCon -> PLeafCon
+intersectLeafCon c@(PLeafEq _ _ _ x p _) (PLeafEq _ _ _ x' p' _)
+  | x == x' && p == p' = c
+intersectLeafCon c@PLeafEq{} c' = intersectLeafCon (expandLeafEq c) c'
+intersectLeafCon c c'@PLeafEq{} = intersectLeafCon c (expandLeafEq c')
 intersectLeafCon (PLeafCon b s1) (PLeafCon _ s2) =
   PLeafCon b [ (i, andGuard g1 g2) | (i, g1) <- s1, Just g2 <- [lookup i s2] ]
 intersectLeafCon (PLeafIvl b lo1 hi1) (PLeafIvl _ lo2 hi2) =
@@ -7838,6 +8631,7 @@ intersectLeafCon c c' = error ("plan leaf region at offset " ++ show (plcBase c)
   ++ " is constrained as both discrete and continuous (plan invariant violation): "
   ++ show (isDisc c) ++ " vs " ++ show (isDisc c'))
   where isDisc PLeafCon{} = True
+        isDisc PLeafEq{}  = True
         isDisc _          = False
 
 insertLeafCon :: PLeafCon -> [PLeafCon] -> [PLeafCon]
@@ -8111,9 +8905,10 @@ planEvalRef meta env = go
 -- before the traversal, and an enclosing component split guards it.
 planRefWorlds :: [ADTDecl] -> PlanRef -> [PLeafCon] -> PTarget -> Either String [PlanWorld]
 planRefWorlds _ (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
-  Right [pw1 (insertLeafCon
-          (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
-          cons)]
+  Right [pw1 (insertLeafCon (con [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ]) cons)]
+  where con = case tgt of
+          PTPoint s -> discreteEqCon off vals s True
+          PTUpTo _  -> PLeafCon off
 planRefWorlds adtDecls' (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
   wa <- component (PlanRef a off) (IRDestruct AcFst s)
   wb <- component (PlanRef b (off + getSize a)) (IRDestruct AcSnd s)
@@ -8619,8 +9414,9 @@ planInvertNode meta env planBody target = case planBody of
         Just (Right (PlanRef (Discretes rty (MultiDiscretes vals)) off, cons)) -> do
           dv <- bindDetSide "eq_rhs" de
           let eqG v = planDetGuard rty (IRConst (valueToIR v)) (PTPoint (IRVar dv))
-          let tw = [pw1 (insertLeafCon (PLeafCon off [ (i, eqG v)                    | (i, v) <- zip [0..] vals ]) cons)]
-          let fw = [pw1 (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (eqG v)) | (i, v) <- zip [0..] vals ]) cons)]
+          let eqCon pol = discreteEqCon off vals (IRVar dv) pol
+          let tw = [pw1 (insertLeafCon (eqCon True  [ (i, eqG v)                    | (i, v) <- zip [0..] vals ]) cons)]
+          let fw = [pw1 (insertLeafCon (eqCon False [ (i, IRUnaryOp OpNot (eqG v)) | (i, v) <- zip [0..] vals ]) cons)]
           return (Right (planBoolWorlds target tw fw))
         Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) | all (null . snd) ctorPlans -> do
           dv <- bindDetSide "eq_rhs" de
@@ -9457,11 +10253,15 @@ planGroupValues pairs = do
 -- what a collapsed group keeps live ('planGroupValues', 'planFieldProduct').
 planCommonDiscreteCons :: [PlanWorld] -> [PLeafCon]
 planCommonDiscreteCons (w:ws') =
-  [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (planConEq c) (pwCons w')) ws' ]
+  [ c | c <- pwCons w, isDiscrete c, all (\w' -> any (planConEq c) (pwCons w')) ws' ]
+  where isDiscrete PLeafCon{} = True
+        isDiscrete PLeafEq{}  = True
+        isDiscrete _          = False
 planCommonDiscreteCons [] = []
 
 planConEq :: PLeafCon -> PLeafCon -> Bool
 planConEq (PLeafCon b1 s1) (PLeafCon b2 s2) = b1 == b2 && s1 == s2
+planConEq (PLeafEq b1 _ _ x1 p1 _) (PLeafEq b2 _ _ x2 p2 _) = b1 == b2 && x1 == x2 && p1 == p2
 planConEq _ _ = False
 
 -- | The worlds of a constructed value, from its fields' worlds: their
@@ -10036,6 +10836,15 @@ planWorldMass sr raws w =
     -- native log form: summed linearly, then carried into the semiring.
     leafMass (PLeafCon _ [])       = srZero sr
     leafMass (PLeafCon base slots) = fromLinearSR sr (foldr1 (IROp OpPlus) (map (slotRead base) slots))
+    -- One indexed read in place of the guarded sum ('PLeafEq'). The region is
+    -- a softmax, so the mass of every slot but @x@'s is the complement of
+    -- @x@'s, as an unconstrained leaf's mass is the semiring one. The read is
+    -- a raw logit, not a compiled (possibly pruned) result, so the complement
+    -- has no lower bound to flip.
+    leafMass (PLeafEq base lo hi x pol _) =
+      let point = fromLinearSR sr (planRawReadAt raws base lo x)
+      in if pol then IRIf (intInRange lo hi x) point (srZero sr)
+                else IRIf (intInRange lo hi x) (srComplement sr point) (srOne sr)
     leafMass (PLeafIvl base lo hi) = case (lo, hi) of
       -- one-sided intervals cannot go negative; only a runtime-empty
       -- two-sided intersection needs the clamp (mirrors measureSet). The log
@@ -10256,6 +11065,26 @@ planApplicable meta rt binding
   | isJust (bindScope binding), not (isTArrowType rt) = planProjectedReadOf meta (bindArg binding)
   | otherwise = Nothing
 
+-- | The in-place engine's applicability to a binding, and the expression it
+-- compiles: a lambda in place whose body reads its variable once, with no
+-- binder on the way ('readOnceInPlace', the predicate of the modality
+-- engine's 'CertInPlace'), is the body with the argument at that read. The
+-- read has the argument's own law, so this is the binding's meaning, not a
+-- rewrite of it; it is the last engine, for bindings no other one measures
+-- ('dispatchEngines').
+--
+-- Only a body compiled inline here qualifies ('bindInline', no invocation
+-- tag, no leading argument, not function-valued): the body handed to the
+-- engines is then the lambda's own, and every node it holds on the way to
+-- the read is compiled from this tree, not looked up by chain name.
+inPlaceApplicable :: RType -> Binding -> Maybe Expr
+inPlaceApplicable rt binding
+  | bindInline binding, not (bindLeadingArg binding), null (bindTag binding)
+  , null (bindOuterVars binding), not (isTArrowType rt)
+  , readOnceInPlace (bindVar binding) (bindBody binding)
+  = Just (substituteVar (bindVar binding) (bindArg binding) (bindBody binding))
+  | otherwise = Nothing
+
 -- | The set-witness engine's applicability to a binding: the shape walk of
 -- 'SPLL.Typing.ForwardChaining.worldsShape' over its body, as the modality
 -- engine's let rule asks it.
@@ -10299,14 +11128,22 @@ bindIfConditions meta binding chain = case used of
   where
     fields = [invValue chain, invCoV chain, invGuard chain, invReadsAny chain, invCumValue chain, invCumGuard chain]
     used = [ vc | vc@(v, _) <- ifConditionVars (fcData meta) (bindTag binding), any (freeInIR v) fields ]
+    -- The condition, under the @let@s on the way to it whose variables it
+    -- reads: a split reached through a @let@ ('toInvExprMaybeWith') has a
+    -- condition that may read the let-bound variable (@draw c = 0.2 < 0.5 in
+    -- if c ..@), which the binding's scope does not bind.
     findCond cn e
       | chainName (getTypeInfo e) == cn = Just e
+      | Expr ti (Apply (Expr lti (Lambda y b)) v) <- e
+      , Just c <- findCond cn b
+      = Just (if y `Set.member` freeVarsExpr c then Expr ti (Apply (Expr lti (Lambda y c)) v) else c)
       | otherwise = listToMaybe (mapMaybe (findCond cn) (getSubExprs e))
     readsOuter c = any (`Set.member` freeVarsExpr c) (bindOuterVars binding)
 
 -- | The probabilistic 'Apply' arm's engines, over one resolved application
--- ('Binding'): plan-guided enumeration, point inversion with its body factor,
--- set-valued witnesses and affine marginalisation, in that order.
+-- ('Binding'), in dispatch order ('engineOrder'): plan-guided enumeration,
+-- point inversion with its body factor, joint affine and affine
+-- marginalisation, set-valued witnesses, and in place.
 applyBinding :: CompilerMetadata -> Bool -> RType -> Binding -> IRExpr -> CompilerMonad PResult
 applyBinding meta cumulative rt binding sample = do
   let clauses = fcData meta
@@ -10362,7 +11199,7 @@ applyBinding meta cumulative rt binding sample = do
    -- engine splits the same if and answers it.
    let condKnown cn = not cumulative && pType (getTypeInfo (reinferRecovered meta (recoveredVars meta) (exprWithCN meta cn))) == Deterministic
    let pointInversion = if fieldWitnessUnfolded then Nothing
-                        else toInvExprMaybeWith condKnown clauses localAdts lChainName
+                        else toInvExprMaybeWith condKnown condKnown clauses localAdts lChainName
    -- A binding whose certificate is an affine Gaussian form, all of whose
    -- uses flow affinely into one density leaf, needs no witness at all: it is
    -- integrated out analytically inside that leaf (task
@@ -10371,12 +11208,11 @@ applyBinding meta cumulative rt binding sample = do
    -- set-witness engine's fallback).
    let affineCollapse x lamBody = do
           form <- affineFormOf meta v
-          let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) x) binding x)
-                           { affineEnv = (x, form) : affineEnv meta }
+          let bodyMeta = marginaliseAs x form (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) x) binding x)
           toIRInference bodyMeta cumulative lamBody sample
    -- Point inversion: the witness recovered by the inverse chain, the
    -- change of variables, and the body factor at the witness.
-   let pointInvert chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} = do
+   let pointInvertWith witnessOf chain@InvChain{invCoV = invExprCoV0, invReadsAny = invExprReadsAny0} = do
         -- A cumulative query transports a bound, rounded at integer quotients
         -- (task cdf-through-discrete-inverse-wrong); a point query the point.
         let (invExprP0, invExprGuard0)
@@ -10412,7 +11248,9 @@ applyBinding meta cumulative rt binding sample = do
         invExprGuard    <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
         invExprReadsAny <- pruneDeadLetIns <$> materializeAnchors meta invExprReadsAny0
         let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
-        let lInv = IRLambda (boundVar ++ tag) invExprP
+        -- 'witnessOf' is 'id' except under 'pointInvert''s enumeration of a
+        -- wildcard leaf, which reads the inverse as a parameter instead.
+        let lInv = witnessOf (IRLambda (boundVar ++ tag) invExprP)
         -- Apply the sample to the inverse
         let appliedSample = IRApply lInv sample
         -- The inversion chain may pass through a deconstructing InjF whose inverse
@@ -10486,7 +11324,7 @@ applyBinding meta cumulative rt binding sample = do
         let bodyExpr = reinferRecovered meta recovered (bindBody binding)
         -- The body references the bound variable, so it must be in scope in the type
         -- environment (mirrors how the Lambda arm descends into a lambda body).
-        let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN) { recoveredVars = recovered }
+        let bodyMeta = recoverVars recovered (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN)
         -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
         -- appliedSample is VAny at runtime iff the slot FC recovers this binding
         -- from was queried marginally. If the binding is a "sink" — a single
@@ -10547,15 +11385,20 @@ applyBinding meta cumulative rt binding sample = do
                   TArrow _ _ -> do
                     let impossible = packResult (impossibleP sr)
                     let guardedCall = IRIf guard (IRIf bodyReadable call impossible) impossible
+                    -- Outside the inverse's domain the closure answers an
+                    -- impossible event, flagged, as 'guardedZero' does for a
+                    -- value result: an unflagged zero made @mk Normal 1.0@
+                    -- (@mk x y = x : [x + y]@) answer p([]) as a possible
+                    -- zero (task ir-contract-violations-in-compiler-output).
                     return (detP (guarded
                       (wrapInLambdas (IRLetIn callVar guardedCall (packResult (withBody (unpackResult callVar)))))
-                      (wrapInLambdas (packResult (detP (srZero sr))))))
+                      (wrapInLambdas impossible)))
                   _ -> do
                     bodyRes <- closeResult sr "body_factor" [guard, bodyReadable]
                                  (openWith [(callVar, call)] (unpackResult callVar))
                     return (withBody bodyRes)
           TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
-                                       (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr)))))))
+                                       (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (impossibleP sr))))))
           -- Integrate mode, a binding read more than once, whatever its head
           -- (a named callee's single witness answered these CDFs wrong too,
           -- e.g. @f x = (x, x + 1.0)@ at @cdf((0.3, 1.0))@ 0.618 for 0.5): the
@@ -10683,10 +11526,24 @@ applyBinding meta cumulative rt binding sample = do
               -- holds a probabilistic let is bound: the copies compound only
               -- through such nesting, and a leaf block's constant dim and flag
               -- fold away inline but not through the shared tuple.
+              --
+              -- The open body is read only where the witness is a wildcard,
+              -- and the binding's one occurrence is read only behind its
+              -- slot's own wildcard test, so it is never evaluated. It is still
+              -- a free variable of the block, which the IR contract does not
+              -- allow, whatever the evaluation order (task
+              -- ir-contract-violations-in-compiler-output: @draw x = Uniform
+              -- in draw y = Uniform in (x, y)@ at @(ANY, 0.5)@ read @x@ in an
+              -- arm that bound it nowhere). So it is replaced by the wildcard
+              -- it stands for: the witness's own value where that is
+              -- evaluable, and a value the dead read cannot tell from it where
+              -- not. Substituted rather than bound: a leaf block is copied per
+              -- field, and a binding with it.
               case r of
                 Just openO ->
                   shareUnlessLeaf sr "open_body" (holdsProbabilisticLet openBody)
-                    [guard, if bindingIsSink then readsAnyW else anyW] openO
+                    [guard, if bindingIsSink then readsAnyW else anyW]
+                    (substFreeOpen toInvCN (IRConst VAny) openO)
                 Nothing -> return (constResult anyRefusal)
             let whenAny whenAnySink whenUneval
                   | bindingIsSink = IRIf readsAnyW whenUneval whenAnySink
@@ -10694,31 +11551,114 @@ applyBinding meta cumulative rt binding sample = do
                   | otherwise     = anyRefusal
             let guardAny ok whenAnySink whenUneval = IRIf anyW (whenAny whenAnySink whenUneval) ok
             return (underLambdas lambdaVars (guardedZero (zip3Result guardAny combined bodyRes unevaluable)))
+   -- A wildcard in a finite leaf of the witness that the body reads again
+   -- (task any-mark-passed-as-recursive-call-state). The witness is the
+   -- query slot itself, so an ANY there reaches every other read of the
+   -- bound variable as a value: @draw e = ev prev in e : gen (snd e)@ at
+   -- @[(0.0, ANY), ..]@ handed @gen@ the ANY as its state, every @prev == 0@
+   -- test answered False, and the marginal was the @prev = 1@ arm alone. The
+   -- slot is marginal, so it is summed out: where the leaf is ANY at run
+   -- time (and its enclosing tuples are not), the binding's result is the
+   -- mixture over the leaf's finite domain of the same result at the witness
+   -- with that leaf fixed. The observation compares the fixed leaf against
+   -- its ANY slot as a wildcard, the bound value's density is read at the
+   -- fixed witness, and the body's other reads see a value. Exact by the law
+   -- of total probability, whatever those reads do with it.
+   --
+   -- The result at a witness is compiled once, as a closure over the inverse
+   -- ('pointInvertWith'), and called per leaf value, so the binding is not
+   -- compiled once per value; the calls sit in the arm of the run-time test,
+   -- so a query without the wildcard makes exactly the one call it made
+   -- before. Only a leaf read by more than one occurrence, or by one that
+   -- computes with it ('varFieldReads'), with a domain the bound value
+   -- states ('fieldDomainOf'), qualifies; any other binding keeps its code.
+   -- A point query of a value-typed body only: a closure-valued result has no
+   -- mixture, and a cumulative one is left to the existing refusals.
+   let enumLeaves =
+         let occReads = varFieldReads (compilingProgram meta) (adtDecls meta) toInvCN (bindBody binding)
+             overlapping p = [ r | r@(_, q) <- occReads, q `isPrefixOf` p || p `isPrefixOf` q ]
+             readAgain p = let ov = overlapping p in length ov >= 2 || any (not . fst) ov
+             leaves = [ (p, vals)
+                      | p <- tupleLeafPaths (rType (getTypeInfo v)), readAgain p
+                      , Just vals <- [fieldDomainOf (compilingProgram meta) 8 v p], not (null vals) ]
+         -- At most 'wildcardLeafSumBound' witnesses per wildcard pattern. Not
+         -- the materialization budget: that is the dense tables' off switch,
+         -- and the sum is not a table.
+         in if length occReads >= 2 && product (map (length . snd) leaves) <= wildcardLeafSumBound
+              then leaves else []
+   let isArrowRT = case rt of TArrow _ _ -> True; _ -> False
+   let pointInvert chain
+         | cumulative || isArrowRT || not (null lambdaVars) || null enumLeaves = pointInvertWith id chain
+         | otherwise = do
+            let sr = semiringOf meta
+            invExprP <- pruneDeadLetIns <$> materializeAnchors meta (invValue chain)
+            invExprGuard <- pruneDeadLetIns <$> materializeAnchors meta (invGuard chain)
+            invExprReadsAny <- pruneDeadLetIns <$> materializeAnchors meta (invReadsAny chain)
+            let lInv = IRLambda (boundVar ++ tag) invExprP
+            let atSample e = IRApply (IRLambda (boundVar ++ tag) e) sample
+            -- Whether the witness may be evaluated at all: inside the
+            -- inverse's domain and not computed from a wildcard.
+            let evaluable = IRIf (atSample invExprReadsAny) constFalseIR (atSample invExprGuard)
+            inverseParam <- mkVariable "inverse"
+            atWitness <- mkVariable "at_witness"
+            resO <- scoped (pointInvertWith (const (IRVar inverseParam)) chain)
+            setVariables [(atWitness, IRLambda inverseParam (closeExpr resO packResult))]
+            argVar <- mkVariable "witness_arg"
+            -- The result at the witness 'fixLeaves' makes of the inverse's.
+            let callAt fixLeaves = do
+                  r <- mkVariable "at_w"
+                  setVariables [(r, IRApply (IRVar atWitness)
+                                   (IRLambda argVar (fixLeaves (IRApply lInv (IRVar argVar)))))]
+                  return (unpackResult r)
+            let leafIsAny w [] = IRUnaryOp OpIsAny w
+                leafIsAny w (st : rest) = IRIf (IRUnaryOp OpIsAny w) constFalseIR (leafIsAny (fieldStepIR st w) rest)
+            let go [] fixLeaves = callAt fixLeaves
+                go ((p, vals) : rest) fixLeaves = do
+                  let w = fixLeaves (IRApply lInv sample)
+                  summedO <- scoped $ do
+                    terms <- forM vals $ \k ->
+                      go rest (\x -> setFieldIR p (IRConst (valueToIR k)) (fixLeaves x))
+                    foldM (\a b -> mixP sr (IROp OpPlus (rBranches a) (rBranches b)) a b) (head terms) (tail terms)
+                  keptO <- scoped (go rest fixLeaves)
+                  r <- mkVariable "marginal_leaf"
+                  setVariables [(r, IRIf (IRIf evaluable (leafIsAny w p) constFalseIR)
+                                       (closeExpr summedO packResult) (closeExpr keptO packResult))]
+                  return (unpackResult r)
+            go enumLeaves id
    -- The engines of a probabilistic application, as data, in dispatch order
-   -- (task engine-applicability-as-data): each entry's applicability is the
-   -- predicate the modality engine's let rule reads too, and its
+   -- ('engineOrder', the one statement of it, which the modality engine's
+   -- 'bindingCerts' lists certificates in too): each entry's applicability is
+   -- the predicate the modality engine's let rule reads, and its
    -- construction. First applicable wins. A construction that declines
    -- ('Left') passes its diagnostic on to the next applicable engine; one
-   -- that refuses refuses the variant. Enumeration comes before all of them,
-   -- at the Apply arm's first equation ('isEnumerableApplication'), ahead of
-   -- the dead-binding and leading-argument handling a 'Binding' needs.
+   -- that refuses refuses the variant. Enumeration is first in the order but
+   -- is not constructed here: it is tried at the Apply arm's earlier
+   -- equations ('isEnumerableApplication', under the materialization budget),
+   -- ahead of the dead-binding and leading-argument handling a 'Binding'
+   -- needs, so a binding reaching this point is one it declined.
    -- Where none applies, the set-witness engine is asked anyway, for its
    -- diagnostic: its predicate is its necessary condition only.
-   let engines =
-         [ ("plan-guided enumeration", planApplicable meta rt binding <&> \_ _ ->
-              planWitnessApply meta cumulative rt binding sample)
-         , ("point inversion", pointInversion <&> \chain diag -> do
+   let engineFor k = case k of
+         EnumerationEngine -> Nothing
+         PlanEngine -> planApplicable meta rt binding <&> \_ _ ->
+              planWitnessApply meta cumulative rt binding sample
+         PointInversionEngine -> pointInversion <&> \chain diag -> do
               bound <- bindIfConditions meta binding chain
               case bound of
                 Just chain' -> Right <$> pointInvert chain'
-                Nothing -> return (Left diag))
-         , ("affine marginalisation", affineMarginalisable meta rt binding <&> \(x, lamBody) _ ->
-              Right <$> affineCollapse x lamBody)
-         , ("joint affine marginalisation", jointAffineApplicable meta rt binding <&> \ja _ ->
-              jointAffineApply meta cumulative binding ja sample)
-         , ("set-valued witnesses", setWitnessApplicable meta binding <&> \_ diag ->
-              Right <$> setWitnessApply meta cumulative rt binding diag sample)
-         ]
+                Nothing -> return (Left diag)
+         AffineEngine -> affineMarginalisable meta rt binding <&> \(x, lamBody) _ ->
+              Right <$> affineCollapse x lamBody
+         JointAffineEngine -> jointAffineApplicable meta rt binding <&> \ja _ ->
+              jointAffineApply meta cumulative binding ja sample
+         WorldsEngine -> setWitnessApplicable meta binding <&> \_ diag ->
+              Right <$> setWitnessApply meta cumulative rt binding diag sample
+         -- Last, after the set-witness engine's fallback below too: that
+         -- one can answer where the set-witness predicate, only its
+         -- necessary condition, declined (the all-ANY mask variant of
+         -- let-bindings/letWitnessedChain), and must keep doing so.
+         InPlaceEngine -> Nothing
+   let engines = [ (engineLabel k, engineFor k) | k <- engineOrder ]
    -- Set-valued witnesses invert the observation structurally into guarded
    -- constraint sets on the bound variable (intervals from comparisons, case
    -- splits from ifs, intersections across occurrences) and measure them
@@ -10727,4 +11667,15 @@ applyBinding meta cumulative rt binding sample = do
          traceM ("binding of '" ++ userBound ++ "' (" ++ lChainName ++ ", "
                  ++ (if cumulative then "integrate" else "probability") ++ ") compiled by " ++ name)
        userBound = case l of Expr _ (Lambda n _) -> n; _ -> toInvCN
-   dispatchEngines compiledFrom engines (\diag -> setWitnessApply meta cumulative rt binding diag sample)
+   -- Where no engine applies, the set-witness engine is asked anyway, and
+   -- where it refuses, the in-place engine answers if it applies.
+   let fallback diag = case inPlaceApplicable rt binding of
+         Nothing -> setWitnessApply meta cumulative rt binding diag sample
+         Just inPlace -> do
+           sw <- (Right <$> scoped (setWitnessApply meta cumulative rt binding diag sample)) `catchError` (return . Left)
+           case sw of
+             Right o -> inline o
+             Left _ -> do
+               compiledFrom (engineLabel InPlaceEngine)
+               toIRInference meta cumulative inPlace sample
+   dispatchEngines compiledFrom engines fallback

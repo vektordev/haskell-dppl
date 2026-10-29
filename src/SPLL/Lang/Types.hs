@@ -30,22 +30,21 @@ module SPLL.Lang.Types
   , GenericValue(..)
   , isVEither, isVTuple, isVADT
   , valueContainsAny
-  , MultiValue(..)
+  , MultiValue
+  , GenericMultiValue(..)
   , Tag(..)
   , InferenceRule(..)
   ) where
 
 
+import SPLL.IR.Value
 import SPLL.Typing.PType
 import SPLL.Typing.RType
-import Data.Bifunctor (second)
 import Data.Foldable (toList)
 import Text.Megaparsec.Pos (SourcePos, sourcePosPretty)
 
 
 type ChainName = String
-
-type CompilerError = String
 
 data InjFName = Named String
               deriving (Show, Eq)
@@ -240,121 +239,11 @@ data ADTDecl = ADTDecl {
   } deriving (Show, Eq)
 type ADTConstructorDecl = (String, [(String, RType)])
 
-data ThetaTree = ThetaTree [Double] [ThetaTree] deriving (Show, Eq)
-
-data GenericList a = EmptyList | ListCont a (GenericList a) | AnyList deriving (Show, Eq)
-type ValueList a = GenericList (GenericValue a)
-
-instance Functor GenericList where
-  fmap _ EmptyList = EmptyList
-  fmap f (ListCont x xs) = ListCont (f x) (fmap f xs) 
-  fmap _ AnyList = AnyList
-
-instance Foldable GenericList where
-  foldMap _ EmptyList = mempty
-  foldMap f (ListCont x xs) = f x `mappend` foldMap f xs
-  foldMap _ AnyList = error "Cannot fold AnyLists"
-
-instance Traversable GenericList where
-  traverse _ EmptyList = pure EmptyList
-  traverse f (ListCont x xs) = ListCont <$> f x <*> traverse f xs
-  traverse _ AnyList = error "AnyLists are not traversable"
-
 type Value = GenericValue Expr
 
-data GenericValue a = VBool Bool
-           | VInt Int
-           | VSymbol String
-           | VFloat Double
-           | VUnit
-           | VList (GenericList (GenericValue a))
-           | VTuple (GenericValue a) (GenericValue a)
-           | VEither (Either (GenericValue a) (GenericValue a))
-           | VThetaTree ThetaTree
-           | VClosure [(String, a)] String a
-           | VADT String [GenericValue a]
-           -- | A tensor: a statically-shaped, flat, homogeneous block of
-           -- values. The element list is in row-major order (outermost axis
-           -- first) and its length is always @shapeNumel@ of the shape, which
-           -- is the invariant every producer maintains and 'tensorWellFormed'
-           -- checks.
-           --
-           -- Flat with an explicit shape, as against 'VList''s cons spine:
-           -- extent is known statically, so an index is O(1) and a reduction
-           -- is one pass rather than a walk. Produced and consumed only by the
-           -- tensor builtins ('BTensor', 'BMap', 'BReduce', 'BIndex') -- the
-           -- surface language has no syntax for it and the parser never builds
-           -- one, so it is unreachable in a 'Value' that came from a .ppl
-           -- file. It lives in 'GenericValue' rather than a type of its own
-           -- because the interpreter's let-environments are typed as
-           -- 'IRValue', and a mapped tensor has to be let-bindable for one map
-           -- to feed two reduces (design ir-tensor-values).
-           --
-           -- Element type is unconstrained here: homogeneity of /primitives/
-           -- is not a typing obligation at this layer but a codegen
-           -- opportunity -- a tensor of float/int/bool lowers to a real torch
-           -- tensor with an O(1) gather and a vectorized reduce, anything else
-           -- falls back to a generic list.
-           | VTensor Shape [GenericValue a]
-           | VAny -- Only used for marginal queries
-           | VAnyExcept [a] -- Only used for marginal queries
-           | VError String
-           deriving (Show, Eq)
+-- | A value set over expressions; the IR uses @GenericMultiValue IRExpr@.
+type MultiValue = GenericMultiValue Expr
 
-instance Functor GenericValue where
-  fmap _ (VInt x) = VInt x
-  fmap _ (VBool x) = VBool x
-  fmap _ (VSymbol x) = VSymbol x
-  fmap _ (VFloat x) = VFloat x
-  fmap _ VUnit = VUnit
-  fmap f (VList x) = VList (fmap (fmap f) x)
-  fmap f (VTuple x y) = VTuple (fmap f x) (fmap f y)
-  fmap f (VEither (Left x)) = VEither (Left (fmap f x))
-  fmap f (VEither (Right x)) = VEither (Right (fmap f x))
-  fmap _ (VThetaTree x) = VThetaTree x
-  fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
-  fmap f (VADT n adt) = VADT n (map (fmap f) adt)
-  fmap f (VTensor sh xs) = VTensor sh (map (fmap f) xs)
-  fmap f (VAnyExcept x) = VAnyExcept (map f x)
-  fmap _ VAny = VAny
-  fmap _ (VError s) = VError s
-
-
-isVTuple, isVEither, isVADT :: GenericValue a -> Bool
-isVTuple (VTuple _ _) = True
-isVTuple _ = False
-isVEither (VEither _) = True
-isVEither _ = False
-isVADT (VADT _ _) = True
-isVADT _ = False
-
--- | Whether a value has a placeholder 'VAny'/'VAnyExcept' anywhere in its
--- structure (e.g. 'VEither (Left VAny)') -- distinct from the value itself
--- being 'VAny'. Used to tell a witness that only partially determines a value
--- (recovered from a lossy inverse, e.g. isLeft's, which knows the tag but not
--- the payload) apart from a fully concrete one.
-valueContainsAny :: GenericValue a -> Bool
-valueContainsAny VAny = True
-valueContainsAny (VAnyExcept _) = True
-valueContainsAny (VEither (Left v)) = valueContainsAny v
-valueContainsAny (VEither (Right v)) = valueContainsAny v
-valueContainsAny (VTuple a b) = valueContainsAny a || valueContainsAny b
-valueContainsAny (VADT _ vs) = any valueContainsAny vs
-valueContainsAny (VList l) = listContainsAny l
-  where
-    listContainsAny EmptyList = False
-    listContainsAny AnyList = True
-    listContainsAny (ListCont x xs) = valueContainsAny x || listContainsAny xs
-valueContainsAny _ = False
-
-data MultiValue = MultiDiscretes [Value]
-                | MultiTuple MultiValue MultiValue
-                | MultiEither MultiValue MultiValue
-                | MultiADT [(String, [MultiValue])]
-                | MultiTypeRef String
-                | MultiContinuous     -- ^ A continuous (Float) leaf, written "Real" in .ppl source.
-                | MultiAuto           -- ^ Placeholder ("_" in .ppl source): auto-derive from the RType.
-                deriving (Show, Eq)
 
 
 data Tag = DiscreteValues MultiValue

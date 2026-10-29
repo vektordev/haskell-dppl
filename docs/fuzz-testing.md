@@ -291,8 +291,8 @@ cancels via an async exception, and a blanket handler would swallow the
 cancellation itself, defeating the per-case budget for exactly the slow
 cases it exists to bound.
 
-The interpreter substitutes a mock for every declared neural network
-(`MockNN.hs`); `(2, [logit0, ...])` (a verbatim logit vector) is the only
+The interpreter is handed a neural oracle (`SPLL.IR.Neural`), and the
+`run*` entry points build it from the mocks (`MockNN.programMockOracle`); `(2, [logit0, ...])` (a verbatim logit vector) is the only
 deterministic mode, used to pin exact densities in `.tst` files.
 
 ## The InjF catalog

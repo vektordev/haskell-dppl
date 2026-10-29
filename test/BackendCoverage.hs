@@ -48,7 +48,8 @@ import Test.Tasty.HUnit (testCase, assertFailure)
 
 import SPLL.Prelude (compile)
 import Control.Concurrent.MVar (newMVar, modifyMVar)
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, CompilerConfig(..), IREnv, IRExpr)
+import SPLL.IntermediateRepresentation (IREnv, IRExpr)
+import SPLL.CompilerConfig (defaultCompilerConfig, CompilerConfig(..))
 import BackendAgreement (AgreementCase, comparedBodies, maskedConstruct, batchedComparedBodies)
 import CertifiedCensus (irConstructs, irEnvConstructs, deterministicBodies, inferenceBodies,
                         certifiedConstructs, allBodies, batchedCertifiedConstructs, batchedReachedNotCompared)

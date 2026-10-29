@@ -1,0 +1,6 @@
+-- Task drawn-isright-test-reads-fromright-of-left-at-o0. Drawing the isRight
+-- test of an enumerated Either (`draw r = isRight m in if r ...`) applies
+-- fromRight to a Left. The task found it -O0-only (the draw-intro rewrite of
+-- either-maybe/enumeratedEitherSelectOnDomainConstant); it now raises at every
+-- -O level on the program written this way, which is why this pin runs here.
+main = draw m = (if Uniform < 0.3 then right True else if Uniform < 0.5 then right False else left False) in draw r = isRight m in if r then (if fromRightPartial m then right 5 else left True) else left False

@@ -31,6 +31,7 @@ module SPLL.Typing.ForwardChaining
   , hasRandomLeaf
   , permissiveDet
   , findEquivalentExpression
+  , boundArgument
   , findExprWithCN
   , unwrapLambdas
   , untag
@@ -81,6 +82,10 @@ data FCData = FCData
   -- | Every if-then-else node, by its chain name: what the point inverse
   -- needs to split the observation over the two arms ('toInvExprMaybeWith').
   , fcIfConds :: Map.Map ChainName IfCond
+  -- | Every @let@ (an application of a literal lambda), by the chain name of
+  -- the application: the point inverse steps through one into its body on
+  -- the way to an if-then-else ('toInvExprMaybeWith').
+  , fcLetSteps :: Map.Map ChainName LetStep
   -- | The equivalence clauses of 'hornClauses', by conclusion, in clause
   -- order ('findEquivalentExpression' follows them per lookup).
   , fcEquivByConclusion :: Map.Map ChainName [HornClause]
@@ -97,6 +102,18 @@ data IfCond = IfCond
   , icThenNodes :: Set ChainName
   , icElseNodes :: Set ChainName
   , icCondRandom :: Bool
+  }
+
+-- | A @let@ (@(\\y -> b) v@) as the point inverse steps through it: the
+-- chain names of its body and of its value, every node of the value, and
+-- whether the value draws fresh randomness itself ('hasRandomLeaf'). The
+-- application's value is its body's, so an observation of the one is an
+-- observation of the other.
+data LetStep = LetStep
+  { lsBody :: ChainName
+  , lsValue :: ChainName
+  , lsValueNodes :: Set ChainName
+  , lsValueRandom :: Bool
   }
 
 -- Information on what type of expression a HornClause originated from
@@ -230,10 +247,13 @@ isWitnessedLambda fcData adtsDecls obsCN = \lambdaCN -> case inversionSetup fcDa
        -- variable arm by arm ('toInvExprMaybeWith'). The shared reach test
        -- goes first: the inverse is seeded per application, so it is the
        -- expensive conjunct.
-       || (Map.member (untag (conclusion paramClause)) (fcIfConds fcData)
+       || (splitsAt (untag (conclusion paramClause))
            && reached (conclusion paramClause) && isJust (toInvExprMaybe fcData adtsDecls lambdaCN))
   Nothing -> False
   where
+    -- An if-then-else, possibly under @let@s ('toInvExprMaybeWith').
+    splitsAt cn = Map.member cn (fcIfConds fcData)
+               || maybe False (splitsAt . lsBody) (Map.lookup cn (fcLetSteps fcData))
     (unwrappedObsCN, _) = unwrapLambdas fcData obsCN
     obsClause = ParameterHornClause unwrappedObsCN
     reached = isJust . toValueExpr (hornClauses fcData) [obsClause] adtsDecls
@@ -261,12 +281,14 @@ data WitnessCert = WitnessCert
 -- @headCN@ resolves to, in the declaration observed at @obsCN@: 'Nothing'
 -- when no occurrence of the bound variable is point-invertible from the
 -- lambda's body. A chain name forward chaining never saw (a node a later pass
--- synthesized) has no certificate.
-pointWitnessCert :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe WitnessCert
-pointWitnessCert fcData adtsDecls obsCN headCN
+-- synthesized) has no certificate. The predicate says which @let@ values on
+-- the way to an if-then-else are known points ('toInvExprMaybeWith'), by
+-- their law.
+pointWitnessCert :: (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe WitnessCert
+pointWitnessCert valueKnown fcData adtsDecls obsCN headCN
   | isNothing (Map.lookup headCN (chainNameInfo fcData)) = Nothing
   | otherwise = do
-      chain <- toInvExprMaybe fcData adtsDecls headCN
+      chain <- toInvExprMaybeWith (const True) valueKnown fcData adtsDecls headCN
       Just (WitnessCert chain (isWitnessedLambda fcData adtsDecls obsCN headCN))
 
 -- | The set-witness engine's certificate (design set-valued-witnesses): how
@@ -365,14 +387,26 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
         | op `elem` ["and", "or"] -> (\x y -> WSConnective [x, y]) <$> walk os a WTPoint <*> walk os b WTPoint
         | op == "TCons", tgt == WTPoint -> WSTuple <$> walk os a WTPoint <*> walk os b WTPoint
       Expr _ (InjF (Named "not") [a]) -> WSConnective . (: []) <$> walk os a WTPoint
-      Expr _ (Apply (Expr lamTI (Lambda _ b)) v)
+      -- An inner binding read once with no binder on the way is its value
+      -- at that read ('readOnceInPlace', the in-place engine's predicate), so
+      -- the body can be walked with the value in place ('enterInPlace'). That
+      -- is the walk where the body reads x too, or reads an x-free value it
+      -- compares x against; where x is in the value alone, it is the
+      -- fallback when the two-stage walk through the binding fails, as for a
+      -- body that projects the bound pair (@draw v = (x, 0.0) in fst v@).
+      Expr _ (Apply (Expr lamTI (Lambda y b)) v)
         | hasOcc os v && not (hasOcc os b) ->
             through os (fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
-        | otherwise -> Nothing
+              <|> inPlace
+        | otherwise -> inPlace
+        where inPlace = if readOnceInPlace y b then walk os (enterInPlace e) tgt else Nothing
       Expr _ (Apply _ _) -> call os e tgt
-      -- A projection of a literal pair is that field.
-      Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]) -> walk os a tgt
-      Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]) -> walk os b tgt
+      -- A projection of a literal pair is that field, also where an inner
+      -- binding read in place holds the pair ('enterInPlace').
+      Expr _ (InjF (Named "fst") [p])
+        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace p -> walk os a tgt
+      Expr _ (InjF (Named "snd") [p])
+        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace p -> walk os b tgt
       -- One invertible step over the one operand the variable reaches, which
       -- does not transport as a whole: the step transported onto the
       -- operand, then the operand walked at the same kind of target.
@@ -503,7 +537,7 @@ toInvExpr fcData adtsDecls lambdaCN = merged
 -- 'mergeExpr'). The set-valued witness fallback in IRCompiler dispatches on
 -- this instead of the hard error.
 toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
-toInvExprMaybe = toInvExprMaybeWith (const True)
+toInvExprMaybe = toInvExprMaybeWith (const True) (const True)
 
 -- | 'toInvExprMaybe', which also inverts through an if-then-else whose
 -- condition is known at the binding (task
@@ -518,17 +552,39 @@ toInvExprMaybe = toInvExprMaybeWith (const True)
 --
 -- The condition enters the chain as the free variable 'ifConditionVars'
 -- names, which the caller binds to the condition's value in its scope. The
--- predicate says which conditions (by untagged chain name) the caller can
--- compile as known; the syntactic floor -- no occurrence of the bound
--- variable, no fresh randomness -- is checked here.
-toInvExprMaybeWith :: (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
-toInvExprMaybeWith condKnown fcData adtsDecls lambdaCN = do
+-- first predicate says which conditions (by untagged chain name) the caller
+-- can compile as known; the syntactic floor -- no occurrence of the bound
+-- variable, no fresh randomness -- is checked here. The second says the same
+-- of the value of a @let@ the split is reached through: the binding is
+-- stepped into only where its value is known, which is where a condition
+-- reading its variable is.
+toInvExprMaybeWith :: (ChainName -> Bool) -> (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
+toInvExprMaybeWith condKnown valueKnown fcData adtsDecls lambdaCN = do
   (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
   let seeded occs seed =
         case informative (mapMaybe (toPointValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
           []  -> throughIf occs seed
           ves -> Just (mergeExpr toInvVarName lambdaCN occs ves)
-      throughIf occs seed = do
+      throughIf occs seed = splitIf occs seed <|> throughLet occs seed
+      -- A @let@ whose value reads none of the occurrences: its body is
+      -- observed as the application is, so the occurrences are recovered
+      -- from the body. The binding's value must be known here, as an @if@'s
+      -- condition must (a condition reading the let-bound variable is known
+      -- exactly when the value is): a @draw c = 0.2 < 0.5@ ahead of
+      -- @if c then .. else ..@ splits as the inline condition does (task
+      -- if-split-ignores-draw-bound-point-condition).
+      throughLet occs seed = do
+        ls <- Map.lookup (untag seed) (fcLetSteps fcData)
+        let tag = getTag seed
+        if lsValueRandom ls || any ((`Set.member` lsValueNodes ls) . untag) occs || not (valueKnown (lsValue ls))
+          then Nothing
+          else do
+            c <- seeded occs (lsBody ls ++ tag)
+            let at field = IRLetIn (lsBody ls ++ tag) (IRVar seed) (field c)
+            Just InvChain { invValue = at invValue, invCoV = at invCoV, invGuard = at invGuard
+                          , invReadsAny = at invReadsAny, invCumValue = at invCumValue
+                          , invCumGuard = at invCumGuard }
+      splitIf occs seed = do
         ic <- Map.lookup (untag seed) (fcIfConds fcData)
         let tag = getTag seed
             inside nodes = filter ((`Set.member` nodes) . untag) occs
@@ -1228,6 +1284,20 @@ findEquivalentExpression fcData startCN = go [startCN] startCN
     isFinalExpr (VarInfo _) = False
     isFinalExpr _ = True
 
+-- | The argument a variable occurrence is bound to, by the equivalence
+-- clause an application gave it ('associateVariable'): for the occurrence
+-- @cn@ of a parameter (tagged with its invocation where the body was copied
+-- per call), the chain name of the argument that invocation passed, itself
+-- tagged where the call sits in another copied body. 'Nothing' for a name no
+-- application binds (a top-level function, a lambda-in-place parameter not
+-- yet related).
+boundArgument :: FCData -> ChainName -> Maybe ChainName
+boundArgument fcData cn =
+  case [ pre | EquivalenceHornClause [pre] _ (VariableEquivalence _) 1
+                 <- Map.findWithDefault [] cn (fcEquivByConclusion fcData) ] of
+    [pre] -> Just pre
+    _ -> Nothing
+
 -- Build the 'lambdaVarOccurrences' map for a whole program: every Lambda node
 -- paired with the (shadowing-aware) occurrences of its bound variable in its
 -- own body. Empty for a dead binding — the caller decides; 'inversionSetup'
@@ -1464,6 +1534,7 @@ progToFCData anchors prog =
          , fcAnchors = anchorInstances
          , lambdaVarOccurrences = firstWins (progToLambdaVarOccurrences prog)
          , fcIfConds = Map.unions [ ifConds e | (_, e) <- functions prog ]
+         , fcLetSteps = Map.unions [ letSteps e | (_, e) <- functions prog ]
          , fcEquivByConclusion = Map.fromListWith (flip (++))
              [ (conclusion hc, [hc]) | g <- anchorClauses ++ baseClauses, hc <- g, isEquivalenceHornClause hc ] }
   where
@@ -1495,6 +1566,12 @@ progToFCData anchors prog =
       , icElseNodes = subtreeChainNames f, icCondRandom = hasRandomLeaf c }
     here _ = Map.empty
 
+    letSteps e = Map.unions (letHere e : map letSteps (getSubExprs e))
+    letHere e@(Expr _ (Apply (Expr _ (Lambda _ b)) v)) = Map.singleton (getChainName e) LetStep
+      { lsBody = getChainName b, lsValue = getChainName v, lsValueNodes = subtreeChainNames v
+      , lsValueRandom = hasRandomLeaf v }
+    letHere _ = Map.empty
+
 -- Every chain name appearing as a premise or conclusion anywhere in a clause set.
 allClauseChainNames :: [[HornClause]] -> [ChainName]
 allClauseChainNames = nubOrd . concatMap (concatMap (\c -> conclusion c : premises c))
@@ -1519,8 +1596,9 @@ progToHornClauses Program{functions=fs, adts=adtsDecls} _ = nubOrdOn show $ init
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adtsDecls . snd) fs
-    topEquivClauses = constructTopLevelEquivalenceClauses initialRun fs
-    equivClauses = lambdasToHornClauses (initialRun ++ topEquivClauses) fs
+    lets = equivalencePartners (letEquivalenceClauses (map snd fs))
+    topEquivClauses = constructTopLevelEquivalenceClauses lets initialRun fs
+    equivClauses = lambdasToHornClauses lets (initialRun ++ topEquivClauses) fs
 
 -- Converts an expression with all its subexpressions into Horn clauses
 exprToHornClauses :: [ADTDecl] -> Expr -> [[HornClause]]
@@ -1591,38 +1669,61 @@ getEquivCNMaybe clauses = \cn -> case Map.findWithDefault [] cn index of
 -- 1. Bound variables are equivalent to the value of their binding apply
 -- 2. An Apply is equivalent to the body of the lambda it applies
 -- This function creates HornCLauses for these equivalences
-lambdasToHornClauses :: [[HornClause]] -> [FnDecl] -> [[HornClause]]
-lambdasToHornClauses clauses fns = fixpointLoop fExprs clauses
+lambdasToHornClauses :: LetEquivalences -> [[HornClause]] -> [FnDecl] -> [[HornClause]]
+lambdasToHornClauses lets clauses fns = fixpointLoop fExprs clauses
   where
     fExprs = map snd fns
-    fixpointLoop exprs cs = let extension = concatMap (constructEquivalenceClauses cs fExprs) exprs in if null extension then cs else fixpointLoop exprs (extension ++ cs)
+    fixpointLoop exprs cs = let extension = concatMap (constructEquivalenceClauses lets cs fExprs) exprs in if null extension then cs else fixpointLoop exprs (extension ++ cs)
 
 -- Top level functions act like an apply binding their body to their name
-constructTopLevelEquivalenceClauses :: [[HornClause]] -> [FnDecl] -> [[HornClause]]
-constructTopLevelEquivalenceClauses clauses decls = concatMap (constructTopLevelEquivalenceClauses' clauses (map snd decls)) decls
+constructTopLevelEquivalenceClauses :: LetEquivalences -> [[HornClause]] -> [FnDecl] -> [[HornClause]]
+constructTopLevelEquivalenceClauses lets clauses decls = concatMap (constructTopLevelEquivalenceClauses' lets clauses (map snd decls)) decls
 
-constructTopLevelEquivalenceClauses' :: [[HornClause]] -> [Expr] -> FnDecl -> [[HornClause]]
-constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (getTypeInfo expr) of
+constructTopLevelEquivalenceClauses' :: LetEquivalences -> [[HornClause]] -> [Expr] -> FnDecl -> [[HornClause]]
+constructTopLevelEquivalenceClauses' lets clauses exprs (name, expr) = case rType (getTypeInfo expr) of
   TArrow _ _ ->
    let (_, bodyExpr) = asLambda "constructTopLevelEquivalenceClauses'" expr
-       dependent = bodyDependentGroups clauses bodyExpr
+       dependent = bodyDependentGroups lets clauses bodyExpr
    in concat $ evalSupply $ mapM (\otherExpr -> do
     (varClauses, applyCnt) <- associateFunctionVariable name (getChainName expr) "" otherExpr
     let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
     return $ varClauses ++ taggedDependents) exprs
   _ -> concatMap (associateVariable name (getChainName expr) "") exprs
 
+-- | The equivalences of every @let@ (a lambda in place applied to a
+-- non-function value) in the program: the application is its lambda's body,
+-- and each occurrence of the bound variable is the value. They are
+-- syntactic, so every per-invocation copy of a function's body follows them
+-- ('getDependentGroups'), whether or not 'lambdasToHornClauses'' fixpoint has
+-- added them to the clause set yet. It adds them one nesting level per
+-- iteration, the same iteration that copies a callee's body per invocation,
+-- and a copy made before they existed did not follow a @draw@ inside the
+-- callee and lost every clause behind it: @f x = draw z = x * Normal in
+-- (x, z)@ called as @f Uniform@ had an empty copy, so @x@ was not witnessed
+-- from the call's observation, and the call typed 'Bottom' where its
+-- in-place twin compiles (task named-callee-binding-not-floored).
+letEquivalenceClauses :: [Expr] -> [[HornClause]]
+letEquivalenceClauses = concatMap lets
+  where
+    lets e@(Expr TypeInfo{chainName = exCn} (Apply (Expr _ (Lambda x b)) v))
+      | not (isArrowType (rType (getTypeInfo v))) =
+          createEquivHornClauseGroup AppliedEquivalence exCn (getChainName b)
+            : associateVariable x (getChainName v) "" b ++ concatMap lets (getSubExprs e)
+    lets e = concatMap lets (getSubExprs e)
+    isArrowType (TArrow _ _) = True
+    isArrowType _ = False
+
 -- Construct horn clauses for equivalences induced by Applies. See lambdasToHornClauses for more info
-constructEquivalenceClauses :: [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
+constructEquivalenceClauses :: LetEquivalences -> [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
 -- Partially applied to the clause set, the lookups below index it once and
 -- every Apply of the walk shares them: a scan per Apply was quadratic in the
 -- program (task noisy-operator-fold-compile-time-wall).
-constructEquivalenceClauses clauses exprs = go
+constructEquivalenceClauses lets clauses exprs = go
   where
     inClauseSet = isInClauseSet clauses
     equivCN = getEquivCN clauses
     equivCNMaybe = getEquivCNMaybe clauses
-    dependentGroups = bodyDependentGroups clauses
+    dependentGroups = bodyDependentGroups lets clauses
     exprWithCN = indexExprsByCN exprs
     go (Expr TypeInfo{chainName=exCn} (Apply l v)) | not (inClauseSet exCn) && (isLambdaExpr l || inClauseSet (getChainName l)) = do
         -- Find the declaration of the lambda on the left side of the Apply. Trivial if the lambda is directly there, else follow equivalences
@@ -1762,9 +1863,9 @@ tagHornClause tag (ParameterHornClause conc) = ParameterHornClause (conc ++ tag)
 --
 -- Partially applied to the clause set, it indexes it once ('dependencyIndex')
 -- and shares the index across every body it is then asked about.
-bodyDependentGroups :: [[HornClause]] -> Expr -> [[HornClause]]
-bodyDependentGroups clauses = let idx = dependencyIndex clauses in \fnBody ->
-  getDependentGroups idx (subtreeChainNames fnBody) (ifChildren fnBody) (getChainName fnBody)
+bodyDependentGroups :: LetEquivalences -> [[HornClause]] -> Expr -> [[HornClause]]
+bodyDependentGroups lets clauses = let idx = dependencyIndex clauses in \fnBody ->
+  getDependentGroups idx lets (subtreeChainNames fnBody) (ifChildren fnBody) (getChainName fnBody)
 
 -- | The arms of every if-then-else node of an expression whose condition
 -- draws no fresh randomness, by the node's chain name. An @if@ emits no
@@ -1814,17 +1915,28 @@ dependencyIndex clauses = DependencyIndex
       -- parameter could not be recovered from e.g. the head of the returned list
       -- (task named-function-list-head-witness-not-recovered).
       | otherwise = nubOrd [ c | cl <- g, isExprHornClause cl, [c] <- [premises cl] ]
-    partners g = case [ hc | hc@(EquivalenceHornClause [_] _ _ 0) <- g ] of
-      [EquivalenceHornClause [a] b _ _]
-        | a == b -> [(a, b)]
-        | otherwise -> [(a, b), (b, a)]
-      _ -> []
+
+-- | Each end of the two-ended equivalence group, with its other end.
+partners :: [HornClause] -> [(ChainName, ChainName)]
+partners g = case [ hc | hc@(EquivalenceHornClause [_] _ _ 0) <- g ] of
+  [EquivalenceHornClause [a] b _ _]
+    | a == b -> [(a, b)]
+    | otherwise -> [(a, b), (b, a)]
+  _ -> []
+
+-- | The equivalences of every @let@ in the program ('letEquivalenceClauses'),
+-- by each end, as 'diEquivalences' holds a clause set's: indexed once per
+-- compile and read by every per-invocation copy ('getDependentGroups').
+type LetEquivalences = Map.Map ChainName [([HornClause], ChainName)]
+
+equivalencePartners :: [[HornClause]] -> LetEquivalences
+equivalencePartners gs = Map.fromListWith (flip (++)) [ (c, [(g, other)]) | g <- gs, (c, other) <- partners g ]
 
 hasForwardClause :: [HornClause] -> Bool
 hasForwardClause = any ((== 0) . inversion)
 
-getDependentGroups :: DependencyIndex -> Set ChainName -> Map.Map ChainName [ChainName] -> ChainName -> [[HornClause]]
-getDependentGroups idx scope ifKids cn0 = fst (go Set.empty cn0)
+getDependentGroups :: DependencyIndex -> LetEquivalences -> Set ChainName -> Map.Map ChainName [ChainName] -> ChainName -> [[HornClause]]
+getDependentGroups idx lets scope ifKids cn0 = fst (go Set.empty cn0)
   where
     go seen c
       | c `Set.member` seen = ([], seen)
@@ -1837,8 +1949,12 @@ getDependentGroups idx scope ifKids cn0 = fst (go Set.empty cn0)
               -- binding-resolver-one-application-rule). One that leaves the
               -- body (a parameter bound at the call site, a call into another
               -- function) is not: that is the copy's own boundary.
+              -- A @let@'s are taken from 'LetEquivalences' where the clause
+              -- set does not hold them yet ('letEquivalenceClauses').
+              held = Map.findWithDefault [] c (diEquivalences idx)
               local = [ (g, other) | c `Set.member` scope
-                                   , (g, other) <- Map.findWithDefault [] c (diEquivalences idx)
+                                   , (g, other) <- held ++ [ e | e@(_, o) <- Map.findWithDefault [] c lets
+                                                               , o `notElem` map snd held ]
                                    , other `Set.member` scope ]
               nexts = concatMap forwardPremises direct ++ map snd local
                       ++ Map.findWithDefault [] c ifKids

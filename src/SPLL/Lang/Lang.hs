@@ -25,7 +25,10 @@ module SPLL.Lang.Lang (
 , containedVars
 , varsOfExpr
 , freeVarsExpr
+, allNamesExpr
 , substituteVar
+, readOnceInPlace
+, enterInPlace
 , renameFreeVar
 , containsRandomSource
 , predicateExpr
@@ -39,6 +42,7 @@ module SPLL.Lang.Lang (
 , multiValueCardinality
 , valueListToMultiValue
 , nubValues
+, allValuesIn
 , valueInMultiValue
 , unionMultiValues
 , autoDeriveMultiValue
@@ -61,16 +65,17 @@ module SPLL.Lang.Lang (
 ) where
 
 import SPLL.Lang.Types
+import SPLL.IR.Value
 import SPLL.Typing.PType (PType(Deterministic))
 import SPLL.Typing.RType
-import SPLL.Typing.AlgebraicDataTypes
+import SPLL.IR.ADT
+import SPLL.Typing.AlgebraicDataTypes (irADTDecl)
 
 import qualified Data.Set as Set
 import Data.Maybe
 import Data.List (nub, transpose, find, intercalate)
 import Control.Monad (zipWithM)
 import Data.Traversable (mapAccumL)
-import qualified Data.Bifunctor as Bifunctor
 
 toStub :: Expr -> ExprStub
 toStub expr = case node expr of
@@ -83,9 +88,6 @@ toStub expr = case node expr of
   Lambda {}      -> StubLambda
   Apply {}       -> StubApply
   ReadNN {}      -> StubReadNN
-
-floatApproxEqThresh :: Double
-floatApproxEqThresh = 1e-10
 
 predicateFlat :: (Expr -> Bool) -> Expr -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
@@ -154,6 +156,42 @@ substituteVar x r = go
       | otherwise = Expr t (Lambda y (go b))
     go (Expr t f) = Expr t (fmap go f)
 
+-- | @readOnceInPlace x body@: does @body@ read @x@ exactly once, with no
+-- binder on the way to the read? The read may not sit under a lambda (a
+-- function value, which may be called any number of times) nor in the body of
+-- a nested @let@ (the applied literal lambda the parser makes of one). Such a
+-- read is evaluated at most once, by the body itself, so the variable's
+-- marginal law is the bound value's own law there, and @body[x := arg]@
+-- denotes what the binding does. No binder lies on the way, so the
+-- substitution captures nothing.
+--
+-- The single predicate of the in-place engine (task
+-- dispatch-on-law-certificates): the modality engine's certificate
+-- ('SPLL.Typing.ModalityInfer.CertInPlace'), the compiler's construction and
+-- the set-witness walk's entry into an inner binding all read it.
+readOnceInPlace :: String -> Expr -> Bool
+readOnceInPlace x body = go body == Just (1 :: Int)
+  where
+    go (Expr _ (Var v)) = Just (if v == x then 1 else 0)
+    go (Expr _ (Lambda y b))
+      | y == x || not (x `Set.member` freeVarsExpr b) = Just 0
+      | otherwise = Nothing
+    go (Expr _ (Apply (Expr _ (Lambda y b)) a))
+      | y /= x, x `Set.member` freeVarsExpr b = Nothing
+      | otherwise = go a
+    go (Expr _ f) = sum <$> traverse go (foldr (:) [] f)
+
+-- | An expression with the inner bindings it opens with entered in place:
+-- @let y = e in b@, where @b@ reads @y@ once with no binder on the way
+-- ('readOnceInPlace'), is @b[y := e]@, repeatedly. The set-witness walk's
+-- entry into an inner binding, for a pattern that matches the shape of a
+-- value: a projection of a literal pair still sees the pair when a @draw@
+-- binds it first (@fst (draw v = (x, 0.0) in v)@).
+enterInPlace :: Expr -> Expr
+enterInPlace (Expr _ (Apply (Expr _ (Lambda y b)) e))
+  | readOnceInPlace y b = enterInPlace (substituteVar y e b)
+enterInPlace e = e
+
 -- | @renameFreeVar old new e@ renames the free occurrences of @old@ in @e@ to
 -- @new@; each keeps its own annotation, so chain names are untouched. The
 -- caller guarantees @new@ is mentioned nowhere in @e@, so no binder there can
@@ -217,27 +255,6 @@ getTypeInfo = ann
 setTypeInfo :: Expr -> TypeInfo -> Expr
 setTypeInfo expr t = expr { ann = t }
 
-constructVList :: [GenericValue a] -> GenericValue a
-constructVList xs = VList $ foldr ListCont EmptyList xs
-
-multiValueToValueList :: MultiValue -> [Value]
--- A continuous slot has no enumerable values: any composite containing it also has none.
-multiValueToValueList MultiContinuous = []
-multiValueToValueList MultiAuto = error "multiValueToValueList: unresolved auto-placeholder (_); this should have been resolved before discrete-value propagation"
-multiValueToValueList (MultiTypeRef n) = error ("multiValueToValueList: unresolved recursion reference to '" ++ n ++ "'; resolveMultiValueTypeDecl should have unrolled it")
-multiValueToValueList (MultiDiscretes vals) = vals
-multiValueToValueList (MultiEither ls rs) = map (VEither . Left) lVals ++ map (VEither . Right) rVals
-  where
-    lVals = multiValueToValueList ls
-    rVals = multiValueToValueList rs
-multiValueToValueList (MultiTuple as bs) = [VTuple aVal bVal | aVal <- aVals, bVal <- bVals]
-  where
-    aVals = multiValueToValueList as
-    bVals = multiValueToValueList bs
-multiValueToValueList (MultiADT constrs) = concatMap (\(cn, fieldCombos) -> map (VADT cn) fieldCombos) constrFieldCombinations
-  where allFieldCombinations = sequence . map multiValueToValueList
-        constrFieldCombinations = map (Bifunctor.second allFieldCombinations) constrs
-
 -- | True if the MultiValue has a continuous (Real) leaf anywhere. Such a value set
 -- has no finite enumeration: 'multiValueToValueList' would yield only its discrete
 -- residue, so enum-based inference must never be offered for it (the enum-annotation
@@ -275,33 +292,6 @@ multiValueIsFinite (MultiEither a b) = multiValueIsFinite a && multiValueIsFinit
 -- A nullary constructor has no fields, so @all _ []@ is vacuously true and the
 -- constructor contributes exactly one value -- which is what we want.
 multiValueIsFinite (MultiADT constrs) = not (null constrs) && all (all multiValueIsFinite . snd) constrs
-
--- | The number of values 'multiValueToValueList' would yield, computed
--- structurally WITHOUT building the list. 'Nothing' when the domain is not
--- statically finite (exactly when 'multiValueIsFinite' is 'False'), so a
--- caller gets "no answer" rather than a misleading count.
---
--- This exists because the count is the only thing a budget check needs, and
--- the list it counts can be astronomically large: a depth-unrolled recursive
--- ADT is a cross-product, so @length . 'multiValueToValueList'@ is itself the
--- blow-up a budget check is there to avoid paying. 'Integer' rather than
--- 'Int' for the same reason -- the product overflows a machine word long
--- before any caller would want to materialize it, and an overflowed count
--- that wraps to something small would wave through exactly the domain the
--- budget exists to refuse.
-multiValueCardinality :: MultiValue -> Maybe Integer
-multiValueCardinality MultiContinuous = Nothing
-multiValueCardinality MultiAuto = Nothing
-multiValueCardinality (MultiTypeRef _) = Nothing
-multiValueCardinality (MultiDiscretes vals) = if null vals then Nothing else Just (toInteger (length vals))
-multiValueCardinality (MultiTuple a b) = (*) <$> multiValueCardinality a <*> multiValueCardinality b
-multiValueCardinality (MultiEither a b) = (+) <$> multiValueCardinality a <*> multiValueCardinality b
--- Mirrors 'multiValueIsFinite'/'multiValueToValueList': a constructor's fields
--- multiply (the 'sequence' cross-product), constructors sum, and a nullary
--- constructor contributes the empty product, 1.
-multiValueCardinality (MultiADT constrs)
-  | null constrs = Nothing
-  | otherwise = sum <$> mapM (fmap product . mapM multiValueCardinality . snd) constrs
 
 -- | The value set a list of values describes, as a 'MultiValue' shaped after
 -- the values themselves (tuples split into their components, and so on).
@@ -375,6 +365,21 @@ nubValues = go Set.empty []
         | v `elem` unkeyed -> go keyed unkeyed vs
         | otherwise -> v : go keyed (v : unkeyed) vs
 
+-- | Whether every value of the first list is a member of the second ('elem'),
+-- in O((n + m) log m) rather than O(n m), through the same 'ValueKey' as
+-- 'nubValues'. A value without a key is looked up with 'elem' among the
+-- second list's keyless values, which is exact for the same reason
+-- 'nubValues' is (task neural-int-read-compile-quadratic-in-domain: a
+-- writeLogits plan checked a V-value support against its V-value domain).
+allValuesIn :: Eq a => [GenericValue a] -> [GenericValue a] -> Bool
+allValuesIn vs ds = all member vs
+  where
+    keyed = Set.fromList [k | Just k <- map valueKey ds]
+    unkeyed = [d | d <- ds, isNothing (valueKey d)]
+    member v = case valueKey v of
+      Just k -> k `Set.member` keyed
+      Nothing -> v `elem` unkeyed
+
 -- | An ordered stand-in for a first-order value, for 'nubValues'. Two values
 -- with keys are '==' exactly when their keys are.
 data ValueKey = KBool Bool | KInt Int | KSymbol String | KFloat Double | KUnit
@@ -400,21 +405,6 @@ valueKey (VEither (Left l)) = KLeft <$> valueKey l
 valueKey (VEither (Right r)) = KRight <$> valueKey r
 valueKey (VADT c fs) = KADT c <$> mapM valueKey fs
 valueKey _ = Nothing
-
-valueInMultiValue :: MultiValue -> Value -> Bool
-valueInMultiValue MultiContinuous (VFloat _) = True
-valueInMultiValue (MultiDiscretes d) x = x `elem` d
-valueInMultiValue (MultiEither ml _) (VEither (Left l)) = valueInMultiValue ml l
-valueInMultiValue (MultiEither _ mr) (VEither (Right r)) = valueInMultiValue mr r
-valueInMultiValue (MultiTuple mf ms) (VTuple f s) = valueInMultiValue mf f && valueInMultiValue ms s
-valueInMultiValue (MultiADT mConstrs) (VADT cName vals) = fromMaybe False (do
-  constr <- lookup cName mConstrs
-  return $ all (uncurry valueInMultiValue) (zip constr vals))
-valueInMultiValue MultiAuto _ = error "valueInMultiValue: unresolved auto-placeholder (_); resolveMultiAuto should have run first"
-valueInMultiValue (MultiTypeRef n) _ = error ("valueInMultiValue: unresolved recursion reference to '" ++ n ++ "'; resolveMultiValueTypeDecl should have unrolled it")
--- Any remaining pair is a value whose shape does not match the value set's, so
--- it is simply not a member.
-valueInMultiValue _ _ = False
 
 unionMultiValues :: MultiValue -> MultiValue -> MultiValue
 unionMultiValues MultiContinuous MultiContinuous = MultiContinuous
@@ -631,12 +621,6 @@ containsTensor decls = go Set.empty
     go _    _             = False
 
 
-elementAt :: ValueList a -> Int -> GenericValue a
-elementAt (ListCont x _) 0 = x
-elementAt (ListCont _ xs) i = elementAt xs (i-1)
-elementAt EmptyList _ = error "Index out of bounds"
-elementAt AnyList _ = error "Cannot iterate AnyLists"
-
 getRType :: Value -> RType
 getRType (VBool _) = TBool
 getRType (VInt _) = TInt
@@ -671,7 +655,7 @@ getFunctionNames :: Program -> [String]
 getFunctionNames p = explicitFs ++ implicitFs
   where
     explicitFs = map fst (functions p)
-    implicitFs = implicitFunctionNames (adts p)
+    implicitFs = implicitFunctionNames (map irADTDecl (adts p))
 
 prettyPrintProg :: Program -> [String]
 prettyPrintProg = prettyPrintProgCustomTI prettyFullTypeInfo

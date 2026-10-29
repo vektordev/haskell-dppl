@@ -104,10 +104,12 @@ import Data.Text (pack, unpack, replace)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Prelude (runProbC, runIntegC, runWriteLogitsRandC, runGenC, compile)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.ReservedNames (componentNormalName)
 import IRInterpreter (generateDet)
+import MockNN (programMockOracle)
 import SPLL.Typing.RType (RType(..))
 import Control.Monad (replicateM)
 import Control.Monad.Random (evalRand)
@@ -257,7 +259,7 @@ interpreterBodyAnswer :: Program -> IREnv -> [IRValue] -> Query -> Maybe Answer
 interpreterBodyAnswer p env args q = case q of
   QNormal g _ -> do
     (body, _) <- normalFun (lookupIREnv g env)
-    case generateDet (neurals p) (writeLogitsDecls p) env (map IRConst args) body of
+    case generateDet (programMockOracle p) env (map IRConst args) body of
       Right (VTuple (VFloat m) (VFloat s)) -> Just (AnsweredVec [Just m, Just s])
       _ -> Nothing
   QWriteLogits g _ -> do
@@ -734,7 +736,8 @@ supportCheck mangle c rt iargs toks = case decodeSample mangle decls rt toks of
       Right (Just (Just (Answered _ _ True))) -> Left ("off the interpreter's support: " ++ show v)
       Right (Just (Just _)) -> Right "in support"
   where
-    env@(IREnv _ decls _) = acEnv c
+    env = acEnv c
+    decls = adts (acProgram c)
     forced a = length (show a) `seq` a
 
 -- | A whole-process bound on top of the Python driver's per-query alarm:

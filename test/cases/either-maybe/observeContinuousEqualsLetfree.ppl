@@ -12,5 +12,5 @@
 -- Letfree, so inference runs through the InjF `hasAnyExcept` combinator;
 -- observeContinuousEqualsLetBound is the set-witness engine's sibling and now
 -- agrees with it. The `Right` rows' dim of 0 is task
--- enumerated-sum-over-density-body, as there.
+-- enumerated-weight-density-reported-as-mass, as there.
 main = observe (if Normal == 0.5 then 1 else 2) (\v -> v < 2)

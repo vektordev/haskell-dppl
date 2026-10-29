@@ -1,0 +1,551 @@
+module SPLL.CodeGenJulia (
+  generateFunctions,
+  juliaVal,
+  juliaMangle,
+  juliaKeywords
+) where
+
+import SPLL.IntermediateRepresentation
+import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
+import SPLL.IRSelectPass (desugarSelectEnv)
+import Data.List (intercalate, intersperse, dropWhileEnd)
+import Data.Char (isDigit)
+import SPLL.IR.Value
+import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
+import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
+import Data.Maybe (fromMaybe)
+import Data.Functor ((<&>))
+import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
+import Utils
+
+--TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
+-- e.g. in MNist-Addition
+
+-- Expected format format of ThetaTrees:
+--    ThetaTree = ([Double], [ThetaTree])
+
+type GlobalStorage = StateT ([(GenericMultiValue IRExpr, String)], [String])
+type VariableSupply = Supply
+type GlobalVariableSupply a = GlobalStorage VariableSupply a
+
+addOrGetFromGlobalStorage :: GenericMultiValue IRExpr -> GlobalVariableSupply String
+addOrGetFromGlobalStorage mv = do
+  (globalStorage, callables) <- get
+  case lookup mv globalStorage of
+    Nothing -> do
+      varID <- lift demandUniqueNumber
+      let varName = "_globalMulti" ++ show varID
+      put ((mv, varName):globalStorage, callables)
+      return varName
+    Just var -> return var
+
+indentOnce :: [String] -> [String]
+indentOnce = map ("  " ++)
+
+juliaOps :: Operand -> String
+juliaOps OpPlus = "+"
+juliaOps OpMult = "*"
+juliaOps OpGreaterThan = ">"
+juliaOps OpLessThan = "<"
+juliaOps OpDiv = "/"
+juliaOps OpIntDiv = "÷"
+juliaOps OpMod = "%"
+juliaOps OpSub = "-"
+juliaOps OpOr = "||"
+juliaOps OpAnd = "&&"
+juliaOps OpEq = "=="
+juliaOps x = error ("Unknown Julia operator: " ++ show x)
+
+juliaUnaryOps :: UnaryOperand -> String
+juliaUnaryOps OpNeg = "-"
+juliaUnaryOps OpExp = "exp"
+juliaUnaryOps OpAbs = "abs"
+juliaUnaryOps OpNot = "!"
+juliaUnaryOps OpLog = "safe_log"
+juliaUnaryOps OpSign = "sign"
+juliaUnaryOps OpIsAny = "isAny"
+
+-- | A 'Double' as a Julia float literal. Haskell's 'show' renders the
+-- non-finite doubles as @Infinity@/@-Infinity@/@NaN@; Julia spells the
+-- infinities @Inf@/@-Inf@ and only @NaN@ agrees, so an unmapped @-Infinity@
+-- was an undefined name in emitted Julia. Log space hits this on every
+-- impossible arm -- its zero is @-1/0@ ('SPLL.Semiring.negInfIR').
+juliaDouble :: Double -> String
+juliaDouble f
+  | isNaN f      = "NaN"
+  | isInfinite f = if f > 0 then "Inf" else "-Inf"
+  | otherwise    = show f
+
+juliaVal :: IRValue -> String
+juliaVal (VList EmptyList) = "EmptyInferenceList()"
+juliaVal (VList AnyList) = "AnyInferenceList()"
+-- The cons spine is rendered as a difference string: @rest ++ ")"@ at every
+-- cell re-copied the whole tail, quadratic in a long constant list such as a
+-- V-value enumeration domain (task neural-int-read-compile-quadratic-in-domain).
+juliaVal (VList l@(ListCont _ _)) = cells l ""
+  where
+    cells (ListCont x xs) = showString "ConsInferenceList(" . showString (juliaVal x) . showString ", " . cells xs . showString ")"
+    cells rest = showString (juliaVal (VList rest))
+juliaVal (VInt i) = show i
+juliaVal (VFloat f) = juliaDouble f
+juliaVal (VBool f) = if f then "true" else "false"
+juliaVal (VTuple a b) = "T(" ++ juliaVal a ++ ", " ++ juliaVal b ++ ")"
+juliaVal (VEither (Left a)) = "Left(" ++ juliaVal a ++ ")"
+juliaVal (VEither (Right a)) = "Right(" ++ juliaVal a ++ ")"
+juliaVal (VThetaTree tt) = juliaValTree tt
+  where juliaValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map juliaDouble val) ++ "], [" ++ intercalate ", " (map juliaValTree trees) ++ "])"
+juliaVal VUnit = "nothing"
+juliaVal (VADT cName params) = juliaCtorRef cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
+-- A rank-1 tensor is a Julia Vector, as 'BTensor' renders one.
+juliaVal (VTensor sh xs)
+  | shapeRank sh == 1 = "[" ++ intercalate ", " (map juliaVal xs) ++ "]"
+  | otherwise = error (juliaRankUnsupported "a tensor value" (shapeRank sh))
+juliaVal VAny = "\"ANY\""
+juliaVal (VError e) = "throw(\"" ++ e ++ "\")"
+-- See 'SPLL.CodeGenPyTorch.pyVal's matching case: 'VAnyExcept' has no runtime
+-- representation in the Julia runtime library either, so this is a backstop
+-- only -- the intended refusal point is
+-- 'SPLL.IntermediateRepresentation.anyExceptCodegenRefusal', called from
+-- 'Main.codeGenToLang' before 'generateFunctions' is ever reached (task
+-- vanyexcept-unrenderable-in-text-backends).
+juliaVal v@(VAnyExcept _) = error (unlines
+  [ "juliaVal: unconsumed VAnyExcept placeholder reached Julia codegen: " ++ show v
+  , "This should have been refused earlier by"
+  , "SPLL.IntermediateRepresentation.anyExceptCodegenRefusal; a caller reached"
+  , "generateFunctions without that guard."
+  , "(task vanyexcept-unrenderable-in-text-backends)" ])
+juliaVal x = error ("unknown juliaVal for " ++ show x)
+juliaMultiVal :: GenericMultiValue IRExpr -> String
+juliaMultiVal MultiContinuous = "(\"C\", nothing)"
+juliaMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (juliaVal . valueToIR) vals) ++ "] )"
+juliaMultiVal (MultiTuple l r) = "(\"T\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"
+juliaMultiVal (MultiEither l r) = "(\"E\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"
+juliaMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) ->
+  "(\"" ++ juliaMangle cName ++ "\", [" ++ intercalate ", " (map juliaMultiVal fields) ++ "])"
+  ) constrs) ++ "] )"
+juliaMultiVal x = error ("unknown juliaMultiVal for " ++ show x)
+
+-- The names 'juliaMangle' escapes ('SPLL.ReservedNames.juliaReservedIdentifiers':
+-- the keywords, @juliaLib@'s exports, and the @Base@ names emitted code uses)
+-- live in 'SPLL.ReservedNames', the registry of every name the pipeline claims.
+
+-- | Make a name safe to emit as a Julia identifier: one the target cannot
+-- spell (a keyword), or one a local binder would shadow for the code emitted
+-- inside its scope (@f randn = randn + Normal@ made the @Normal@ draw,
+-- @randn()@, call the parameter). Same rule as
+-- 'SPLL.CodeGenPyTorch.pyMangle', including the escape of a reserved name followed by
+-- a run of underscores -- without it the distinct fields @end@ and @end_@ would
+-- both emit @end_@, and Julia rejects the resulting struct for a duplicate
+-- field name. See that function for why injectivity stops at this family.
+juliaMangle :: String -> String
+juliaMangle name
+  | juliaNeedsEscape (dropWhileEnd (== '_') name) = name ++ "_"
+  | otherwise                                    = name
+
+-- | 'juliaMangle' for a constructor reference in a rendered value. The test
+-- harness qualifies query-point constructors with the generated module name
+-- (@Prog1.Leaf@); only the final segment is an identifier this backend owns.
+juliaCtorRef :: String -> String
+juliaCtorRef name = case break (== '.') (reverse name) of
+  (revLast, '.':revQual) -> reverse revQual ++ "." ++ juliaMangle (reverse revLast)
+  _                      -> juliaMangle name
+
+generateADTClasses :: [IRADTDecl] -> [String]
+generateADTClasses decls =
+  concatMap generateADTClass (concatMap irConstructors decls)
+  ++ concatMap (uncurry generateADTAccessor) (fieldAccessorOwners decls)
+
+-- Every identifier printed here goes through 'juliaMangle'; the declaration
+-- keeps the user's names (see 'renameADTIdentifiers'), and 'anyCtorTestMessage'
+-- deliberately still quotes the source constructor name so the diagnostic reads
+-- the same here, in Python, and in the interpreter.
+generateADTClass :: IRADTConstructorDecl -> [String]
+generateADTClass (name, fields) =
+  -- Struct declaration
+  ["struct " ++ struct]++
+  indentOnce (
+    indentOnce fieldNames
+  ) ++
+  ["end"] ++
+  -- Is function. Refuses a hole rather than answering False, matching the
+  -- interpreter's 'isImpl' -- see 'anyCtorTestMessage'.
+  ["is" ++ struct ++ "(x) = isAny(x) ? throw(" ++ show (anyCtorTestMessage name) ++ ") : x isa " ++ struct] ++
+  -- Equals function
+  ("Base.:(==)(other::Any, self::" ++ struct ++") = begin"):
+    indentOnce
+      (("if (!(other isa " ++ struct ++ ")) return false end"):
+      -- Compare every field
+      map (\f -> "if(!eq(self." ++ f ++ ", other." ++ f ++ ")) return false end") fieldNames ++ 
+      ["return true"]) ++
+  ["end"]
+  where struct = juliaMangle name
+        fieldNames = map juliaMangle (map fst fields)
+
+-- | One field accessor, guarded on the constructor that owns the field.
+--
+-- The signature used to be @function color(x :: Obj)@, so a sibling
+-- constructor produced Julia's own @MethodError: no method matching
+-- color(::Nil)@ -- and, where two constructors declared the same field name,
+-- two methods that both dispatched, where the interpreter admits only the
+-- first ('fieldAccessorOwners'). The parameter is now untyped with an explicit
+-- check, which makes the diagnostic the compiler's own and the resolution the
+-- interpreter's. See 'accessorMismatchMessage'.
+generateADTAccessor :: String -> String -> [String]
+generateADTAccessor fieldName ctorName =
+  ("function " ++ juliaMangle fieldName ++ "(x)") :
+  indentOnce [ "if !(x isa " ++ juliaMangle ctorName ++ ") throw("
+                 ++ show (accessorMismatchMessage fieldName ctorName)
+                 ++ " * \" Got: \" * string(typeof(x))) end"
+             , "return x." ++ juliaMangle fieldName ] ++
+  ["end"]
+
+generateFunctions :: IREnv -> [String]
+generateFunctions env0 = do
+  -- Scalar backend: lower any IRSelect back to IRIf up front (pytorch-tensorizer
+  -- M1, strategy B), so the rest of codegen never encounters it.
+  let IREnv funcs adtDecls consts = mangleUserIdentifiers juliaMangle (renameADTIdentifiers juliaMangle (desugarSelectEnv (retireUnrenderableVariants "Julia" env0)))
+  let adtClasses = generateADTClasses adtDecls
+  let constsStr = map (\(name, val) -> name ++ " = " ++ juliaVal val) consts
+  let callableNames = [ n ++ "_gen"
+                      | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
+                      , null (fst (unwrapLambdas e)) ]
+                      -- nullary ADT constructors must be emitted as instantiations,
+                      -- otherwise the bare struct type never compares equal to an
+                      -- instance (same rule as CodeGenPyTorch's callableNames).
+                      ++ [ juliaMangle cName | decl <- adtDecls, (cName, fields) <- irConstructors decl, null fields ]
+                      -- a nullary normal function is referenced by a bare name
+                      -- too, and writeLogits indexes its (mu, sigma) result
+                      ++ [ normalFnName n
+                         | IRFunGroup{groupName=n, normalFun=Just (e, _)} <- funcs
+                         , null (fst (unwrapLambdas e)) ]
+  let funcGroupsMonadic = concatMapM generateFunctionGroup funcs
+  let (funcStrs, (globalVars, _)) = evalSupply $ runStateT funcGroupsMonadic ([], callableNames)
+  let varsStr = map (\(mv, name)-> name ++ " = " ++ juliaMultiVal mv) globalVars
+  adtClasses ++ constsStr ++ varsStr ++ funcStrs
+
+generateFunctionGroup :: IRFunGroup -> GlobalVariableSupply [String]
+generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, writeLogitsFun=e, normalFun=nrm, groupDoc=doc} = do
+  let preemble = ("# === Function Group " ++ n ++ " ===") : map ("# " ++) (lines doc)
+  gen <- fromMaybe (return []) (g <&> genF n "_gen")
+  prob <- fromMaybe (return []) (p <&> genF n "_prob")
+  integ <- fromMaybe (return []) (i <&> genF n "_integ")
+  enc <- fromMaybe (return []) (e <&> genF n "_writeLogits")
+  norm <- fromMaybe (return []) (nrm <&> \(fnBody, d) -> generateFunction (normalFnName n) d fnBody)
+  return $ preemble ++ gen ++ prob ++ integ ++ enc ++ norm
+  where genF name suffix (fnBody, d) = generateFunction (name ++ suffix) d fnBody
+
+-- | The name a group's normal function is defined under, which has to be the
+-- name the IR calls it by: @f_normal@, or for a tuple component's own group the
+-- bare component name ('SPLL.ReservedNames.componentNormalName'). It used to be
+-- @_component_f_normal_fst_normal@ while writeLogits called @f_normal_fst@.
+normalFnName :: String -> String
+normalFnName n = fromMaybe (n ++ "_normal") (componentNormalName n)
+
+generateFunction :: String -> String -> IRExpr -> GlobalVariableSupply [String]
+generateFunction name doc expr = do
+    let (args, reducedExpr) = unwrapLambdas expr
+    let docLines = map ("# " ++) (lines doc)
+    let l1 = "function " ++ name ++ "(" ++ intercalate ", " args ++ ")"
+    block <- generateStatementBlock reducedExpr
+    let lEnd = "end"
+    return $ docLines ++ [l1] ++ indentOnce block ++ [lEnd]
+
+unwrapLambdas :: IRExpr -> ([String], IRExpr)
+unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
+  where (otherNames, plainTree) = unwrapLambdas rest
+unwrapLambdas anyNode = ([], anyNode)
+
+generateStatementBlock :: IRExpr -> GlobalVariableSupply [String]
+
+generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = do
+    funLines <- generateFunction name ("Inner function: " ++ name) lmd
+    bodyLines <- generateStatementBlock body
+    return (funLines ++ bodyLines)
+
+generateStatementBlock (IRLetIn name val body) = do
+    v <- generateExpression val
+    rest <- generateStatementBlock body
+    return ((name ++ " = " ++ v) : rest)
+
+generateStatementBlock (IRError e) =
+    return ["throw(\"" ++ escapeStr e ++ "\")"]
+
+generateStatementBlock (IRIf cond left right) = do
+    cCond  <- generateExpression cond
+    cLeft  <- generateStatementBlock left
+    cRight <- generateStatementBlock right
+    let l1 = "if " ++ cCond
+        l2 = "else"
+        l3 = "end"
+    return $ [l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight ++ [l3]
+
+generateStatementBlock expr = do
+    e <- generateExpression expr
+    return ["return " ++ e]
+
+
+-- | The text of an expression, built as a difference string (ShowS): a
+-- right-nested chain (a V-deep @prepend@ cons, an index chain of @?:@)
+-- re-copied its whole tail at every @tail ++ ")"@ with plain String
+-- concatenation, which made emitting it quadratic in its depth (task
+-- neural-int-read-compile-quadratic-in-domain; the Python backend's
+-- 'SPLL.CodeGenPyTorch.generateExpressionLifted' made the same change).
+generateExpression :: IRExpr -> GlobalVariableSupply String
+generateExpression e = ($ "") <$> genS e
+
+genS :: IRExpr -> GlobalVariableSupply ShowS
+
+genS (IRIf cond left right) = do
+    c <- genS cond
+    l <- genS left
+    r <- genS right
+    return $ str "(" . c . str " ? " . l . str " : " . r . str ")"
+genS (IROp OpApprox left right) = do
+    l <- genS left
+    r <- genS right
+    return $ str "isclose(" . l . str ", " . r . str ")"
+-- 'OpMax' has no infix spelling; Julia's `max` is the prefix form.
+genS (IROp OpMax left right) = do
+    l <- genS left
+    r <- genS right
+    return $ str "max(" . l . str ", " . r . str ")"
+genS (IROp op left right) = do
+    l <- genS left
+    r <- genS right
+    return $ str "((" . l . str ") " . str (juliaOps op) . str " (" . r . str "))"
+genS (IRUnaryOp op expr) = do
+    e <- genS expr
+    return $ str (juliaUnaryOps op) . str "(" . e . str ")"
+genS (IRConst v) =
+    return $ str (juliaVal v)
+genS (IRBuiltin BMapList [f, x]) = do
+    ff <- genS f
+    xx <- genS x
+    return $ str "mapList(" . ff . str ", " . xx . str ")"
+-- The constructor/accessor family (design ir-reengineering), mirroring
+-- Julia's 1-based indexing for the theta/subtree accessors.
+genS (IRConstruct TgTuple [fs, sn]) = do
+    f <- genS fs
+    s <- genS sn
+    return $ str "T(" . f . str ", " . s . str ")"
+genS (IRConstruct TgCons [hd, tl]) = do
+    h <- genS hd
+    t <- genS tl
+    return $ str "prepend(" . h . str ", " . t . str ")"
+genS (IRConstruct TgLeft [x]) = do
+    e <- genS x
+    return $ str "Left(" . e . str ")"
+genS (IRConstruct TgRight [x]) = do
+    e <- genS x
+    return $ str "Right(" . e . str ")"
+genS (IRDestruct AcFst x) = do
+    e <- genS x
+    return $ str "(" . e . str ")[1]"
+genS (IRDestruct AcSnd x) = do
+    e <- genS x
+    return $ str "(" . e . str ")[2]"
+genS (IRDestruct AcHead x) = do
+    e <- genS x
+    return $ str "head(" . e . str ")"
+genS (IRDestruct AcTail x) = do
+    e <- genS x
+    return $ str "tail(" . e . str ")"
+genS (IRDestruct AcFromLeft x) = do
+    e <- genS x
+    return $ str "fromLeft(" . e . str ")"
+genS (IRDestruct AcFromRight x) = do
+    e <- genS x
+    return $ str "fromRight(" . e . str ")"
+genS (IRDestruct AcIsLeft x) = do
+    e <- genS x
+    return $ str "(" . e . str " isa Left)"
+genS (IRDestruct AcIsRight x) = do
+    e <- genS x
+    return $ str "(" . e . str " isa Right)"
+genS (IRDestruct (AcTheta i) x) = do
+    e <- genS x
+    return $ str "(" . e . str ")[1][" . str (show (i + 1)) . str "]"
+genS (IRDestruct (AcSubtree i) x) = do
+    e <- genS x
+    return $ str "(" . e . str ")[2][" . str (show (i + 1)) . str "]"
+genS (IRDensity dist Linear x) = do
+    e <- genS x
+    return $ str "density_" . str (show dist) . str "(" . e . str ")"
+genS (IRCumulative dist Linear x) = do
+    e <- genS x
+    return $ str "cumulative_" . str (show dist) . str "(" . e . str ")"
+genS (IRDensity dist Log x) = do
+    e <- genS x
+    return $ str "log_density_" . str (show dist) . str "(" . e . str ")"
+genS (IRCumulative dist Log x) = do
+    e <- genS x
+    return $ str "log_cumulative_" . str (show dist) . str "(" . e . str ")"
+genS (IRSample IRNormal) =
+    return (str "randn()")
+genS (IRSample IRUniform) =
+    return (str "rand()")
+genS (IRVar name) = do
+    (_, callables) <- get
+    return $ str (if name `elem` callables then "(" ++ name ++ ")()" else name)
+genS expr@(IRLambda _ _) =
+    str <$> generateLambdaExpression expr
+genS expr@(IRApply _ _) = do
+    let (fn, args) = collectApplyChain expr
+    fn' <- genS fn
+    args' <- mapM genS args
+    return $ str "(" . fn' . str ")(" . commaSep args' . str ")"
+genS (IRIsPossible multiVal expr) = do
+    e <- genS expr
+    var <- addOrGetFromGlobalStorage multiVal
+    return $ str "isPossible(" . str (var) . str ", " . e . str ")"
+genS (IRBuiltin BListIndex [lst, idx]) = do
+    l <- genS lst
+    i <- genS idx
+    return $ str "(" . l . str ")[" . i . str " + 1]"
+genS (IRLetIn name val body) = do
+    v <- genS val
+    b <- genS body
+    return $ str "(let " . str (name) . str " = " . v . str "; " . b . str " end)"
+-- The tensor builtins (design ir-tensor-values); see the note in
+-- CodeGenPyTorch. A Julia rank-1 tensor is a Vector, so BIndex is an O(1) read
+-- against BListIndex's cons walk. Indices are 1-based, hence the "+ 1" that
+-- BListIndex also carries. Rank > 1 and axis > 0 are refused, as there too.
+genS (IRBuiltin (BTensor sh) elems)
+    | shapeRank sh == 1 = do
+        es <- mapM genS elems
+        return $ str "[" . commaSep es . str "]"
+    | otherwise = error (juliaRankUnsupported "BTensor" (shapeRank sh))
+-- The element positions, 0-based like every IR index (BIndex adds the 1).
+genS (IRBuiltin (BIota sh) [])
+    | shapeRank sh == 1 = return $ str ("collect(0:" ++ show (shapeNumel sh - 1) ++ ")")
+    | otherwise = error (juliaRankUnsupported "BIota" (shapeRank sh))
+genS (IRBuiltin BMap [IRLambda v body, t]) = do
+    b <- genS body
+    tt <- genS t
+    return $ str "[" . b . str " for " . str v . str " in " . tt . str "]"
+genS (IRBuiltin BMap [f, t]) = do
+    ff <- genS f
+    tt <- genS t
+    return $ str "map(" . ff . str ", " . tt . str ")"
+-- sum needs an explicit init: Julia raises on a reduction over an empty
+-- collection, where a zero-extent axis must reduce to the operator identity.
+genS (IRBuiltin (BReduce ROpAdd 0) [t]) = do
+    tt <- genS t
+    return $ str "sum(" . tt . str "; init=0.0)"
+genS (IRBuiltin (BReduce ROpLogSumExp 0) [t]) = do
+    tt <- genS t
+    return $ str "logsumexp(" . tt . str ")"
+genS (IRBuiltin (BReduce ROpMax 0) [t]) = do
+    tt <- genS t
+    return $ str "maximum(" . tt . str "; init=-Inf)"
+genS (IRBuiltin (BReduce _ ax) _) = error (juliaAxisUnsupported "BReduce" ax)
+genS (IRBuiltin (BIndex 0) [t, k]) = do
+    tt <- genS t
+    kk <- genS k
+    return $ str "(" . tt . str ")[" . kk . str " + 1]"
+genS (IRBuiltin (BIndex ax) _) = error (juliaAxisUnsupported "BIndex" ax)
+-- Elementwise zip of two equal-length Vectors (task
+-- categorical-product-ov-fusion). Julia spells this as a broadcast, which is
+-- both the idiomatic form and the vectorized one -- unlike the Python
+-- comprehension, it needs no loop variables and so cannot shadow anything.
+genS (IRBuiltin (BZip op) [a, b]) = do
+    aa <- genS a
+    bb <- genS b
+    return $ str "((" . aa . str ") ." . str (juliaOps op) . str " (" . bb . str "))"
+-- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep).
+-- 'start' is passed 0-based and converted inside juliaLib's categorical_index,
+-- which also returns the 0-based index the IR means.
+genS (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
+    uu <- genS u
+    ww <- genS w
+    return $ str "categorical_index(" . uu . str ", " . ww . str ", " . str (show start) . str ", " . str (show n) . str ")"
+genS (IRError e) =
+    return $ str "throw(\"" . str (escapeStr e) . str "\")"
+genS (IRConformsTo t x) = do
+    sx <- genS x
+    return (str (jlConforms t (sx "")))
+genS x =
+    error ("Unknown expression in Julia codegen: " ++ show x)
+
+str :: String -> ShowS
+str = showString
+
+-- | Difference strings joined by @", "@.
+commaSep :: [ShowS] -> ShowS
+commaSep = foldr (.) id . intersperse (str ", ")
+
+-- | Escape a Haskell string for embedding in a double-quoted Julia string literal
+-- (e.g. an IRError message that may contain quotes from a show'd type).
+escapeStr :: String -> String
+escapeStr = concatMap esc
+  where esc '"'  = "\\\""
+        esc '\\' = "\\\\"
+        esc '\n' = "\\n"
+        esc c    = [c]
+
+-- | Runtime type-tag check for the query-type guard (see IRConformsTo). Full-depth
+-- structural check mirroring the interpreter's 'valueConformsTo': recurses into tuple
+-- components, either arms, and every list element; precise for float/bool/int and
+-- permissive ("true") only for types with no cheap runtime tag. Note Bool <: Integer
+-- in Julia, so TInt explicitly excludes Bool. The marginal-query wildcard (isAny) is
+-- accepted at every level, matching VAny, and short-circuits before any component
+-- accessor. The Int arg is a nesting depth used to name list-lambda binders uniquely.
+jlConforms :: IRType -> String -> String
+jlConforms = jlConformsAt 0
+
+jlConformsAt :: Int -> IRType -> String -> String
+jlConformsAt d t e = "(isAny(" ++ e ++ ") || " ++ jlConformsShape d t e ++ ")"
+
+jlConformsShape :: Int -> IRType -> String -> String
+-- Real and not Integer rather than AbstractFloat: an AD number (ForwardDiff's
+-- Dual is a Real, not an AbstractFloat) is a float sample whose derivative the
+-- caller wants, the twin of the Python guard's 0-d tensor (task
+-- emitted-runtime-differentiability-gaps). Bool <: Integer, so a Bool stays out.
+jlConformsShape _ ITFloat  e = "((" ++ e ++ " isa Real) && !(" ++ e ++ " isa Integer))"
+jlConformsShape _ ITBool   e = "(" ++ e ++ " isa Bool)"
+jlConformsShape _ ITInt    e = "((" ++ e ++ " isa Integer) && !(" ++ e ++ " isa Bool))"
+jlConformsShape d (ITTuple a b) e =
+  "((" ++ e ++ " isa T) && " ++ jlConformsAt d a (jlFieldBase e ++ ".t1") ++ " && " ++ jlConformsAt d b (jlFieldBase e ++ ".t2") ++ ")"
+jlConformsShape d (ITList t) e =
+  let v = "_ce" ++ show d
+  in "((" ++ e ++ " isa InferenceList) && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
+jlConformsShape d (ITEither a b) e =
+  "(((" ++ e ++ " isa Left) && " ++ jlConformsAt d a (jlFieldBase e ++ ".val") ++ ") || ((" ++ e ++ " isa Right) && " ++ jlConformsAt d b (jlFieldBase e ++ ".val") ++ "))"
+jlConformsShape d (ITTensor sh t) e
+  | shapeRank sh == 1 =
+      let v = "_ce" ++ show d
+      in "((" ++ e ++ " isa AbstractVector) && length(" ++ e ++ ") == " ++ show (shapeNumel sh)
+         ++ " && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
+jlConformsShape _ _ _ = "true"
+
+-- | An operand as the base of a field access (@e.t1@): a number literal is
+-- parenthesised, since @-1.0.t1@ does not parse and @3.t1@ reads as a
+-- juxtaposition (task ir-conformsto-lowering-gaps-in-text-backends).
+-- Anything else is emitted as it was.
+jlFieldBase :: String -> String
+jlFieldBase e@(c : _) | c == '-' || isDigit c = "(" ++ e ++ ")"
+jlFieldBase e = e
+
+
+generateLambdaExpression :: IRExpr -> GlobalVariableSupply String
+generateLambdaExpression expr = do
+    let (names, rest) = getLambdaNames expr
+    body <- generateExpression rest
+    return $ "((" ++ intercalate ", " names ++ ") -> " ++ body ++ ")"
+
+getLambdaNames :: IRExpr -> ([String], IRExpr)
+getLambdaNames (IRLambda n body) = (n:names, rest)
+  where (names, rest) = getLambdaNames body
+getLambdaNames x = ([], x)
+
+-- | Diagnostics for the tensor ranks and axes this backend does not emit; see
+-- the note on the tensor builtins above.
+juliaRankUnsupported :: String -> Int -> String
+juliaRankUnsupported what r =
+  what ++ ": only rank-1 tensors are emitted, got rank " ++ show r
+       ++ " (the representation admits it; no backend lowers it yet)"
+
+juliaAxisUnsupported :: String -> Int -> String
+juliaAxisUnsupported what ax =
+  what ++ ": only axis 0 is emitted, got axis " ++ show ax
+       ++ " (the representation admits it; no backend lowers it yet)"

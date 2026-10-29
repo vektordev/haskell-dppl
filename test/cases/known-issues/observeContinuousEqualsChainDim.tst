@@ -9,9 +9,10 @@ p(Right ANY)=(0.640913004920576, 1.0)
 -- are right -- p(Right 0)/p(Right 1) is the likelihood ratio N(0)/N(1), and
 -- p(Left ()) is 1.0 -- but each `Right` row is a density reported at dim 0.
 -- `observe` binds `v` to the inner value, which is enumerable over {0, 1, 2},
--- and the enumerated sum over it reports a mass whatever its body; the
--- density guard that would catch this is omitted for a result type with no
--- Float leaf. Task enumerated-sum-over-density-body. The same program without
+-- and the enumerated sum over it keeps only the probability of each value's
+-- weight P(v = value), dropping that weight's dim (here a density, by the
+-- continuous-`==` convention). Task enumerated-weight-density-reported-as-mass
+-- (the body's dims are kept since enumerated-sum-over-density-body). The same program without
 -- `observe` answers the same values at dim 1
 -- (set-witness/setWitnessContinuousEqualsChain). Rows state the idealized
 -- values; only the currently-wrong rows are listed.

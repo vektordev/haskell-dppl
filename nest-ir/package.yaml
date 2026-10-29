@@ -1,0 +1,38 @@
+name:                nest-ir
+version:             0.1.0.0
+license:             BSD3
+description:         The intermediate representation of NeST (IR, its checker, optimizer and passes, the interpreter and the three code generators). It imports nothing from the frontend; the dependency direction is enforced by this package boundary (design ir-package-boundary).
+
+dependencies:
+- base >= 4.7 && < 5
+- containers
+- mtl
+- erf
+- vector
+- MonadRandom
+- statistics
+
+library:
+  source-dirs: src
+  # Same flags as the frontend: zero warnings, -Werror.
+  ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Wincomplete-record-updates
+  - -Wredundant-constraints
+  - -Werror
+
+tests:
+  nest-ir-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -Wall
+    - -Wcompat
+    - -Wincomplete-record-updates
+    - -Wredundant-constraints
+    - -Werror
+    dependencies:
+    - nest-ir
+    - tasty
+    - tasty-hunit

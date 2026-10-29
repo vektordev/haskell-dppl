@@ -467,7 +467,9 @@ combine is still `srComplement` (max-product refuses `srMinus`).
 ## Affine Gaussian marginalisation of an unwitnessed `draw`
 
 A third answer to "no occurrence of the bound variable is point-invertible",
-tried before set-valued witnesses: if the binding's certificate is a Gaussian
+tried after joint affine marginalisation and before set-valued witnesses
+(the order and its measurement: `modality-and-admission.md`, "Why this
+order"): if the binding's certificate is a Gaussian
 affine form and **every** use of the variable flows affinely into **one**
 Gaussian density leaf, the variable needs no witness at all -- it is
 integrated out analytically inside that leaf (task
@@ -491,11 +493,11 @@ once) and each field's residual; where two factors integrate the same
 the joint affine engine integrates (below) is `Joint` instead, and sharing it
 is not a reason to floor.
 
-**The compiler.** `CompilerMetadata.affineEnv` holds the IR of such a variable's
-form, `c + sum a_i * eps_i` over independent standard normals, keyed the same
+**The compiler.** The variable's entry in `CompilerMetadata.lawEnv` holds the IR
+of its form (`BoundVar.bvForm`, set by `marginaliseAs`), `c + sum a_i * eps_i` over independent standard normals, keyed the same
 way: by the chain name of the env-free Gaussian leaf that introduced each
 latent. `toIRNormalParams` collapses a form (`mu = c`, `sigma` the norm of the
-coefficient vector) **only** for expressions reading an `affineEnv` variable,
+coefficient vector) **only** for expressions reading such a variable (`affineVars`),
 so everything else emits exactly what it did before. The Gaussian catch-all
 takes such an expression (`readsMarginalised`) whether or not it has a handler
 of its own. The rules are `plus`, `mult` by a deterministic operand, `neg` and
@@ -524,7 +526,7 @@ keeps the scalar collapse sound. Otherwise the binding goes to
 A saturated call of a non-recursive top-level function is affine when its
 arguments are, and its body is affine over the parameters they bind
 (`affineCall`, `affineCallForm`): constant arguments are let-bound, the others
-enter `affineEnv`. The latents the body draws are keyed by the call site too,
+are marginalised with their forms. The latents the body draws are keyed by the call site too,
 so two calls of one helper draw independent latents, while a latent reaching
 the body through an argument keeps its key and stays shared.
 
@@ -537,13 +539,13 @@ answers a partial observation like `(s1, s3)` of a three-step chain, as
 
 ### Joint affine marginalisation: correlated Gaussian fields
 
-The fourth engine, tried after the single-consumer collapse and before
-set-valued witnesses (design `affine-gaussian-forms` M2). It applies when the
+Tried after point inversion and before the single-consumer collapse
+(design `affine-gaussian-forms` M2). It applies when the
 binding's certificate is an affine form and the body is a let spine whose
 every binding is affine over the variables bound so far, ending in a tree of
 tuples (`jointAffineApplicable`, twin of `ModalityInfer.jointAffineBindingCert`).
-The engine does not dispatch the nested bindings: every spine variable enters
-`affineEnv` with its form. The fields reading the spine (at most
+The engine does not dispatch the nested bindings: every spine variable is
+marginalised with its form. The fields reading the spine (at most
 `jointAffineMaxSlots` = 3) are jointly Gaussian, with means their constants
 and covariance the Gram matrix of their coefficient vectors. The other fields
 read none of it and are independent factors, compiled as usual.
@@ -615,7 +617,9 @@ tries them as a declared list. The engines:
   (`leadingArgBinding`): its witness is read from the call's forward-chaining
   copy, and its body factor is the call with the argument replaced by the
   recovered variable. `ANY` in that witness slot is a runtime refusal, and the
-  cumulative variant is refused.
+  cumulative variant is refused. Where this refuses and the argument is the
+  call's only random one and enumerable, it is enumerated instead
+  (`leadingEnumerableArgument`, `enumeration.md`).
 
 Corpus `higher-order/namedFunction*`, `rewriteProbeHelper*`,
 `helperCallsHelperRandomArg`, `namedHof*`, `set-witness/absNTopLevelSetWitness`,
@@ -639,7 +643,13 @@ randomness and holds no occurrence of the variable,
 `ForwardChaining.toInvExprMaybeWith` inverts each arm on its own, seeded at the
 arm, and selects the two chains field by field with an `IRIf` on the
 condition. Nested ifs split recursively. An arm where the variable is dead
-leaves the whole split without an inverse.
+leaves the whole split without an inverse. The seed may also be a `let`
+(`fcLetSteps`) whose value holds no occurrence, draws no fresh randomness and
+is a known point: the split continues at its body, so
+`draw c = 0.2 < 0.5 in if c then [x] else x : [x]` inverts as the inline
+condition does. Which values are known is a second predicate, read off the
+law: IRCompiler asks the same `Deterministic` test it asks of a condition,
+the modality's `pointWitnessCert` the value's inferred `pType` in the body.
 
 The condition enters the chain as a free variable (`ifConditionVars`: its
 chain name plus the invocation tag). `IRCompiler.bindIfConditions` binds it to
@@ -647,7 +657,8 @@ the condition compiled where the body means what it means in the callee
 (`enterBindingScope`), so `t < 0.5` reads the call's argument for `t`. The
 engine declines when the body can't be entered, when the condition is not in
 the body this binding compiles (a leading-argument binding), or when the
-condition reads a parameter of a function-valued body. The caller's predicate
+condition reads a parameter of a function-valued body. A condition that reads
+a variable bound by a `let` on the way is compiled under those bindings. The caller's predicate
 admits a condition only when it is `Deterministic` after re-inferring the
 recovered variables. A cumulative query never splits, because the point path
 refuses a variable read more than once, and the set-witness engine splits the
@@ -659,6 +670,18 @@ The per-invocation copy (`getDependentGroups`) steps into the arms of an
 arms. Before this, a callee whose body is an `if` had an empty copy. Copying
 every `if`'s arms and condition made the copies of a recursive body whole,
 which cost 5x on the Markov branch-chain family (now `TestInternals` `markovBranchRandomRateCompilePolynomial`).
+
+The copy also follows the equivalences of every `draw` in the body (the
+application is its lambda's body, each occurrence of the variable is the
+value), taken from `letEquivalenceClauses`, indexed once per compile. The
+clause set itself gains them one nesting level per iteration of
+`lambdasToHornClauses`' fixpoint, which is also where calls are copied, so a
+copy made first held nothing behind a `draw`: `f x = draw z = x * Normal in
+(x, z)` called as `f Uniform` did not witness `x`, and `main` was `Bottom`
+where the in-place twin compiles (task `named-callee-binding-not-floored`).
+They are not added to the clause set up front: that reorders it, which moves
+the slot a non-identifiable density is recovered through
+(`let-bindings/letWitnessedTupleFpUlp`'s warning).
 
 An `ANY` in the witnessing slot of an if-rooted program stays a runtime
 refusal: observation masks stop at an `if` root (`observation-masks.md`).
@@ -766,3 +789,37 @@ recomputed). Corpus: `data-structures/fstOfPairWrapperStructuredDraw`,
 Not covered: a structured variable re-read through an alias (`draw s = t`),
 through a helper taking the whole tuple, or through a projecting helper
 behind a second helper (task structured-draw-reread-through-binder-drops-field).
+
+## A wildcard leaf the body reads again is summed out
+
+The point witness is the query slot itself, so an `ANY` in one of its leaves
+reaches every other read of the bound variable as a value. In `draw e = ev
+prev in e : gen (snd e)` at `[(0.0, ANY), ..]`, `gen` got the `ANY` as its
+state and every `prev == 0` test answered False (task
+`any-mark-passed-as-recursive-call-state`). In a condition it compared False
+or raised "Condition is not a boolean: VAny", and in a second output slot it
+matched anything. `IRCompiler.applyBinding`'s `pointInvert` sums such a leaf
+over its finite domain: where it is `ANY` at run time (and its enclosing
+tuples are not), the binding's result is the mixture (`mixP`) over the
+domain of the same result at the witness with the leaf fixed. That is exact
+by the law of total probability. The result at a witness is compiled once,
+as a closure over the inverse (`pointInvertWith`), and called once per
+value. The calls sit in the arm of the run-time test, so a query without the
+wildcard makes the one call it made before.
+
+A leaf qualifies when it is read by at least two occurrences, or by one in a
+computing position (`varFieldReads`: anything other than field
+constructors, `if` arms and let bodies down from the body's root), and when
+the bound value states its domain (`fieldDomainOf`: a `DiscreteValues` tag,
+through a tuple constructor, a `fst`/`snd` projection, `if` arms, a let body,
+or the body of a called or nullary top-level function). The reads are
+followed through spellings that only rename the value, so equivalent programs
+agree: a projection of the variable bound by an inner `draw y = ..` is read
+wherever `y` is, and one passed to a top-level function wherever the callee's
+body reads that parameter (at most four calls deep, past which the argument
+counts as one computing read). At most 64 fixed witnesses (`wildcardLeafSumBound`), and the query
+must be a point query of a value-typed body. Any other binding keeps its code.
+Each `ANY` leaf of a recursion's state doubles the calls, so the runtime is
+exponential in the number of masked leaves (no memo). Corpus
+`data-structures/anyMarkPassedAsRecursiveState`,
+`let-bindings/anyLeafReadAgain*`.

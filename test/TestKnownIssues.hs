@@ -41,8 +41,9 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, testCaseInfo, assertBool, assertEqual, assertFailure)
 
 import SPLL.Lang.Types (CompilerError, Program, GenericValue(..))
+import SPLL.CompilerConfig (CompilerConfig, defaultCompilerConfig)
 import SPLL.IntermediateRepresentation
-  ( IREnv(..), IRValue, CompilerConfig, defaultCompilerConfig, lookupIREnv
+  ( IREnv(..), IRValue, lookupIREnv
   , IRFunGroup(..), showRefusal
   , resultImpossible, pattern VProbDim
   )

@@ -174,9 +174,10 @@ order:
 | enumeration | `Analysis.enumerableApplication` (a conditional head, `isConditional`, over a random enumerable argument) | the domain |
 | plan-guided enumeration | `AutoNeural.planReadOf` (a neural read whose declaration yields a plan) | the network |
 | point inversion | `ForwardChaining.pointWitnessCert` (`toInvExprMaybe`, seeded at the lambda's body) | the inverse, and the root-seeded witness verdict |
-| affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |
 | joint affine marginalisation | `ModalityInfer.jointAffineBindingCert` (an affine form with latents, read by a spine of affine bindings ending in a tuple of at most 3 affine fields) | the form |
+| affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |
 | set-valued witnesses | `ForwardChaining.worldsShape`, `invertToWorlds`' shape walk without its IR | the shape |
+| in place | `Lang.readOnceInPlace` (the body reads the variable once, under no lambda and in no nested `let`'s body) | none: the argument is measured at the read |
 
 For a `draw` (a lambda in place) whose argument is random, not a function of
 witnessed variables alone (`determinedByWitnesses`), and read by the body,
@@ -184,9 +185,79 @@ witnessed variables alone (`determinedByWitnesses`), and read by the body,
 by `-d`, and per binding by `-v`). Where the list is empty it binds the
 variable sample-only and re-infers the body, so the function is `Bottom`: no
 inference variant is promised, and `bindingWithoutEngine` records the reason
-on the absent variants. `applyBinding` tries the engines as a declared list
-(`dispatchEngines`); enumeration is tried earlier, at the `Apply` arm's first
-equation.
+on the absent variants. The order is stated once, as the constructor order of
+`ModalityInfer.Engine` (`engineOrder`): `bindingCerts` lists certificates in
+it and `applyBinding` tries its constructions in it (`dispatchEngines`).
+Enumeration is tried earlier, at the `Apply` arm's first equation; the
+in-place engine is tried last, after the set-witness engine's fallback (which
+can answer where its predicate declined).
+
+**The in-place engine** (task `dispatch-on-law-certificates`, law-carrying-modality
+M6). A binding whose body reads its variable once, under no lambda and in no
+nested `let`'s body, has the argument's own law at that read, which is how
+`bindParam` types the read anyway. So `body[x := arg]` is what the binding
+denotes, and the engine compiles that (`inPlaceApplicable`; only for a lambda
+in place compiled inline, so every node on the way is compiled from this
+tree). It is an engine with a certificate (`CertInPlace`), last in the order,
+not a source rewrite: a binding any other engine measures keeps that engine's
+code. The set-witness walk uses the same predicate to enter an inner binding
+whose body holds x (`draw c = x < 0.5 in if c ..`, `draw z = 0.5 in x < z`):
+it walks the body with the value in place, in `worldsShape` and
+`invertToWorldsStep` alike. Corpus `let-bindings/drawSingleReadInPlace*`,
+`set-witness/setWitness*InPlace`. Two reads (`draw x = Normal in x + x`) are
+never in place; the affine engine owns that.
+
+**Why this order** (acceptance 6 of `dispatch-on-law-certificates`, measured at
+`1a09132` plus the in-place engine, in the order before the size-only flip
+below: affine ahead of joint affine). For each pair of engines whose
+certificates both appear on some binding of a corpus program, the corpus
+programs where they do were compiled to Python with the second engine moved
+just ahead of the first, and their `.tst` rows run (End2End, interpreter,
+against a control run in the current order). An engine that answers is "first
+applicable wins", so the swap only matters where both apply:
+
+| seam (order measured) | co-apply | swapped order: code changed, size | variants lost / gained | `.tst` rows newly failing |
+|---|---|---|---|---|
+| enumeration < plan | 92 | 61, +9.1 MB | 1 / 2 | run exceeded 8 GB (the 423x plan pessimisation under budget, see `enumeration.md`) |
+| enumeration < point inversion | 11 | 11, +91 KB | 9 / 1 | 1 program |
+| enumeration < set-valued witnesses | 74 | 70, +373 KB | 33 / 2 | 15 programs |
+| enumeration < in place | 83 | 69, -701 KB | 7 / 2 | 1 program (run incomplete) |
+| plan < point inversion | 14 | 10, -20 KB | 1 / 0 | 1 program |
+| plan < affine, plan < joint affine | 1 | 0 | none | none |
+| plan < set-valued witnesses | 50 | 20, -218 KB | 10 / 0 | 7 programs |
+| plan < in place | 87 | 46, -680 KB | 11 / 1 | 4 programs, 2 lose probability (run incomplete) |
+| point inversion < affine | 20 | 19, -8 KB | none | none |
+| point inversion < joint affine | 30 | 27, -211 KB | none | none |
+| point inversion < set-valued witnesses | 110 | 97, +8.1 MB | 24 / 2 | 20 programs |
+| point inversion < in place | 77 | 66, -364 KB | 4 / 1 | 2 programs |
+| affine < joint affine | 28 | 11, -23 KB | none | none |
+| affine < set-valued witnesses | 27 | 5, -6 KB | 1 / 0 | 1 program |
+| affine < in place | 34 | 9, -20 KB | none | none |
+| joint affine < set-valued witnesses, joint affine < in place | 29, 32 | 0 | none | none |
+| set-valued witnesses < in place | 159 | 33, -92 KB | 1 / 3 | none |
+
+Every seam the order wins on answers or capability is kept for that reason.
+Four made no difference to answers or refusals, only to code size, and there
+the alternative was smaller. They were taken one at a time, largest gain
+first, each re-measured against the order as it stood (task
+`engine-order-flip-size-only-seams`, at `76152ac`: every corpus program
+compiled to Python in each of the six orders of point inversion, affine and
+joint affine, the code compared, the -O0 duplication census taken, and the
+default suite run in the order kept). A flip also had to leave every
+duplication-census pin where it was or lower:
+
+| size-only seam | outcome | re-measured |
+|---|---|---|
+| point inversion < joint affine | kept. No total order puts joint affine ahead of point inversion without also crossing affine. Every such order is smaller (by 197.9 to 200.0 KB over 34 to 39 programs, answers unchanged), but each raises `higher-order/arrowApplyIfSelected`'s census from 4 to 8 (`main.prob`) and from at most 2 to 8 (`main.integ`): the affine engine's result is an `if` mixture whose condition probability, 31 nodes, the -O0 IR copies 8 times. The -O0 IR halves, and M stays 8 with 3 or 4 arms | moving point inversion behind joint affine from the order below: 32 programs, -158.5 KB |
+| point inversion < affine | kept: moving affine ahead of point inversion raises the same census, and alone (before the flip below) `let-bindings/aliasedChainStepMarginalTail`'s from 25 to 48 | 19 programs, -10.5 KB |
+| affine < joint affine | **flipped**: joint affine is tried before affine | 13 programs, -39.3 KB (3 grow, by at most 622 B); no variant, refusal or `.tst` row changed; census pins only fall |
+| affine < in place | kept: it cannot hold in a total order. In place must follow set-valued witnesses (that seam trades variants) and affine must precede them (that seam loses one), so affine precedes in place. The compiler also tries in place after the set-witness fallback (`IRCompiler.applyBinding`) | not measured |
+
+So the order is enumeration, plan, point inversion, joint affine, affine,
+set-valued witnesses, in place. Set-valued witnesses < in place trades one
+variant for three and stays. The enumeration rows are approximate: the
+measurement build moved enumeration into the binding list, where the
+`Apply` arm's earlier equations normally take it.
 
 The plan traversal and the set-witness IR can still decline what their
 predicate admits (a transported sentinel, an x-free factor reading a random
@@ -194,11 +265,37 @@ local, a plan node outside the traversal), so their predicates are necessary
 conditions and the refusal stays the net. The predicates are permissive where
 the compiler might know more: a part with no fresh randomness of its own counts
 as deterministic (`permissiveDet`), since an enclosing variable may be
-recovered by the time the body is compiled. A named callee's binding is not
-floored, so a call no engine handles is still admitted and refused. The plan
+recovered by the time the body is compiled. The plan
 closed form of `compareGround` is the plan certificate too: both operands must
 project from plan reads through bindings (`JPlan`, `planDependent`), where
 any declaration containing a `ReadNN` used to qualify.
+
+**A named callee's binding** (task `named-callee-binding-not-floored`). A
+call whose head is not a literal lambda (`g u Normal`, a recursive `genS
+thetas (RP : ..)`) binds the parameter of the lambda forward chaining
+resolves the head to (`IRCompiler.resolveBinding`), and the `Apply` rule asks
+the engines of that binding at the call (`calleeBindingCerts`). The callee's
+body is the one written, not re-inferred (a recursive callee would re-enter
+itself), so each predicate is read permissively: enumeration is an argument
+with an enumerable domain (the compiler enumerates a call's argument on
+several paths), the plan engine an argument projecting from a plan read
+(`planRoots`), point inversion and the set-witness walk take every value as a
+known point, and the affine and in-place engines apply only to a body the
+compiler compiles inline (not a copy made per invocation, not a top-level
+function's). The law-independent part is solved once per declaration
+context (`icCallSyntax`). Where none applies, the call is sample-only in
+every part (`sampleOnlyOf`: not the callee's closure at a sample-only
+argument, which inside a recursive component costs the fixpoint an
+iteration per floored call), the certificates are recorded under
+`callBindingKey`, `-v` lists the binding as "binding of the call of 'g'",
+and `bindingWithoutEngine` names it. No engine is asked where the argument
+draws nothing fresh and reads only variables the compiler holds at a point
+where the call is compiled (`icPoint`): the parameters of the closure being
+evaluated (a caller passing a random argument there has its own binding),
+and `draw`-bound variables that enumeration, a plan read or point inversion
+answers. Not floored yet: a random leading argument of a call
+(`IRCompiler.leadingArgBinding`, `g Normal 0.5`), which is admitted and
+refused (docs task `leading-argument-binding-not-floored`).
 
 ## A static refusal is an absent variant, never a compile-killing error
 
@@ -219,6 +316,15 @@ reason. `propagateRefusals` then refuses, to a fixed point, every variant that
 calls a refused one (`main_prob` calling a refused `f_prob`), naming the callee
 and its reason, so no backend emits a call to a function that was never
 written (`Rejection.RefusedVariant`).
+
+A `Bottom` verdict records a reason the same way (`intractableRefusal` in
+`envToIRUnoptimized'`): the first that applies of a comparison with no closed
+form (`comparisonWithoutClosedForm`), a binding no engine applies to
+(`bindingWithoutEngine`), and otherwise the node the `Bottom` starts at
+(`bottomOrigin`: the `Bottom` node none of whose operands is `Bottom`, a
+curried call counted as one node), named with its source position and its
+operands' laws. `Normal + Uniform` answers "`+` at m.ppl:1:8 has no inference
+rule for its operands Normal (Gaussian) and Uniform (random)".
 
 A few sites *catch* a refusal instead of propagating it, where an engine
 tries an alternative after a failed attempt: the cumulative atom of a point

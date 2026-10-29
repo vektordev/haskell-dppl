@@ -35,19 +35,26 @@ Uniform < 0.1)` (`test/cases/let-bindings/enumLetGatesFreshDraw*`), plus three
 fuzz-found known issues now in the corpus (`enumNeuralBoolGatesFreshDraw`,
 `enumNeuralDeadBranchFreshDraw`, `enumDeadLetFreshDrawTuple`).
 
-Delegation has one catch: every enumerated sum (`enumSumP`) reports a **mass**
-(dim 0), which was true while enumerated bodies were always forward-and-compare
-indicators, and a delegated body can be a density. Whether it is one is a
-*runtime* fact (`(x, Uniform)` is a mass exactly when the query puts `ANY` in
-the second slot; topK makes the dim a runtime choice too), so the delegated
-probability is guarded at run time — a possible result with a non-zero dim
-raises "met a continuous density" rather than being summed as a mass. The guard
-is omitted for a cumulative result and for a result type with no `Float` leaf
-(which is what keeps a helper call guard-free: its dim is a runtime projection),
-and folds away where the dim is a literal 0. A real density sum is the
-follow-up `enumerated-sum-over-density-body`, pinned by
-`known-issues/enumLetGatesFreshDensity`. Solving the fixed point
-algebraically (the marginal *is* closed-form for that program) was declined: it
+Delegation has one catch: a delegated body can be a density, and whether it is
+one is a *runtime* fact (`(x, Uniform)` is a mass exactly when the query puts
+`ANY` in the second slot; topK makes the dim a runtime choice too). So the
+enumerated sums over a `draw` keep their terms' dims: where the body's dim is
+not literally 0 they sum with `Semiring.enumMinDimP`, the enumerated form of
+the mixture rule (impossible terms dropped, the lowest possible dim wins, only
+terms at that dim summed; `docs/semiring-presult-internals.md`). `draw b =
+Uniform < 0.5 in if b then Normal else 3.0` is then the mass 0.5 at 3.0 and the
+density 0.5·φ(x) elsewhere (task `enumerated-sum-over-density-body`, corpus
+`let-bindings/enumLetGatesFresh{Density,MixedDim,TupleDims}`). That needs a
+static bound on the dims (`IRCompiler.floatLeafBound`); under a sum whose body
+type has none (a list of reals), `CompilerMetadata.dimAwareEnum` is off and the
+delegated probability keeps a run-time guard: a possible result with a non-zero
+dim raises "met a continuous density" rather than being summed as a mass. The
+guard is also omitted for a cumulative result and for a result type with no
+`Float` leaf.
+
+The refusal of a draw through a function on a call cycle stays. Solving the
+fixed point algebraically (the marginal *is* closed-form for the resample-and-
+retry program) was declined: it
 would make "does my program infer?" unpredictable from the source. The refusal
 is an absent probability/integrate variant with a recorded reason (see "A
 static refusal is an absent variant" in `modality-and-admission.md`), so `generate` still works.
@@ -93,8 +100,28 @@ applied to arguments that are all deterministic -- once the enclosing
 enumerated latents are fixed (`reinferRecovered` over `recoveredVars`) -- except
 a random enumerable *last* one is compiled by `enumerateCurriedArgument`, which
 loops over that argument's domain exactly as `enumerateAppliedLambda` loops
-over a `let`'s. A random *leading* argument declines there and keeps its old
-path; and `enumerateAppliedLambda` measures its bound value with the enclosing
+over a `let`'s. A random enumerable *leading* argument, when it is the call's
+only random argument, is enumerated the same way (`leadingEnumerableArgument`:
+the loop body is the call with that position fixed) wherever the binding path
+(`leadingArgBinding`) refuses. For the probability variant this makes the two
+spellings agree on the values tested (`walk (trans fog) (n - 1)` and
+`walk (n - 1) (trans fog)`, corpus `leadingRandomStateMarkovChain`,
+`leadingRandomArgumentCurried`). The two spellings are **not** equivalent in
+general:
+
+- the cumulative variant has no leading-argument enumeration, so
+  `g (Uniform < 0.3) 5` refuses a CDF that `g 5 (Uniform < 0.3)` answers;
+- the leading enumeration is a last-resort retry outside the engine list, so
+  for a leading argument enumeration is tried last, where for a last argument
+  it is tried first. Nested leading calls retry at every level and compile in
+  exponential time, while the trailing spelling compiles in linear time;
+- batched mode refuses some trailing spellings that it compiles in the leading
+  order.
+
+Docs-repo tasks `leading-argument-enumeration-as-binding-engine` and
+`nested-leading-random-argument-compile-exponential`. Several random
+arguments, or one without a finite domain, have only the binding path
+(`witness-inversion-engines.md`); and `enumerateAppliedLambda` measures its bound value with the enclosing
 latents fixed, which is what `draw v = contrib u 1` (u enumerated outside,
 `sharedLatentNestedLet`) needs once `contrib u 1` carries a tag. Before, even
 `match Red (readC s)` had no probability path ("set-valued witness
@@ -105,6 +132,18 @@ Two refusals remain, each answering "no tag":
 
 - **Recursion.** A function already being looked through is refused; unrolling
   has no termination story and the enclosing tag fixpoint would not converge.
+  The exception is a call whose arguments are all **closed constants**
+  (`rollout 3`, and inside it `rollout (3 - 1)`): `applyTags` substitutes the
+  constants for the parameters and annotates the body without marking the
+  function visited, and inside such an unrolled body a closed-constant
+  condition selects its arm (`liveArm`), so the base case ends the unrolling.
+  It is bounded twice: at most `unrollFuel` (64) calls deep, and only for a
+  callee with at most one call that can lead back into it
+  (`unrollableCallee`), so a tree recursion like `fib 5` is not unrolled.
+  Either bound falls back to the ordinary look-through. This is what gives
+  `len (rollout 3)` an enumerable argument (task
+  `recursive-consumer-of-recursive-random-list-refused`; corpus
+  `data-structures/recursive{LengthOfRecursiveList,CountOfRecursiveBoolList}`).
 - **An empty propagated domain.** No values at all is an *absence* of a domain,
   not an empty one; tagging it would make downstream inference sum over nothing
   and report probability zero.
@@ -226,6 +265,37 @@ though no field then sinks. Within a group the cost is still exponential in its
 shared fields, and an `ANY` slot still keeps its fields in the group. Pinned by
 `Internals.recordSharedFieldGroupsCodeSizePolynomial` and the
 `neural/recordSharedFieldGroups{,Noisy}` corpus pairs.
+
+**A conjunction of clauses that share draws in a cycle is summed by variable
+elimination** (task `grid-constraint-network-enumerated-jointly`). A 3x3 grid
+of 10-way reads whose rows and columns must each be all different puts every
+read in two clauses, so sinking leaves most of them above the conjunction and
+the loops nest nine deep: about `10^9` terms per call, more than ten minutes.
+IRCompiler's `constraintNet` recognises a Boolean tree of `&&` whose inner
+nodes carry enumerable draws (wherever sinking left them) and whose leaves are
+clauses deterministic given the draws (re-inferred with the draws pinned); no
+draw may read another or a random enclosing local, the binder names must be
+unique and not captured, and the clauses must not be holes. It is taken only
+when the clause/draw incidence graph has a cycle (acyclic networks are what
+sinking already factorises) and the elimination costs under a quarter of the
+joint enumeration, and declined under topK, branch counting and max-product
+(below). `compileConstraintNet` then emits, per draw, its domain and its
+measure as a rank-1 tensor; per elimination (greedy, smallest table first,
+`eliminationOrder`), a table over the draws the eliminated one shares a factor
+with, built as nested `BMap`s over `BIota` positions whose innermost body sums
+the eliminated draw, its clauses guarding the product of its measure and the
+tables read at those positions. The tables are tensors of tensors, read by
+chained `BIndex`; the clauses read the draws by name, bound from their
+positions. `P(True)` is the last table; `P(False)` is the product of the draws'
+totals minus it (`measureDiffSR`, exact sums only, hence the declines), and
+`ANY` is the total. Measured on the 3x3 grid (scalar Python): 0.3 s per call
+with float probabilities; 9 s with `[128]` torch vectors, 24 s batched, whose
+kernel per table entry is still one small torch op (a real `[10^k, B]` table
+would be einsum speed). The batched backend reads a `BIota` binder and a
+constant domain at it as structure, and `tensor_index`/`tensor_sum` take a
+Python element as it stands rather than stacking the axis. Pinned by
+`Internals.gridConstraintNetEliminated` (loop depth) and the
+`neural/gridLatinNet` / `neural/gridSumNet` corpus pairs.
 
 **A nested draw's measure is tabulated ahead of its loop** (task
 `split-read-field-leaf-rebuilt-per-world`). Inside an enclosing enumeration,
@@ -686,7 +756,9 @@ Only **rank 1 and axis 0** are emitted. The representation admits any rank and
 the interpreter implements it (`fibres`/`rewrap` do the stride arithmetic, and
 `Internals/tensor builtins` pins the layout); the three backends refuse higher
 rank with a named diagnostic rather than emitting something plausible. Nothing
-produces a rank > 1 tensor today.
+produces a rank > 1 tensor today. A table over several variables is a rank-1
+tensor of rank-1 tensors instead (the constraint-network elimination above),
+read one axis at a time.
 
 One refusal this form does **not** preserve: `--batched --logSpace`.
 `CodeGenPyTorchBatched`'s `emittable` used to have no `IRLogEnumSum` case (and

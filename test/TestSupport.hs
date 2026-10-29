@@ -15,6 +15,7 @@ module TestSupport
 import Test.QuickCheck
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Prelude (runProb)
 import TestTolerances (reasonablyCloseTolerance)
 import Test.Tasty.HUnit (Assertion, assertBool, assertFailure)

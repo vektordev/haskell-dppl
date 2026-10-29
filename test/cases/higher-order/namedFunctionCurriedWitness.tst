@@ -5,3 +5,4 @@ slow
 p([0.0, 1.0])=(0.39894228, 1.0, False)
 p([0.5, 1.5])=(0.35206533, 1.0, False)
 p([0.0, 2.0]) is impossible
+p([]) is impossible

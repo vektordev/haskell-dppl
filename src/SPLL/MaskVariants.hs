@@ -23,7 +23,8 @@ module SPLL.MaskVariants
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types (ADTDecl(..), GenericValue(..), GenericList(..))
+import SPLL.Lang.Types (GenericValue(..), GenericList(..))
+import SPLL.IR.Type (IRADTDecl(..))
 import SPLL.ObservationMask (Accessor(..), Slot, Mask, prettyMask)
 
 import Data.List (intercalate)
@@ -89,7 +90,7 @@ variantGroupName f slots m = f ++ "__m" ++ maskBits slots m
 -- replaces a base body, and with no base body there is nothing to dispatch
 -- from. Generate stays the base function's (a mask is a property of a query,
 -- not of a sample), as do the normal shortcut and writeLogits.
-withDispatcher :: [ADTDecl] -> [Slot] -> [MaskVariant] -> IRFunGroup -> [IRFunGroup]
+withDispatcher :: [IRADTDecl] -> [Slot] -> [MaskVariant] -> IRFunGroup -> [IRFunGroup]
 withDispatcher decls slots variants g =
   g { probFun  = fmap (dispatch "prob" "probability" mvProb) (probFun g)
     , integFun = fmap (dispatch "integ" "integrate" mvInteg) (integFun g)
@@ -205,7 +206,7 @@ withDispatcher decls slots variants g =
 -- and answers its impossibility as it always has. If another slot /is/ masked,
 -- the variant gets it, and the variant is an ordinary compiled program that
 -- answers a tag mismatch the same way.
-maskedAtIR :: [ADTDecl] -> IRExpr -> Slot -> IRExpr
+maskedAtIR :: [IRADTDecl] -> IRExpr -> Slot -> IRExpr
 maskedAtIR _ v [] = IRUnaryOp OpIsAny v
 maskedAtIR decls v (Accessor c i : rest) =
   IRIf (IRUnaryOp OpIsAny v)
@@ -240,7 +241,7 @@ maskedAtIR decls v (Accessor c i : rest) =
 -- (how the compiler names a slot's value), or projected back out of a tuple
 -- built from such paths. A binder that shadows the query parameter stops the
 -- rewrite below it.
-assumeObserved :: [ADTDecl] -> Set.Set Slot -> IRExpr -> IRExpr
+assumeObserved :: [IRADTDecl] -> Set.Set Slot -> IRExpr -> IRExpr
 assumeObserved decls known body = case body of
   IRLambda q b -> IRLambda q (go q Map.empty b)
   _ -> body
@@ -285,14 +286,14 @@ assumeObserved decls known body = case body of
         SymPath p -> Just (SymPath (IRApply f p))
         _ -> Nothing
       _ -> Nothing
-    fieldNames = Set.fromList [ fst f | d <- decls, (_, fs) <- constructors d, f <- fs ]
+    fieldNames = Set.fromList [ fst f | d <- decls, (_, fs) <- irConstructors d, f <- fs ]
 
 -- | A value 'assumeObserved' can follow: a path from the query parameter, or a
 -- structure built from such values ('Nothing' for a part it cannot follow).
 data Sym = SymPath IRExpr | SymCon ConTag [Maybe Sym]
 
 -- | The IR that reads field @idx@ of a value built by constructor @ctor@.
-projectIR :: [ADTDecl] -> String -> Int -> IRExpr -> IRExpr
+projectIR :: [IRADTDecl] -> String -> Int -> IRExpr -> IRExpr
 projectIR decls ctor idx x = case (ctor, idx) of
     ("TCons", 0) -> IRDestruct AcFst x
     ("TCons", _) -> IRDestruct AcSnd x
@@ -304,7 +305,7 @@ projectIR decls ctor idx x = case (ctor, idx) of
   where
     adtField =
       case catMaybes [ if idx < length fields then Just (fst (fields !! idx)) else Nothing
-                     | d <- decls, (cName, fields) <- constructors d, cName == ctor ] of
+                     | d <- decls, (cName, fields) <- irConstructors d, cName == ctor ] of
         (name : _) -> name
         [] -> error ("projectIR: constructor " ++ ctor ++ " has no field " ++ show idx
                        ++ " (invariant: slots come from this program's own observation tree)")

@@ -26,7 +26,7 @@ import qualified Data.Map as Map
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
-import SPLL.ReservedNames (distributionPrimitiveNames)
+import SPLL.ReservedNames (distributionPrimitiveNames, perValueHelperSuffixes)
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
@@ -79,7 +79,9 @@ data RTypeError
   | UnificationMismatch [RType] [RType]
   | ExprInfo [String]
   | FalseParameterFail String
-  | ClassConstraintViolation ClassConstraint RType
+  -- | A class constraint met a type outside the class, and where the
+  -- constrained use is in the source.
+  | ClassConstraintViolation ClassConstraint RType (Maybe Provenance)
   | AmbiguousClassConstraint ClassConstraint
   deriving (Show, Eq)
 
@@ -93,7 +95,9 @@ type Infer a = (ReaderT
                   a)              -- Result
 
 -- | Inference state
-data InferState = InferState { var_count :: Int, collectedClassConstraints :: [ClassConstraint] }
+-- Each collected class constraint carries the provenance of the use that
+-- emitted it, so a violation is reported at that use.
+data InferState = InferState { var_count :: Int, collectedClassConstraints :: [(ClassConstraint, Maybe Provenance)] }
 
 -- | Initial inference state
 initInfer :: InferState
@@ -199,20 +203,37 @@ showConstraint (Constraint a b (Just c)) =
 -- conclusion -- which is the whole point of task @opaque-user-facing-errors@.
 renderRTypeError :: RTypeError -> String
 renderRTypeError (UnificationFail t1 t2 prov) =
-  unlines (location ++ [header] ++ context)
+  unlines (provenanceLocation prov ++ [header] ++ provenanceLines prov)
   where
-    location = case prov >>= provSpan of
-      Just sp -> [spanPretty sp ++ ":"]
-      Nothing -> []
     header = "    Couldn't match type '" ++ prettyRType t1
                ++ "' with '" ++ prettyRType t2 ++ "'"
-    -- A node the parser synthesized names the construct it was desugared from,
-    -- so the chain never mentions a binder the user never wrote.
+renderRTypeError (ClassConstraintViolation cc t prov) =
+  unlines (provenanceLocation prov
+           ++ ["    No instance for (" ++ className cc ++ " " ++ prettyRType t ++ ")"]
+           ++ provenanceLines prov)
+  where
+    className c = case c of
+      CNum _ -> "Num"
+      CFractional _ -> "Fractional"
+      COrd _ -> "Ord"
+      CEq _ -> "Eq"
+      CDiscrete _ -> "Discrete"
+renderRTypeError e = show e
+
+provenanceLocation :: Maybe Provenance -> [String]
+provenanceLocation prov = case prov >>= provSpan of
+  Just sp -> [spanPretty sp ++ ":"]
+  Nothing -> []
+
+-- | The context chain of a diagnostic. A node the parser synthesized names
+-- the construct it was desugared from, so the chain never mentions a binder
+-- the user never wrote.
+provenanceLines :: Maybe Provenance -> [String]
+provenanceLines prov = map ("      In " ++) (maybe [] provContext prov) ++ desugarNote
+  where
     desugarNote = case prov >>= provSpan >>= spanDesugaredFrom of
       Just phrase -> ["      In " ++ phrase]
       Nothing -> []
-    context = map ("      In " ++) (maybe [] provContext prov) ++ desugarNote
-renderRTypeError e = show e
 
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
@@ -234,36 +255,56 @@ basicTEnv adtsDecl = Map.fromList $ (adtRTs ++ injFRTs ++ distRTs)
 -- | After solving, check that all emitted class constraints are satisfied.
 -- For each constraint, resolve the TVarR using the final substitution.
 -- A still-free TV after solving means the type is ambiguous.
-checkClassConstraints :: Subst -> [ClassConstraint] -> Either RTypeError ()
+checkClassConstraints :: Subst -> [(ClassConstraint, Maybe Provenance)] -> Either RTypeError ()
 checkClassConstraints subst cs = mapM_ check cs
   where
-    check cc =
+    check (cc, prov) =
       let tv = constraintTV cc
           resolved = apply subst (TVarR tv)
       in case resolved of
            TVarR _ -> Right ()  -- still free = genuinely polymorphic, constraint is deferred
            t       -> if satisfiesClass cc t
                       then Right ()
-                      else Left $ ClassConstraintViolation cc t
+                      else Left $ ClassConstraintViolation cc t prov
 
 addRTypeInfo :: Program -> Either CompilerError Program
 addRTypeInfo = addRTypeInfoAt 0
 
 -- | 'addRTypeInfo', with the solver dump gated on verbosity.
 --
--- The dump -- the pretty-printed program, every constraint, and the leftover
--- constraints after simplification -- used to be appended to *every* type
--- error: 88 lines of solver internals for a five-line program, none of it
+-- Inference is Hindley-Milner with let-generalisation of top-level
+-- declarations ('inferGeneralized'), followed by 'monomorphize', which clones
+-- every polymorphic declaration once per type it is used at, followed by the
+-- monomorphic inference of the cloned program ('addRTypeInfoMono'), which
+-- annotates every node. A program that types with one shared type per
+-- declaration comes out of the clone step unchanged, so the last step types
+-- it exactly as a monomorphic checker would; every diagnostic is the
+-- generalising pass's (task rinfer-generalise-unconditionally).
+--
+-- The dump -- the pretty-printed declarations, every constraint, and the
+-- leftover constraints after simplification -- used to be appended to *every*
+-- type error: 88 lines of solver internals for a five-line program, none of it
 -- meaningful to a user. It is a real debugging aid for someone working on this
 -- module, so it is kept and moved behind @-v@ rather than deleted.
 addRTypeInfoAt :: Int -> Program -> Either CompilerError Program
-addRTypeInfoAt verbosity p = case addRTypeInfoMono verbosity p of
-  Right typed -> Right typed
-  Left err -> retryMonomorphized err (addRTypeInfoMono verbosity) p
+addRTypeInfoAt verbosity p = case generalised p of
+  Left (GenError err) -> Left (renderRTypeError err)
+  Left (GenSolveFailure err cs members) -> Left (renderRTypeError err ++ dump)
+    where
+      (subst, leftoverConstraints) = simplify (emptySubst, cs)
+      showDecls ds = unlines (prettyPrintProgRTyOnly p { functions = ds })
+      dump
+        | verbosity < 1 = ""
+        | otherwise =
+            "\nprog = \n" ++ showDecls members
+            ++ "\n\nconstraints = \n" ++ (unlines $ map showConstraint cs)
+            ++ "\n\nsimplified prog = \n" ++ showDecls [ (n, apply subst e) | (n, e) <- members ]
+            ++ "\n\nleftover constraints = \n" ++ (unlines $ map showConstraint leftoverConstraints)
+  Right cloned -> addRTypeInfoMono verbosity cloned
 
 -- | The monomorphic inference: every top-level declaration has one type,
--- shared by all of its uses. Tried first, so every program it accepts is typed
--- exactly as it always was.
+-- shared by all of its uses. Runs on the output of 'monomorphize', where that
+-- holds by construction; a rejection here is never expected.
 addRTypeInfoMono :: Int -> Program -> Either CompilerError Program
 addRTypeInfoMono verbosity p =
   case runInfer (basicTEnv (adts p)) (inferProg p) of
@@ -280,13 +321,14 @@ addRTypeInfoMono verbosity p =
                   ++ "\n\nsimplified prog = \n" ++ (unlines $ prettyPrintProgRTyOnly (subst `apply` p2))
                   ++ "\n\nleftover constraints = \n" ++ (unlines $ map showConstraint leftoverConstraints)
       Right subst -> case checkClassConstraints subst classCs of
-        Left err -> Left ("Class constraint violation: " ++ renderRTypeError err)
+        Left err -> Left (renderRTypeError err)
         Right () -> Right (apply subst p2)
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
-tryAddRTypeInfo p = case tryAddRTypeInfoMono p of
-  Right typed -> Right typed
-  Left err -> retryMonomorphized err tryAddRTypeInfoMono p
+tryAddRTypeInfo p = case generalised p of
+  Left (GenError err) -> Left err
+  Left (GenSolveFailure err _ _) -> Left err
+  Right cloned -> tryAddRTypeInfoMono cloned
 
 tryAddRTypeInfoMono :: Program -> Either RTypeError Program
 tryAddRTypeInfoMono p@(Program _ _ adtsDecl _ _) = do
@@ -295,27 +337,25 @@ tryAddRTypeInfoMono p@(Program _ _ adtsDecl _ _) = do
   checkClassConstraints subst classCs
   return $ apply subst prog
 
--- | The fallback when monomorphic inference rejects a program (design
--- @polymorphic-monomorphization@): infer it again with let-generalisation of
--- top-level declarations, clone every polymorphic declaration once per type it
--- is used at ('monomorphize'), and type the clones monomorphically. Anything
--- going wrong on this path -- the program is ill-typed under generalisation
--- too, or (never expected) the clones do not type -- reports the original,
--- monomorphic error, so every diagnostic a program got before is unchanged.
---
--- Trying monomorphic inference first is what keeps every previously accepted
--- program typed exactly as before: this path only ever turns a rejection into
--- an acceptance.
-retryMonomorphized :: e -> (Program -> Either e Program) -> Program -> Either e Program
-retryMonomorphized err mono p = case monomorphizing p of
-  Right p' -> either (const (Left err)) Right (mono p')
-  Left _ -> Left err
+-- | Why the generalising pass rejected a program.
+data GenFailure
+  -- | A component's constraints have no solution: the error, and (for the
+  -- @-v@ dump) the component's constraints and its members' bodies.
+  = GenSolveFailure RTypeError [Constraint] [(String, Expr)]
+  -- | Anything else: an unbound name, a class constraint violated.
+  | GenError RTypeError
 
--- | Generalise, then clone. 'Left' carries a reason for debugging only.
-monomorphizing :: Program -> Either String Program
-monomorphizing p = do
-  typed <- first show (runExcept (evalStateT (runReaderT (inferGeneralized p) (basicTEnv (adts p))) initInfer))
-  monomorphize p (Map.fromList typed)
+-- | Generalise, then clone: the untyped program 'addRTypeInfoMono' types.
+-- 'monomorphize' failing is an internal inconsistency between it and
+-- 'inferGeneralized', never a user error.
+generalised :: Program -> Either GenFailure Program
+generalised p =
+  case runExcept (evalStateT (runReaderT (inferGeneralized p) (basicTEnv (adts p))) initInfer) of
+    Left err -> Left (GenError err)
+    Right (Left failure) -> Left failure
+    Right (Right typed) -> case monomorphize p (Map.fromList typed) of
+      Left msg -> error ("RInfer: " ++ msg)
+      Right cloned -> Right cloned
 
 -- | Hindley-Milner inference with let-generalisation of top-level
 -- declarations. Declarations are processed in dependency order, one strongly
@@ -327,9 +367,14 @@ monomorphizing p = do
 -- become part of the scheme and are re-emitted, renamed, at each use by
 -- 'instantiate'; the rest are checked against the component's substitution.
 --
+-- There is no monomorphism restriction: a nullary declaration with a
+-- class-constrained type is generalised like any other and cloned per use
+-- type. Every reference to a nullary declaration is already a call of its own
+-- (a random one draws afresh), so a clone per type changes no law.
+--
 -- Answers each declaration's scheme and its typed body, in which a reference
 -- to a polymorphic declaration carries the type of that one use.
-inferGeneralized :: Program -> Infer [(String, (Scheme, Expr))]
+inferGeneralized :: Program -> Infer (Either GenFailure [(String, (Scheme, Expr))])
 inferGeneralized p = do
   Program decls _ adtsDecl _ _ <- addTVarsEverywhere p
   let declNames = Set.fromList (map fst decls)
@@ -344,19 +389,24 @@ inferGeneralized p = do
         cts <- mapM ((inTEnvF (polyEnv ++ monoEnv ++ neuralEnv) . infer adtsDecl) . snd) members
         let equalities = zipWith (\t1 t2 -> Constraint t1 t2 Nothing) tvs (map fst3cts cts)
         sigCs <- signatureConstraints (signatures p) (zip (map fst members) tvs)
-        subst <- either throwError return (runSolve (equalities ++ concatMap snd3cts cts ++ sigCs))
-        classCs <- gets collectedClassConstraints
-        let resolved = [ (applyCC subst cc, apply subst (TVarR (constraintTV cc))) | cc <- classCs ]
-        forM_ resolved $ \(cc, t) -> case t of
-          TVarR _ -> return ()
-          _ -> unless (satisfiesClass cc t) (throwError (ClassConstraintViolation cc t))
-        let generalise ty =
-              let vs = Set.toList (ftv ty)
-              in Forall vs [ cc | (cc, TVarR v) <- resolved, v `elem` vs ] ty
-            typedMembers = [ (n, (generalise (apply subst tv), apply subst (trd3cts ct)))
-                           | ((n, _), tv, ct) <- zip3 members tvs cts ]
-        return (done ++ typedMembers)
-  foldM (\done scc -> component done (flattenSCC scc)) [] components
+        let cs = equalities ++ concatMap snd3cts cts ++ sigCs
+        case runSolve cs of
+          Left err -> return (Left (GenSolveFailure err cs (zip (map fst members) (map trd3cts cts))))
+          Right subst -> do
+            classCs <- gets collectedClassConstraints
+            let resolved = [ (applyCC subst cc, apply subst (TVarR (constraintTV cc)), prov) | (cc, prov) <- classCs ]
+            forM_ resolved $ \(cc, t, prov) -> case t of
+              TVarR _ -> return ()
+              _ -> unless (satisfiesClass cc t) (throwError (ClassConstraintViolation cc t prov))
+            let generalise ty =
+                  let vs = Set.toList (ftv ty)
+                  in Forall vs [ cc | (cc, TVarR v, _) <- resolved, v `elem` vs ] ty
+                typedMembers = [ (n, (generalise (apply subst tv), apply subst (trd3cts ct)))
+                               | ((n, _), tv, ct) <- zip3 members tvs cts ]
+            return (Right (done ++ typedMembers))
+      step (Left failure) _ = return (Left failure)
+      step (Right done) scc = component done (flattenSCC scc)
+  foldM step (Right []) components
 
 rtFromScheme :: Scheme -> RType
 rtFromScheme (Forall _ _ rt) = rt
@@ -395,9 +445,17 @@ inferProg p = do
 signatureConstraints :: [FnSignature] -> [(String, RType)] -> Infer [Constraint]
 signatureConstraints sigs declTypes = sequence
   [ do declared <- fillHoles (sigType sig)
-       return (Constraint t declared (Just (Provenance Nothing ["the type signature of '" ++ sigName sig ++ "'"])))
+       return (Constraint t declared (Just (Provenance Nothing ["the type signature of '" ++ writtenBy (sigName sig) ++ "'"])))
   | sig <- sigs, Just t <- [lookup (sigName sig) declTypes] ]
   where
+    -- A per-value helper's signature is derived from the user's signature of
+    -- the marked function, so a clash with it is reported against that one:
+    -- the helper's own component can be solved first, and its name is not one
+    -- the user wrote.
+    writtenBy n = case [ sigName s | s <- sigs, not (null (sigEnumerated s))
+                                   , suffix <- perValueHelperSuffixes, n == sigName s ++ suffix ] of
+      (user : _) -> user
+      [] -> n
     fillHoles ty = case ty of
       NotSetYet -> fresh
       TArrow a b -> TArrow <$> fillHoles a <*> fillHoles b
@@ -449,7 +507,7 @@ infer adtsDecl expr
           -- resulting type is tv -> functionTy; propagate constraints from inner Expr.
           return (tv `TArrow` functionTy, cs, Expr (setRType ti (tv `TArrow` functionTy)) (Lambda name inExprTy))
         (Expr ti (Var name)) -> do
-          t <- lookupTEnv name
+          t <- lookupTEnv (provenanceOf expr) name
           return (t, [], Expr (setRType ti t) (Var name))
         (Expr ti (Apply func arg)) -> do
           (funcTy, c1, funcExprTy) <- infer adtsDecl func
@@ -462,7 +520,7 @@ infer adtsDecl expr
             Just (FPair FDecl {contract=scheme} _) -> usingScheme adtsDecl e scheme
             Nothing -> throwError $ UnboundVariable ("InjF " ++ name)
         (Expr ti (ReadNN name sym)) -> do
-          t <- lookupTEnv name
+          t <- lookupTEnv (provenanceOf expr) name
           (symTy, c1, symTyExpr) <- infer adtsDecl sym
           let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (provenanceOf expr)
           return (rType ti, [argConstraint] ++ c1, Expr ti (ReadNN name symTyExpr))
@@ -493,7 +551,7 @@ usingScheme adtsDecl expr scheme = do
   let localConstraints = concatMap snd3cts tuples
   let subExprTypes = map fst3cts tuples
   let typedSubExprs = map trd3cts tuples
-  rescoped <- rescope scheme
+  rescoped <- rescope (provenanceOf expr) scheme
   (resultingtype, recursiveConstraints) <- inferResultingType (provenanceOf expr) rescoped subExprTypes
   return (resultingtype, recursiveConstraints ++ localConstraints, reformExpr expr typedSubExprs resultingtype)
 
@@ -504,28 +562,28 @@ solvesSimply e = (not (null plausibleAlgs)) && (not ((toStub e) == StubConstant)
 
 --put all new TVars into a scheme
 --TODO: could probably be reduced to instantiate, depending on context.
-rescope :: Scheme -> Infer Scheme
-rescope (Forall tvars cs rty) = do
+rescope :: Maybe Provenance -> Scheme -> Infer Scheme
+rescope prov (Forall tvars cs rty) = do
   newTVars <- mapM (const fresh) tvars
   let newvars = map unwrap newTVars
   let substitution = Subst $ Map.fromList (zip tvars newTVars)
   let substituted = apply substitution rty
   let renamedCs = map (applyCC substitution) cs
   -- Emit class constraints so they can be checked post-solve
-  modify (\s -> s { collectedClassConstraints = renamedCs ++ collectedClassConstraints s })
+  modify (\s -> s { collectedClassConstraints = map (\cc -> (cc, prov)) renamedCs ++ collectedClassConstraints s })
   return (Forall newvars renamedCs substituted)
     where unwrap (TVarR tv) = tv
           -- 'fresh' only ever yields a type variable.
           unwrap t = error ("rescope: fresh produced " ++ show t ++ ", not a type variable")
 
 -- instantiate a Scheme: Substitute each ForAll'd TV with a fresh var.
-instantiate :: Scheme -> Infer RType
-instantiate (Forall as cs t) = do
+instantiate :: Maybe Provenance -> Scheme -> Infer RType
+instantiate prov (Forall as cs t) = do
     as2 <- mapM (const fresh) as
     let s = Subst $ Map.fromList $ zip as as2
     -- Emit renamed class constraints so they can be checked post-solve
     let renamedCs = map (applyCC s) cs
-    modify (\s' -> s' { collectedClassConstraints = renamedCs ++ collectedClassConstraints s' })
+    modify (\s' -> s' { collectedClassConstraints = map (\cc -> (cc, prov)) renamedCs ++ collectedClassConstraints s' })
     return $ apply s t
 
 -- into an existing expression, replace a subexpresison and rtype.
@@ -561,12 +619,12 @@ inTEnvF :: [(Name, Scheme)] -> Infer a -> Infer a
 inTEnvF bindings m = local (\env -> foldl' (\e (x, sc) -> Map.insert x sc e) env bindings) m
 
 -- | Lookup type in the TEnvironment
-lookupTEnv :: Name -> Infer RType
-lookupTEnv x = do
+lookupTEnv :: Maybe Provenance -> Name -> Infer RType
+lookupTEnv prov x = do
   env <- ask
   case Map.lookup x env of
       Nothing   ->  throwError $ UnboundVariable x
-      Just s    ->  do t <- instantiate s
+      Just s    ->  do t <- instantiate prov s
                        return t
 
 fst3cts ::  (RType, [Constraint], Expr) -> RType
@@ -598,7 +656,7 @@ freshVars n rts = do
 
 
 -- | Run the inference monad
-runInfer :: TEnv -> Infer ([Constraint], Program) -> Either RTypeError ([Constraint], [ClassConstraint], Program)
+runInfer :: TEnv -> Infer ([Constraint], Program) -> Either RTypeError ([Constraint], [(ClassConstraint, Maybe Provenance)], Program)
 runInfer env m = runExcept $ do
   (result, finalState) <- runStateT (runReaderT m env) initInfer
   let (cs, prog) = result

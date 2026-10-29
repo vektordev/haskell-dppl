@@ -6,4 +6,6 @@
 -- so its two family-free Integrate operands type SampleOnly. Residue of task
 -- comparison-closed-form-verdict-for-plan-leaves (the coarse per-declaration
 -- flag); found by design clevr-position-experiments' arm-A readiness probe.
-expect-failure: no-code probability
+-- Since task bottom-verdict-records-no-refusal-reason the absence carries a
+-- reason, naming the call of 'before' and its random argument.
+expect-failure: refused "the call of 'before' at"

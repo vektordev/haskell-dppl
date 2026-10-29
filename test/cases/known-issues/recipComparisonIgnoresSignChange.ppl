@@ -1,0 +1,1 @@
+main = recip Normal > 0.5

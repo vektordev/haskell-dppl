@@ -1,2 +1,2 @@
 f x = draw x2 = x in (x2, draw y = Normal in x2 * y + 0.0)
-main = f Uniform
+main = draw u = Uniform in f u

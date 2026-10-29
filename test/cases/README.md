@@ -139,7 +139,8 @@ other.
 
 Header lines, each optional and on its own line before the rows: `slow` (the
 program belongs to the opt-in Slow tier), `dense` (its query domain is finite,
-so batched mode emits dense entry points), and `no-normalization` (keep a
+so batched mode emits dense entry points), `ir-contract: violated "<substring>"` (the compiled IR is known not to type-check; see
+`docs/testing.md`), and `no-normalization` (keep a
 neural program out of the Normalization sweep, which samples the output; say
 why in a leading comment).
 

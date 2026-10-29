@@ -18,19 +18,21 @@ module TestRejection (rejectionTests) where
 
 import Data.Char (isUpper)
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), GenericList(..), MultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), GenericList(..), GenericMultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
 import SPLL.Typing.RType (RType(..), Extent(..))
 import Control.Monad.Random (evalRand, mkStdGen)
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, runGen, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (CompilerConfig(..), defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
+import SPLL.IntermediateRepresentation (firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
+import SPLL.CompilerConfig (CompilerConfig(..), defaultCompilerConfig)
 import SPLL.IRCompiler (requireNoGenerateBacked, symbolCdfMessage)
 import TestSupport (expectVariantRefused)
 import Data.Maybe (isJust, isNothing)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
-import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage, accessorMismatchMessage)
+import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage)
+import SPLL.Typing.AlgebraicDataTypes (adtCdfMessage)
 import qualified SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorch (pyMangle, pythonKeywords)
 import SPLL.CodeGenJulia (juliaMangle, juliaKeywords)
@@ -966,13 +968,17 @@ fstProjectedBottomSrc = "main = fst (Uniform * Uniform, Uniform)"
 
 -- 'f' is refused by the set-witness engine (sqrt is outside the monotone
 -- transport table); 'main' is perfectly tractable apart from calling it.
--- The binding is a call of 'g', not a @draw@: a @draw@ no engine applies to
--- is typed Bottom (task engine-applicability-as-data), so 'f' would not be
--- admitted at all, while a call's binding is still admitted and refused.
+-- The binding is of a call's random /leading/ argument: a @draw@ no engine
+-- applies to is typed Bottom (task engine-applicability-as-data), and so is a
+-- call binding its last argument (task named-callee-binding-not-floored, which
+-- moved this fixture off @f u = g u Normal@), so 'f' would not be admitted at
+-- all, while a leading argument's binding ('IRCompiler.leadingArgBinding') is
+-- still admitted and refused (docs task
+-- leading-argument-binding-not-floored).
 refusedHelperSrc :: String
 refusedHelperSrc = unlines
-  [ "g u x = if sqrt x > u then 1.0 else 0.0"
-  , "f u = g u Normal"
+  [ "g x u = if sqrt x > u then 1.0 else 0.0"
+  , "f u = g Normal u"
   , "main = if Uniform < 0.5 then f 0.5 else 3.0"
   ]
 
@@ -992,6 +998,17 @@ refusedVariantTests = testGroup "RefusedVariant"
                               ("NeST refused to compile it" `isInfixOf` e && "f_prob" `isInfixOf` e)
           Left ex -> assertFailure ("crashed: " ++ show ex)
           Right (Right v) -> assertFailure ("main answered " ++ show v ++ " through a refused helper")
+  , testCase "a named callee's binding no engine applies to is Bottom, with the reason" $
+      -- Task named-callee-binding-not-floored: the engines of the binding a
+      -- call makes are asked at the call, so @g Normal@ (sqrt is outside the
+      -- monotone transport table) is typed Bottom, as a @draw@ is, rather
+      -- than admitted and refused at codegen.
+      withParsed (unlines [ "g x = if sqrt x > 0.5 then 1.0 else 0.0", "main = g Normal" ]) $ \prog -> do
+        let compiled = compile defaultCompilerConfig prog
+        expectVariantRefused "main" "prob" "no inference engine applies to the parameter bound by the call of 'g'" compiled
+        expectVariantRefused "main" "integ" "no inference engine applies to the parameter bound by the call of 'g'" compiled
+        assertBool "generate went down with the refused variants"
+          (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   , testCase "generate survives on both the helper and its caller" $
       withParsed refusedHelperSrc $ \prog -> do
         let compiled = compile defaultCompilerConfig prog
@@ -1029,7 +1046,8 @@ refusedVariantTests = testGroup "RefusedVariant"
         assertBool "generate went down with the refused variants"
           (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   ]
-  where setWitnessDiagnostic' = "set-valued witness construction failed for the binding of 'x'"
+  -- The leading argument's binding names a fresh variable for the parameter.
+  where setWitnessDiagnostic' = "set-valued witness construction failed for the binding of"
 
 generateBackedProjectionTests :: TestTree
 generateBackedProjectionTests = testGroup "GenerateBackedProjection"
@@ -1535,13 +1553,19 @@ setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
 -- table (sqrt/recip/sq: partial domain or non-monotone on the line) and for
 -- mult by a deterministic operand that is not a literal, whose sign -- and
 -- so the transported endpoints' order -- is not statically known.
+--
+-- The arms read x again: a body reading x once, with no binder on the way,
+-- is the in-place engine's (task dispatch-on-law-certificates), which
+-- compiles @if sqrt Normal > 0.5 ...@ exactly as that spelling compiles
+-- (wrongly for recip, docs-repo task recip-comparison-ignores-sign-change,
+-- and for sq, sq-inverse-drops-nonpositive-preimages).
 setWitnessTransportTests :: TestTree
 setWitnessTransportTests = testGroup "SetWitnessTransport"
-  [ refused "sqrt on the spine" "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
-  , refused "recip on the spine" "main = draw x = Normal in if recip x > 0.5 then 1.0 else 0.0"
-  , refused "sq on the spine" "main = draw x = Normal in if sq x > 0.5 then 1.0 else 0.0"
+  [ refused "sqrt on the spine" "main = draw x = Normal in if sqrt x > 0.5 then x else 0.0 - x"
+  , refused "recip on the spine" "main = draw x = Normal in if recip x > 0.5 then x else 0.0 - x"
+  , refused "sq on the spine" "main = draw x = Normal in if sq x > 0.5 then x else 0.0 - x"
   , refused "mult by a non-literal deterministic operand"
-      "main = draw x = Normal in if (x * (0.0 - 2.0)) > 1.0 then 1.0 else 0.0"
+      "main = draw x = Normal in if (x * (0.0 - 2.0)) > 1.0 then x else 0.0 - x"
   ]
   where
     refused what src = testCase (what ++ " is refused, not silently measured") $

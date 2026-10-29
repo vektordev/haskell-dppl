@@ -48,17 +48,18 @@ module SPLL.Semiring (
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
   prodP, onProb, onDim, onBranches, underLambdas, substResult, errorWhen, constantResult, guardP, zipResult, zip3Result,
-  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, closeResult, guardedResult, shareUnlessLeaf,
+  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumMinDimP, enumSumNode, tensorDomainSR, opaqueMass, closeResult, guardedResult, shareUnlessLeaf,
   packResult, unpackResult, packedProb, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
   CompilerMonad, CompilerM, refuse, runCompilerMonad, mkVariable, setVariables, generateLetInExpr,
   -- * Scopes
   Open, scoped, openWith, openValue, closeExpr, inline, splitOpen, openNames, openReads, openIterates, openNests,
-  openIsEmpty, openBlockSize, unsafeDistributeBlock
+  openIsEmpty, openBlockSize, unsafeDistributeBlock, substFreeOpen
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.ReservedNames (sumProductGroupTag, maxProductGroupTag, countingGroupTag)
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (multiValueToValueList)
@@ -179,6 +180,25 @@ inline (Open a binds) = setVariables binds >> return a
 splitOpen :: ([(Varname, IRExpr)] -> ([(Varname, IRExpr)], [(Varname, IRExpr)]))
           -> Open a -> (Open (), Open a)
 splitOpen part (Open a binds) = let (out, stay) = part binds in (Open () out, Open a stay)
+
+-- | Replace the free occurrences of a variable throughout a scope, its block
+-- and its result: a variable the scope reads but nothing binds, given the
+-- value it stands for. A binding of the same name in the block, or a binder
+-- inside an expression, shadows it from there on. Adds no binding, so the
+-- block is no larger (a binding copied into each field of a leaf block would
+-- be).
+substFreeOpen :: Varname -> IRExpr -> Open PResult -> Open PResult
+substFreeOpen n val (Open a binds0) = go binds0 []
+  where
+    go [] acc = Open (eachField subst a) (reverse acc)
+    go ((m, v) : rest) acc
+      | m == n    = Open a (reverse acc ++ (m, subst v) : rest)
+      | otherwise = go rest ((m, subst v) : acc)
+    subst e = case e of
+      IRVar m | m == n -> val
+      IRLetIn m v b | m == n -> IRLetIn m (subst v) b
+      IRLambda m _ | m == n -> e
+      _ -> irDescend subst e
 
 -- | The names the scope binds (no values: a name alone copies nothing).
 openNames :: Open a -> [Varname]
@@ -1102,6 +1122,62 @@ enumMixP sr withBranchCount wrap densityDim v vals packed = do
                   (IRIf atomWon dim0 densityDim)
                   (out 3)
                   (orIR (out 2) (andIR atomWon (IROp OpEq (out 0) (srZero sr)))))
+
+-- | 'enumSumP' for an enumerated MIXTURE whose terms may be densities of any
+-- dimension up to @maxDim@ (task enumerated-sum-over-density-body): the
+-- general form of 'enumMixP', which is the scalar case @maxDim = 1@ with the
+-- density's dim supplied rather than read off the terms. The fold follows
+-- 'mixWith''s rule for a binary mixture: impossible terms are dropped, the
+-- result's dim is the lowest dim among the possible terms, and only terms at
+-- that dim are summed. So @draw b = .. in if b then Normal else 3.0@ is a mass
+-- (dim 0) at 3.0 and a density elsewhere.
+--
+-- @maxDim@ is a static upper bound on every term's dim (the number of real
+-- leaves of the measured type, see 'SPLL.IRCompiler.floatLeafBound'). The
+-- lowest possible dim is found as a ladder over @0 .. maxDim - 1@, each rung a
+-- count of the possible terms at that dim, reduced with 'ROpAdd': there is no
+-- min reduction, and 'ROpMax' is refused by the batched backend, so this
+-- builds only from what every backend emits. With no possible term below
+-- @maxDim@ the dim is @maxDim@.
+--
+-- The flag is structural: impossible when no term is possible, and, for a
+-- winning dim of 0 (a discrete MASS), also when that mass is exactly zero,
+-- sound there for the reason 'opaqueMass' gives. Like 'enumMixP' the body is
+-- bound once per value and the mapped axis is let-bound and read by every
+-- reduction.
+enumMinDimP :: Semiring -> Bool -> (IRExpr -> IRExpr) -> Int -> Varname -> MultiValue -> IRExpr -> CompilerMonad PResult
+enumMinDimP sr withBranchCount wrap maxDim v vals packed = do
+  n <- mkVariable "mixd_axis"
+  body <- mkVariable "mixd_body"
+  t <- mkVariable "mixd_term"
+  win <- mkVariable "mixd_dim"
+  paired <- mkVariable "mixd_paired"
+  let r = unpackResult body
+      mapped = IRBuiltin BMap [ IRLambda v (IRLetIn body packed
+                                  (packMany [unP (rProb r), rDim r, rImposs r, rBranches r]))
+                              , tensorDomainSR vals ]
+      field k = projMany k 4 (IRVar t)
+      possible = notIR (field 2)
+      overTerms f = IRBuiltin BMap [IRLambda t f, IRVar n]
+      countWhere cond = IRBuiltin (BReduce ROpAdd 0) [overTerms (IRIf cond const1 const0)]
+      atDim k = andIR possible (IROp OpEq (field 1) (IRConst (VInt k)))
+      ladder = foldr (\k rest -> IRIf (IROp OpGreaterThan (countWhere (atDim k)) const0)
+                                      (IRConst (VInt k)) rest)
+                     (IRConst (VInt maxDim)) [0 .. maxDim - 1]
+      counted = IRIf (andIR possible (IROp OpEq (field 1) (IRVar win))) (field 0) (srZero sr)
+      probSum = IRBuiltin (BReduce (srReduceOp sr) 0) [overTerms counted]
+      bcSum   = if withBranchCount
+                  then IRBuiltin (BReduce ROpAdd 0) [overTerms (field 3)]
+                  else const0
+  setVariables [(paired, wrap (IRLetIn n mapped
+                                (IRLetIn win ladder
+                                  (packMany [ probSum, IRVar win
+                                            , IROp OpEq (countWhere possible) const0, bcSum ]))))]
+  let out k = projMany k 4 (IRVar paired)
+  return (PResult (P (out 0))
+                  (out 1)
+                  (out 3)
+                  (orIR (out 2) (andIR (IROp OpEq (out 1) dim0) (IROp OpEq (out 0) (srZero sr)))))
 
 -- | The IR node an enumerated sum/max of probabilities is built from: a
 -- 'BMap' of the body over the domain, reduced along that one axis with the

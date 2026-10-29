@@ -45,7 +45,8 @@ import Test.QuickCheck.Random (mkQCGen)
 import SPLL.Lang.Types
 import SPLL.Typing.PType (PType(..))
 import SPLL.Lang.Lang (freeVarsExpr, getTypeInfo)
-import SPLL.IntermediateRepresentation (IREnv, IRValue, CompilerConfig(..), defaultCompilerConfig, pattern VProbDim, pattern VProbDimBC)
+import SPLL.IntermediateRepresentation (IREnv, IRValue, pattern VProbDim, pattern VProbDimBC)
+import SPLL.CompilerConfig (CompilerConfig(..), defaultCompilerConfig)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, compileStages, runProbC, runGenC, rtypedProgram, StageSnapshot(..), StageValue(..))
 import TestCaseParser (TestCase(..), Backend(..))
@@ -66,21 +67,30 @@ import End2EndTesting (programRuntimeFields)
 -- does not deliver:
 --
 -- * 'AliasIntro': was assigned to M1, reinfer-body-under-recovered-bindings,
---   which cut its logged frontier from 75 to 50 but did not close it. What is
---   left is not re-inference's class (a variable's stale type after it is
---   recovered): an alias between a curried function's parameters
---   (@constructEquivalenceClauses@, ~21), tagged or higher-order invocations
---   (~15), an alias of a function parameter handed to the Gaussian catch-all
---   with nothing recovered (2), and a witness seeded through an aliased chain
---   refusing an ANY marginal. Those belong to M2 and M6, so the family stays
---   log-only until the later of the two lands;
+--   which cut its logged frontier from 75 to 50 but did not close it. At
+--   8924628 promoting it fails 22 corpus programs and 1 sequence seed (20261015), all
+--   refusals of the rewritten program that the original answers. They belong
+--   to open tickets, so the family stays log-only until those resolve:
+--   alias-between-curried-lambdas-refuses-enumerable-and-function-arguments
+--   (leadingRandomArgumentCurried, namedHof*, observePredicateParameterLambda,
+--   witnessThroughDetIfNamed(Last)), alias-of-recursive-helper-parameter-
+--   refuses-with-random-argument (recursive*, decreasingRecursion*,
+--   recursionDepthFromSample, leadingRandomStateMarkovChain,
+--   listIndexFromSample), theta-anchor-through-callee-local-binding (the two
+--   theta* rows), gaussian-catch-all-dispatch-on-codegen-law
+--   (normalThroughFunctionParam, paramPairHelperFst,
+--   correlatedGaussianLetSharesLatent), alias-before-helper-built-tuple-tail-
+--   approx-type-error and alias-chain-of-structured-draw-any-marginal-refused;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
--- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates, which
---   cut the promoted draw-intro frontier from 16 failing tests to 13 (probe
---   rows 5, 8 and 9: the affine certificate of a fresh draw beside a
---   recovered variable is now the one compiled) and left it there: most of the rest is a single-read random
---   binding no engine measures in place, which waits on a decision recorded
---   in that task; linear-inline fails only on gaussianTrajectory4's masks.
+-- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates. Its
+--   in-place engine (a binding read once, with no binder on the way, measured
+--   at its read) and the set-witness walk's entry into such an inner binding
+--   cut the promoted frontier, over the Slow sweep, the probes and the
+--   sequences, from 55 failing tests to 35 (at 1a09132). What is left is
+--   classified in that task: mostly other milestones' classes (Gaussian
+--   rules reading syntax, M7; named callees; point inversion through a
+--   deterministic if behind a binding; recursion; ANY-mask runtime refusals;
+--   interpreter type errors), so both stay log-only.
 refusalIsHard :: Family -> Bool
 refusalIsHard AliasIntro = False
 refusalIsHard HelperExtract = False
@@ -133,14 +143,6 @@ knownDivergences =
   , Known "maskSwappedWrapper" DrawIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" AliasIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" HelperExtract "" variantsSilenceReread
-  -- An aliased third step of the trajectory (`draw s3 = .. in draw y = s3 in
-  -- draw s4 = y + .. in (s1, (s2, (y, s4)))`) answers the (_, _, _, ANY)
-  -- marginal as impossible. Pre-existing; exposed when gaussianTrajectory4
-  -- joined the corpus. (The same entries used to cover a doubled Jacobian
-  -- on an aliased first step, fixed with task
-  -- aliased-draw-scaled-sibling-double-jacobian.)
-  , Known "gaussianTrajectory4" DrawIntro "" aliasChainMarginalTail
-  , Known "gaussianTrajectory4" AliasIntro "" aliasChainMarginalTail
   -- The M3 families (task transformation-differential-testing-m3-catalog-expansion).
   -- The same impossible (0.7, 0.6) answered 1.0 as the other families above.
   , Known "maskSwappedWrapper" TupleLaw "pair-fst" variantsSilenceReread
@@ -156,7 +158,6 @@ knownDivergences =
   where
     hiddenNegation = "if-complement-drops-hidden-negation-density"
     nanComparison = "nan-operand-comparison-measured-through-cdf"
-    aliasChainMarginalTail = "aliased-chain-step-marginal-tail-impossible"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
 
@@ -983,10 +984,7 @@ knownConfigDivergences =
   , KnownConfig "anySlotThroughPlusInverse" HelperExtract "extract (TCons (plus x 0.0) 1.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
   , KnownConfig "anySlotThroughPlusInverseTupleSplit" DrawIntro "draw-intro (plus h 0.0)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
   , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro (log x)" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
-  , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro 2.0" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic"
-  -- Drawing the isRight test leaves the -O0 compile applying fromRight to a
-  -- Left ("fromRight of a Left"); -O2 agrees with the original.
-  , KnownConfig "enumeratedEitherSelectOnDomainConstant" DrawIntro "draw-intro (isRight m)" "-O0" "drawn-isright-test-reads-fromright-of-left-at-o0" ]
+  , KnownConfig "anySlotThroughInverseNested" DrawIntro "draw-intro 2.0" "-O0" "residue-factor-at-wildcard-witness-evaluates-arithmetic" ]
 
 knownConfigDivergence :: String -> Family -> String -> String -> Maybe KnownConfig
 knownConfigDivergence prog fam site cfg =

@@ -14,6 +14,7 @@ import SPLL.Examples
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Validator
 import Control.Monad.Random.Lazy (evalRandIO)
 import SPLL.Parser
@@ -23,6 +24,7 @@ import TestObservationMask (observationMaskTests, slowVariantCorpusTests, chartW
 import TestPerValue (perValueTests)
 import TestMonomorphize (monomorphizeTests)
 import TestIRTypeCheck (irTypeCheckTests)
+import TestIRContract (irContractTests, slowIrContractTests)
 import IRFuzz (irFuzzGeneratorTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
@@ -30,13 +32,14 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, batchedPerElementEvaluatorTests, branchCountBackendTests, topKRuntimeCutoffTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, batchedPerElementEvaluatorTests, branchCountBackendTests, topKRuntimeCutoffTests, topKWriteLogitsTests)
 import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
 import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rewriteIntegrationTests, ofToggleCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestSamplingPrimitives (samplingPrimitiveTests)
 import TestCLI (cliTests)
+import TestMemoRecursion (memoRecursionTests)
 import BackendCoverage (backendCoverageTests, irGeneratorCoverageTests)
 import GenerateCensus (generateCensusTests)
 import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
@@ -559,6 +562,7 @@ main = do
   showcase <- showcaseTests
   writeLogitsRoundtrip <- writeLogitsRoundtripTests corpus
   knownIssues <- knownIssuesTests manifest
+  irContract <- irContractTests corpus
   -- Names corpus members, but reads only the front end (0.1 s for the whole
   -- corpus), so it runs by default rather than in Slow.
   chartWarnings <- chartWarningCorpusTests corpus
@@ -574,6 +578,7 @@ main = do
   -- they read the whole corpus, `slow` programs included, so they live here
   -- (docs-repo task demote-tick-redundant-corpus-programs-to-slow).
   slowPlanDiff <- slowPlanEngineDifferentialTests corpus manifest
+  slowIrContract <- slowIrContractTests corpus
   slowVariants <- slowVariantCorpusTests corpus
   juliaFreeNames <- juliaFreeNamesTests corpus
   -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
@@ -594,7 +599,7 @@ main = do
   generateCensus <- generateCensusTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
-        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, rewriteSequences, rewriteIntegration, ofToggleCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
+        if isNothing runSlow then [] else [slowInternals, slowIrContract, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, rewriteSequences, rewriteIntegration, ofToggleCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it
@@ -636,6 +641,7 @@ main = do
     , rejectionTests
     , monomorphizeTests
     , irTypeCheckTests
+    , irContract
     , irFuzzGeneratorTests
     , modalityTests
     , modalityInfer
@@ -660,6 +666,7 @@ main = do
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests
     , topKRuntimeCutoffTests
+    , topKWriteLogitsTests
     , wideNeuralDomainTests
     , deepExpressionSpillTests
     , deepIndentationHoistTests
@@ -670,6 +677,7 @@ main = do
     , pythonPreludeTests
     , samplingPrimitiveTests
     , cliTests
+    , memoRecursionTests
     , batchedEnumBucketingTests
     , batchedPerElementEvaluatorTests
     , branchCountBackends

@@ -1,0 +1,3 @@
+-- map's inverse onto a draw-bound list read once: the in-place engine (task
+-- dispatch-on-law-certificates), as data-structures/mapMultList.
+main = draw z = [Uniform, Uniform + 1.0] in map (mult 2.0) z

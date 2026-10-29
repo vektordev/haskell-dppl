@@ -4,5 +4,6 @@
 -- dispatched for xc. Unrolled to two boxes the refusal does carry a reason
 -- ("no affine Gaussian form flowing into one consumer"). Found by the
 -- publication-exploration C1 pilot (W8). Verified at b16b4d9 on dev. Docs
--- task bottom-verdict-records-no-refusal-reason.
-expect-failure: no-code probability
+-- task bottom-verdict-records-no-refusal-reason added the reason pinned
+-- below: the call of 'exL' with a Gaussian argument.
+expect-failure: refused "has no inference rule for its arguments"

@@ -1,0 +1,16 @@
+-- Task per-value-veto-complement-cancels-confident-network. The per-value veto
+-- of perValueVetoIndexedRead: P(not (t == c)) for a known t is read as
+-- 1 - raw[t] (PLeafEq, srComplement), not as the sum of the other slots. With
+-- a confident anti-model (raw[1] rounds to 1.0, the others sum to ~3e-9) the
+-- complement is exactly 0 and the discrete-mass exception flags the possible
+-- event impossible.
+neural lm :: (Symbol -> Int) of [0, 1, 2, 3]
+neural lmAnti :: (Symbol -> Int) of [0, 1, 2, 3]
+
+main ctx ctxC =
+  draw t = lm ctx in
+  draw c = lmAnti ctxC in
+  (t, not (t == c))
+
+posterior :: Symbol -> Symbol -> (Enumerated Int, Bool)
+posterior = main

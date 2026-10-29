@@ -9,7 +9,11 @@ for unit tests). It is split across **two cabal test-suites**, each its own
 executable/OS process: `haskell-dppl-test` (`test/Spec.hs`, everything below
 except Corpus) and `haskell-dppl-test-corpus` (`test-corpus/SpecCorpus.hs`,
 just the `Corpus` group, module `TestCorpus`). `stack test` builds and runs
-both automatically; `--ta` patterns only reach whichever one you invoke
+both automatically, plus a third, `nest-ir:test:nest-ir-test`
+(`nest-ir/test`, the IR package's own suite: the IR type checker's constructs,
+builtins, rejections and environment rules, built from hand-written IR with no
+frontend; the main suite's `IRTypeCheck` group keeps the "accepts compiler
+output" checks). `--ta` patterns only reach whichever one you invoke
 directly (`stack test haskell-dppl:test:haskell-dppl-test-corpus --ta '-p ...'`), since each
 process gets its own tasty CLI. This split exists because `Corpus` compiles
 the whole `test/cases/` corpus 8 times over (once per config it needs to
@@ -165,7 +169,9 @@ checks the rows on the dense entry points), a line of its own;
 (keeps a program out of `End2End.Normalization`, which samples the output and
 cannot cover a wide support; the file's leading comment says why); and, for a
 `test/cases/known-issues/` file only, `expect-failure: <shape>` (design
-testcases-corpus-restructure — see "Known-issues corpus" below).
+testcases-corpus-restructure — see "Known-issues corpus" below); and
+`ir-contract: violated "<substring>"` for a program whose compiled IR is known
+not to type-check ("The IR contract on the corpus").
 
 **The interpreter is the oracle** (impact analysis M2, docs-repo task
 `impact-analysis-m2-drop-runtime-from-key`). An ordinary corpus file names no
@@ -416,6 +422,38 @@ existing `TestRejection.hs` groups onto it is out of scope. Seeded with
 correlated-gaussian-let-shares-latent), the `diagnostic` shape, whose fuller
 multi-assertion sibling is `TestRejection.SetWitnessSharedLatent`. That seed
 has since been fixed and moved to `let-bindings/` (affine-gaussian-forms M2).
+
+### The IR contract on the corpus
+
+`IRContract` (`test/TestIRContract.hs`) compiles each corpus program and runs
+the IR type checker (`checkIREnvWith`, with the program's mock oracle as
+externals) on two environments of the same compile: the IR before the
+optimizer, after the select pass (`"After Select Pass"`, which is where
+`IRSelect` enters under `--batched`), and the final one. A failure names
+the stage: `pre-optimizer` is a compiler violation, `final` alone an optimizer
+or batched post-pass one. A corpus row can pass over a violating IR whose
+offending code is unreachable, so this checks what the rows cannot.
+
+- **Default tier**, `IRContract.Corpus`: every non-`slow` program, compiled at
+  the default config, with `--batched` and with `--topK 0.1`; and
+  `IRContract.KnownIssues`, the known-issues programs (but not the performance
+  pins, which have no program to check). About 6 s wall (`--topK` adds about
+  2 s). The checker itself is cheap (about a
+  second over the whole corpus); the cost is the compile, which the sweep does
+  not share with other sweeps.
+- **Slow tier**, `Slow.IRContractConfigs (slow)`: `--logSpace` and
+  `--countBranches` for every program, and all five configs for the `slow`
+  programs.
+- **Known violations.** `ir-contract: violated "<substring>"` in a `.tst`
+  (ordinary or known-issues) requires some check to be rejected with a
+  message containing the substring, and fails the day the program checks, like
+  `expect-failure:`; a rejection with another message fails too (the violation
+  changed shape). Put it on the known-issue that causes it. A program that
+  does not compile has no IR and passes.
+- **No impact skipping.** The verdict depends on the checker, which the
+  manifest's keys do not cover, and the compile is never skipped; the sweep
+  runs every time. A skipped End2End check is therefore no gap in the contract
+  check.
 
 ### Duplication census: catching a fan-out at depth 2
 
@@ -692,8 +730,9 @@ its own key (`sourcesFingerprint`), so editing it reruns that sweep only.
 | `Slow.RewriteInvarianceCorpus` | the rows, and for the original and every variant (family and site) its program fields and its compile, a refusal's message included, and the interpreter fingerprint; `TestRewrites.hs` and `Rewrites.hs` join the harness. A variant whose compile timed out, or whose shown environment crashed or timed out, leaves the program unkeyed |
 
 The **interpreter fingerprint** (M1 of the task) is the source of every
-`src/` module that `IRInterpreter` transitively imports (13 of 39, read off the
-import lines at run time), plus `SPLL/Prelude.hs` (the `run*C` entry points),
+`src/` module that `IRInterpreter` or `MockNN` (which builds the neural oracle
+the interpreter is handed) transitively imports (read off the import lines at
+run time), plus `SPLL/Prelude.hs` (the `run*C` entry points),
 `stack.yaml` and the GHC version. The compiler proper (`IRCompiler`, the
 optimizer, the parser, the typing passes, codegen) is outside it. A compiler
 change reaches an interpreter check through the emitted `IREnv`, which is in

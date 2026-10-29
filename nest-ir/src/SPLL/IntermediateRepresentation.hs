@@ -1,0 +1,1113 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+module SPLL.IntermediateRepresentation (
+  IRExpr(..)
+, IREnv(..)
+, IRFunDecl
+, IRFunGroup (..)
+, VariantRefusal(..)
+, showRefusal
+, Operand(..)
+, UnaryOperand(..)
+, Builtin(..)
+, ReduceOp(..)
+, Shape
+, Extent(..)
+, builtinArity
+, expectBuiltinArgs
+, ConTag(..)
+, Accessor(..)
+, conTagArity
+, expectConTagArgs
+, Distribution(..)
+, LogSpace(..)
+, Varname
+, IRValue
+, irMap
+, irDescend
+, irDescendM
+, getIRSubExprs
+, collectApplyChain
+, isPure
+, isEffectfulVar
+, isPureGiven
+, lookupIREnv
+, reduceIREnv
+, irPrintFlat
+, valueToIR
+, multiValueToIR
+, isLambda
+, pattern VProbDim
+, pattern VProbDimBC
+, resultImpossible
+, adtIdentifierRenaming
+, renameADTIdentifiers
+, mangleUserIdentifiers
+, unmangleDiagnostic
+, firstAnyExceptIR
+, anyExceptCodegenRefusal
+, retireUnrenderableVariants
+) where
+
+import SPLL.IR.Value
+import SPLL.IR.Type (IRType, IRADTDecl(..))
+import Data.Data()
+import Data.List (isSuffixOf, sort, group)
+import Data.Char (isAlpha, isAlphaNum)
+import Control.Monad.State.Strict (State, execState, modify)
+import Data.Maybe (mapMaybe, listToMaybe, fromMaybe, isNothing, catMaybes)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import SPLL.ReservedNames (genSuffix, functionVariantSuffixes, componentNormalName)
+
+-- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
+--
+-- >  (prob, (dim, (branchCount, impossible)))    -- countBranches on
+-- >  (prob, (dim, impossible))                   -- countBranches off
+--
+-- The impossibility flag is an internal side-channel (design
+-- inference-result-side-channels): it tells a mixture which alternatives are
+-- structurally inapplicable, instead of that being re-derived by comparing a
+-- probability to zero. It is not stripped from the emitted result yet, so
+-- consumers match through these patterns rather than on the tuple shape, which
+-- is the layout's only definition outside the compiler.
+--
+-- The dim is an 'Int' ('VInt'): it counts dimensions (task presult-dim-as-int).
+-- A result carrying a 'VFloat' dim matches neither pattern, so a leftover
+-- float dim fails loudly at its consumer instead of comparing unequal to an
+-- integer.
+pattern VProbDim :: Double -> Int -> IRValue
+pattern VProbDim p d <- (probDimOf -> Just (p, d))
+
+pattern VProbDimBC :: Double -> Int -> Double -> IRValue
+pattern VProbDimBC p d bc <- (probDimBCOf -> Just (p, d, bc))
+
+probDimOf :: IRValue -> Maybe (Double, Int)
+probDimOf (VTuple (VFloat p) (VTuple (VInt d) _)) = Just (p, d)
+probDimOf _                                       = Nothing
+
+probDimBCOf :: IRValue -> Maybe (Double, Int, Double)
+probDimBCOf (VTuple (VFloat p) (VTuple (VInt d) (VTuple (VFloat bc) _))) = Just (p, d, bc)
+probDimBCOf _                                                           = Nothing
+
+-- | The impossibility flag of a result, when the layout carries one.
+resultImpossible :: IRValue -> Maybe Bool
+resultImpossible (VTuple _ (VTuple _ (VBool imp)))            = Just imp
+resultImpossible (VTuple _ (VTuple _ (VTuple _ (VBool imp)))) = Just imp
+resultImpossible _                                            = Nothing
+
+{-
+{-# OPTIONS -Wall #-}
+import Control.Monad.Cont
+import Control.Monad.State.Strict
+
+
+data IRExpr = IRLetIn Varname IRExpr IRExpr
+            | IRLit Int
+            | IRAdd IRExpr IRExpr
+            | IRVar Varname
+  deriving (Show)
+
+newtype Varname = Varname String
+  deriving (Show)
+
+type M = StateT Int (Cont IRExpr)
+
+runM :: M IRExpr -> IRExpr
+runM m = runCont (runStateT m 0) fst
+
+genName :: String -> M Varname
+genName base = do
+  i <- get
+  let name = "$" ++ show i ++ "_" ++ base
+  put (i + 1)
+  return (Varname name)
+
+letin :: String -> IRExpr -> M Varname
+letin base rhs = do
+  name <- genName base
+  lift $ cont (\f -> IRLetIn name rhs (f name))
+
+-- literal :: Int -> M ()
+-- literal n = lift $ cont (\f -> _ f)
+
+generateCode :: M IRExpr
+generateCode = do
+  varName <- letin "some_string" (IRLit 10)
+  subex <- subCode varName
+  return (IRAdd (IRVar varName) subex)
+
+-- returs var + 3, using a let binding
+subCode :: Varname -> M IRExpr
+subCode v = do
+  a <- letin "a" (IRLit 3)
+  return (IRAdd (IRVar a) (IRVar v))
+-}
+
+
+
+{-
+import Control.Monad.Cont
+import Control.Monad.State.Strict
+
+type Varname = String
+
+type M a = ContT Int (State IRExpr)
+
+--runM :: M a IRExpr -> IRExpr
+runM m = evalState (runContT m return) 0
+
+genName :: String -> M a Varname
+genName base = do
+  i <- get
+  let name = "$" ++ show i ++ "_" ++ base
+  put (i + 1)
+  return name
+
+letin :: String -> IRExpr -> M a Varname
+letin base rhs = do
+  name <- genName base
+  ContT (\f -> IRLetIn name rhs <$> f name)
+-}
+--generateCode :: M a IRExpr
+--generateCode = do
+--  varName <- letin "some_string" (IRLit 10)
+--  subex <- subCode varName
+--  return (IRAdd (IRVar varName) subex)
+
+-- returs var + 3, using a let binding
+--subCode :: Varname -> M a IRExpr
+--subCode v = do
+--  a <- letin "a" (IRLit 3)
+--  return (IRAdd (IRVar a) (IRVar v))
+
+type Varname = String
+
+data Operand = OpPlus
+             | OpMult
+             | OpGreaterThan
+             | OpLessThan
+             | OpDiv
+             | OpSub
+             | OpOr
+             | OpAnd
+             | OpEq
+             | OpApprox
+             -- Fiber-enumerator probe (task fiber-enumerator-probe-max): `max`
+             -- is a forward-only binary numeric op, added purely to exercise
+             -- the existing isForwardOnly enumerate-both InjF path on a second
+             -- operator. Interpreter-only for now -- no Python/Julia/batched
+             -- codegen case exists, since the probe's corpus test declares
+             -- `backends: interpreter` only.
+             | OpMax
+             -- Exact integer division/remainder (task
+             -- int-mult-inversion-divides-and-crashes): 'multI's inverse needs
+             -- to recover a factor via c/a on TInt, which OpDiv has never
+             -- supported (its only equation is VFloat/VFloat; VInt/VInt is a
+             -- deliberate 'forceOp' refusal, since a *truncating* division
+             -- would silently return a wrong-but-domain-valid factor whenever
+             -- the dividend isn't a multiple of the divisor -- e.g. 6 'div' 4
+             -- truncates to 1, and 1 may well be a legal domain member even
+             -- though 4*1/=6). These two are therefore only ever emitted
+             -- guarded by an applicability test asserting OpMod is zero first
+             -- (see 'PredefinedFunctions.multIInv1'/'multIInv2'), at which
+             -- point every rounding convention agrees and cross-backend
+             -- truncation-direction differences (Python '//' floors, Julia
+             -- 'div' truncates toward zero) cannot bite.
+             | OpIntDiv
+             | OpMod
+             deriving (Show, Eq)
+
+data UnaryOperand = OpNeg
+                  | OpSign
+                  | OpAbs
+                  | OpNot
+                  | OpExp
+                  | OpLog   --Natural Logarithm
+                  | OpIsAny
+                  deriving (Show, Eq)
+
+-- | The reduction operators a tensor axis can be folded with. A field of
+-- 'BReduce' rather than a constructor per operator: the retired enum-sum family
+-- split @IREnumSum@ from @IRLogEnumSum@ on exactly this axis and paid for it in
+-- every generic pass (task retire-irenumsum).
+data ReduceOp = ROpAdd        -- ^ Sum. Identity 0.
+              | ROpLogSumExp  -- ^ Log-sum-exp, the log-space sibling of 'ROpAdd'. Identity -inf.
+              | ROpMax        -- ^ Max (task semiring-parametric-marginals): the
+                               -- reduction the max-product (MAP/tropical) semiring's
+                               -- enumerated-sum sites fold with, in place of 'ROpAdd'.
+                               -- Identity -inf, same as 'ROpLogSumExp' (max is
+                               -- domain-agnostic: linear and log-space probabilities
+                               -- compare in the same order since log is monotone).
+              deriving (Show, Eq)
+
+-- | Operations over a tensor (design ir-tensor-values): build, map, reduce
+-- along an axis, index along an axis by a runtime key, and zip two tensors
+-- elementwise.
+--
+-- The /representation/ carries a full 'Shape', so the typed surface tensor of
+-- tensors-in-core-language lowers onto it directly. The /operation set/ is
+-- deliberately small, and that restraint is a soundness matter rather than an
+-- effort one (that design, §4.2): broadcasting would put one latent in every
+-- element and silently drop the correlation from @p(t) = \prod p(t_i)@;
+-- reducing a probabilistic axis is a convolution, which SPLL has no engine
+-- for; a general linear map has a non-diagonal Jacobian that @FDecl@\'s
+-- per-input scalar derivatives cannot express.
+--
+-- 'BReduce' is safe because it reduces already-computed probabilities, not
+-- random variables. 'BZip' (task categorical-product-ov-fusion) is admitted on
+-- exactly that ground and no wider one: elementwise-multiplying two @[V]@
+-- vectors of already-computed marginals is the sum-product algebra's own
+-- factor product, not an operation on random variables. It is /not/ a licence
+-- to multiply two arbitrary tensors -- the answer is a correct joint only when
+-- the two marginals' subexpressions are independent, which is a property of
+-- the program, not of the node. Establishing it is the producer's obligation:
+-- 'SPLL.IRCompiler.enumerateAgreement' discharges it with the decomposability
+-- gate ('SPLL.IRCompiler.shareEnumeratedLatent'), and refuses to fuse rather
+-- than assume when two operands may read a shared enumerated latent.
+data Builtin
+  -- | @BTensor sh [e1 .. eN]@ -- build a tensor of shape @sh@ from its
+  -- elements in row-major order (outermost axis first). @N@ must be
+  -- @shapeNumel sh@.
+  = BTensor Shape
+  -- | @BMap [IRLambda v body, t]@ -- apply the lambda to every element,
+  -- yielding a tensor of the same shape. The lambda is the binder; see the
+  -- note on 'IRBuiltin'. Shape-preserving, so it needs no axis and no shape
+  -- field of its own.
+  | BMap
+  -- | @BReduce op axis [t]@ -- fold @t@ along @axis@ with @op@, dropping that
+  -- axis. Reducing the last axis of a rank-1 tensor yields a scalar, not a
+  -- rank-0 tensor: rank 0 is not an inhabited shape.
+  --
+  -- Note it does /not/ take a lambda: reduce is separate from map rather than
+  -- fused with it, which is the whole point -- one 'BMap' can be let-bound and
+  -- reduced twice, which is the sharing the retired @IREnumSumPaired@ existed
+  -- to fake (task retire-irenumsum).
+  | BReduce ReduceOp Int
+  -- | @BIndex axis [t, key]@ -- read along @axis@ at a runtime integer key,
+  -- dropping that axis (rank 1 therefore yields a scalar). Distinct from
+  -- 'BListIndex', which indexes a cons-list in an O(n) walk; this is an O(1)
+  -- read into a flat block.
+  | BIndex Int
+  -- | @BZip op [a, b]@ -- elementwise binary @op@ over two tensors of the
+  -- /same/ shape, yielding a tensor of that shape (task
+  -- categorical-product-ov-fusion).
+  --
+  -- The operation the agreement fusion is built on: multiplying two dense
+  -- @[V]@ categorical marginals is @BZip OpMult@, one vectorizable node, in
+  -- O(V). Writing the same product as a @BMap@ whose body evaluates both
+  -- marginals per element is also O(V) on paper but keeps the per-element
+  -- work inside a scalar loop, which at vocabulary scale (V in the tens of
+  -- thousands) is the difference between a @torch.mul@ and fifty thousand
+  -- interpreter steps -- see 'SPLL.IRCompiler.enumerateAgreement'.
+  --
+  -- Takes an 'Operand' rather than having a constructor per operation, for
+  -- the same reason 'BReduce' takes a 'ReduceOp': a second elementwise
+  -- operation is then a call site, not a new node every generic pass must
+  -- learn. Shape-preserving, so like 'BMap' it needs no axis field.
+  --
+  -- Shape agreement is the producer's obligation. 'expectBuiltinArgs' checks
+  -- the argument /count/, but nothing checks the two operands' extents
+  -- statically -- 'IRExpr' carries no shape on a general expression, only on
+  -- a 'BTensor' literal. The interpreter checks at run time and fails loudly;
+  -- every producer in the compiler builds both operands from the same
+  -- enumerated domain, so a mismatch is a compiler bug.
+  | BZip Operand
+  -- | @BMapList [f, xs]@ -- apply @f@ to every element of a cons-list @xs@,
+  -- yielding a list of the same length (design ir-reengineering, slice S2).
+  -- The list-walking sibling of 'BMap': that node is shape-preserving over a
+  -- static-extent tensor, this one walks an ordinary 'IRCons' spine
+  -- (@mapList(f, xs)@ in both scalar backends), and the batched backend
+  -- refuses it outright (no tensor shape to bucket).
+  | BMapList
+  -- | @BListIndex [xs, i]@ -- the @i@\'th element of a cons-list @xs@, an
+  -- O(n) walk via 'elementAt' in the interpreter. Distinct from 'BIndex',
+  -- which is an O(1) read into a flat tensor block; a point
+  -- "SPLL.IRCompiler" relies on when arguing why materialized marginal cells
+  -- are let-bound scalars rather than a table (design ir-reengineering, slice
+  -- S2).
+  | BListIndex
+  -- | @BCategoricalIndex start n [u, w]@ -- the inverse-CDF index of the
+  -- uniform @u@ (in @[0, 1)@) in the categorical whose /unnormalised/ weights
+  -- are @w[start] .. w[start + n - 1]@: the smallest @k@ in @[0, n)@ with
+  -- @u * S < w[start] + .. + w[start + k]@, @S@ the sum of all @n@ weights,
+  -- clamped to @n - 1@ when no @k@ qualifies (rounding at the top of the CDF,
+  -- or an all-zero @w@). Index @k@ is therefore drawn with probability
+  -- @w[start + k] / S@ when @u@ is uniform (task
+  -- neural-categorical-sampler-nests-v-deep).
+  --
+  -- It is /pure/: the randomness is the @u@ argument, an ordinary
+  -- 'IRSample' 'IRUniform', so every pass that decides purity or
+  -- effectfulness by looking for an 'IRSample' in the subtree (CSE,
+  -- 'isPureGiven') needs no case for it. @w@ is anything 'BListIndex' can read
+  -- a weight out of (a network's logit vector); @start@ and @n@ are static,
+  -- like 'BReduce'\'s axis, because a read-logits plan's slot offsets are.
+  --
+  -- It exists because the only other way to write a categorical draw in this
+  -- IR is a chain of @n@ nested 'IRIf's, which every text backend renders
+  -- @n@ levels deep -- CPython rejects a module past 100 indentation levels --
+  -- and which re-sums a suffix of the weights at each level, so O(n^2) text.
+  -- This node is O(n) work and O(1) text and nesting in every backend.
+  | BCategoricalIndex Int Int
+  -- | @BIota sh []@ -- the tensor of shape @sh@ whose element at flat
+  -- row-major position @k@ is the integer @k@ (task
+  -- tensor-gaussian-heads-rd-diffusion). The element axis a tensor-valued
+  -- neural read is lowered over: a 'BMap' over it reads element @k@'s logit
+  -- slots at an offset computed from @k@, so the emitted text is O(1) in the
+  -- tensor's size where a 'BTensor' of the indices would be O(numel).
+  | BIota Shape
+  deriving (Show, Eq)
+
+-- | The argument count each 'Builtin' takes, or 'Nothing' for the variadic
+-- 'BTensor' (whose count is its shape\'s @shapeNumel@). The single source of
+-- truth for the shapes documented above; a malformed 'IRBuiltin' is a compiler
+-- bug, so consumers that must have a shape use 'expectBuiltinArgs' and 'error'
+-- rather than degrading.
+builtinArity :: Builtin -> Maybe Int
+builtinArity (BTensor _)   = Nothing
+builtinArity BMap          = Just 2
+builtinArity (BReduce _ _) = Just 1
+builtinArity (BIndex _)    = Just 2
+builtinArity (BZip _)      = Just 2
+builtinArity BMapList      = Just 2
+builtinArity BListIndex    = Just 2
+builtinArity (BCategoricalIndex _ _) = Just 2
+builtinArity (BIota _)     = Just 0
+
+-- | Check an 'IRBuiltin'\'s argument list against 'builtinArity' -- and, for
+-- 'BTensor', against its shape -- failing loudly with the offending node.
+expectBuiltinArgs :: Builtin -> [IRExpr] -> [IRExpr]
+expectBuiltinArgs b@(BTensor sh) args
+  | length args == shapeNumel sh = args
+  | otherwise = error ("IRBuiltin " ++ show b ++ " needs " ++ show (shapeNumel sh)
+                       ++ " elements for shape " ++ show sh ++ ", got " ++ show (length args))
+expectBuiltinArgs b args = case builtinArity b of
+  Nothing -> args
+  Just n | length args == n -> args
+         | otherwise -> error ("IRBuiltin " ++ show b ++ " expects " ++ show n
+                               ++ " arguments, got " ++ show (length args)
+                               ++ ": " ++ show args)
+
+data Distribution = IRNormal | IRUniform deriving (Show, Eq)
+
+-- | Whether an 'IRDensity'/'IRCumulative' leaf computes the linear pdf/cdf or
+-- the native log-pdf/log-cdf formula (design ir-reengineering, slice S4). A
+-- field rather than a constructor split ('IRLogDensity'/'IRLogCumulative'
+-- used to exist as siblings of 'IRDensity'/'IRCumulative') -- exactly the axis
+-- 'ReduceOp' folds the same way for 'BReduce', and for the same reason: the
+-- distinction paid for a constructor in every generic pass without changing
+-- what the node fundamentally is.
+data LogSpace = Linear | Log deriving (Show, Eq)
+
+-- | The data-structure /constructor/ tag for 'IRConstruct' (design
+-- ir-reengineering, slice S1a). Four shapes, matching the four families the
+-- fourteen retiring constructors group into (tuples, cons lists, and the two
+-- 'Either' arms) -- see "Tuples stay binary" in the design for why there is no
+-- fifth, N-ary tag. Named @ConTag@, not @Tag@: "SPLL.Lang.Types" already
+-- exports @Tag@ (@DiscreteValues@), which this module
+-- re-exports, so reusing the name would shadow it in every module that needs
+-- both.
+data ConTag
+  = TgTuple       -- ^ A pair. Exactly 2 children.
+  | TgCons        -- ^ List cons. Exactly 2 children.
+  | TgLeft        -- ^ 'Either' left. Exactly 1 child.
+  | TgRight       -- ^ 'Either' right. Exactly 1 child.
+  deriving (Show, Eq)
+
+-- | The number of children an 'IRConstruct' of this 'ConTag' must carry -- the
+-- single source of truth 'expectConTagArgs' checks against, mirroring
+-- 'builtinArity' for 'IRBuiltin'.
+conTagArity :: ConTag -> Int
+conTagArity TgTuple = 2
+conTagArity TgCons  = 2
+conTagArity TgLeft  = 1
+conTagArity TgRight = 1
+
+-- | Check an 'IRConstruct'\'s argument list against 'conTagArity', failing
+-- loudly with the offending node -- the same discipline 'expectBuiltinArgs'
+-- applies to 'IRBuiltin': a malformed construct is a compiler bug, so it
+-- should 'error' at construction rather than degrade silently in a backend.
+expectConTagArgs :: ConTag -> [IRExpr] -> [IRExpr]
+expectConTagArgs t args
+  | length args == conTagArity t = args
+  | otherwise = error ("IRConstruct " ++ show t ++ " expects " ++ show (conTagArity t)
+                       ++ " arguments, got " ++ show (length args) ++ ": " ++ show args)
+
+-- | The /destructor/ tag for 'IRDestruct': which projection or predicate to
+-- apply to its one child. 'AcTheta'/'AcSubtree' index a 'VThetaTree' rather
+-- than project a tuple -- see "AcTheta / AcSubtree are their own accessors" in
+-- the design -- but they cost nothing extra in the seven generic passes, which
+-- is all that distinction needs to be free.
+data Accessor
+  = AcFst | AcSnd              -- ^ Tuple projection.
+  | AcHead | AcTail            -- ^ List cons projection.
+  | AcFromLeft | AcFromRight   -- ^ 'Either' payload projection (partial: wrong arm errors).
+  | AcIsLeft | AcIsRight       -- ^ 'Either' arm test.
+  | AcTheta Int                -- ^ Theta tree: leaf parameter @i@.
+  | AcSubtree Int              -- ^ Theta tree: child subtree @i@.
+  deriving (Show, Eq)
+
+data IRExpr = IRIf IRExpr IRExpr IRExpr
+              -- | A /select/ (design pytorch-tensorizer, M1): semantically an
+              -- if whose /both/ arms are evaluated and combined by a mask on the
+              -- condition. Every conditional leaves 'IRCompiler' as an 'IRIf';
+              -- the batched-mode select pass ('SPLL.IRSelectPass') rewrites the
+              -- data-dependent, elementwise-eligible ones to 'IRSelect'. Scalar
+              -- consumers lower it identically to 'IRIf' (a lazy ternary) -- the
+              -- interpreter delegates and each codegen desugars it away at entry
+              -- -- so today it is a behavioural no-op; a future batched backend
+              -- lowers it to @torch.where@ instead. A distinct node (rather than
+              -- a flag on 'IRIf') keeps if-specific optimizer rewrites from
+              -- silently relabelling or mis-transforming a select.
+              | IRSelect IRExpr IRExpr IRExpr
+              | IROp Operand IRExpr IRExpr
+              | IRUnaryOp UnaryOperand IRExpr
+              | IRConst IRValue
+              -- | A named data-structure construction (design ir-reengineering,
+              -- slice S1). Collapses the former 'IRCons'/'IRTCons'/'IRLeft'/
+              -- 'IRRight' constructors into one node parameterised by 'ConTag'.
+              -- Argument count is fixed per 'ConTag' ('conTagArity'/
+              -- 'expectConTagArgs').
+              | IRConstruct ConTag [IRExpr]
+              -- | A named data-structure projection or test (design
+              -- ir-reengineering, slice S1). Collapses the former
+              -- 'IRHead'/'IRTail'/'IRTFst'/'IRTSnd'/'IRLeft'-arm accessors/
+              -- 'IRTheta'/'IRSubtree' constructors into one node parameterised
+              -- by 'Accessor'. See 'IRConstruct'.
+              | IRDestruct Accessor IRExpr
+              -- | @IRDensity dist ls e@ -- density of @dist@ at @e@.
+              -- @ls == 'Log'@ selects the native log-pdf leaf (task
+              -- log-space-probability-computation) rather than the linear pdf
+              -- with a separate @log@ applied afterwards: the latter computes
+              -- the linear pdf first (which underflows in a deep tail, e.g.
+              -- exp(-z^2/2) for large z) and only then takes the log, so
+              -- precision is already lost by the time the log is taken. The
+              -- native leaf lets each backend emit the log-pdf/log-cdf formula
+              -- directly instead (e.g. Normal log-pdf = -0.5*z^2 -
+              -- 0.5*log(2*pi)), so a compile-time log-space mode never
+              -- round-trips through a linear value that could have
+              -- underflowed to zero first. A field on 'LogSpace' rather than a
+              -- constructor split (formerly 'IRLogDensity'/'IRLogCumulative'),
+              -- design ir-reengineering slice S4.
+              | IRDensity Distribution LogSpace IRExpr
+              | IRCumulative Distribution LogSpace IRExpr
+              | IRSample Distribution
+              | IRLetIn Varname IRExpr IRExpr
+              | IRVar Varname
+              | IRLambda String IRExpr
+              | IRApply IRExpr IRExpr
+              -- NOTE (task retire-irenumsum): three constructors stood here
+              -- -- @IREnumSum@, @IRLogEnumSum@ and @IREnumSumPaired@ -- one
+              -- per reduction operator plus one for a two-component
+              -- accumulator, each binding a 'Varname' over a 'MultiValue'
+              -- domain. They are gone. An enumerated sum is now built by
+              -- 'SPLL.Semiring.enumSumNode'/@enumSumP@ as
+              -- @BReduce op 0 [BMap [IRLambda v body, BTensor dom]]@: the
+              -- operator is a field of 'BReduce', and the paired form is one
+              -- let-bound 'BMap' reduced twice, which is the loop-body sharing
+              -- @IREnumSumPaired@ existed to fake before the IR could name a
+              -- vector of per-iteration results (design ir-tensor-values).
+              --
+              -- 'IRIsPossible' below is the residue: it also carries a
+              -- 'MultiValue', but it is a membership TEST rather than a loop,
+              -- emitted as a single runtime-library call ('isPossible' in
+              -- @pythonLib.py@/@juliaLib.jl@) that walks the value's structure
+              -- against the domain's. Expressing it on the dense axis would
+              -- mean building the domain as a tensor and reducing an equality
+              -- map with a boolean OR -- a reduction operator that exists for
+              -- no other purpose, replacing an O(1)-looking library call with
+              -- a materialised domain. It stays.
+              | IRIsPossible (GenericMultiValue IRExpr) IRExpr
+              -- | A named operation over a tensor (design ir-tensor-values).
+              -- One constructor rather than a family:
+              -- which operation, and any shape/operator/axis it is parameterised
+              -- by, live in the 'Builtin' tag, so a new tensor operation costs an
+              -- enum case and not another binder for every generic pass to
+              -- special-case -- which is precisely how the retired enum-sum
+              -- family grew a constructor per reduction operator.
+              --
+              -- Shaped as @Builtin [IRExpr]@ so a new tensor operation lands
+              -- here rather than becoming another constructor family to
+              -- collapse later -- exactly the demotion 'BMapList'/'BListIndex'
+              -- (design ir-reengineering, slice S2) gave the former @IRMap@/
+              -- @IRIndex@ constructors. Argument counts and shapes are
+              -- documented per 'Builtin'; 'builtinArity' is the single place
+              -- they are checked.
+              --
+              -- Note the map binds its variable by taking an 'IRLambda' as an
+              -- argument, not by carrying a 'Varname' field. That keeps the
+              -- flat argument list, at the price of the optimizer's
+              -- loop-invariance analysis having to recognise a binder
+              -- generically instead of by matching a constructor list.
+              | IRBuiltin Builtin [IRExpr]
+              | IRError String
+              -- Runtime type-tag check: True iff the value of the sub-expression
+              -- structurally conforms to the given IRType. Emitted as the
+              -- query-type guard at a prob/integ function root (see IRCompiler),
+              -- so a wrong-typed query value fails with a clear diagnostic instead
+              -- of a silent bogus number or a deep "not a boolean" panic, and, at
+              -- TFloat, as the float test of a type-variable leaf's comparison
+              -- ('SPLL.IRCompiler.leafEqIR').
+              | IRConformsTo IRType IRExpr
+              deriving (Show, Eq)
+
+type IRValue = GenericValue IRExpr
+
+data IREnv = IREnv [IRFunGroup] [IRADTDecl] [(String, IRValue)] deriving (Show)
+
+
+-- | Why the compiler declined to build one variant of a function group (task
+-- static-refusals-become-absent-variants): an unsupported shape met while
+-- compiling a probability/integrate (or, through a closure, generate/normal)
+-- body. The variant is then absent -- exactly as a 'Bottom'-typed one is --
+-- and the reason travels with the group, so 'Prelude.runProbNamedC' can say
+-- /why/ instead of only that it is missing. The chain name is the node that
+-- refused, or, for a refusal propagated along the call graph, empty.
+data VariantRefusal = VariantRefusal { refusalReason :: String, refusalChainName :: String }
+  deriving (Show, Eq)
+
+-- | One-line-per-fact rendering of a 'Refusal' for diagnostics.
+showRefusal :: VariantRefusal -> String
+showRefusal (VariantRefusal why "") = why
+showRefusal (VariantRefusal why cn) = why ++ "\n(refused at chain name " ++ cn ++ ")"
+
+data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, writeLogitsFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String,
+  -- | The variants the compiler refused to build, keyed by the same label
+  -- the generate-backed guard uses (@"gen"@, @"prob"@, @"integ"@,
+  -- @"normal"@, @"writeLogits"@). A label here always has its field
+  -- 'Nothing'; the converse does not hold (a variant can also be absent
+  -- because modality inference typed it intractable, or by a @--noX@ flag).
+  refusedVariants :: [(String, VariantRefusal)],
+  -- | The finite enumeration of values a query against this group's prob/integ
+  -- function can take, when the sample domain is statically finite -- the
+  -- function's own return type, /not/ the domain of anything it enumerates
+  -- internally (that is a 'BReduce' over a 'BMap', a separate axis). 'Nothing' whenever the
+  -- domain is continuous, unbounded (Int/Symbol), or not statically derivable.
+  --
+  -- Consumed only by the batched backend's dense-enumeration mode (design
+  -- heterogeneous-batch-inference M3), which evaluates the ordinary batched
+  -- kernel once with this domain /as the batch/ to get the whole probability
+  -- vector. Purely additive: every other backend ignores it.
+  sampleDomain::Maybe (GenericMultiValue IRExpr),
+  -- | @Just f@ when this group is a per-mask inference variant of function
+  -- @f@ (@f__m\<bits\>@; task per-mask-variants-by-pruning), reached only
+  -- through @f@'s mask dispatcher. A variant is never a whole function of its
+  -- own, so what is allowed to fail in it is narrower: see
+  -- 'retireUnrenderableVariants'.
+  maskVariantOf::Maybe String} deriving (Show)
+
+-- Name, Documentation, Body
+type IRFunDecl = (IRExpr, String)
+
+--3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
+--    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
+
+valueToIR :: GenericValue a -> GenericValue b
+valueToIR = fmap (error "Cannot convert VClosure to IR")
+
+-- | The lowering-boundary conversion of a value set: the expression parameter
+-- is replaced, as 'valueToIR' does for one value.
+multiValueToIR :: GenericMultiValue a -> GenericMultiValue b
+multiValueToIR = fmap (error "Cannot convert VClosure to IR")
+
+lookupIREnv :: String -> IREnv -> IRFunGroup
+lookupIREnv name (IREnv env _ _) =
+  case filter (\IRFunGroup{groupName=a} -> a == name) env of
+    [] -> error ("function " ++ show name ++ "not found in environment")
+    [a] -> a
+    lst -> head lst
+
+-- | The first unconsumed @VAnyExcept@ placeholder reachable from any compiled
+-- function body in an 'IREnv', if any. @VAnyExcept@ ("any value other than
+-- this one") is the @False@-branch witness an @==@ inverse
+-- ('PredefinedFunctions.eqInv1'/'eqInv2') or an ADT constructor-test inverse
+-- ('PredefinedFunctions.invIs') materialises during inference; it is a
+-- symbolic set, not a runtime value. The optimizer normally consumes it before
+-- codegen, but where it survives, neither scalar text backend has anywhere to
+-- put it: unlike @VAny@/@AnyList@, which both render as real sentinel values,
+-- a set has no runtime representation to lower to, so there is no correct
+-- string to emit -- only a refusal (task
+-- @vanyexcept-unrenderable-in-text-backends@).
+--
+-- A per-mask variant group ('maskVariantOf') is not searched: the text
+-- backends retire such a variant's offending body first
+-- ('retireUnrenderableVariants'), since a mask the backend cannot render must
+-- not take the whole function down with it.
+firstAnyExceptIR :: IREnv -> Maybe IRExpr
+firstAnyExceptIR (IREnv groups _ _) =
+  listToMaybe (filter isAnyExceptConst (concatMap allSubExprsOf funBodies))
+  where
+    funBodies = concatMap groupBodies [ g | g <- groups, isNothing (maskVariantOf g) ]
+    groupBodies IRFunGroup{genFun=g, probFun=p, integFun=i, writeLogitsFun=e, normalFun=n} =
+      map fst (mapMaybe id [g, p, i, e, n])
+    allSubExprsOf = irSubterms
+    isAnyExceptConst (IRConst (VAnyExcept _)) = True
+    isAnyExceptConst _ = False
+
+-- | Refuse to compile to a scalar text backend (Python or Julia) if a
+-- @VAnyExcept@ placeholder survived to codegen, naming the construct rather
+-- than letting 'SPLL.CodeGenPyTorch.pyVal'/'SPLL.CodeGenJulia.juliaVal' fall
+-- through to their generic "unknown value" panic -- which named an internal
+-- IR variable and a source line, not the actual defect. The interpreter is
+-- unaffected: it answers these programs directly (its 'VAnyExcept' handling
+-- predates this refusal), and that answer is the reference this diagnostic
+-- points readers at. The batched backend needs no equivalent call: it already
+-- refuses every marginal-query construct, 'VAnyExcept' included, through its
+-- own @emittable@/@reason@ guard.
+anyExceptCodegenRefusal :: String -> IREnv -> Either CompilerError ()
+anyExceptCodegenRefusal lang env = case firstAnyExceptIR env of
+  Nothing -> Right ()
+  Just ir -> Left $ unlines
+    [ lang ++ " codegen cannot render a VAnyExcept placeholder: " ++ show ir
+    , "VAnyExcept (\"any value other than this one\") is the False-branch witness"
+    , "an == inverse or ADT constructor-test inverse materialises during"
+    , "inference. It is a symbolic set, not a runtime value -- unlike"
+    , "VAny/AnyList, which both render as real sentinels in the " ++ lang
+    , "runtime library, a set has no runtime representation to lower to, so"
+    , "there is no correct output to emit. NeST refuses at compile time rather"
+    , "than crash inside codegen."
+    , "The interpreter answers this program directly; this backend does not."
+    , "(task vanyexcept-unrenderable-in-text-backends)" ]
+
+-- | Replace the probability or integrate body of every per-mask variant group
+-- that still carries a @VAnyExcept@ placeholder with a runtime refusal, for a
+-- scalar text backend (task per-mask-variants-by-pruning).
+--
+-- The same placeholder in an ordinary group refuses the whole compile
+-- ('anyExceptCodegenRefusal'). A variant is narrower than a function: it answers
+-- one query mask through the function's dispatcher, and a masked program can
+-- leave a constructor-test witness where the full observation had a whole
+-- value (@(isFace heard, heard)@ masked at its second slot). Refusing the
+-- compile there would let an optional mask take every other query down, so
+-- only that mask refuses, at run time, saying why and pointing at the
+-- interpreter, which answers it. The body's parameter lambdas are kept, so
+-- the dispatcher's call still has a function of the right arity to call.
+retireUnrenderableVariants :: String -> IREnv -> IREnv
+retireUnrenderableVariants lang (IREnv groups decls consts) = IREnv (map retire groups) decls consts
+  where
+    retire g = case maskVariantOf g of
+      Nothing -> g
+      Just base -> g { probFun = fmap (retireBody base (groupName g)) (probFun g)
+                     , integFun = fmap (retireBody base (groupName g)) (integFun g) }
+    retireBody base vname d@(body, doc)
+      | any isAnyExceptConst (allSubExprsOf body) = (keepSpine body, doc)
+      | otherwise = d
+      where
+        keepSpine (IRLambda n b) = IRLambda n (keepSpine b)
+        keepSpine _ = IRError
+          ( "cannot compute marginal of '" ++ base ++ "' at this query mask in " ++ lang
+          ++ ": the variant compiled for it (" ++ vname ++ ") carries a VAnyExcept placeholder "
+          ++ "(\"any value other than this one\"), which has no " ++ lang ++ " representation. "
+          ++ "The interpreter answers this query. (task vanyexcept-unrenderable-in-text-backends)" )
+    allSubExprsOf = irSubterms
+    isAnyExceptConst (IRConst (VAnyExcept _)) = True
+    isAnyExceptConst _ = False
+
+-- | Every subterm of an expression, itself included, in preorder. Built by
+-- accumulator passing: @e : concatMap irSubterms (getIRSubExprs e)@ re-copies
+-- a non-last child's whole list at every '++', which is quadratic down a deep
+-- spine in such a position, such as a curried call chain (task
+-- neural-int-read-compile-quadratic-in-domain).
+irSubterms :: IRExpr -> [IRExpr]
+irSubterms e0 = go e0 []
+  where
+    go e rest = e : foldr go rest (getIRSubExprs e)
+
+-- | An application spine, uncurried: the callee and its arguments in source
+-- order. A non-application collects zero arguments.
+collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
+collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])
+collectApplyChain expr = (expr, [])
+
+getIRSubExprs :: IRExpr -> [IRExpr]
+getIRSubExprs (IRIf a b c) = [a, b, c]
+getIRSubExprs (IRSelect a b c) = [a, b, c]
+getIRSubExprs (IROp _ a b) = [a, b]
+getIRSubExprs (IRUnaryOp _ a) = [a]
+getIRSubExprs (IRConst _) = []
+getIRSubExprs (IRConstruct _ children) = children
+getIRSubExprs (IRDestruct _ child) = [child]
+getIRSubExprs (IRIsPossible _ a) = [a]
+getIRSubExprs (IRDensity _ _ a) = [a]
+getIRSubExprs (IRCumulative _ _ a) = [a]
+getIRSubExprs (IRSample _) = []
+getIRSubExprs (IRLetIn _ a b) = [a, b]
+getIRSubExprs (IRVar _) = []
+getIRSubExprs (IRLambda _ a) = [a]
+getIRSubExprs (IRApply a b) = [a, b]
+getIRSubExprs (IRBuiltin _ args) = args
+getIRSubExprs (IRError _) = []
+getIRSubExprs (IRConformsTo _ a) = [a]
+
+-- | True if an @IRVar name@ reference is *effectful* -- i.e. a reference to a
+-- top-level generator function, whose evaluation draws randomness. The IR uses
+-- @IRVar@ for two semantically different things: a pure value reference (a
+-- lambda parameter, let binding, or enumSum loop variable, free to duplicate)
+-- and a nullary generator call such as @coin_gen@. \"Referencing\" the latter
+-- actually /runs the sampler/: the interpreter re-evaluates the bound expression
+-- on every lookup and code generation renders it as a call, so duplicating the
+-- reference duplicates the random draw (task ir-effectful-var-purity).
+--
+-- Generator references are recognised by the @_gen@ name suffix that
+-- 'SPLL.IRCompiler' appends to every inference-carrying top-level declaration
+-- (this also covers neural @_auto_gen@). A @_gen@ reference that names a
+-- /function/ rather than a nullary sampler is itself a pure closure value, but
+-- treating it conservatively as effectful only ever forgoes an optimization --
+-- it never changes semantics -- so this predicate does not try to tell them
+-- apart.
+isEffectfulVar :: String -> Bool
+isEffectfulVar name = genSuffix `isSuffixOf` name
+
+-- | True if evaluating the expression has no observable side effect, so it is
+-- safe both to duplicate (inline into several uses) and to collapse repeated
+-- occurrences into one shared binding. The two effects are drawing a random
+-- sample ('IRSample') and referencing a generator function ('isEffectfulVar').
+--
+-- This is the single mechanism every duplicating or sharing optimizer rewrite
+-- consults, replacing the ad-hoc per-pass assumptions this class of bug used to
+-- rely on: @optimizeLetIns@' \"never duplicate a non-'IRConst' binding\" and
+-- CSE's \"a subexpression is pure iff it contains no 'IRSample'\" -- the latter
+-- silently misclassified an expression built from a generator reference as
+-- pure and could collapse two independent draws into one (task
+-- ir-effectful-var-purity).
+isPure :: IRExpr -> Bool
+isPure = isPureGiven Set.empty
+
+-- | 'isPure' relative to a set of generator names already /proven/ deterministic
+-- by whole-program analysis (see 'SPLL.IROptimizer.deterministicGens').
+--
+-- 'isEffectfulVar' is a name test, so it calls every @_gen@ reference effectful.
+-- That is safe but blunt: a generate function that draws no randomness -- an
+-- accessor, a comparison, an arithmetic helper -- is a pure call, and refusing
+-- to share it blocks CSE on every expression that mentions one. In an
+-- enumerated inference body, which is written almost entirely in terms of such
+-- calls, that means the enumeration itself is never recognised as a repeat and
+-- gets evaluated once per occurrence.
+isPureGiven :: Set.Set Varname -> IRExpr -> Bool
+isPureGiven _   (IRSample _) = False
+isPureGiven det (IRVar name) = not (isEffectfulVar name) || Set.member name det
+isPureGiven det e            = all (isPureGiven det) (getIRSubExprs e)
+
+irMap :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
+irMap f x = f (irDescend (irMap f) x)
+
+-- | Apply @f@ to the immediate children of a node, rebuilding it. One level
+-- only -- unlike 'irMap' it does not recurse, so the caller controls the
+-- traversal. This is what a scope-aware rewrite needs: it can handle the
+-- binding forms itself (threading an environment through 'IRLetIn'/'IRLambda'
+-- scopes) and delegate every other constructor here, instead of
+-- re-listing the whole AST.
+irDescend :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
+irDescend f x = case x of
+  (IRIf cond left right) -> IRIf (f cond) (f left) (f right)
+  (IRSelect cond left right) -> IRSelect (f cond) (f left) (f right)
+  (IROp op left right) -> IROp op (f left) (f right)
+  (IRUnaryOp op expr) -> IRUnaryOp op (f expr)
+  (IRConstruct t cs) -> IRConstruct t (map f cs)
+  (IRDestruct a c) -> IRDestruct a (f c)
+  (IRIsPossible val expr) -> IRIsPossible val (f expr)
+  (IRDensity a ls expr) -> IRDensity a ls (f expr)
+  (IRCumulative a ls expr) -> IRCumulative a ls (f expr)
+  (IRLetIn name left right) -> IRLetIn name (f left) (f right)
+  (IRLambda name scope) -> IRLambda name (f scope)
+  (IRApply a b) -> IRApply (f a) (f b)
+  (IRBuiltin b args) -> IRBuiltin b (map f args)
+  (IRConst _) -> x
+  (IRSample _) -> x
+  (IRVar _) -> x
+  (IRError _) -> x
+  (IRConformsTo t a) -> IRConformsTo t (f a)
+
+-- | Monadic 'irDescend': rebuild a node from effectfully-rewritten children,
+-- one level only. Children are visited left-to-right, so an effect that
+-- threads state (a fresh-name counter, a collected list of hoisted bindings)
+-- sees them in source order. Like 'irDescend' it does /not/ recurse — the
+-- caller drives the traversal and can handle binding forms itself.
+irDescendM :: Monad m => (IRExpr -> m IRExpr) -> IRExpr -> m IRExpr
+irDescendM f x = case x of
+  (IRIf cond left right) -> IRIf <$> f cond <*> f left <*> f right
+  (IRSelect cond left right) -> IRSelect <$> f cond <*> f left <*> f right
+  (IROp op left right) -> IROp op <$> f left <*> f right
+  (IRUnaryOp op expr) -> IRUnaryOp op <$> f expr
+  (IRConstruct t cs) -> IRConstruct t <$> mapM f cs
+  (IRDestruct a c) -> IRDestruct a <$> f c
+  (IRIsPossible val expr) -> IRIsPossible val <$> f expr
+  (IRDensity a ls expr) -> IRDensity a ls <$> f expr
+  (IRCumulative a ls expr) -> IRCumulative a ls <$> f expr
+  (IRLetIn name left right) -> IRLetIn name <$> f left <*> f right
+  (IRLambda name scope) -> IRLambda name <$> f scope
+  (IRApply a b) -> IRApply <$> f a <*> f b
+  (IRBuiltin b args) -> IRBuiltin b <$> mapM f args
+  (IRConst _) -> pure x
+  (IRSample _) -> pure x
+  (IRVar _) -> pure x
+  (IRError _) -> pure x
+  (IRConformsTo t a) -> IRConformsTo t <$> f a
+
+isLambda :: IRExpr -> Bool
+isLambda IRLambda {} = True
+isLambda _ = False
+
+-- | The environment's top-level bindings, as the interpreter's global scope
+-- and 'SPLL.IRTypeCheck' see them: each compile-time constant, then each
+-- present variant of each group under @name ++ suffix@ (@_gen@, @_prob@,
+-- @_integ@, @_writeLogits@, @_normal@). A per-component normal group
+-- registers its normal function under the bare component name, with no
+-- suffix ('SPLL.ReservedNames.componentNormalName'). A name bound twice is
+-- listed twice; consumers keep the first.
+reduceIREnv :: IREnv -> [(String, IRExpr)]
+reduceIREnv (IREnv funcs _ consts) =
+  map (\(name, val) -> (name, IRConst val)) consts ++
+  concatMap (\(IRFunGroup name gen prob integ writeLogits normal _ _ _ _) ->
+    case componentNormalName name of
+     Just componentName -> catMaybes [fmap (\(expr, _) -> (componentName, expr)) normal]
+     Nothing ->
+      catMaybes [red name "_gen" <$> gen, red name "_prob" <$> prob, red name "_integ" <$> integ, red name "_writeLogits" <$> writeLogits, red name "_normal" <$> normal]) funcs
+  where red name suffix (expr, _) = (name ++ suffix, expr)
+
+irPrintFlat :: IRExpr -> String
+irPrintFlat (IRIf _ _ _) = "IRIf"
+irPrintFlat (IRSelect _ _ _) = "IRSelect"
+irPrintFlat (IROp _ _ _) = "IROp"
+irPrintFlat (IRUnaryOp _ _) = "IRUnaryOp"
+irPrintFlat (IRConst _) = "IRConst"
+irPrintFlat (IRConstruct t _) = "IRConstruct " ++ show t
+irPrintFlat (IRDestruct a _) = "IRDestruct " ++ show a
+irPrintFlat (IRIsPossible _ _) = "IRIsPossible"
+irPrintFlat (IRDensity _ _ _) = "IRDensity"
+irPrintFlat (IRCumulative _ _ _) = "IRCumulative"
+irPrintFlat (IRSample _) = "IRSample"
+irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
+irPrintFlat (IRVar _) = "IRVar"
+irPrintFlat (IRLambda _ _) = "IRLambda"
+irPrintFlat (IRApply _ _) = "IRApply"
+irPrintFlat (IRBuiltin b _) = "IRBuiltin " ++ show b
+irPrintFlat (IRError _) = "IRError"
+irPrintFlat (IRConformsTo _ _) = "IRConformsTo"
+
+
+-- ----------------------------------------------------------------------------
+-- Target-language identifier hygiene for every other user name
+--
+-- 'renameADTIdentifiers' (below) covers the names a @data@ declaration
+-- contributes. The user's other names reach the emitted code too: a
+-- definition's name becomes a Python instance and class (and part of every
+-- Julia function name), and a parameter or @draw@ binder becomes a Python or
+-- Julia local. @f lambda = ...@ emitted @def forward(self, lambda, sample)@
+-- and @f end = ...@ a Julia function Julia could not parse (design
+-- reserved-name-registry).
+--
+-- This pass renames those with the same backend @mangle@. Binders are renamed
+-- by scope-aware alpha-renaming -- the binder and exactly the references it
+-- captures -- so a free name (a runtime-library function, a predefined
+-- operation such as @in@) is never touched. A group whose name the mangle
+-- changes is renamed together with every derived reference to it
+-- (@<name>_gen@, @<name>_prob@, ...), which are free names in the other
+-- groups' bodies.
+--
+-- The pass is sound because the two namespaces it could confuse are disjoint:
+-- a binder is never an ADT-derived name nor a definition name
+-- ('SPLL.Validator' rejects both), so no name is renamed by both this pass and
+-- 'renameADTIdentifiers', and compiler-generated binders (@l_...@, @sample@,
+-- @cse_<n>@, ...) are never in a mangled family. A program with no such name
+-- is returned unchanged, so its emitted code is byte-identical.
+-- ----------------------------------------------------------------------------
+
+mangleUserIdentifiers :: (String -> String) -> IREnv -> IREnv
+mangleUserIdentifiers mangle (IREnv groups decls consts) =
+  IREnv (map onGroup groups) decls consts
+  where
+    renamedGroups = [ (n, n') | g <- groups, let n = groupName g, let n' = mangle n, n' /= n ]
+    derivedRenames = Map.fromList
+      [ (n ++ s, n' ++ s) | (n, n') <- renamedGroups, s <- functionVariantSuffixes ]
+    onGroup g = g
+      { groupName      = fromMaybe (groupName g) (lookup (groupName g) renamedGroups)
+      , genFun         = fmap onBody (genFun g)
+      , probFun        = fmap onBody (probFun g)
+      , integFun       = fmap onBody (integFun g)
+      , writeLogitsFun = fmap onBody (writeLogitsFun g)
+      , normalFun      = fmap onBody (normalFun g)
+      }
+    onBody (body, doc) = (alpha derivedRenames body, doc)
+    alpha env (IRVar n) = IRVar (Map.findWithDefault n n env)
+    alpha env (IRLambda b body) =
+      let b' = mangle b in IRLambda b' (alpha (Map.insert b b' env) body)
+    alpha env (IRLetIn b rhs body) =
+      let b' = mangle b in IRLetIn b' (alpha env rhs) (alpha (Map.insert b b' env) body)
+    alpha env e = irDescend (alpha env) e
+
+-- | Put a diagnostic produced /after/ mangling back into the user's spelling.
+--
+-- A backend that refuses a program part-way through emission words its
+-- refusal from the environment it is emitting, which 'renameADTIdentifiers' and
+-- 'mangleUserIdentifiers' have already renamed. Since the escaped set grew to
+-- every runtime and builtin name (task python-runtime-name-shadowing), that is
+-- no rare keyword any more: the corpus's own definition @factorial@ was
+-- reported as @factorial__gen@. This maps each whole identifier token that is
+-- the image of a renamed name -- a definition and its derived variants
+-- (@<name>_gen@, ...), a binder, an ADT identifier -- back to its source. Taking
+-- @env@ /before/ mangling, it recomputes the same renaming the backend applied.
+--
+-- The inverse is well defined because the manglers are injective, and it
+-- cannot misfire on an unrelated token: every image has the shape
+-- @reserved_+@, and a /source/ name of that shape is itself mangled (one
+-- underscore further), so no identifier in the mangled environment spells an
+-- image without being one.
+unmangleDiagnostic :: (String -> String) -> IREnv -> String -> String
+unmangleDiagnostic mangle (IREnv groups decls _) = retoken
+  where
+    inverse = Map.fromList
+      ( [ (to, from) | (from, to) <- adtIdentifierRenaming mangle decls ]
+     ++ [ (n' ++ sfx, n ++ sfx)
+        | g <- groups, let n = groupName g, let n' = mangle n, n' /= n
+        , sfx <- "" : functionVariantSuffixes ]
+     ++ [ (b', b) | b <- Set.toList binders, let b' = mangle b, b' /= b ] )
+    binders = Set.fromList (concatMap groupBinders groups)
+    groupBinders g = concat [ execState (collect body) []
+                            | Just (body, _) <- [genFun g, probFun g, integFun g, writeLogitsFun g, normalFun g] ]
+    collect :: IRExpr -> State [String] IRExpr
+    collect e = do
+      case e of
+        IRLambda b _  -> modify (b :)
+        IRLetIn b _ _ -> modify (b :)
+        _             -> return ()
+      irDescendM collect e
+    retoken [] = []
+    retoken str@(c:_)
+      | isAlpha c || c == '_' =
+          let (w, rest) = span (\x -> isAlphaNum x || x == '_') str
+          in Map.findWithDefault w w inverse ++ retoken rest
+    retoken (c:rest)
+      | isAlphaNum c = let (w, rest') = span isAlphaNum (c:rest) in w ++ retoken rest'
+      | otherwise    = c : retoken rest
+
+-- ----------------------------------------------------------------------------
+-- Target-language identifier hygiene for ADT names
+--
+-- ADT constructor and field names reach the emitted Python/Julia verbatim, as
+-- class/struct names, accessor function names, and every reference to them in
+-- the compiled expressions. A source name that happens to be a keyword of the
+-- target language then produces code that does not compile -- @data Opt = None
+-- | Some w::Float@ emitted @class None:@ (a Python SyntaxError), and a field
+-- named @end@ emitted a Julia @struct@ that closed two lines early and was
+-- silently mis-parsed (task codegen-adt-name-collides-with-target-keyword).
+--
+-- The fix is to mangle rather than to reject: SPLL is the source language, and
+-- whether a program is legal must not depend on which backend it is aimed at.
+-- Mangling happens once, over the whole 'IREnv', before any emission -- not at
+-- the individual emission sites. That matters because the *same* name appears
+-- both as a definition (@class None:@) and as a reference carried in the IR
+-- (@IRVar "None"@, @IRVar "isNone"@, @IRVar "w"@); renaming the environment
+-- keeps the two halves in step by construction, whereas per-site mangling
+-- would have to be repeated at every one of the ~20 places a name is printed
+-- and would silently desynchronise the moment one was missed.
+--
+-- Only ADT-derived names are renamed. Local binders and compiler-generated
+-- temporaries are deliberately left alone: they are never ADT names, and
+-- renaming references without also renaming their binders is exactly the
+-- desynchronisation this pass exists to avoid.
+-- ----------------------------------------------------------------------------
+
+-- | Every identifier an ADT declaration contributes to the emitted code,
+-- paired with what @mangle@ turns it into -- but only where the two differ,
+-- so a program with no colliding name produces an empty renaming and emitted
+-- code identical to before.
+--
+-- Three families per constructor: the constructor itself (a class/struct name
+-- and a callable), its @is\<Ctor\>@ predicate, and its field accessors. The
+-- predicate is derived from the *mangled* constructor name, matching how the
+-- backends spell it (@"is" ++ name@ over the already-renamed declaration), so
+-- @None@ becoming @None_@ takes @isNone@ to @isNone_@.
+--
+-- Field names are global across a program (accessor lookup in
+-- 'SPLL.Typing.AlgebraicDataTypes.findField' searches every declaration), so a
+-- flat association list is the right shape.
+--
+-- This is also the only place with enough context to catch a mangling
+-- /collision/. Each @mangle@ sees one name at a time -- which is what lets
+-- 'SPLL.CodeGenPyTorch.pyVal' mangle a query point that never passed through
+-- this pass -- so it cannot know that a field named @isNone_@ lands on the same
+-- emitted name as constructor @None@'s derived predicate. Here the whole
+-- declaration set is in scope, so two distinct source identifiers sharing one
+-- emitted name is a refusal rather than two definitions of which the second
+-- silently wins.
+adtIdentifierRenaming :: (String -> String) -> [IRADTDecl] -> [(String, String)]
+adtIdentifierRenaming mangle decls
+  | not (null introduced) = error (mangleCollisionMessage introduced)
+  | otherwise             = [ (from, to) | (from, to) <- allPairs, from /= to ]
+  where
+    allPairs =
+      [ pair
+      | decl <- decls
+      , (cName, fields) <- irConstructors decl
+      , pair <- (cName, mangle cName)
+              : ("is" ++ cName, "is" ++ mangle cName)
+              : [ (fName, mangle fName) | (fName, _) <- fields ]
+      ]
+    -- Collisions that mangling *introduced*: two identifiers the user kept
+    -- apart that land on one emitted name. Distinct sources sharing an emitted
+    -- name is exactly that, so the test needs nothing more.
+    --
+    -- A name that was already duplicated before mangling (two ADTs sharing a
+    -- constructor or field name) collapses to a single source here and is
+    -- deliberately not reported: it is a pre-existing ambiguity in accessor
+    -- lookup, and failing on it would reject programs that compile today.
+    introduced =
+      [ (sources, to)
+      | to <- dedup (map snd allPairs)
+      , let sources = dedup [ from | (from, to') <- allPairs, to' == to ]
+      , length sources > 1
+      ]
+    dedup = map head . group . sort
+
+-- | Raised when mangling maps two distinct ADT identifiers onto one emitted
+-- name -- the residue 'SPLL.CodeGenPyTorch.pyMangle' cannot see on its own,
+-- since it only ever looks at one name. Left as an 'error': the two scalar
+-- backends have no error channel at this point, and a loud refusal is strictly
+-- better than what the collision otherwise produces, which is two definitions
+-- of the same name where the second silently shadows the first.
+mangleCollisionMessage :: [([String], String)] -> String
+mangleCollisionMessage clashes = unlines
+  ( "Target-language name mangling collided. These ADT identifiers are distinct \
+    \in the program but would be emitted under one name:"
+  : [ "  " ++ show sources ++ " all become " ++ show to | (sources, to) <- clashes ]
+ ++ ["Rename one of them in the `data` declaration."] )
+
+-- | Apply an 'adtIdentifierRenaming' to every 'IRVar' reference in every
+-- compiled function body.
+--
+-- The 'IRADTDecl's are deliberately left alone, so they keep the names the user
+-- wrote. The declarations are printed by exactly one function per backend
+-- (@generateADTClass@), which applies @mangle@ itself at each identifier it
+-- emits -- and can therefore still spell the *source* constructor name into
+-- 'SPLL.Typing.AlgebraicDataTypes.anyCtorTestMessage', which all three backends
+-- and the interpreter must agree on word for word (task
+-- is-ctor-on-any-slot-diverges-across-backends). Renaming the declaration would
+-- have made Python say @isNone_@ where the interpreter says @isNone@, quietly
+-- undoing that agreement for precisely the programs this pass exists for.
+--
+-- The definition and reference halves stay in step because both go through the
+-- same @mangle@, which is a pure function of the name: neither side needs to
+-- know what the other did.
+--
+-- Constants and 'IRConst' values are likewise not rewritten. A @VADT@ reaches
+-- the output through the backend's value renderer ('pyVal', 'juliaVal'), which
+-- mangles there -- including for query points fed in by the test harness and
+-- the CLI, which never pass through this pass at all.
+renameADTIdentifiers :: (String -> String) -> IREnv -> IREnv
+renameADTIdentifiers mangle env@(IREnv groups decls consts)
+  | null renaming = env
+  | otherwise     = IREnv (map onGroup groups) decls consts
+  where
+    renaming = adtIdentifierRenaming mangle decls
+    rename n = maybe n id (lookup n renaming)
+    onGroup g = g
+      { genFun    = fmap onBody (genFun g)
+      , probFun   = fmap onBody (probFun g)
+      , integFun  = fmap onBody (integFun g)
+      , writeLogitsFun = fmap onBody (writeLogitsFun g)
+      , normalFun = fmap onBody (normalFun g)
+      }
+    onBody (body, doc) = (irMap onVar body, doc)
+    onVar (IRVar n) = IRVar (rename n)
+    onVar e         = e

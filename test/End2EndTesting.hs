@@ -26,6 +26,7 @@ import SPLL.Parser (tryParseProgram)
 import TestCaseParser
 import TestTolerances (probTolerance, writeLogitsSlotTolerance, normalizationTolerance, samplingTolerance)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Typing.RType
 import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, topLevelWriteLogitsPlan, PartitionPlan, getSize, InputSlot(..), inputSlots, inputWidth)
 import SPLL.Typing.Infer (addTypeInfo)
@@ -40,7 +41,7 @@ import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.QSem (newQSem, waitQSem, signalQSem)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
-import MockNN (evaluateMockNN, mockInputFor, MockSlot(..), planAwareMockSlots, planHasTensor)
+import MockNN (evaluateMockNN, programMockOracle, mockInputFor, MockSlot(..), planAwareMockSlots, planHasTensor)
 import ImpactManifest
 import CorpusSweep
 import TestDuplicationCensus (duplicationCensusSweep)
@@ -184,8 +185,8 @@ budgetZeroKnownDivergent = []
 budgetZeroKnownDivergentRows :: [(String, IRValue)]
 budgetZeroKnownDivergentRows =
   -- The default compile reports the `Right` rows' density at dim 0 where
-  -- budget 0 says dim 1 (task enumerated-sum-over-density-body: the default's
-  -- enumerated sum reports a mass). The letfree `Right ANY` also differs in
+  -- budget 0 says dim 1 (task enumerated-weight-density-reported-as-mass: the
+  -- default's enumerated sum drops the dim of each value's weight). The letfree `Right ANY` also differs in
   -- value: budget 0 answers impossible, because the letfree CDF of
   -- `if Normal == 0.5 then 1 else 2` at 1 is a possible zero mass at dim 0
   -- rather than the density (task letfree-cdf-density-atom-reports-zero-mass).
@@ -543,12 +544,12 @@ normalizationResults p compiled = case (genFun (lookupIREnv "main" compiled), pr
     -- neural outputs, which currently yields Bottom and emits no main_prob.
     (Just (genExpr, _), Just (probExpr, _)) -> do
       let (params, randomParamsForSamples) = normalizationDraws p
-          gens = map (\args -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
+          gens = map (\args -> generateRand (programMockOracle p) compiled (map IRConst args) genExpr) randomParamsForSamples
           pSamples = evalRand (sequence gens) (mkStdGen 42)
           uniqueSamples = nub pSamples
           counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
       -- The per-sample prob queries are independent and pure; force them in parallel.
-      probResults <- parEval (map (\sam -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
+      probResults <- parEval (map (\sam -> generateDet (programMockOracle p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
       return ((,) counts <$> sequence probResults)
     _ -> return (Left "main has no probability function (inference unavailable); only generate compiled")
 
@@ -1034,12 +1035,22 @@ juliaFreeReferences src = nub [ x | x <- used, x `notElem` defined ]
   where
     code = stripJulia src
     ls = lines code
-    defined = concatMap definedOn ls ++ letBound code
+    defined = concatMap definedOn ls ++ letBound code ++ lambdaBound code
     -- an inline @let name = ...;@, which codegen emits for an IR let mid-expression
     letBound str = case str of
       [] -> []
       ('l':'e':'t':' ':more) -> takeWhile isIdentChar more : letBound more
       (_:more) -> letBound more
+    -- the parameters of an anonymous lambda, @((a, b) -> body)@
+    -- ('generateLambdaExpression'): a function-valued one is called as
+    -- @(a)(x)@ in the body
+    lambdaBound str = case str of
+      [] -> []
+      ('(':'(':more)
+        | (inner, ')':' ':'-':'>':_) <- break (== ')') more
+        , all (\ch -> isIdentChar ch || ch == ',' || ch == ' ') inner
+        -> [ takeWhile isIdentChar (dropWhile (== ' ') prm) | prm <- splitOn ',' inner ] ++ lambdaBound more
+      (_:more) -> lambdaBound more
     definedOn l = case words l of
       -- the function and its parameters: a higher-order parameter is called
       -- as @(f)(x)@, which the parenthesised-callee rule below reads as a use
@@ -1090,13 +1101,18 @@ stripJulia = go
 -- @netNames@ (empty for a non-neural program) gets one identity-mock
 -- definition apiece -- see 'testJuliaAll'\'s note.
 testPython :: [NetMock] -> Either CompilerError IREnv -> [TestCase] -> Property
-testPython netNames compiledE tc = ioProperty $ do
+testPython = testPythonWith False
+
+-- | 'testPython' on the module emitted with the recursion memo switched on by
+-- the first argument (@--memoRecursion@).
+testPythonWith :: Bool -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> Property
+testPythonWith memo netNames compiledE tc = ioProperty $ do
   case compiledE of
     Left err -> return $ counterexample err False
     Right compiled -> do
       projectDir <- getCurrentDirectory
       code <- withSystemTempFile "spll_test.py" $ \tmpPath tmpHandle -> do
-        hPutStr tmpHandle (pythonTestScript projectDir netNames compiled tc)
+        hPutStr tmpHandle (pythonTestScriptWith memo projectDir netNames compiled tc)
         hClose tmpHandle
         (_, _, _, handle) <- createProcess (proc "python3" [tmpPath])
         waitForProcess handle
@@ -1112,10 +1128,13 @@ testPython netNames compiledE tc = ioProperty $ do
 -- is its temp dir rather than the project; pythonLib has to be put back on
 -- the path explicitly, which is what @projectDir@ is for.
 pythonTestScript :: FilePath -> [NetMock] -> IREnv -> [TestCase] -> String
-pythonTestScript projectDir netNames compiled tc =
+pythonTestScript = pythonTestScriptWith False
+
+pythonTestScriptWith :: Bool -> FilePath -> [NetMock] -> IREnv -> [TestCase] -> String
+pythonTestScriptWith memo projectDir netNames compiled tc =
   "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n" ++ mockDefs ++ pythonTestCode src tc
   where
-    src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
+    src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctionsWith memo True compiled)
     mockDefs = concatMap pyMockDef netNames
 
 -- | One writeLogits row as the text backends check it: the endpoint, its
@@ -1387,6 +1406,17 @@ pyImpossCheck name (Just expected) =
 -- @.tst@ header, with a stderr note for programs that were eligible without
 -- declaring it. Before that, the selection condition was
 -- @Python \`elem\` bs || not (null (neurals p))@.)
+
+-- | Recursive corpus programs the @Python MemoRecursion@ sweep leaves out, each
+-- with why. Not memo failures: the scalar harness cannot run them at all, with
+-- or without the flag, and the plain Python sweep never meets them because the
+-- fuzzers certify them ('textRouted').
+memoSweepExceptions :: [(String, String)]
+memoSweepExceptions =
+  -- The identity mock of a Symbol-input network hands the row's resolved
+  -- (index, logits) tuple straight back, which the emitted read cannot use:
+  -- the scalar twin of batched-harness-list-of-symbol-parameters.
+  [ ("neuralReadListWalkRecursion", "batched-harness-list-of-symbol-parameters") ]
 
 -- | Corpus programs batched mode does not take yet, each with the docs-repo
 -- ticket that owns the refusal. Exact: a listed program that becomes eligible
@@ -1761,9 +1791,10 @@ batchedRefusalTable =
   -- batched-prob-path-calls-recursive-helper-gen and
   -- batched-prob-path-calls-helper-normal-params: both are pure callees,
   -- emitted as ordinary batched methods. A call to a *random* recursive
-  -- generator is still refused; its only corpus trigger is a known-issues
-  -- miscompile (`namedHofRandomFunctionArg`), so it is a synthetic row in
-  -- "TestInternals" ('test_batchedPureCallees').
+  -- generator is still refused; no corpus program reaches it (the one that
+  -- did, `namedHofRandomFunctionArg`, was a miscompile, fixed by task
+  -- named-hof-random-function-argument-miscompiled), so it is a synthetic
+  -- row in "TestInternals" ('test_batchedPureCallees').
   --
   -- Refusals pinned as open bugs under universal batched admission (task
   -- batched-admission-universal), one row per refusal class without a row
@@ -4221,12 +4252,18 @@ normalizationKey m p (Right env) = do
 -- | Key of 'testPython': the exact script it runs (emitted module, mocks,
 -- row checks with the tolerance spliced in), plus the Python runtime.
 pythonKey :: Manifest -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
-pythonKey _ _ (Left _) _ = return Nothing
-pythonKey m nets (Right env) tcs = do
+pythonKey = pythonKeyWith False
+
+-- | 'pythonKey' of the module 'testPythonWith' runs. The emitted script
+-- differs with the memo only where it decorates something, and the
+-- runtime's fingerprint covers the rest.
+pythonKeyWith :: Bool -> Manifest -> [NetMock] -> Either CompilerError IREnv -> [TestCase] -> IO (Maybe String)
+pythonKeyWith _ _ _ (Left _) _ = return Nothing
+pythonKeyWith memo m nets (Right env) tcs = do
   projectDir <- getCurrentDirectory
   h <- harnessFingerprint m
   py <- pythonFingerprint m
-  return $ Just $ hashKey [pythonCheckVersion, h, py, pythonTestScript projectDir nets env tcs]
+  return $ Just $ hashKey [pythonCheckVersion, h, py, pythonTestScriptWith memo projectDir nets env tcs]
 
 -- | Key of one program's part of a 'testJuliaAll' shard: its module and row
 -- checks as 'juliaBatchTestCode' renders them, under a fixed module name (the
@@ -4426,6 +4463,19 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
           let (n, c, tcs, nets) = routedQuery e
           in testProperty n (once $ cachedProperty manifest (check "Python") n (pythonKey manifest nets c tcs)
                                       (testPython nets c tcs))
+    -- The same rows under --memoRecursion (docs task
+    -- recursive-prob-calls-not-shared-across-branches), for every program
+    -- the memo changes: one with a recursive probability or integrate
+    -- method. Not gated on the fuzzers' certification, since they never run
+    -- the memo.
+    , corpusSweep corpus SweepSpec
+        { sweepName = path ++ ".Python MemoRecursion", sweepTier = tier, sweepSlow = slowH
+        , sweepSelect = \e -> Python `elem` ceBackends e && hasQueries e && memoChanges e
+                               && ceName e `notElem` map fst memoSweepExceptions
+        , sweepNote = "every p()/cdf() row of a recursive program against the emitted Python under --memoRecursion" } $ \e ->
+          let (n, c, tcs, nets) = routedQuery e
+          in testProperty n (once $ cachedProperty manifest (check "Python MemoRecursion") n (pythonKeyWith True manifest nets c tcs)
+                                      (testPythonWith True nets c tcs))
     -- writeLogits rows used to run on the interpreter only, which is how
     -- every text-backend writeLogits but a flat discrete one shipped
     -- crashing (task writelogits-text-backends-broken).
@@ -4517,6 +4567,7 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     isQuery x = isProbTestCase x || isCumulTestCase x
     queries e = filter isQuery (rows e)
     hasQueries e = any isQuery (ceCases e)
+    memoChanges e = either (const False) (not . null . memoMembers . memoPlan) (opt e)
     wlRows e = filter (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) (rows e)
     hasWriteLogits e = any (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) (ceCases e)
     writeLogitsRows e = map (writeLogitsRow (ceProgram e)) (wlRows e)
@@ -4645,3 +4696,63 @@ topKRuntimeCutoffTests = testGroup "topK runtime cutoff"
       return $ case ec of
         ExitSuccess -> compare1 ("julia " ++ name) out src
         ExitFailure _ -> counterexample ("julia " ++ name ++ " failed:\n" ++ out ++ err) False
+
+-- | Under topK a prob function also takes the accumulated probability and the
+-- cutoff, and an auto-generated writeLogits must pass them like every other
+-- caller (task writelogits-calls-prob-without-topk-arguments): it called
+-- @cond.forward(True)@, a TypeError in Python, and the interpreter answered a
+-- closure. The fixture's True mass is 0.2 + 0.4: its 0.2 arm is pruned at
+-- cutoff 0.3 from the root, so a pruned call would give 0.4. writeLogits wants
+-- the exact marginal, [0.6, 0.4], in every backend.
+topKWriteLogitsTests :: TestTree
+topKWriteLogitsTests = testGroup "topK writeLogits"
+  [ testProperty "interpreter: unpruned marginals" $ once $ check "interpreter" (interp (env False))
+    -- What writeLogits answers under logSpace is not this task's (it reads the
+    -- prob function's log probabilities); topK must only not change it.
+  , testProperty "interpreter, logSpace: topK does not change writeLogits" $ once $
+      let got = interp (env True)
+          base = interp (compileWith defaultCompilerConfig { logSpace = True })
+      in counterexample ("topK " ++ show got ++ " /= no topK " ++ show base)
+           (length got == length base && and (zipWith (\a b -> abs (a - b) <= writeLogitsSlotTolerance) got base))
+  , testProperty "the fixture is not vacuous: a root prob query prunes the 0.2 arm" $ once $
+      case runProbC prog (env False) [] (VBool True) of
+        Right (VProbDim p _) -> counterexample ("P(True) under topK = " ++ show p) (abs (p - 0.4) <= probTolerance)
+        other -> counterexample ("unexpected " ++ show other) False
+  , testProperty "emitted Python calls prob with the topK arguments" $ once $ ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> noTorchProperty "topK writeLogits (Python)"
+        Just py -> do
+          cwd <- getCurrentDirectory
+          let code = unlines (SPLL.CodeGenPyTorch.generateFunctions True (env False))
+              script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ code
+                ++ "\nprint(' '.join(str(float(x)) for x in main.writeLogits()))\n"
+          runScript "python" py [] "topk_writelogits.py" script
+  , testProperty "emitted Julia calls prob with the topK arguments" $ once $ ioProperty $ do
+      projectDir <- getCurrentDirectory
+      let code = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions (env False))
+          script = "include(\"" ++ projectDir ++ "/juliaLib.jl\")\nusing .JuliaSPPLLib\n"
+            ++ "module P\nusing ..JuliaSPPLLib\n" ++ code ++ "\nend\n"
+            ++ "println(join([string(Float64(x)) for x in P.main_writeLogits()], \" \"))\n"
+      runScript "julia" "julia" juliaTestFlags "topk_writelogits.jl" script
+  ]
+  where
+    src = "main = if Uniform < 0.2 then True else Uniform < 0.5"
+    prog = either (error . show) id (tryParseProgram "" src)
+    compileWith c = either (error . show) id (compile c prog)
+    env logS = compileWith defaultCompilerConfig { topKThreshold = Just 0.3, logSpace = logS }
+    want = [0.6, 0.4] :: [Double]
+    interp e = case runWriteLogitsC prog e "main" [] of
+      Right (VList l) -> [ x | VFloat x <- toList l ]
+      other -> error ("writeLogits returned " ++ show other)
+    check tag got = counterexample (tag ++ ": got " ++ show got ++ ", want " ++ show want)
+      (length got == length want && and (zipWith (\a b -> abs (a - b) <= writeLogitsSlotTolerance) got want))
+    runScript tag exe flags file script = do
+      (ec, out, err) <- withSystemTempFile file $ \tmpPath h -> do
+        hPutStr h script >> hClose h
+        readProcessWithExitCode exe (flags ++ [tmpPath]) ""
+      return $ case ec of
+        ExitSuccess -> case lines out of
+          [] -> counterexample (tag ++ ": no output\n" ++ err) False
+          ls -> check tag (map read (words (last ls)))
+        ExitFailure _ -> counterexample (tag ++ " failed:\n" ++ out ++ err) False

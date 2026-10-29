@@ -70,6 +70,8 @@ module SPLL.Prelude
   , CodeGenTarget(..)
   , codeGenToLang
   , emitCompiled
+  , memoRecursionActive
+  , memoRecursionIgnored
   , runGen
   , runProb
   , runInteg
@@ -108,14 +110,17 @@ import SPLL.ReservedNames (topKCutoffName, accProbInitName)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo(..), ADTDecl, FnDecl, spanPretty)
 import SPLL.Typing.PType (PType(..))
+import qualified SPLL.Typing.RType as R
 import SPLL.ObservationMask
 import SPLL.MaskVariants
 import SPLL.AutoNeural (validateWriteLogitsGaussian, topLevelWriteLogitsPlan, fitPlanToSupport)
 import SPLL.CompileWarnings
 import SPLL.IntermediateRepresentation
+import SPLL.OptimizerProjection (optimizerConfig)
+import SPLL.CompilerConfig
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo, addModalityLaws)
-import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..), renderJustification, engineName)
+import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..), renderJustification, engineName, callBindingKey)
 import qualified Data.Map.Strict as Map
 import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
@@ -123,6 +128,7 @@ import SPLL.CalleeNormalize (normalizeCallees, etaExpandArrowResults)
 import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.PerValue (validateSignatures, expandPerValue, perValuePlans, checkSignatureTypes, dropSlotProbes, installPerValue)
 import IRInterpreter (generateRand, generateDet, generateRandE)
+import MockNN (programMockOracle)
 import Control.Monad.Random (Rand, RandomGen, evalRand)
 import System.Random (mkStdGen)
 import SPLL.IRCompiler
@@ -130,7 +136,7 @@ import SPLL.IROptimizer (optimizeEnvWith)
 import SPLL.IRSelectPass (selectPassEnv)
 import SPLL.IRGatherPass (gatherPassEnv)
 import SPLL.IRLeafTablePass (leafTablePassEnv)
-import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched, generateFunctionsBatchedWith)
 import qualified SPLL.CodeGenPyTorch
 import qualified SPLL.CodeGenJulia
 import Debug.Trace
@@ -498,7 +504,7 @@ frontEndS conf p0 = do
   -- `main x = (if ..) x` a user would write, then normalised and inferred
   -- again (task arrow-result-main-entry-points). Type-directed, so it needs
   -- the first inference's arities; see 'etaExpandArrowResults'.
-  rtyped <- case etaExpandArrowResults rtyped0 normalized of
+  rtyped <- case etaExpandArrowResults rtyped0 (untypedOf rtyped0) of
     Nothing -> return rtyped0
     Just expanded -> do
       let renormalized = fromMaybe expanded (normalizeCallees expanded)
@@ -551,7 +557,7 @@ compileRTypedS conf rtypedWithSigs = do
   let selected = if batched conf then selectPassEnv stripped else stripped
   stageIR conf "After Select Pass" selected
 
-  let optimized = optimizeEnvWith conf (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
+  let optimized = optimizeEnvWith (optimizerConfig conf) (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
       -- Batched only: a one-hot sum reading a logit tensor at a contiguous
       -- key range becomes one guarded gather (task
       -- batched-mask-variant-neural-read-nests-v-deep). After the optimizer,
@@ -705,13 +711,30 @@ codeGenToLang target truncOut conf prog = compile conf prog >>= emitCompiled tar
 emitCompiled :: CodeGenTarget -> Bool -> CompilerConfig -> IREnv -> Either CompilerError String
 emitCompiled target truncOut conf compiled = case target of
   TargetPython
-    | batched conf -> intercalate "\n" <$> generateFunctionsBatched (not truncOut) compiled
+    | batched conf -> intercalate "\n" <$> generateFunctionsBatchedWith memo (not truncOut) compiled
     | otherwise    -> do
         anyExceptCodegenRefusal "Python" compiled
-        Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not truncOut) compiled)
+        Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctionsWith memo (not truncOut) compiled)
   TargetJulia -> do
     anyExceptCodegenRefusal "Julia" compiled
     Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
+
+  where memo = memoRecursionActive conf
+
+-- | Whether the Python backends emit the recursion memo
+-- ('CompilerConfig.memoRecursion'): requested, and not under topK, whose
+-- accumulated probability makes a call's answer depend on the path to it.
+memoRecursionActive :: CompilerConfig -> Bool
+memoRecursionActive conf = memoRecursion conf && isNothing (topKThreshold conf)
+
+-- | Why a requested @--memoRecursion@ is not in effect for this target, if it
+-- is not: the note the CLI prints as a compile warning.
+memoRecursionIgnored :: CodeGenTarget -> CompilerConfig -> Maybe String
+memoRecursionIgnored target conf
+  | not (memoRecursion conf) = Nothing
+  | TargetJulia <- target = Just "Warning: --memoRecursion is ignored by the Julia backend; recursive probability calls are not memoised."
+  | isJust (topKThreshold conf) = Just "Warning: --memoRecursion is ignored under --topKCutoff: a call's pruned probability depends on the path to it, so it cannot be shared."
+  | otherwise = Nothing
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Either CompilerError (Rand g IRValue)
 runGen _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
@@ -758,7 +781,7 @@ runProbC p compiled = runProbNamedC p compiled "main"
 runGenNamedC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g IRValue
 runGenNamedC p compiled name args =
   case genFun (lookupIREnv name compiled) of
-    Just (gen, _) -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) gen
+    Just (gen, _) -> generateRand (programMockOracle p) compiled (map IRConst args) gen
     -- Unlike the prob/integ runners there is no error channel in the return
     -- type to report this through.
     Nothing -> error (missingVariant "generate" "gen" (lookupIREnv name compiled))
@@ -767,7 +790,7 @@ runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either Co
 runProbNamedC p compiled name args x =
   case probFun (lookupIREnv name compiled) of
     Nothing -> Left (missingVariant "probability" "prob" (lookupIREnv name compiled))
-    Just (prob, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst args') prob
+    Just (prob, _) -> generateDet (programMockOracle p) compiled (map IRConst args') prob
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with the semiring's multiplicative
       -- identity at the query root -- linear 1.0, or log-space 0.0. Hardcoding
@@ -817,7 +840,7 @@ runIntegNamedC p compiled name args sample =
   case integFun (lookupIREnv name compiled) of
     -- A topK-compiled integrate function takes the runtime cutoff right
     -- after the sample (no acc_prob: its root seeds its own).
-    Just (integ, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sample : maybeToList (topKCutoff compiled) ++ args)) integ
+    Just (integ, _) -> generateDet (programMockOracle p) compiled (map IRConst (sample : maybeToList (topKCutoff compiled) ++ args)) integ
     Nothing -> Left (missingVariant "integrate" "integ" (lookupIREnv name compiled))
 
 -- | Modality inference decides per definition which of the three variants are
@@ -858,7 +881,7 @@ runWriteLogitsRandC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] 
 runWriteLogitsRandC p compiled target outerArgs =
   case validateWriteLogitsGaussian (adts p) (writeLogitsDecls p) (neurals p) compiled >> findEnc of
     Left err  -> return (Left err)
-    Right enc -> generateRandE (neurals p) (writeLogitsDecls p) compiled (map IRConst outerArgs) enc
+    Right enc -> generateRandE (programMockOracle p) compiled (map IRConst outerArgs) enc
   where
     IREnv groups _ _ = compiled
     findEnc = case find ((== target) . groupName) groups of
@@ -902,11 +925,19 @@ printStageWith _ _ _ _ = return ()
 engineReport :: Program -> LawTable -> String
 engineReport prog laws = unlines ("=== Engine applicability (the first listed is dispatched) ===" : rows)
   where
-    rows = [ row f x lti cs | (f, b) <- functions prog, (x, lti) <- bindings b
-                            , Just (Law _ (JBinding cs)) <- [Map.lookup (chainName lti) laws] ]
-    bindings e@(Expr _ (Apply (Expr lti (Lambda x _)) _)) = (x, lti) : concatMap bindings (getSubExprs e)
-    bindings e = concatMap bindings (getSubExprs e)
-    row f x lti cs = f ++ ": binding of '" ++ x ++ "'" ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
+    rows = [ row f what lti cs | (f, b) <- functions prog, (what, lti, key) <- bindings b
+                               , Just (Law _ (JBinding cs)) <- [Map.lookup key laws] ]
+    -- A literal @draw@ records on its lambda; a named callee's binding on
+    -- its call ('callBindingKey', task named-callee-binding-not-floored).
+    bindings e@(Expr ti nd) = here ++ concatMap bindings (getSubExprs e)
+      where here = case nd of
+              Apply (Expr lti (Lambda x _)) _ -> [("binding of '" ++ x ++ "'", lti, chainName lti)]
+              Apply _ _ | (Expr _ (Var g), _) <- spine e -> [("binding of the call of '" ++ g ++ "'", ti, callBindingKey (chainName ti))]
+                        | otherwise -> [("binding of the call", ti, callBindingKey (chainName ti))]
+              _ -> []
+    spine (Expr _ (Apply g a)) = let (h, as) = spine g in (h, as ++ [a])
+    spine h = (h, [])
+    row f what lti cs = f ++ ": " ++ what ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
       ++ ": " ++ (if null cs then "no engine applies (sample-only)" else intercalate ", " (map engineName cs))
 
 -- | The justification of each node's law, for the modality stage's dump.
@@ -972,9 +1003,16 @@ normalizeAndInfer :: Program -> Either CompilerError Program
 normalizeAndInfer p = do
   let normalized = fromMaybe p (normalizeCallees p)
   rtyped <- addRTypeInfo normalized
-  case etaExpandArrowResults rtyped normalized of
+  case etaExpandArrowResults rtyped (untypedOf rtyped) of
     Nothing -> return rtyped
     Just expanded -> addRTypeInfo (fromMaybe expanded (normalizeCallees expanded))
+
+-- | A typed program with its 'rType's cleared, for a rewrite that is
+-- inferred again. Not the program inference was given: RInfer clones a
+-- declaration used at several types ('SPLL.Typing.Monomorphize'), so only the
+-- typed program has the declarations whose types are read.
+untypedOf :: Program -> Program
+untypedOf p = p { functions = [ (n, tMap (\x -> (getTypeInfo x) { rType = R.NotSetYet }) e) | (n, e) <- functions p ] }
 
 -- | Enum annotation plus chain naming. The analysis needs chain names because
 -- latent identity is keyed by them.

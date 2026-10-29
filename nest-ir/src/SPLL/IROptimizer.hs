@@ -1,0 +1,1453 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+module SPLL.IROptimizer (
+  OptimizerConfig(..)
+, defaultOptimizerConfig
+, optimizeEnv
+, optimizeEnvWith
+, shareNetworkCallsCounted
+, postProcess
+, OptStats(..)
+, OptEnv(..)
+, emptyOptEnv
+, optEnvFromADTs
+, simplify
+, propagateCondition
+, optimizeStats
+, deterministicGens
+, distributeIf
+, headHash
+, hashMix
+, allNamesIR
+) where
+
+import SPLL.IntermediateRepresentation
+import SPLL.IR.ADT (fieldAccessorOwners)
+import SPLL.IR.Type (IRADTDecl(..))
+import Data.Number.Erf (erfc)
+import Data.Bits (xor)
+import Data.Either (isLeft)
+import Data.List (maximumBy, foldl', findIndex, partition, intercalate)
+import Data.Ord (comparing)
+import Data.Foldable (toList)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import Control.Monad.State (State, runState, get, put, modify')
+import Debug.Trace (trace)
+import SPLL.IR.Value
+
+
+-- | What the optimizer reads of the compiler's configuration. A projection of
+-- 'SPLL.CompilerConfig.CompilerConfig' ('SPLL.OptimizerProjection.optimizerConfig'),
+-- so the IR side does not depend on the frontend's configuration type.
+data OptimizerConfig = OptimizerConfig
+  { optLevel :: Int            -- ^ @-O@ level, 0 to 2
+  , optPruneAnyChecks :: Bool  -- ^ run the any-check pruning stage
+  , optVerbose :: Int          -- ^ verbosity; 1 adds per-function rows to the telemetry
+  , optShowStats :: Bool       -- ^ collect and print @--optStats@ telemetry
+  } deriving (Show)
+
+defaultOptimizerConfig :: OptimizerConfig
+defaultOptimizerConfig = OptimizerConfig {optLevel = 2, optPruneAnyChecks = False, optVerbose = 0, optShowStats = False}
+
+optimizeEnv :: OptimizerConfig -> IREnv -> IREnv
+optimizeEnv conf = optimizeEnvWith conf Set.empty
+
+-- | 'optimizeEnv' told the program's declared network names, so it can share
+-- repeated calls of one network on one argument ('shareNetworkCallsCounted').
+optimizeEnvWith :: OptimizerConfig -> Set.Set Varname -> IREnv -> IREnv
+optimizeEnvWith conf neuralNames (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv funcs' adtsDecl consts)
+  where
+    optGroup :: IRFunGroup -> State [(String, OptStats)] IRFunGroup
+    (funcs', report) = runState (mapM optGroup funcs) []
+    -- Bound once for the whole environment, not per function.
+    det = (optEnvFromADTs adtsDecl) { optDetGens = deterministicGens funcs, optNeurals = neuralNames }
+    optGroup fg = do
+      g <- onFun (groupName fg ++ "_gen")   (genFun fg)
+      pr <- onFun (groupName fg ++ "_prob")  (probFun fg)
+      i <- onFun (groupName fg ++ "_integ") (integFun fg)
+      e <- onFun (groupName fg ++ "_writeLogits") (writeLogitsFun fg)
+      n <- onFun (groupName fg ++ "_normal") (normalFun fg)
+      return fg { genFun = g, probFun = pr, integFun = i, writeLogitsFun = e, normalFun = n }
+    onFun :: String -> Maybe IRFunDecl -> State [(String, OptStats)] (Maybe IRFunDecl)
+    onFun _ Nothing = return Nothing
+    onFun label (Just (expr, doc)) = do
+      let (expr', st) = postProcessStats conf det expr
+      modify' ((label, st) :)
+      return (Just (expr', doc))
+
+postProcess :: OptimizerConfig -> IRExpr -> IRExpr
+--postProcess = id
+postProcess conf = fst . postProcessStats conf emptyOptEnv
+
+-- | 'postProcess' told which generate functions are deterministic, so the
+-- duplicating and sharing rewrites can treat calls to them as pure, plus the
+-- telemetry the run produced.
+-- | Run the optimizer to a fixed point, keeping the near-idempotent stages out
+-- of the loop.
+--
+-- Telemetry (@--optStats@) over the whole corpus shows a sharp split in how much
+-- work each rule finds after the first pass. Five rules essentially never find
+-- more -- @applyToLetIn@ 2589 firings in pass 1 against 17 in all later passes
+-- combined, @applyConstant@ 772 against 1, @propagateAnyGuard@ (now @propagateCondition@) 517 against 3,
+-- @associativity@ 9 against 4, @indexMagic@ 51 against 0 -- while the rest keep
+-- finding work in proportion (@simplify@ 67147 against 10211, @letIn@ 53196
+-- against 2246, @cse@ 3911 against 2025). Running the first group on every
+-- iteration costs a full traversal each time to rewrite almost nothing.
+--
+-- So the first pass runs everything, later passes run only 'loopStage' rules,
+-- and when those settle the 'onceStage' rules get one verification pass.
+-- "Almost nothing" is not "nothing", so that pass is a real check rather than an
+-- assertion: if it does find work, the loop is re-entered and the run is tallied
+-- as a recheck ('statRechecks', reported by @--optStats@). The result is
+-- therefore a fixed point of the same combined rule set as before -- the split
+-- changes the route, never the destination -- while the rare programs that need
+-- the extra rounds stay visible instead of being silently under-optimized.
+postProcessStats :: OptimizerConfig -> OptEnv -> IRExpr -> (IRExpr, OptStats)
+postProcessStats conf det e0 = go 1 [] 0 AllStages e0
+  where
+    go n acc rechecks set e =
+      let (e', tally) = optimizeStats' conf det set e
+      in if e' /= e
+           then go (n + 1) (tally : acc) rechecks LoopStages e'
+           else case set of
+             -- The reduced loop has settled; give the once-only rules their pass.
+             LoopStages ->
+               let (e'', residue) = optimizeStats' conf det OnceStagesOnly e
+               in if e'' == e
+                    then done n acc rechecks e
+                    else go (n + 1) (residue : acc) (rechecks + 1) LoopStages e''
+             -- The very first pass changed nothing, so nothing can have work.
+             _ -> done n acc rechecks e
+    -- The last iteration is the one that proved the fixed point: counted, but by
+    -- definition it rewrote nothing, so its empty tally is not listed.
+    done n acc rechecks e = (e, OptStats n (reverse acc) rechecks)
+
+-- | What one optimizer run did, for @--optStats@. 'statIterations' counts every
+-- pass including the final no-change one that established the fixpoint;
+-- 'statPerIteration' holds the rules that fired in each of the earlier ones.
+data OptStats = OptStats
+  { statIterations   :: !Int
+  , statPerIteration :: [Tally]
+    -- | How many times the post-loop verification pass found work for a rule the
+    -- loop had stopped running, so the loop had to be re-entered. Expected to be
+    -- 0 for almost every program; a nonzero count names a program whose shape
+    -- keeps feeding one of the 'onceStage' rules.
+  , statRechecks     :: !Int
+  } deriving (Show)
+
+-- | How many nodes each named rewrite rule changed during one pass.
+type Tally = Map.Map String Int
+
+-- | Emit the telemetry as a trace, then hand back the environment unchanged.
+reportStats :: OptimizerConfig -> [(String, OptStats)] -> IREnv -> IREnv
+reportStats conf report env
+  | not (optShowStats conf) = env
+  | otherwise           = trace (unlines (summary ++ detail)) env
+  where
+    entries = reverse report
+    iters = map (statIterations . snd) entries
+    rechecks = sum (map (statRechecks . snd) entries)
+    total = Map.unionsWith (+) (concatMap (statPerIteration . snd) entries)
+    summary =
+      [ "=== Optimizer telemetry (-O" ++ show (optLevel conf) ++ ") ==="
+      , "  " ++ show (length entries) ++ " function bodies, "
+          ++ show (sum iters) ++ " fixed-point iterations total"
+          ++ (if null iters then "" else ", max " ++ show (maximum iters)
+               ++ " (" ++ fst (maximumBy (comparing (statIterations . snd)) entries) ++ ")")
+      ] ++ [ "  rules fired: " ++ showTally total | not (Map.null total) ]
+        ++ [ "  once-only check re-entered the loop " ++ show rechecks ++ " time(s): "
+               ++ intercalate ", " [l | (l, st) <- entries, statRechecks st > 0]
+           | rechecks > 0 ]
+    detail
+      | optVerbose conf < 1 = []
+      | otherwise = concatMap perFun entries
+    perFun (label, OptStats n tallies _) =
+      ("  " ++ label ++ ": " ++ show n ++ " iteration(s)")
+        : [ "    iteration " ++ show i ++ ": " ++ showTally t
+          | (i, t) <- zip [(1 :: Int) ..] tallies, not (Map.null t) ]
+    showTally t = intercalate ", " [k ++ "=" ++ show v | (k, v) <- Map.toList t]
+
+-- | Whole-program facts the local rewrites consult. Both are conservative
+-- over-approximations of "nothing": an empty 'OptEnv' makes every rewrite fall
+-- back to what it did before these analyses existed.
+data OptEnv = OptEnv
+  { -- | Generate functions proven not to draw randomness, so a call to one may
+    -- be shared or duplicated ('isPureGiven').
+    optDetGens :: Set.Set Varname
+    -- | The compiler-generated @is\<Ctor\>@ constructor tests. They return a
+    -- Bool, so an @isAny@ over a call to one is statically False -- which an
+    -- 'IRApply' cannot be told on its own, since a user function may well
+    -- return the ANY sentinel.
+  , optCtorTests :: Set.Set Varname
+    -- | Every declared ADT constructor with its arity. A literal application
+    -- of one ('ctorLiteral') is a value whose constructor is known statically,
+    -- so a constructor test, field accessor, equality or @isAny@ over it folds.
+  , optCtors :: Map.Map Varname Int
+    -- | Every generated field accessor: the one constructor it accepts and the
+    -- field's position in it. The owner is the one 'fieldAccessorOwners'
+    -- picks, which is the constructor every backend's accessor tests for.
+  , optFieldOwners :: Map.Map Varname (Varname, Int)
+    -- | The declared networks. A pure application of one is shared across
+    -- loops and if-arms ('shareNetworkCallsCounted'); empty turns that off.
+  , optNeurals :: Set.Set Varname
+  }
+
+-- | Knows nothing: every rewrite that consults the environment falls back to
+-- its conservative behaviour.
+emptyOptEnv :: OptEnv
+emptyOptEnv = OptEnv Set.empty Set.empty Map.empty Map.empty Set.empty
+
+-- | The ADT facts of an 'OptEnv' (no generate function is assumed
+-- deterministic).
+optEnvFromADTs :: [IRADTDecl] -> OptEnv
+optEnvFromADTs decls = emptyOptEnv
+  { optCtorTests = Set.fromList ["is" ++ cn | (cn, _) <- ctors]
+  , optCtors = Map.fromList [(cn, length fs) | (cn, fs) <- ctors]
+  , optFieldOwners = Map.fromList
+      [ (f, (owner, i))
+      | (f, owner) <- fieldAccessorOwners decls
+      , Just fs <- [lookup owner ctors]
+      , Just i <- [findIndex ((== f) . fst) fs] ]
+  }
+  where ctors = concatMap irConstructors decls
+
+-- | The @_gen@ functions whose evaluation draws no randomness, so that sharing
+-- or duplicating a reference to one cannot collapse or multiply a random draw.
+--
+-- A generate function is deterministic when its own body holds no 'IRSample'
+-- and every generator it references is itself deterministic. That is a mutual
+-- condition, so it is computed as a greatest fixpoint: assume all of them are
+-- deterministic, then repeatedly drop any whose body refutes the assumption.
+-- Starting optimistic is what admits mutually recursive groups; starting from
+-- the empty set would never let a self-recursive generate function in.
+--
+-- A generator this analysis cannot see (a name with no group, e.g. a neural
+-- @_auto_gen@ wrapper, which samples from the read-logits network anyway) is absent from
+-- the candidate set and therefore refutes any body mentioning it -- the same
+-- answer 'isEffectfulVar' alone would have given.
+deterministicGens :: [IRFunGroup] -> Set.Set Varname
+deterministicGens funcs = fixedPointIteration shrink candidates
+  where
+    named = [(groupName fg ++ "_gen", body) | fg <- funcs, Just (body, _) <- [genFun fg]]
+    candidates = Set.fromList (map fst named)
+    shrink live = Set.fromList [n | (n, body) <- named, Set.member n live, isPureGiven live body]
+
+isValue :: IRExpr -> Bool
+isValue (IRConst _) = True
+isValue _ = False
+
+unval :: IRExpr -> IRValue
+unval (IRConst val) = val
+unval _ = error "tried to unval a non-val"
+
+--strip all top-level lambdas and collect the bound names.
+--unwrapTLLambdas :: Expr t a -> ([Varname], Expr t a)
+--unwrapTLLambdas (Lambda _ name subExpr) = (name : innerNames, unwrappedExpr)
+--  where (innerNames, unwrappedExpr) = unwrapTLLambdas subExpr
+--unwrapTLLambdas expr = ([], expr)
+
+
+fixedPointIteration :: (Eq a, Show a) => (a -> a) -> a -> a
+fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
+  where fx = f x
+
+-- | One optimizer pass, plus a count of how many nodes each rewrite rule
+-- changed. The tally is what @--optStats@ reports; a rule is credited once per
+-- node whose value it altered, so a stage that is idempotent with respect to
+-- everything else in the pipeline shows a zero tally in every iteration after
+-- the first -- which is the evidence needed before lifting a stage out of the
+-- fixed point.
+--
+-- CSE runs as a whole-expression pass (not per-node via irMap) so it can hand
+-- out globally-unique binding names; running it per node lets the same name be
+-- reused at different nesting levels, which produces shadowing bugs.
+-- | Which stages a pass runs. See 'postProcessStats' for why the split exists.
+data StageSet
+  = AllStages       -- ^ the first pass
+  | LoopStages      -- ^ every later pass
+  | OnceStagesOnly  -- ^ the post-loop idempotence check
+  deriving (Eq)
+
+optimizeStats :: OptimizerConfig -> OptEnv -> IRExpr -> (IRExpr, Tally)
+optimizeStats conf det = optimizeStats' conf det AllStages
+
+optimizeStats' :: OptimizerConfig -> OptEnv -> StageSet -> IRExpr -> (IRExpr, Tally)
+optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= networkShareStage >>= commonSubexprStage) Map.empty
+  where
+    nodeWise = irMapM (\e ->
+      pruneAnyCkecksStage e
+        >>= lambdaApplicationStage
+        >>= distributeConditionals
+        >>= indexStage
+        >>= anyGuardStage
+        >>= simplifyStage
+        >>= constantDistrStage
+        >>= letInStage
+        >>= assiciativityStage
+        >>= applyConstStage)
+    oLvl = optLevel conf
+    -- A rule that has more to do once other rules have run: it stays in the loop.
+    loopStage name enabled = mkStage name (enabled && stages /= OnceStagesOnly)
+    -- A rule believed to reach its fixed point in the first pass. Runs in the
+    -- first pass and in the check, never in the loop.
+    onceStage name enabled = mkStage name (enabled && stages /= LoopStages)
+    -- Tallying a rule means comparing each node with its rewrite, and on the
+    -- usual unchanged node that comparison walks the node's whole subtree:
+    -- every pass then costs nodes x depth, quadratic on a deep tree (a
+    -- 100-deep if-chain spent 5 of its 7.7 s compile here). The tally is only
+    -- ever read by --optStats, so without it the rule just runs.
+    mkStage name enabled f
+      | not enabled    = return
+      | optShowStats conf  = counted name f
+      | otherwise      = return . f
+    commonSubexprStage =
+      if oLvl >= 2 && stages /= OnceStagesOnly
+        then countedBy "cse" (optimizeCommonSubexprCounted det)
+        else return
+    -- Before CSE, so CSE sees one shared name where the calls were.
+    networkShareStage =
+      if oLvl >= 2 && stages /= OnceStagesOnly
+        then countedBy "networkShare" (shareNetworkCallsCounted det)
+        else return
+    applyConstStage = onceStage "applyConstant" (oLvl >= 2) applyConstant
+    assiciativityStage = onceStage "associativity" (oLvl >= 2) optimizeAssociativity
+    indexStage = onceStage "indexMagic" (oLvl >= 1) indexmagic
+    anyGuardStage = onceStage "propagateCondition" (oLvl >= 1) (propagateCondition det)
+    lambdaApplicationStage = onceStage "applyToLetIn" (oLvl >= 2) applyToLetIn
+    letInStage = loopStage "letIn" (oLvl >= 2) (optimizeLetIns det)
+    constantDistrStage = loopStage "constantDistr" (oLvl >= 2) evalConstantDistr
+    simplifyStage = loopStage "simplify" (oLvl >= 1) (simplify det)
+    distributeConditionals = loopStage "distributeIf" (oLvl >= 2) (distributeIf det (oLvl >= 3))
+    -- No telemetry either way (it only runs under --pruneAnyChecks), so it keeps
+    -- the conservative placement.
+    pruneAnyCkecksStage = loopStage "pruneAnyChecks" (optPruneAnyChecks conf) pruneAnyCkecksExpr
+
+-- | Run a rewrite and record whether it changed the node.
+counted :: String -> (IRExpr -> IRExpr) -> IRExpr -> State Tally IRExpr
+counted name f = countedBy name (\e -> let e' = f e in (e', if e' == e then 0 else 1))
+
+-- | 'counted' for a rewrite that reports its own amount of work.
+countedBy :: String -> (IRExpr -> (IRExpr, Int)) -> IRExpr -> State Tally IRExpr
+countedBy name f e = do
+  let (e', n) = f e
+  if n == 0 then return () else modify' (Map.insertWith (+) name n)
+  return e'
+
+-- | The monadic 'irMap': bottom-up, so a rewrite sees children already rewritten.
+irMapM :: Monad m => (IRExpr -> m IRExpr) -> IRExpr -> m IRExpr
+irMapM f x = irDescendM (irMapM f) x >>= f
+
+indexmagic :: IRExpr -> IRExpr
+-- if calling Apply ("indexOf") elem [0..], replace with elem
+indexmagic (IRApply (IRApply (IRVar "indexOf") elemExpr) (IRConst (VList list)))
+  | isNaturals valList = elemExpr
+  | Just vals <- constEnumList valList = indexOfChain elemExpr vals
+  where
+    valList = toList list
+    isNaturals lst = and (zipWith (==) [0..] (map toNatural lst))
+    toNatural (VInt x) = x
+    toNatural _ = -1 -- not a natural number, should fail the above.
+indexmagic x = x
+
+-- | A non-naturals enumeration constant (e.g. [False, True] or [3, 7, 11]) that
+-- indexmagic's fast path above doesn't fold: every element is a scalar constant
+-- (Bool/Int) so equality against it is cheap and unambiguous. Used to fold
+-- `indexOf elem [..]` into a chain of equality comparisons below, which keeps the
+-- enum-index lookup an elementwise IRIf chain (select-pass/batching eligible)
+-- rather than surviving to codegen as a call to the linked-list-walking stdlib
+-- `indexOf`, whose `VList` argument has no batched representation
+-- (task batched-bool-enum-index).
+constEnumList :: [IRValue] -> Maybe [IRValue]
+constEnumList lst@(_:_) | all isScalarConst lst = Just lst
+  where
+    isScalarConst (VBool _) = True
+    isScalarConst (VInt _) = True
+    isScalarConst _ = False
+constEnumList _ = Nothing
+
+-- | indexOf elem [v0, v1, .., vn] ~> if elem == v0 then 0 else if elem == v1 then 1
+-- else .. else n. The last element needs no comparison: indexOf's own contract
+-- (StandardLibrary.stdIndexOf) is a total function only when elem is a member of
+-- the list, so falling through to the final index is sound whenever this fold's
+-- caller relied on that same guarantee (as SPLL.AutoNeural.indexOf's callers do).
+indexOfChain :: IRExpr -> [IRValue] -> IRExpr
+indexOfChain _ [] = IRError "indexOf: empty enumeration"
+indexOfChain elemExpr vals = go (zip [0 ..] vals)
+  where
+    go [(i, _)] = IRConst (VInt i)
+    go ((i, v) : rest) = IRIf (IROp OpEq elemExpr (IRConst v)) (IRConst (VInt i)) (go rest)
+    go [] = IRError "indexOf: empty enumeration"
+
+-- A tuple of conditionals sharing one condition can be hoisted into a single
+-- conditional over tuples, e.g. (if c then x else y, if c then z else w) becomes
+-- if c then (x, z) else (y, w).  Generalised to any nesting of @IRConstruct
+-- TgTuple@: whenever every leaf of the tuple tree is an IRIf with the same
+-- condition, pull that condition out and split the tree into a then-tree and
+-- an else-tree.
+-- | Pull a condition shared by a tuple's leaves out to the front of the tuple:
+-- @(if c then a else b, if c then x else y)@ becomes
+-- @if c then (a, x) else (b, y)@.
+--
+-- The @mergeOverConstants@ flag (-O3) also admits tuples whose remaining leaves
+-- are constants, copying those into both arms. That case is what re-unites
+-- 'PResult' fields split across tuple slots: a probability and the
+-- impossibility flag derived from it start out sharing one let-bound value, but
+-- packing them into a result tuple gives each slot its own copy of the
+-- condition and hence a single use of the binding, which 'optimizeLetIns'
+-- inlines -- so the shared value is recomputed per slot. Merging the arms puts
+-- both back in one straight-line region where CSE can share them again. The
+-- constant slots in between (a statically-known dim of 0, a branch count of 0)
+-- are exactly what makes the strict form refuse.
+--
+-- It is off below -O3 because it is a compile-time-for-run-time trade, not a
+-- free win: hoisting conditionals outward exposes far more material to the CSE
+-- scan. Measured on the corpus it cuts emitted code ~13% and halves the
+-- enumerated work in neural-enumeration programs, while
+-- @testCases/planEnumRecDeepCount.ppl@ goes from 1.2s to 9.0s to compile.
+--
+-- The shared condition must be __pure__ ('isPureGiven'), for the same reason
+-- CSE and 'optimizeLetIns' consult purity (tasks ir-effectful-var-purity,
+-- stochastic-call-cse-unsound): the rewrite keeps one copy of a condition that
+-- the tuple evaluated once per leaf, so an effectful condition would have its
+-- draws fused. @(if Uniform < 0.5 then 1 else 2, if Uniform < 0.5 then 1 else
+-- 2)@ is two independent coin flips in the source and the two syntactically
+-- equal conditions are two distinct draws in the IR; distributing them made the
+-- mixed outcomes @(1,2)@ and @(2,1)@ unreachable, silently and with no crash.
+distributeIf :: OptEnv -> Bool -> IRExpr -> IRExpr
+distributeIf det mergeOverConstants e
+  | isTupleShape e, leavesShareCond = IRIf cond (mapTupleLeaves ifThen e) (mapTupleLeaves ifElse e)
+  where
+    isTupleShape (IRConstruct TgTuple _) = True
+    isTupleShape _ = False
+    leaves = tupleTreeLeaves e
+    conds = [c | IRIf c _ _ <- leaves]
+    nonConditional = [l | l <- leaves, not (isConditional l)]
+    isConditional (IRIf _ _ _) = True
+    isConditional _            = False
+    leavesShareCond = not (null conds)
+      && all (== head conds) (tail conds)
+      && isPureGiven (optDetGens det) (head conds)
+      && if mergeOverConstants
+           then length conds >= 2 && all isValue nonConditional
+           else null nonConditional
+    cond = head conds
+    ifThen (IRIf _ t _) = t
+    ifThen x = x
+    ifElse (IRIf _ _ el) = el
+    ifElse x = x
+distributeIf _ _ x = x
+
+-- | The leaves of a tree of nested @IRConstruct TgTuple@ (everything that is
+-- not itself a tuple construction).
+tupleTreeLeaves :: IRExpr -> [IRExpr]
+tupleTreeLeaves (IRConstruct TgTuple [a, b]) = tupleTreeLeaves a ++ tupleTreeLeaves b
+tupleTreeLeaves x = [x]
+
+-- | Rebuild a tree of nested @IRConstruct TgTuple@, applying f to each leaf.
+mapTupleLeaves :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
+mapTupleLeaves f (IRConstruct TgTuple [a, b]) = IRConstruct TgTuple [mapTupleLeaves f a, mapTupleLeaves f b]
+mapTupleLeaves f x = f x
+
+--TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
+--TODO: Unary operators
+
+-- | Simplify terms that apply a constant to a lambda expression
+-- if we build a lambda expression and immediately apply a constant, replace mentions of the lambda'd variable with the constant.
+applyConstant :: IRExpr -> IRExpr
+applyConstant (IRApply (IRLambda varname inExpr) v@(IRConst _)) = replaceAll (IRVar varname) v inExpr
+applyConstant x = x
+
+optimizeAssociativity :: IRExpr -> IRExpr
+-- Associative Addition
+optimizeAssociativity (IROp OpPlus leftV (IROp OpPlus rightV1 rightV2))
+  | isValue leftV && isValue rightV1, not (isNaNResult (forceOp OpPlus (unval leftV) (unval rightV1))) = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV1))) rightV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV && isValue rightV2, not (isNaNResult (forceOp OpPlus (unval leftV) (unval rightV2))) = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV2))) rightV1   -- a + (b + c) = b + (a + c)
+optimizeAssociativity (IROp OpPlus (IROp OpPlus leftV1 leftV2) rightV )
+  | isValue leftV1 && isValue rightV, not (isNaNResult (forceOp OpPlus (unval leftV1) (unval rightV))) = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV2 && isValue rightV, not (isNaNResult (forceOp OpPlus (unval leftV2) (unval rightV))) = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
+-- Associative Multiplication
+optimizeAssociativity (IROp OpMult leftV (IROp OpMult rightV1 rightV2))
+  | isValue leftV && isValue rightV1, not (isNaNResult (forceOp OpMult (unval leftV) (unval rightV1))) = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV1))) rightV2   -- a * (b * c) = (a * b) * c
+  | isValue leftV && isValue rightV2, not (isNaNResult (forceOp OpMult (unval leftV) (unval rightV2))) = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV2))) rightV1   -- a * (b * c) = (a * c) * b
+optimizeAssociativity (IROp OpMult (IROp OpMult leftV1 leftV2) rightV )
+  | isValue leftV1 && isValue rightV, not (isNaNResult (forceOp OpMult (unval leftV1) (unval rightV))) = IROp OpMult (IRConst (forceOp OpMult (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV2 && isValue rightV, not (isNaNResult (forceOp OpMult (unval leftV2) (unval rightV))) = IROp OpMult (IRConst (forceOp OpMult (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
+optimizeAssociativity x = x
+
+optimizeLetIns :: OptEnv -> IRExpr -> IRExpr
+optimizeLetIns det (IRLetIn name val scope)
+  -- A binding may be inlined into *every* use (i.e. duplicated) only when doing so
+  -- is both cheap and effect-free. `duplicableBinding` is the gate: IRConst
+  -- (small, pure) and pure copy-propagations of a bare IRVar qualify. Effectfulness
+  -- is decided by the shared `isPure` mechanism rather than the old
+  -- "IRConst only" rule -- a bare IRVar can name a nullary generator (e.g.
+  -- coin_gen) whose evaluation samples randomness, so inlining it into multiple
+  -- uses would re-draw the sample (task ir-effectful-var-purity). Multi-use
+  -- non-duplicable bindings stay as a let; single use is still inlined below.
+  | duplicableBinding det val = replaceAll (IRVar name) val scope
+  | countUses name scope == 1 && not (usedInEnumSumBodyInvariant name val scope) = replaceAll (IRVar name) val scope
+  | countUses name scope == 0 = scope
+  | hasTupleLeaf val, scope' <- foldConstProjections name val scope, scope' /= scope = IRLetIn name val scope'
+optimizeLetIns _ ex = ex
+
+-- | Does some way of evaluating @e@ end in a tuple construction? The cheap
+-- pre-test for 'foldConstProjections'.
+hasTupleLeaf :: IRExpr -> Bool
+hasTupleLeaf e = case e of
+  IRConstruct TgTuple _ -> True
+  IRConst (VTuple _ _)  -> True
+  IRIf _ t f            -> hasTupleLeaf t || hasTupleLeaf f
+  IRLetIn _ _ b         -> hasTupleLeaf b
+  _                     -> False
+
+-- | Replace a projection off a let-bound tuple by the literal it is, wherever
+-- every way the bound value can evaluate puts the same literal at that
+-- position.
+--
+-- This is what keeps a shared 'PResult' from costing its constants (task
+-- presult-unbound-block-copied-per-field). 'Semiring.closeResult' and
+-- 'Semiring.anySafeShared' bind a sub-result once as a packed tuple, usually
+-- @if isAny(s) then <defaults> else (let .. in <fields>)@, and project its
+-- fields off that one binding. A field that is the same constant on every arm
+-- -- a dim of 0, a False impossibility flag -- used to stay an opaque
+-- projection, so every test reading it (a mixture's dim comparisons, a guard on
+-- the flag) survived to the emitted code. Folding it here lets those tests fold
+-- as they did when each field carried its own inline copy of the block.
+--
+-- Sound because only the projection is replaced: the binding itself stays, and
+-- is still evaluated (with any error or effect it has) wherever it was. A use
+-- under a binder that shadows @name@ is left alone.
+foldConstProjections :: Varname -> IRExpr -> IRExpr -> IRExpr
+foldConstProjections name val = go
+  where
+    go e = case projPath e of
+      Just path | Just v <- constAt path val -> IRConst v
+      _ -> case e of
+        IRLetIn n v b | n == name -> IRLetIn n (go v) b
+        IRLambda n _  | n == name -> e
+        _ -> setIRSubExprs e (map go (getIRSubExprs e))
+    -- The accessors from @name@ outward, for a chain of tuple projections
+    -- rooted at it.
+    projPath (IRDestruct ac inner)
+      | ac == AcFst || ac == AcSnd = (++ [ac]) <$> rootPath inner
+    projPath _ = Nothing
+    rootPath (IRVar n) | n == name = Just []
+    rootPath e = projPath e
+    -- The literal at @path@ of every value @e@ can evaluate to, if they agree.
+    constAt :: [Accessor] -> IRExpr -> Maybe IRValue
+    constAt path e = case e of
+      IRIf _ t f -> do
+        a <- constAt path t
+        b <- constAt path f
+        if a == b then Just a else Nothing
+      IRLetIn _ _ b -> constAt path b
+      IRConstruct TgTuple [a, b] -> case path of
+        AcFst : rest -> constAt rest a
+        AcSnd : rest -> constAt rest b
+        _            -> Nothing
+      IRConst v -> constValAt path v
+      _ -> Nothing
+    constValAt [] v = Just v
+    constValAt (AcFst : rest) (VTuple a _) = constValAt rest a
+    constValAt (AcSnd : rest) (VTuple _ b) = constValAt rest b
+    constValAt _ _ = Nothing
+
+-- | A binding whose value may be duplicated across all uses without changing
+-- semantics or blowing up code size: a literal constant, or a pure bare
+-- variable reference (copy propagation). The purity check is what keeps an
+-- effectful generator reference (@coin_gen@) from being duplicated
+-- (ir-effectful-var-purity).
+duplicableBinding :: OptEnv -> IRExpr -> Bool
+duplicableBinding det val = isValue val || (isBareVar val && isPureGiven (optDetGens det) val)
+  where isBareVar (IRVar _) = True
+        isBareVar _         = False
+
+-- | An /iterating/ form: one whose body is evaluated once per element of a
+-- domain, together with the variable it binds over that body. This is the one
+-- place that knows which constructors iterate; the analyses below are written
+-- against it rather than re-matching the constructor set each time, which is
+-- how the enum-sum family came to be spelled out in four separate walks
+-- (design ir-tensor-values).
+--
+-- Note what is deliberately /not/ here: a bare 'IRLambda'. A lambda's body is
+-- evaluated once per application, which is usually once, so treating every
+-- lambda as a loop would change hoisting decisions for every program with a
+-- lambda in it -- a behaviour change well beyond adding a dense axis. A
+-- 'BMap''s lambda /is/ listed, because a map applies it once per element by
+-- construction.
+loopBinder :: IRExpr -> Maybe (Varname, IRExpr)
+loopBinder (IRBuiltin BMap [IRLambda n body, _]) = Just (n, body)
+loopBinder _ = Nothing
+
+-- | True if `var` is used inside an iterating body in `scope` AND `val` does not
+-- reference any loop variable of those forms.  Such a binding is
+-- loop-invariant and should be hoisted rather than inlined into the loop body.
+usedInEnumSumBodyInvariant :: String -> IRExpr -> IRExpr -> Bool
+usedInEnumSumBodyInvariant var val scope =
+  usedInEnumSumBody var scope &&
+  all (\loopVar -> countUses loopVar val == 0) (enumSumBoundVars scope)
+
+-- | True if `var` appears free inside at least one iterating body in `expr`.
+usedInEnumSumBody :: String -> IRExpr -> Bool
+usedInEnumSumBody var expr = case loopBinder expr of
+  Just (_, body) -> countUses var body > 0
+  Nothing -> any (usedInEnumSumBody var) (getIRSubExprs expr)
+
+-- | Collect all variables bound by an iterating form in an expression.
+enumSumBoundVars :: IRExpr -> [String]
+enumSumBoundVars expr = case loopBinder expr of
+  Just (n, _) -> n : rest
+  Nothing -> rest
+  where rest = concatMap enumSumBoundVars (getIRSubExprs expr)
+
+evalConstantDistr :: IRExpr -> IRExpr
+evalConstantDistr (IRDensity IRNormal Linear (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
+evalConstantDistr (IRCumulative IRNormal Linear (IRConst (VFloat x))) = IRConst (VFloat (erfc (-x / sqrt 2) / 2))
+evalConstantDistr (IRDensity IRUniform Linear (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
+evalConstantDistr (IRCumulative IRUniform Linear (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
+evalConstantDistr (IRDensity IRNormal Log (IRConst (VFloat x))) = IRConst (VFloat ((-0.5) * x * x - 0.5 * log (2 * pi)))
+evalConstantDistr (IRCumulative IRNormal Log (IRConst (VFloat x))) = IRConst (VFloat (log (erfc (-x / sqrt 2) / 2)))
+evalConstantDistr (IRDensity IRUniform Log (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 0 else (-1)/0))
+evalConstantDistr (IRCumulative IRUniform Log (IRConst (VFloat x))) = IRConst (VFloat (log (if x < 0 then 0 else if x > 1 then 1 else x)))
+evalConstantDistr x = x
+
+simplify :: OptEnv -> IRExpr -> IRExpr
+-- Equality of two values whose constructors are statically known. Different
+-- constructors are never equal (every backend's ADT equality tests the class
+-- first); the same nullary constructor always is. Same-constructor values with
+-- fields are left alone: their equality is the fields' equality, which may
+-- involve ANY or float tolerance and is not this rule's business.
+simplify det (IROp OpEq l r)
+  | Just (cl, al) <- ctorLiteral det l, Just (cr, _) <- ctorLiteral det r
+  , cl /= cr || null al = IRConst (VBool (cl == cr))
+  | Just a <- eitherLiteral l, Just b <- eitherLiteral r
+  , isLeft a /= isLeft b = IRConst (VBool False)
+simplify _ (IROp op leftV rightV)
+  | isValue leftV && isValue rightV
+  , not (intDivByZero op (unval rightV))
+  , not (isNaNResult (forceOp op (unval leftV) (unval rightV))) = IRConst (forceOp op (unval leftV) (unval rightV))
+  | isValue leftV || isValue rightV = softForceLogic op leftV rightV
+-- Mask fusion: a semiring indicator times a value becomes a branch on the
+-- indicator's condition, so the value is evaluated only where the indicator
+-- admits it. 'indicatorP' (via 'maskSR') builds exactly this shape, and
+-- 'prodP' multiplies it against whatever the branch costs -- in an enumerated
+-- sum, the per-world density. Without the fusion every enumerated world pays
+-- that density and then multiplies it by zero; with it, only the worlds the
+-- indicator selects pay. Strictly smaller IR as well as strictly less work.
+--
+-- Only fired for a pure operand: making evaluation conditional must not drop
+-- an IRSample draw. Dropping a value that would have been multiplied by the
+-- semiring zero is the same licence 'softForceLogic' already takes for
+-- @0 * x@.
+simplify det (IROp op left right)
+  | Just (c, z) <- semiringMask op left, isPureGiven (optDetGens det) right = IRIf c right z
+  | Just (c, z) <- semiringMask op right, isPureGiven (optDetGens det) left = IRIf c left z
+simplify det (IRUnaryOp OpIsAny x) = forceAnyCheck det x
+-- Sound under the IR's own semantics even for ANY: 'forceUnaryOp' maps
+-- @not ANY@ to ANY, so a double negation is the identity on every value.
+simplify _ (IRUnaryOp OpNot (IRUnaryOp OpNot x)) = x
+simplify _ (IRUnaryOp op val)
+  | isValue val, not (isNaNResult (forceUnaryOp op (unval val))) = IRConst $ forceUnaryOp op (unval val)
+simplify _ (IRIf _ left right) | left == right = left
+-- A branch that answers the two Bool constants IS its own condition. Worth a
+-- rule of its own because a condition is rendered inline while an IRIf in value
+-- position becomes a statement block per backend arm: the short-circuiting
+-- "or" that a strict OpOr cannot express (both operands would be evaluated) is
+-- spelled `IRIf a True b`, and where b folds to a constant this is what is
+-- left of it.
+simplify _ (IRIf cond (IRConst (VBool True)) (IRConst (VBool False))) = cond
+-- ...and one answering them the other way round is its negation. Without this
+-- the dual of the rule above survives as a statement block per arm
+-- (@False if c else True@).
+simplify _ (IRIf cond (IRConst (VBool False)) (IRConst (VBool True))) = IRUnaryOp OpNot cond
+-- Only a Bool constant picks an arm. 'forceOp' folds an operation on the ANY
+-- sentinel to ANY, and an IRIf on that used to take the else arm -- where the
+-- runtime raises a type error, the optimized program answered silently
+-- (fuzz-admission-oracle-bugs item 8: an applicability guard @VAny > 0.0@
+-- folded into "impossible"). Left alone, it fails at run time as it would at
+-- -O0.
+simplify _ x@(IRIf cond left right) =
+  case cond of
+    IRConst (VBool True)  -> left
+    IRConst (VBool False) -> right
+    _ -> x
+-- The same two foldings are sound for a select (pytorch-tensorizer M1): equal
+-- arms collapse to that value, and a constant mask picks one arm -- both hold
+-- whether one arm is taken (scalar) or both are computed and masked (batched),
+-- so unlike distributeIf these are safe to fire on IRSelect. They keep batched
+-- code from bloating when the select pass converts constant-conditioned ifs.
+simplify _ (IRSelect _ left right) | left == right = left
+simplify _ x@(IRSelect cond left right) =
+  case cond of
+    IRConst (VBool True)  -> left
+    IRConst (VBool False) -> right
+    _ -> x
+-- A non-list tail is ill-typed rather than merely unsimplifiable, but the
+-- optimizer is not the place to reject it: leave the cons alone.
+simplify _ x@(IRConstruct TgCons [left, right]) =
+  case (isValue left && isValue right, unval right) of
+    (True, VList tl) -> IRConst (VList (ListCont (unval left) tl))
+    _ -> x
+simplify _ (IRDestruct AcHead (IRConstruct TgCons [a, _])) = a
+simplify _ (IRDestruct AcTail (IRConstruct TgCons [_, b])) = b
+simplify _ (IRDestruct AcFst  (IRConstruct TgTuple [a, _])) = a
+simplify _ (IRDestruct AcSnd  (IRConstruct TgTuple [_, b])) = b
+-- Either arm tests and payload projections over a literal Left/Right. A
+-- projection of the *wrong* arm is left alone: it throws at runtime, and it is
+-- only ever reached behind an arm test that now folds to False, which removes
+-- it. Rewriting it into something that does not throw would hide that.
+simplify _ (IRDestruct AcIsLeft e)    | Just v <- eitherLiteral e = IRConst (VBool (isLeft v))
+simplify _ (IRDestruct AcIsRight e)   | Just v <- eitherLiteral e = IRConst (VBool (not (isLeft v)))
+simplify _ (IRDestruct AcFromLeft e)  | Just (Left a) <- eitherLiteral e = a
+simplify _ (IRDestruct AcFromRight e) | Just (Right b) <- eitherLiteral e = b
+-- The same for user ADTs, whose tests and accessors are calls to the generated
+-- @is\<Ctor\>@ and field functions. An accessor applied to a constructor that
+-- does not own the field throws at runtime; like the Either projection above it
+-- is left to be removed by the test guarding it.
+simplify det (IRApply (IRVar f) e)
+  | f `Set.member` optCtorTests det, Just (c, _) <- ctorLiteral det e
+  = IRConst (VBool (f == "is" ++ c))
+  | Just (owner, i) <- Map.lookup f (optFieldOwners det)
+  , Just (c, args) <- ctorLiteral det e, c == owner, i < length args
+  = args !! i
+simplify _ x = x
+
+-- | A value built by a statically known ADT constructor: a constant, a bare
+-- nullary constructor (codegen instantiates it), or a /saturated/ application
+-- spine -- a partial one is a function, not a value of the ADT.
+ctorLiteral :: OptEnv -> IRExpr -> Maybe (Varname, [IRExpr])
+ctorLiteral _ (IRConst (VADT c vs)) = Just (c, map IRConst vs)
+ctorLiteral env e = go e []
+  where
+    go (IRApply f a) args = go f (a : args)
+    go (IRVar c) args
+      | Map.lookup c (optCtors env) == Just (length args) = Just (c, args)
+    go _ _ = Nothing
+
+-- | A value built by a literal 'Either' constructor, with its payload.
+eitherLiteral :: IRExpr -> Maybe (Either IRExpr IRExpr)
+eitherLiteral (IRConstruct TgLeft [a])  = Just (Left a)
+eitherLiteral (IRConstruct TgRight [b]) = Just (Right b)
+eitherLiteral (IRConst (VEither (Left v)))  = Just (Left (IRConst v))
+eitherLiteral (IRConst (VEither (Right v))) = Just (Right (IRConst v))
+eitherLiteral _ = Nothing
+
+countUses :: String -> IRExpr -> Int
+countUses var (IRVar a) | a == var = 1
+countUses var expr = sum (map (countUses var) (getIRSubExprs expr))
+
+replaceAll :: IRExpr -> IRExpr -> IRExpr -> IRExpr
+replaceAll find replaceWith = irMap (replace find replaceWith)
+
+replace :: Eq p => p -> p -> p -> p
+replace find replace' expr = if find == expr then replace' else expr
+
+softForceLogic :: Operand -> IRExpr -> IRExpr -> IRExpr
+--logic operands: or and and
+softForceLogic OpOr (IRConst (VBool True)) _ = IRConst (VBool True)
+softForceLogic OpOr _ (IRConst (VBool True)) = IRConst (VBool True)
+softForceLogic OpOr (IRConst (VBool False)) right = right
+softForceLogic OpOr left (IRConst (VBool False)) = left
+softForceLogic OpAnd (IRConst (VBool True)) right = right
+softForceLogic OpAnd left (IRConst (VBool True)) = left
+softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
+softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
+softForceLogic OpEq (IRConstruct TgCons _) (IRConst (VList EmptyList)) = IRConst $ VBool False
+softForceLogic OpEq (IRConst (VList EmptyList)) (IRConstruct TgCons _) = IRConst $ VBool False
+-- numeric arithmetic, shared between Int and Float via isNumZero / isNumOne.
+-- The matched zero/one constant is reused so the result keeps the operand's type.
+softForceLogic OpPlus (IRConst z) right | isNumZero z = right
+softForceLogic OpPlus left (IRConst z) | isNumZero z = left
+softForceLogic OpMult z@(IRConst zv) _ | isNumZero zv = z
+softForceLogic OpMult _ z@(IRConst zv) | isNumZero zv = z
+softForceLogic OpMult (IRConst o) right | isNumOne o = right
+softForceLogic OpMult left (IRConst o) | isNumOne o = left
+softForceLogic OpDiv left (IRConst o) | isNumOne o = left
+-- A literal zero divisor is simply a case folding cannot handle: it falls
+-- through to the catch-all below and the IROp survives untouched. This used to
+-- `error`, which escaped the compiler's `Either CompilerError` contract
+-- entirely. It also fired on statically dead divisions, since folding runs
+-- bottom-up with no regard for reachability (task
+-- optimizer-literal-zero-divisor-panic).
+softForceLogic OpDiv z@(IRConst zv) _ | isNumZero zv = z
+softForceLogic OpSub left (IRConst z) | isNumZero z = left
+softForceLogic op left right = IROp op left right     -- Nothing can be done
+
+-- | Recognise @op@ applied to a semiring indicator: linear @(if c then 1 else
+-- 0) * x@, or its log-space twin @(if c then 0 else -inf) + x@ (log-space
+-- multiplication is addition, and the log of zero is negative infinity).
+-- Returns the condition and the semiring zero to fall back to.
+semiringMask :: Operand -> IRExpr -> Maybe (IRExpr, IRExpr)
+semiringMask OpMult (IRIf c one zero@(IRConst z))
+  | isValue one, isNumOne (unval one), isNumZero z = Just (c, zero)
+semiringMask OpPlus (IRIf c zero negInf@(IRConst n))
+  | isValue zero, isNumZero (unval zero), isNegInf n = Just (c, negInf)
+semiringMask _ _ = Nothing
+
+-- | The log-space semiring zero.
+isNegInf :: IRValue -> Bool
+isNegInf (VFloat x) = isInfinite x && x < 0
+isNegInf _ = False
+
+-- | A numeric zero, regardless of Int/Float.
+isNumZero :: IRValue -> Bool
+isNumZero (VInt 0) = True
+isNumZero (VFloat 0) = True
+isNumZero _ = False
+
+-- | A numeric one, regardless of Int/Float.
+isNumOne :: IRValue -> Bool
+isNumOne (VInt 1) = True
+isNumOne (VFloat 1) = True
+isNumOne _ = False
+
+-- | A NaN float result. Unlike Infinity (where @Infinity == Infinity@ holds),
+-- @NaN == NaN@ is 'False' for every IEEE float, including two syntactically
+-- identical 'VFloat' literals built from the same computation. Constant
+-- folding a NaN into the tree therefore poisons every later structural-
+-- equality check that expression sits under -- most importantly
+-- 'postProcessStats'\'s own fixed-point test (@e' /= e@ never turns
+-- 'False'), which does not merely mis-optimize but never terminates: each
+-- iteration re-finds "a change" against itself, and the per-iteration tally
+-- list it accumulates while doing so grows without bound (task
+-- mixture-combination-rules-compile-hang -- reached via a deterministic
+-- scale factor going into @log@ while deriving a PLogNormal expression's
+-- closed-form parameters, e.g. @(-51.84) * exp(Normal-derived)@, where the
+-- scale's sign makes the family classification unsound but nothing upstream
+-- of the optimizer checks that; only 'toIRLogNormalParams' assumes a
+-- positive scale). Every fold site below that calls 'forceOp'/'forceUnaryOp'
+-- checks this before embedding an 'IRConst': on a NaN result the rewrite
+-- backs off and leaves the operation symbolic, so it is still evaluated (via
+-- the runtime's own IEEE-conforming semantics, or a backend's @safe_log@)
+-- but never becomes a literal the fixpoint check can get stuck comparing to
+-- itself.
+-- | An integer quotient or remainder by a literal zero. 'multI''s inverse is
+-- only ever evaluated behind its own @divisor /= 0@ guard, but the folder sees
+-- both arms: @c `div` (4 * 0)@ folded to a Haskell 'divide by zero' that took
+-- the whole compile down (fuzz-admission-oracle-bugs item 6). Left symbolic,
+-- it sits in the arm the guard never takes.
+intDivByZero :: Operand -> IRValue -> Bool
+intDivByZero op (VInt 0) = op `elem` [OpIntDiv, OpMod]
+intDivByZero _ _ = False
+
+isNaNResult :: IRValue -> Bool
+isNaNResult (VFloat x) = isNaN x
+isNaNResult _ = False
+
+forceOp :: Operand -> IRValue -> IRValue -> IRValue
+forceOp OpEq (VList AnyList) (VList _) = VBool True
+forceOp OpEq (VList _) (VList AnyList) = VBool True
+forceOp OpEq (VList EmptyList) (VList EmptyList) = VBool True
+forceOp OpEq (VList (ListCont VAny _)) (VList (ListCont _ _)) = VBool True
+forceOp OpEq (VList (ListCont _ _)) (VList (ListCont VAny _)) = VBool True
+forceOp OpEq (VList (ListCont _ as)) (VList (ListCont _ bs)) = forceOp OpEq (VList as) (VList bs)
+forceOp OpEq (VList _) (VList _) = VBool False
+forceOp OpEq a b = VBool $ a == b
+forceOp OpApprox (VFloat x) (VFloat y) = VBool $ abs (x - y) <= floatApproxEqThresh
+forceOp OpMult (VInt x) (VInt y) = VInt (x*y)
+forceOp OpMult (VFloat x) (VFloat y) = VFloat (x*y)
+forceOp OpPlus (VInt x) (VInt y) = VInt (x+y)
+forceOp OpPlus (VFloat x) (VFloat y) = VFloat (x+y)
+forceOp OpDiv (VInt _) (VInt _) = error "tried to do integer division in forceOp"
+forceOp OpDiv (VFloat x) (VFloat y) = VFloat (x/y)
+-- Only ever emitted guarded by an OpMod==0 applicability test (see
+-- IntermediateRepresentation's OpIntDiv/OpMod haddock), so every rounding
+-- convention agrees here; 'div'/'mod' (floor-style) are as good as any.
+forceOp OpIntDiv (VInt x) (VInt y) = VInt (x `div` y)
+forceOp OpMod (VInt x) (VInt y) = VInt (x `mod` y)
+forceOp OpSub (VInt x) (VInt y) = VInt (x-y)
+forceOp OpSub (VFloat x) (VFloat y) = VFloat (x-y)
+forceOp OpOr (VBool x) (VBool y) = VBool (x || y)
+forceOp OpGreaterThan (VInt x) (VInt y) = VBool (x > y)
+forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x > y)
+forceOp OpLessThan (VInt x) (VInt y) = VBool (x < y)
+forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x < y)
+forceOp OpAnd (VBool x) (VBool y) = VBool (x && y)
+-- Missing until the admission-totality fuzz oracle found @main = max 5.0
+-- (-9.0)@ crashing every variant, generate included: two constant operands are
+-- folded here, and the interpreter's own 'OpMax' already had both cases.
+forceOp OpMax (VInt x) (VInt y) = VInt (max x y)
+forceOp OpMax (VFloat x) (VFloat y) = VFloat (max x y)
+-- Operations on ANYs should not happen. This is simplifying unreachable code paths, that should be optimized away later
+forceOp _ VAny _ = VAny
+forceOp _ _ VAny = VAny
+forceOp a b c = error $ "Error during forceOp optimizer: " ++ show a ++ " " ++ show b ++ " " ++ show c
+
+forceUnaryOp :: UnaryOperand -> IRValue -> IRValue
+forceUnaryOp OpAbs (VFloat x) = VFloat (abs x)
+forceUnaryOp OpAbs (VInt x) = VInt (abs x)
+forceUnaryOp OpNeg (VFloat x) = VFloat (-x)
+forceUnaryOp OpNeg (VInt x) = VInt (-x)
+forceUnaryOp OpSign (VFloat x) = VFloat (signum x)
+forceUnaryOp OpSign (VInt x) = VInt (signum x)
+forceUnaryOp OpNot (VBool x) = VBool (not x)
+-- Same policy as forceOp: an operation on ANY is an unreachable path being
+-- folded, not a real negation.
+forceUnaryOp OpNot VAny = VAny
+forceUnaryOp OpExp (VFloat x) = VFloat (exp x)
+forceUnaryOp OpLog (VFloat x) = VFloat (log x)
+-- Every other operation on the sentinel too: the inverse of @exp@ applied to a
+-- wildcard field is folded here on a path that only the runtime's
+-- unevaluable-witness refusal guards (fuzz-admission-oracle-bugs item 8a). An
+-- IRIf never picks an arm on the resulting ANY (see 'simplify').
+forceUnaryOp _ VAny = VAny
+forceUnaryOp _ _ = error "Error during forceUnaryOp optimizer"
+
+
+--TODO
+
+forceAnyCheck :: OptEnv -> IRExpr -> IRExpr
+forceAnyCheck _ x | isValue x = IRConst $ VBool (unval x == VAny || unval x == VList AnyList)
+-- One arm covers all four 'ConTag's at once -- a computed construct of any
+-- tag (list cons, tuple, either arm) can never be the ANY sentinel.
+forceAnyCheck _ (IRConstruct _ _) = IRConst $ VBool False
+-- A computed scalar is never the ANY sentinel. ANY reaches an expression only
+-- as a query value -- an IRConst VAny or a parameter carrying one -- and does
+-- NOT propagate through arithmetic: every operator case in 'IRInterpreter'
+-- errors on a VAny operand rather than returning VAny (the propagating cases
+-- are present but commented out), and the Python/Julia runtimes likewise raise
+-- on arithmetic against the sentinel. So an operator, a distribution leaf, a
+-- draw or an enumerated sum is statically not-ANY, and the check guarding it
+-- collapses -- which matters because that check is typically the second copy
+-- of the whole value expression it tests, next to the equality it guards.
+forceAnyCheck _ (IROp _ _ _) = IRConst $ VBool False
+forceAnyCheck _ (IRUnaryOp _ _) = IRConst $ VBool False
+forceAnyCheck _ (IRDensity _ _ _) = IRConst $ VBool False
+forceAnyCheck _ (IRCumulative _ _ _) = IRConst $ VBool False
+forceAnyCheck _ (IRSample _) = IRConst $ VBool False
+-- A tensor is a computed aggregate and a reduction of one is a computed
+-- scalar; neither can be the ANY sentinel, for the same reason the enumerated
+-- sums above cannot. 'BIndex' is deliberately absent: it reads back an element
+-- someone else put in the tensor, so it is only not-ANY if that value was,
+-- which is not decidable here -- it falls through to a real runtime check.
+forceAnyCheck _ (IRBuiltin (BTensor _) _) = IRConst $ VBool False
+forceAnyCheck _ (IRBuiltin BMap _) = IRConst $ VBool False
+forceAnyCheck _ (IRBuiltin (BReduce _ _) _) = IRConst $ VBool False
+forceAnyCheck _ (IRBuiltin (BIota _) _) = IRConst $ VBool False
+-- Push the check through the binding forms, so a scalar body above can decide
+-- it. Only kept when it actually decided: otherwise this would just relocate
+-- the test (and, for an if, duplicate it).
+forceAnyCheck env (IRLetIn n v b)
+  | IRConst c <- forceAnyCheck env b = IRLetIn n v (IRConst c)
+forceAnyCheck env (IRIf c t e)
+  | IRConst t' <- forceAnyCheck env t
+  , IRConst e' <- forceAnyCheck env e = IRIf c (IRConst t') (IRConst e')
+-- A constructor test is Bool-valued. Only these calls fold: an arbitrary
+-- 'IRApply' may return the sentinel it was handed.
+forceAnyCheck env (IRApply (IRVar f) _)
+  | f `Set.member` optCtorTests env = IRConst $ VBool False
+-- A freshly built ADT value is never the sentinel, whatever its fields hold.
+forceAnyCheck env x
+  | Just _ <- ctorLiteral env x = IRConst $ VBool False
+forceAnyCheck _ x = IRUnaryOp OpIsAny x
+-- Maybe more, I am not quite sure
+
+-- | Inside @if c then t else e@, a re-test of @c@ is decided: True throughout
+-- @t@, False throughout @e@. The compiler emits these at every level --
+-- 'anySafe' wraps each result in an @isAny@ guard and each leaf adds its own,
+-- Either inference tests the arm before projecting it, and -O2's substituting
+-- rewrites stack a condition directly inside its own branch -- and the dead arm
+-- a nested re-test selects is often another copy of the value expression.
+--
+-- Only cheap tests over a single bare variable are propagated, so the
+-- substitution is a structural match and a shadowing binder is easy to spot:
+-- @isAny v@, an Either arm test, a constructor test @is\<Ctor\> v@, and the
+-- bare Bool @v@ itself, each under any number of @not@s. The condition must be
+-- pure: re-testing a draw is a second, independent draw, not the same value.
+--
+-- The three tests yield a genuine Bool in every backend, so they are replaced
+-- wherever they occur. A bare @v@ is replaced only where it is itself the
+-- condition of a nested if: the Python backend treats the ANY sentinel as
+-- truthy, so inside @if v@ the variable is only known to be truthy, which is
+-- all an if-condition observes.
+propagateCondition :: OptEnv -> IRExpr -> IRExpr
+propagateCondition env (IRIf c t e)
+  | (atom, pol) <- stripNots c
+  , Just v <- conditionVar atom
+  , isPureGiven (optDetGens env) atom
+  = IRIf c (substCond v atom (boolTest atom) pol t)
+           (substCond v atom (boolTest atom) (not pol) e)
+  where
+    conditionVar (IRVar v) = Just v
+    conditionVar (IRUnaryOp OpIsAny (IRVar v)) = Just v
+    conditionVar (IRDestruct AcIsLeft (IRVar v)) = Just v
+    conditionVar (IRDestruct AcIsRight (IRVar v)) = Just v
+    conditionVar (IRApply (IRVar f) (IRVar v)) | f `Set.member` optCtorTests env = Just v
+    conditionVar _ = Nothing
+    boolTest (IRVar _) = False
+    boolTest _ = True
+propagateCondition _ x = x
+
+-- | A condition with its leading @not@s removed, and whether their number is
+-- even (True: the condition holds exactly when the stripped test does).
+stripNots :: IRExpr -> (IRExpr, Bool)
+stripNots (IRUnaryOp OpNot x) = not <$> stripNots x
+stripNots x = (x, True)
+
+-- | Replace @atom@ (a test over variable @v@) by its known value @b@ -- in every
+-- position when @everywhere@, otherwise only as (a negation of) a nested if's
+-- whole condition -- stopping at any binder that shadows @v@.
+substCond :: Varname -> IRExpr -> Bool -> Bool -> IRExpr -> IRExpr
+substCond v atom everywhere b = go
+  where
+    go x | everywhere, x == atom = IRConst (VBool b)
+    go x | v `Set.member` binderOf x = x
+    go (IRIf c t e)
+      | (a, pol) <- stripNots c, a == atom = IRIf (IRConst (VBool (b == pol))) (go t) (go e)
+    go x = irDescend go x
+    binderOf (IRLetIn n _ _) = Set.singleton n
+    binderOf (IRLambda n _)  = Set.singleton n
+    binderOf _               = Set.empty
+
+-- Sharing network applications (task repeated-neural-read-not-shared).
+--
+-- A network call @n(arg)@ is the most expensive node the IR has: with a real
+-- CNN behind @n@ it dominates the whole query. The compiler emits one per read,
+-- and a program that reads several fields of one read (@define truth = see img
+-- in Face (.. x0 truth ..) (.. x1 truth ..)@) emits one per field, each inside
+-- that field's own enumeration loop and under the guards the field equations
+-- add. CSE cannot merge them: it shares only occurrences on the unconditional
+-- skeleton, and these sit in loop bodies and if-arms. Nor can the compiler's
+-- own @nn_raw@ hoist, which stops at the guarded block a sub-inference binds
+-- ('IRCompiler.guardedSubInference').
+--
+-- This pass shares them. For each distinct pure application of a declared
+-- network it places one binding at the lowest node that covers every
+-- occurrence, and it lifts even a single occurrence out of an enumeration loop
+-- whose variable the argument does not read. An occurrence is never moved
+-- across
+--
+--   * a binder of one of its free variables (it would read another value), or
+--   * an if/select whose condition reads one of its free variables. Such a
+--     condition can be what keeps the call off an argument the network cannot
+--     take, @isAny(img)@ for instance, so the call stays under it.
+--
+-- A condition that reads none of the argument's variables cannot protect the
+-- call, so leaving its arm is sound for a pure expression. The cost side is
+-- that a call previously reached only in some arms is now evaluated once even
+-- when none of those arms runs. It is never evaluated more than once where it
+-- was evaluated at least once before.
+
+-- | One child of a node, as the network-sharing pass sees it: an occurrence
+-- below the edge may move above it only if it reads none of 'nkBarrier'.
+data NetKid = NetKid
+  { nkExpr    :: IRExpr
+  , nkBarrier :: Set.Set Varname
+  , nkLoop    :: Bool   -- ^ the body of an enumeration loop
+  }
+
+-- | The children of a node and how to rebuild it. An application spine is one
+-- node whose children are its head and arguments, so a binding is never placed
+-- inside a curried call (the scalar backends flatten a spine into one call;
+-- see 'unconditionalAnns'), and an enumeration loop's lambda is not a child of
+-- its own: the loop's body is.
+netKids :: IRExpr -> ([NetKid], [IRExpr] -> IRExpr)
+netKids e = case e of
+  IRApply{} ->
+    let (hd, args) = spine e []
+    in (map plain (hd : args), rebuildSpine)
+  IRIf c t f      -> ([plain c, guarded c t, guarded c f], rebuild3 IRIf)
+  IRSelect c t f  -> ([plain c, guarded c t, guarded c f], rebuild3 IRSelect)
+  IRLetIn n v b   -> ([plain v, NetKid b (Set.singleton n) False], rebuild2 (IRLetIn n))
+  IRLambda n b    -> ([NetKid b (Set.singleton n) False], rebuild1 (IRLambda n))
+  IRBuiltin BMap [IRLambda n b, d] ->
+    ([NetKid b (Set.singleton n) True, plain d], rebuild2 (\b' d' -> IRBuiltin BMap [IRLambda n b', d']))
+  _ -> (map plain (getIRSubExprs e), setIRSubExprs e)
+  where
+    plain x = NetKid x Set.empty False
+    guarded c x = NetKid x (Set.fromList (freeVarsIR c)) False
+    spine (IRApply f a) acc = spine f (a : acc)
+    spine f acc = (f, acc)
+    rebuildSpine (h : as) = foldl' IRApply h as
+    rebuildSpine [] = error "netKids: an application spine lost its head"
+    rebuild1 k [a] = k a
+    rebuild1 _ _ = error "netKids: arity mismatch (1)"
+    rebuild2 k [a, b] = k a b
+    rebuild2 _ _ = error "netKids: arity mismatch (2)"
+    rebuild3 k [a, b, c] = k a b c
+    rebuild3 _ _ = error "netKids: arity mismatch (3)"
+
+-- | A saturated application of a declared network to a pure argument.
+isNetworkApp :: OptEnv -> IRExpr -> Bool
+isNetworkApp env (IRApply (IRVar n) arg) =
+  n `Set.member` optNeurals env && isPureGiven (optDetGens env) arg
+isNetworkApp _ _ = False
+
+-- | The network applications in @e@ that may be moved to just above it, given
+-- the names they may not read ('nkBarrier's accumulated on the way down).
+-- Visited nodes are always spine roots, so a match is a whole call.
+netOccs :: OptEnv -> Set.Set Varname -> IRExpr -> [IRExpr]
+netOccs env barrier e =
+  [ e | isNetworkApp env e, Set.disjoint barrier (Set.fromList (freeVarsIR e)) ]
+  ++ concat [ netOccs env (barrier `Set.union` nkBarrier k) (nkExpr k) | k <- fst (netKids e) ]
+
+-- | Any network application at all in @e@, ignoring scope.
+hasNetworkApp :: OptEnv -> IRExpr -> Bool
+hasNetworkApp env e = isNetworkApp env e || any (hasNetworkApp env . nkExpr) (fst (netKids e))
+
+-- | Replace the occurrences of @key@ that 'netOccs' would report from here.
+replaceNetOcc :: IRExpr -> IRExpr -> IRExpr -> IRExpr
+replaceNetOcc key rep = walk Set.empty
+  where
+    fvKey = Set.fromList (freeVarsIR key)
+    walk barrier e
+      | not (Set.disjoint barrier fvKey) = e
+      | e == key = rep
+      | otherwise =
+          let (ks, rebuild) = netKids e
+          in rebuild [ walk (barrier `Set.union` nkBarrier k) (nkExpr k) | k <- ks ]
+
+-- | The sharing pass, plus the number of bindings it introduced.
+shareNetworkCallsCounted :: OptEnv -> IRExpr -> (IRExpr, Int)
+shareNetworkCallsCounted env top
+  | Set.null (optNeurals env) || not (hasNetworkApp env top) = (top, 0)
+  | otherwise = runState (go top) 0
+  where
+    reserved = allNamesIR top
+    fresh :: State Int String
+    fresh = do
+      i <- get
+      put (i + 1)
+      let n = "cse_nn_" ++ show i
+      if n `Set.member` reserved then fresh else return n
+    go :: IRExpr -> State Int IRExpr
+    go x = do
+      let kids = fst (netKids x)
+          perKid = [ (nkLoop k, netOccs env (nkBarrier k) (nkExpr k)) | k <- kids ]
+          keys = nubEq (concatMap snd perKid)
+          -- Covered by this node and no lower one: spread over two or more
+          -- children, or confined to a loop body it does not vary with.
+          placeHere key = case [ loop | (loop, os) <- perKid, key `elem` os ] of
+            []     -> False
+            [loop] -> loop
+            _      -> True
+          here = filter placeHere keys
+      names <- mapM (const fresh) here
+      let pairs = zip here names
+          x' = foldl' (\acc (k, n) -> replaceNetOcc k (IRVar n) acc) x pairs
+          (kids', rebuild) = netKids x'
+      kids'' <- mapM (\k -> if hasNetworkApp env (nkExpr k) then go (nkExpr k) else return (nkExpr k)) kids'
+      return (foldr (\(k, n) acc -> IRLetIn n k acc) (rebuild kids'') pairs)
+    nubEq = foldl' (\acc a -> if a `elem` acc then acc else acc ++ [a]) []
+
+-- Common-subexpression elimination.
+--
+-- This is a whole-expression pass (run outside @irMap@): it threads a single
+-- counter so every binding it introduces gets a globally-unique name.  Running it
+-- per node instead would let the same @cse_N@ name be chosen at two different
+-- nesting levels, which shadows and corrupts a binding of a different type.
+--
+-- A candidate is only hoisted when doing so is provably semantics-preserving,
+-- which requires three conditions:
+--
+--   * pure — evaluating it has no side effect ('isPure', tracked as 'annImpure'):
+--     no IRSample draw and no generator reference, so sharing a single value for
+--     it cannot collapse distinct random draws;
+--   * capture-safe — none of its free variables are bound anywhere inside the
+--     node, so lifting it to a let at the top of the node keeps every variable
+--     in scope;
+--   * unconditionally evaluated — it occurs at least twice in the node's
+--     "unconditional skeleton" (positions reached on every evaluation, i.e. not
+--     inside an IRIf branch or a lambda body -- an enumeration loop body being a
+--     'BMap''s lambda).  Because IRLetIn is
+--     strict in both the interpreter and generated code, this guarantees the
+--     hoisted binding is forced exactly when one of its original occurrences
+--     would have been, so no extra evaluation is introduced.
+--
+-- Cost model: a skeleton is scanned only at "scan roots" (the top expression
+-- and each conditional entry point: if-branches, lambda and enum-sum bodies),
+-- not at every node.  An interior node's skeleton is a sublist of its scan
+-- root's, so it cannot contain a repeat the root scan did not already see —
+-- except a candidate the root refused only for capture reasons, whose binder
+-- the descent can move below; only such still-repeated candidates warrant a
+-- same-region re-scan, and only along child subtrees whose skeleton still
+-- repeats one of them ('descendBlocked').  Repeats are counted by structural
+-- hash ('annotateIR', verified with exact equality inside each bucket),
+-- replacing the pairwise subexpression comparisons that, together with the
+-- historical per-node re-scans, made this pass roughly cubic in the length of
+-- world-sum spines (see task iroptimizer-superlinear-scaling).
+
+-- | CSE plus the number of bindings it hoisted. Unlike the per-node rules this
+-- is a whole-expression pass, so "fired once" would say nothing about how much
+-- it did; the counter behind the fresh-name supply is the useful number.
+-- (A name collision with an existing @cse_N@ -- possible from a previous
+-- fixed-point iteration -- consumes a counter step without hoisting, so the
+-- figure is an upper bound, off by the number of such collisions.)
+optimizeCommonSubexprCounted :: OptEnv -> IRExpr -> (IRExpr, Int)
+optimizeCommonSubexprCounted det topExpr = runState (scan (annotateIR det topExpr)) 0
+  where
+    -- Names already present anywhere in the expression (e.g. from a previous
+    -- fixed-point iteration); fresh names must avoid these too.
+    reserved = allNamesIR topExpr
+    fresh :: State Int String
+    fresh = do
+      i <- get
+      put (i + 1)
+      let n = "cse_" ++ show i
+      if n `Set.member` reserved then fresh else return n
+    -- Extract every hoistable repeat of this node's skeleton, then continue
+    -- at the scan roots below it.  The annotation is built once for the whole
+    -- expression and reused down the walk; only an actual extraction, which
+    -- rewrites the node, forces a re-annotation of that subtree.
+    scan :: AnnIR -> State Int IRExpr
+    scan a = do
+      (a', blockedKeys) <- extractHere a
+      if Set.null blockedKeys
+        then descendToScanRoots a'
+        else descendBlocked blockedKeys a'
+    descendToScanRoots :: AnnIR -> State Int IRExpr
+    descendToScanRoots a = case annExpr a of
+      IRIf{}          | [c, t, el] <- annKids a -> IRIf <$> descendToScanRoots c <*> scan t <*> scan el
+      IRSelect{}      | [c, t, el] <- annKids a -> IRSelect <$> descendToScanRoots c <*> scan t <*> scan el
+      IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
+      e -> do
+        kids <- mapM descendToScanRoots (annKids a)
+        return (setIRSubExprs e kids)
+    -- Like descendToScanRoots, but through a region whose scan left capture-
+    -- blocked repeats: a same-region child is re-scanned only if some blocked
+    -- candidate still occurs >=2 times in the child's own skeleton (only there
+    -- can the descent free it for extraction below its binder); all other
+    -- children cannot host a same-region extraction and take the cheap walk.
+    descendBlocked :: Set.Set (Int, Int) -> AnnIR -> State Int IRExpr
+    descendBlocked keys a = case annExpr a of
+      IRIf{}          | [c, t, el] <- annKids a -> IRIf <$> route c <*> scan t <*> scan el
+      IRSelect{}      | [c, t, el] <- annKids a -> IRSelect <$> route c <*> scan t <*> scan el
+      IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
+      e -> do
+        kids <- mapM route (annKids a)
+        return (setIRSubExprs e kids)
+      where
+        -- once no key repeats in a child's skeleton, none can repeat deeper in
+        -- the same region (skeletons only shrink), so the walk needs no
+        -- further key counting
+        route c | keysRepeatedIn keys c = scan c
+                | otherwise = descendToScanRoots c
+    extractHere :: AnnIR -> State Int (AnnIR, Set.Set (Int, Int))
+    extractHere a = case bestCommonSubexpr a of
+      (Nothing, blockedKeys) -> return (a, blockedKeys)
+      (Just sub, _) -> do
+        name <- fresh
+        -- swap the occurrences inside the existing annotation instead of
+        -- re-annotating the whole subtree: re-annotation per extraction made
+        -- extraction chains quadratic in region size
+        let body = annReplace det sub (annotateIR det (IRVar name)) a
+        extractHere (mkAnnIR det (IRLetIn name (annExpr sub) (annExpr body)) [sub, body])
+
+-- | True if any of the given (hash, size) keys occurs at least twice in the
+-- node's unconditional skeleton.
+keysRepeatedIn :: Set.Set (Int, Int) -> AnnIR -> Bool
+keysRepeatedIn keys annIR = any (>= (2 :: Int)) (Map.elems counts)
+  where
+    counts = Map.fromListWith (+)
+      [ (k, 1) | a <- unconditionalAnns annIR
+               , let k = (annHash a, annSize a)
+               , k `Set.member` keys ]
+
+-- | Subtree annotated with memoized structural facts, so repeats can be
+-- counted by hash instead of pairwise tree comparison.
+data AnnIR = AnnIR
+  { annExpr    :: IRExpr
+  , annKids    :: [AnnIR]
+  , annHash    :: !Int
+  , annSize    :: !Int      -- leaf count
+  , annImpure  :: !Bool     -- evaluation has a side effect: an IRSample draw or
+                            -- a generator reference (see 'isPure'). Sharing an
+                            -- impure repeat would collapse independent draws.
+  , annBound   :: Set.Set String  -- names bound by binders anywhere in the subtree
+  }
+
+annotateIR :: OptEnv -> IRExpr -> AnnIR
+annotateIR det e = mkAnnIR det e (map (annotateIR det) (getIRSubExprs e))
+
+-- | Annotate a node whose children are already annotated.
+mkAnnIR :: OptEnv -> IRExpr -> [AnnIR] -> AnnIR
+mkAnnIR det e kids = AnnIR e kids h sz smp bnd
+  where
+    h = foldl' hashMix (headHash e) (map annHash kids)
+    sz = if null kids then 1 else sum (map annSize kids)
+    smp = case e of
+      IRSample _              -> True
+      IRVar n | isEffectfulVar n, not (Set.member n (optDetGens det)) -> True
+      _                       -> any annImpure kids
+    kidsBound = Set.unions (map annBound kids)
+    bnd = case e of
+      IRLetIn n _ _   -> Set.insert n kidsBound
+      IRLambda n _    -> Set.insert n kidsBound
+      _               -> kidsBound
+
+-- | Replace every subtree structurally equal to `sub` by `rep`, rebuilding
+-- annotations only along changed paths and sharing untouched subtrees.
+-- Occurrences cannot nest (a strict subtree is smaller than its host), so a
+-- match is not descended into — same result as the historical whole-tree
+-- replaceAll with a fresh re-annotation, without its quadratic cost.
+annReplace :: OptEnv -> AnnIR -> AnnIR -> AnnIR -> AnnIR
+annReplace det sub rep a0 = maybe a0 id (go a0)
+  where
+    go a
+      | annSize a < annSize sub = Nothing
+      | annHash a == annHash sub && annSize a == annSize sub
+        && annExpr a == annExpr sub = Just rep
+      | otherwise =
+          let changes = map go (annKids a)
+          in if all (== Nothing) (map (fmap (const ())) changes)
+               then Nothing
+               else let kids' = zipWith (\old new -> maybe old id new) (annKids a) changes
+                    in Just (mkAnnIR det (setIRSubExprs (annExpr a) (map annExpr kids')) kids')
+
+hashMix :: Int -> Int -> Int
+hashMix a b = (a * 16777619) `xor` b
+
+hashStr :: String -> Int
+hashStr = foldl' (\a c -> hashMix a (fromEnum c)) 5381
+
+-- | Hash of a node's constructor and non-child payload.
+headHash :: IRExpr -> Int
+headHash e = case e of
+  IRIf{}            -> 1
+  IRSelect{}        -> 33
+  IROp op _ _       -> hashMix 2 (hashStr (show op))
+  IRUnaryOp op _    -> hashMix 3 (hashStr (show op))
+  IRConst v         -> hashMix 6 (hashStr (show v))
+  IRDensity d ls _  -> hashMix 21 (hashMix (hashStr (show d)) (hashStr (show ls)))
+  IRCumulative d ls _ -> hashMix 22 (hashMix (hashStr (show d)) (hashStr (show ls)))
+  IRSample d        -> hashMix 23 (hashStr (show d))
+  IRLetIn n _ _     -> hashMix 24 (hashStr n)
+  IRVar n           -> hashMix 25 (hashStr n)
+  IRLambda n _      -> hashMix 26 (hashStr n)
+  IRApply{}         -> 27
+  IRIsPossible v _  -> hashMix 29 (hashStr (show v))
+  IRError s         -> hashMix 31 (hashStr s)
+  IRConformsTo t _  -> hashMix 32 (hashStr (show t))
+  IRBuiltin b _       -> hashMix 38 (hashStr (show b))
+  IRConstruct t _     -> hashMix 39 (hashStr (show t))
+  IRDestruct a _      -> hashMix 40 (hashStr (show a))
+
+-- | The largest hoistable common subexpression of a node (candidates are in
+-- first-occurrence order and ties break like the historical
+-- @maximumBy . nub@, i.e. towards the last equal maximum), plus the
+-- (hash, size) keys of repeated pure candidates that were refused only for
+-- capture reasons (and may become extractable further down).
+bestCommonSubexpr :: AnnIR -> (Maybe AnnIR, Set.Set (Int, Int))
+bestCommonSubexpr annIR =
+  ( if null candidates then Nothing else Just (maximumBy (comparing annSize) candidates)
+  , Set.fromList [ (annHash a, annSize a) | a <- blocked ] )
+  where
+    skeleton = unconditionalAnns annIR
+    bound = annBound annIR
+    repeated = [ a | (a, n) <- tallyAnns skeleton
+                   , n >= 2
+                   , annSize a > 1
+                   -- Deliberately not raised at -O3, where the merge exposes far
+                   -- more material and hoisting everything is expensive: the
+                   -- chain is order-dependent, and it is the SMALL hoists that
+                   -- enable the large ones. `cse_0 = readScene(sym)` is two
+                   -- leaves, and without it the two enumerated sums that read it
+                   -- keep referring to differently-named bindings and never
+                   -- compare equal, so the one hoist that actually halves the
+                   -- runtime never happens. Measured: a minimum of 4 leaves cuts
+                   -- planEnumRecDeepCount's -O3 compile from 5.8s to 1.1s and
+                   -- loses the entire -O3 runtime win.
+                   , not (annImpure a) ]
+    (candidates, blocked) = partition captureSafe repeated
+    captureSafe a = not (any (`Set.member` bound) (freeVarsIR (annExpr a)))
+
+-- | Subexpressions reached on every evaluation of the node.  We descend through
+-- ordinary nodes but stop at the branches of an IRIf and the body of a lambda
+-- (an enumeration loop is a 'BMap' over one, so its body is stopped at there),
+-- since those are only conditionally, repeatedly, or never evaluated.
+--
+-- One node shape is descended into but never LISTED: the function half of an
+-- application that is itself an application, i.e. a partially applied call.
+-- The IR is curried (@IRApply (IRApply f a) b@) while the scalar backends are
+-- not -- they flatten a whole application spine into one @f(a, b)@ call site --
+-- so hoisting the inner spine into its own binding emits @cse_0 = f(a)@, a call
+-- with the wrong arity, which is a runtime TypeError rather than a slower
+-- program. (A partially applied LAMBDA is legitimate and common; this only
+-- refuses to let CSE manufacture one where the source had a saturated call.)
+unconditionalAnns :: AnnIR -> [AnnIR]
+unconditionalAnns a0 = go True a0 []
+  where
+    go listed a acc = (if listed then (a :) else id) $ case annExpr a of
+      IRIf{}      -> case annKids a of { (c:_) -> go True c acc; [] -> acc }
+      -- A select's arms are conditional under scalar lowering exactly like an
+      -- if's (pytorch-tensorizer M1): only the condition is unconditional, so a
+      -- guarded subexpression must not be counted as hoistable above the guard.
+      IRSelect{}  -> case annKids a of { (c:_) -> go True c acc; [] -> acc }
+      IRLambda{}  -> acc
+      IRApply{}   -> case annKids a of
+        [fn, arg] -> go (not (isApplication (annExpr fn))) fn (go True arg acc)
+        kids      -> foldr (go True) acc kids
+      _           -> foldr (go True) acc (annKids a)
+    isApplication IRApply{} = True
+    isApplication _         = False
+
+-- | Exact occurrence counts of the distinct subexpressions in the list, in
+-- order of first occurrence.  Entries are bucketed by (hash, size) and
+-- resolved by exact equality within a bucket, so a hash collision can cost
+-- time but never miscount.  (A miscount of 1 as >=2 would extract a
+-- single-use binding that optimizeLetIns inlines right back, making the
+-- optimizer fixpoint oscillate.)
+tallyAnns :: [AnnIR] -> [(AnnIR, Int)]
+tallyAnns anns = [ (a, countAt key idx) | (key, idx, a) <- reverse order ]
+  where
+    (finalCounts, order) = foldl' step (Map.empty, []) anns
+    countAt key idx = snd (Map.findWithDefault [] key finalCounts !! idx)
+    step (m, ord) a =
+      let key = (annHash a, annSize a)
+          bucket = Map.findWithDefault [] key m
+      in case findIndex ((== annExpr a) . fst) bucket of
+           Just i  -> (Map.insert key (bumpAt i bucket) m, ord)
+           Nothing -> (Map.insert key (bucket ++ [(annExpr a, 1)]) m, (key, length bucket, a) : ord)
+    bumpAt i xs = [ if j == i then (x, n + 1) else (x, n) | (j, (x, n)) <- zip [0 ..] xs ]
+
+-- | Rebuild a node from a fresh list of children (inverse of 'getIRSubExprs').
+setIRSubExprs :: IRExpr -> [IRExpr] -> IRExpr
+setIRSubExprs (IRIf{}) [a, b, c] = IRIf a b c
+setIRSubExprs (IRSelect{}) [a, b, c] = IRSelect a b c
+setIRSubExprs (IROp op _ _) [a, b] = IROp op a b
+setIRSubExprs (IRUnaryOp op _) [a] = IRUnaryOp op a
+setIRSubExprs (IRConstruct t _) kids = IRConstruct t kids
+setIRSubExprs (IRDestruct a _) [c] = IRDestruct a c
+setIRSubExprs (IRIsPossible val _) [a] = IRIsPossible val a
+setIRSubExprs (IRDensity d ls _) [a] = IRDensity d ls a
+setIRSubExprs (IRCumulative d ls _) [a] = IRCumulative d ls a
+setIRSubExprs (IRLetIn n _ _) [a, b] = IRLetIn n a b
+setIRSubExprs (IRLambda n _) [a] = IRLambda n a
+setIRSubExprs (IRApply{}) [a, b] = IRApply a b
+setIRSubExprs (IRConformsTo t _) [a] = IRConformsTo t a
+setIRSubExprs (IRBuiltin b _) kids = IRBuiltin b kids
+setIRSubExprs e [] = e  -- leaves: IRConst, IRSample, IRVar, IRError
+setIRSubExprs e kids = error ("setIRSubExprs: arity mismatch for " ++ irPrintFlat e ++ " with " ++ show (length kids) ++ " children")
+
+-- | Free variables of an IR expression.
+freeVarsIR :: IRExpr -> [String]
+freeVarsIR (IRVar v) = [v]
+freeVarsIR (IRLetIn n decl body) = freeVarsIR decl ++ filter (/= n) (freeVarsIR body)
+freeVarsIR (IRLambda n body) = filter (/= n) (freeVarsIR body)
+freeVarsIR e = concatMap freeVarsIR (getIRSubExprs e)
+
+-- | Every variable name occurring anywhere in the expression, as a variable
+-- occurrence or as a binder — i.e. the union of free and bound variables,
+-- computed scope-blind in one pass (the per-binder filtering of 'freeVarsIR'
+-- makes free-then-bound quadratic on deep let chains).
+allNamesIR :: IRExpr -> Set.Set String
+allNamesIR = go Set.empty
+  where
+    go acc e = case e of
+      IRVar n         -> Set.insert n acc
+      IRLetIn n _ _   -> foldl' go (Set.insert n acc) (getIRSubExprs e)
+      IRLambda n _    -> foldl' go (Set.insert n acc) (getIRSubExprs e)
+      _               -> foldl' go acc (getIRSubExprs e)
+
+-- | Replace an application of a lambda to a non-value argument by a let binding:
+-- @(\x -> body) arg@ becomes @let x = arg in body@.  This is the capture-safe
+-- form of lambda elimination; 'applyConstant' handles constant arguments by
+-- inlining them directly, and 'optimizeLetIns' cleans up the resulting binding.
+applyToLetIn :: IRExpr -> IRExpr
+applyToLetIn (IRApply (IRLambda varname inExpr) v) | not (isValue v) = IRLetIn varname v inExpr
+applyToLetIn x = x
+
+pruneAnyCkecksExpr :: IRExpr -> IRExpr
+pruneAnyCkecksExpr (IRUnaryOp OpIsAny _) = IRConst $ VBool False
+pruneAnyCkecksExpr x = x
+

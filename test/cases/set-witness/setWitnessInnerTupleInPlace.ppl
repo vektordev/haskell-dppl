@@ -1,0 +1,4 @@
+-- An inner binding holding x, read once beside another read of x: the
+-- set-witness walk enters it in place (task dispatch-on-law-certificates), as
+-- ((x, 1.0), x).
+main = draw x = Normal in draw z = (x, 1.0) in (z, x)

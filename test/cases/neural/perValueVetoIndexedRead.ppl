@@ -1,0 +1,17 @@
+-- Task per-value-neural-equality-unrolled-sum: a per-value veto. The token t
+-- is drawn from lm, and an anti-model lmAnti vetoes it when its own draw c
+-- agrees. With t known (a per-value slot, or the point query's t), P(c == t)
+-- and P(not (c == t)) are one indexed read of lmAnti's vector at t and its
+-- complement, not a sum with one guarded term per domain value (which made
+-- the per-value posterior O(V^2) per token). TestInternals'
+-- perValueVetoIndexedRead checks the emitted IR carries no such sum.
+neural lm :: (Symbol -> Int) of [0, 1, 2, 3]
+neural lmAnti :: (Symbol -> Int) of [0, 1, 2, 3]
+
+main ctx ctxC =
+  draw t = lm ctx in
+  draw c = lmAnti ctxC in
+  (t, not (t == c))
+
+posterior :: Symbol -> Symbol -> (Enumerated Int, Bool)
+posterior = main

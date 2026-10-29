@@ -71,7 +71,7 @@ NOT_FLOAT_PATH = {
   "rand", "randn", "categorical_index", "isAny", "isFloat", "eq", "isclose", "throw",
   "fromLeft", "fromRight", "toList", "mapList", "indexOf", "listProd",
   "listConcat",
-  "isPossible",
+  "isPossible", "nest_memo", "nest_memo_scope",
 }
 
 def public_functions(mod):

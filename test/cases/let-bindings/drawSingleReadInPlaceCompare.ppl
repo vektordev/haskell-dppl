@@ -1,0 +1,4 @@
+-- A comparison against an enumerated bound, the Normal behind a draw read once:
+-- the in-place engine (task dispatch-on-law-certificates), as
+-- enumerability/normalBelowRandomThresholdEnumLeft.
+main = draw b = Uniform < 0.3 in draw z = Normal in (if b then 1.0 else 0.0) > z

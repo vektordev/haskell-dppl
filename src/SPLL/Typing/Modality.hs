@@ -149,9 +149,9 @@ joinFin _      _      = Infinite
 -- enumerated values). 'Finite' means /enumerable domain/
 -- ('SPLL.Analysis.enumerableDomain') and nothing else: a node whose type
 -- merely has finitely many inhabitants, but which carries no tag to loop over,
--- is 'Infinite', because the one reader of 'Fin' is 'marginalize''s @keepD@,
--- and every IRCompiler equation that can cash a finite-sum density enumerates
--- the tag (task finiteness-single-producer).
+-- is 'Infinite', because the readers of 'Fin' are 'marginalize''s @keepD@
+-- and @keepI@, and every IRCompiler equation that can cash a finite-sum
+-- density enumerates the tag (task finiteness-single-producer).
 finFromTags :: [Tag] -> Fin
 finFromTags ts = maybe Infinite (const Finite) (enumerableDomain ts)
 
@@ -285,7 +285,8 @@ meetGroundParts = meetGroundMixture
 --     affine shift that /preserves/ the family is the job of the operator-aware
 --     @shiftSem@ layer (milestone 4), a peer that consumes this one.
 --   * Otherwise you pay one marginalization, which always costs 'CanExact', and
---     costs the density unless the integrated-out side is finite-discrete.
+--     costs the density and the integral unless the integrated-out side is
+--     finite-discrete.
 --
 -- 'marginalize' is /family-agnostic/: its result always has @gFam = FamNone@.
 marginalize :: GroundMod -> GroundMod -> GroundMod
@@ -299,9 +300,13 @@ marginalize a b
     has x s = x `Set.member` s
     -- Sampling survives if both sides can be sampled (joint sample + pushforward).
     keepS = has CanSample sa && has CanSample sb
-    -- Integrals survive if each side offers a density or an integral.
+    -- Integrals survive if each side offers a density or an integral AND at
+    -- least one side is finite-discrete (so the marginal CDF is a finite sum of
+    -- known CDFs). Two infinite-support operands under a generic operator have
+    -- no trusted O(1) CDF (only quadrature), so only sampling survives.
     keepI = (has CanDensity sa || has CanIntegrate sa)
          && (has CanDensity sb || has CanIntegrate sb)
+         && (gFin a == Finite || gFin b == Finite)
     -- A closed marginal density survives only with densities on both sides AND
     -- at least one finite-discrete side (so the marginal is a finite sum).
     keepD = has CanDensity sa && has CanDensity sb

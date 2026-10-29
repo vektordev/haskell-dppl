@@ -1,9 +1,10 @@
 -- A plan-enumerated (neural) *continuous* leaf combined arithmetically with a
 -- fresh continuous draw in the same expression. The convolution of the leaf's
 -- transported bound with the fresh Normal has no closed form in the
--- plan-guided transport, and the probability variant is dropped silently --
--- `probability` reports only "'main' has no compiled probability function",
--- with no plan diagnostic naming the cause (contrast
+-- plan-guided transport, and the probability variant is dropped. Since
+-- bottom-verdict-records-no-refusal-reason it records the reason that `+` has
+-- no inference rule for a random operand and a Gaussian one (before, it
+-- reported only "'main' has no compiled probability function"; contrast
 -- neuralLeafComparedAgainstRandomThreshold, whose comparison arm *does* say
 -- why). Multiplying instead of adding (`(snd o) * (Normal * 0.5)`) fails the
 -- same way through the same channel.
@@ -15,4 +16,4 @@
 -- gate, or downstream of a threshold on the leaf all compile exactly now;
 -- only the arithmetic combination pinned here remains.
 slow
-expect-failure: no-code probability
+expect-failure: refused "NeST computes no density or CDF for this combination"

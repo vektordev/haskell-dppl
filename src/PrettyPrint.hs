@@ -3,6 +3,7 @@ module PrettyPrint
   , pPrintIREnv
   , pPrintExpr
   , pPrintIRExpr
+  , pPrintValue
   ) where
 
 import SPLL.Lang.Lang

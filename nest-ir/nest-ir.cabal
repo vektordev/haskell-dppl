@@ -1,0 +1,68 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           nest-ir
+version:        0.1.0.0
+description:    The intermediate representation of NeST (IR, its checker, optimizer and passes, the interpreter and the three code generators). It imports nothing from the frontend; the dependency direction is enforced by this package boundary (design ir-package-boundary).
+license:        BSD3
+build-type:     Simple
+
+library
+  exposed-modules:
+      IRInterpreter
+      SPLL.CodeGenJulia
+      SPLL.CodeGenPyTorch
+      SPLL.CodeGenPyTorchBatched
+      SPLL.IntermediateRepresentation
+      SPLL.IR.ADT
+      SPLL.IR.Neural
+      SPLL.IR.Type
+      SPLL.IR.Value
+      SPLL.IRGatherPass
+      SPLL.IRLeafTablePass
+      SPLL.IROptimizer
+      SPLL.IRSelectPass
+      SPLL.IRTypeCheck
+      SPLL.PythonNesting
+      SPLL.ReservedNames
+      StandardLibrary
+      Utils
+  other-modules:
+      Paths_nest_ir
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wredundant-constraints -Werror
+  build-depends:
+      MonadRandom
+    , base >=4.7 && <5
+    , containers
+    , erf
+    , mtl
+    , statistics
+    , vector
+  default-language: Haskell2010
+
+test-suite nest-ir-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      TestIRTypeCheck
+      Paths_nest_ir
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wredundant-constraints -Werror
+  build-depends:
+      MonadRandom
+    , base >=4.7 && <5
+    , containers
+    , erf
+    , mtl
+    , nest-ir
+    , statistics
+    , tasty
+    , tasty-hunit
+    , vector
+  default-language: Haskell2010

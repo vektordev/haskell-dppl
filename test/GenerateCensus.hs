@@ -34,7 +34,8 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertFailure)
 
 import SPLL.Prelude (compile)
-import SPLL.IntermediateRepresentation (IREnv(..), IRExpr, IRFunGroup(..), defaultCompilerConfig)
+import SPLL.IntermediateRepresentation (IREnv(..), IRExpr, IRFunGroup(..))
+import SPLL.CompilerConfig (defaultCompilerConfig)
 import CertifiedCensus (irEnvConstructs, inferenceBodies, samplingConstructs)
 import BackendCoverage (fuzzCoverageExceptions)
 import CorpusSweep

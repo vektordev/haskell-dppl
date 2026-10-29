@@ -1,0 +1,13 @@
+-- A draw-bound running sum in slot 2, an independent draw in slot 3 and a
+-- constant in slot 4: (2 pi)^-3/2 at dim 3 at the origin (s1 = 0,
+-- s2 = p2 - s1 = 0, s3 = 0; the constant slot is a unit factor). The
+-- mask variant main__m001 binds (\p2 -> (s1, (p2, (ANY, 0.0)))) (s1 + s2)
+-- to compare it against the sample; 'stripBranchCount' read that four-deep
+-- tuple as a callee result and shifted its last two fields, so the guard
+-- compared a float against a tuple (interpreter "Approx can only evaluate
+-- on two floats", Python "unsupported operand type(s) for -"). The shape is
+-- an in-program position accumulator draw p_k = p_{k-1} + s_k, which
+-- answered at 3 slots and failed from 4. Task
+-- trajectory-tail-bound-as-tuple-type-error (second trigger); found by
+-- exp-continuous-hybrid-simulation-retest.
+p((0.0, (0.0, (0.0, 0.0))))=(6.349363593424097e-2, 3.0)

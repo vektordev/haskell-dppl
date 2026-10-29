@@ -8,7 +8,7 @@
 -- therefore has to become two declarations before those passes see it.
 --
 -- This module does the cloning. Its input is the result of let-generalising
--- inference (@RInfer@'s fallback path): each declaration's 'Scheme' and its
+-- inference (@RInfer.inferGeneralized@): each declaration's 'Scheme' and its
 -- typed body, in which every reference to a polymorphic declaration carries
 -- the instantiated type of that one use. Its output is an ordinary,
 -- *untyped* program with one declaration per instantiation and every

@@ -58,6 +58,7 @@ import SPLL.Lang.Lang (getTypeInfo)
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.PType (PType(..))
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Prelude (compile, admissionTyped, runGenNamedC, runProbNamedC, runIntegNamedC)
 
 -- | Which compiled variant a check exercised.

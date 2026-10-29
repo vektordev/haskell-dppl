@@ -18,6 +18,7 @@ import SPLL.Parser (tryParseProgram)
 import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.Analysis (annotate, annotateEnumsProg, definitelyUntagged, materializationDomain, withinMaterializationBudget, structuralTag, listedTag)
 import qualified SPLL.CodeGenPyTorch
+import qualified SPLL.CodeGenJulia
 import SPLL.Typing.Infer (addTypeInfo, addModalityLaws)
 import SPLL.Typing.ModalityInfer (Law(..), Justification(..), EngineCert(..), engineName)
 import SPLL.Typing.ForwardChaining (WorldsShape(..))
@@ -28,12 +29,13 @@ import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, makeProb, InputSlo
 import qualified SPLL.AutoNeural
 import MockNN (flattenMockInput, mockInputFor, shapedMockLogits, planAwareMockLogits)
 import SPLL.IntermediateRepresentation
+import SPLL.CompilerConfig
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IRGatherPass (gatherPassExpr)
 import SPLL.IRLeafTablePass (leafTablePassExpr)
-import SPLL.IROptimizer (postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
+import SPLL.IROptimizer (defaultOptimizerConfig, postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, prepBatchedBody, structural)
-import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
+import SPLL.IR.ADT (accessorMismatchMessage, implicitFunctionNames, implicitFunctionImpl, implicitFunctionApplicable)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic, Bottom))
 import Data.Foldable (toList)
@@ -45,6 +47,10 @@ import ScalingCheck (Point(..), Verdict(..), climb)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
+import SPLL.IR.Neural (noNeurals, neuralOracle, NeuralPrimitive(..), oracleSignatures)
+import SPLL.IR.Type (IRType(..), IRADTDecl(..))
+import SPLL.Typing.AlgebraicDataTypes (irADTDecl)
+import Data.Either (isLeft)
 import IRInterpreter (generateDet, generateRand)
 import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), CodeVariant(..), expectationProb, expectationDim, defaultBackends,
                         parseTestCasesFromString, corpusPplPath, corpusTstPath, TstFile(..), parseTstFileFromString)
@@ -149,7 +155,7 @@ test_plusBoolReject = testCase "plusBoolReject" $ do
   case tryParseProgram "<test>" src of
     Left err -> assertFailure ("Parse failed: " ++ show err)
     Right prog -> case tryAddRTypeInfo prog of
-      Left (ClassConstraintViolation _ _) -> return ()
+      Left (ClassConstraintViolation _ _ _) -> return ()
       other -> assertFailure ("Expected ClassConstraintViolation, got: " ++ show other)
 
 classConstraintTests :: TestTree
@@ -700,6 +706,26 @@ test_underflowedTailKeepsDimension = testCase "underflowedTailKeepsDimension" $ 
       assertEqual "the density underflows to a true float zero at this depth" 0.0 p
       assertEqual "but the branch is possible, so the mixture keeps dim=1" 1 d
       assertEqual "and the result is not flagged impossible" (Just False) (resultImpossible res)
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- Task enumerated-sum-over-density-body: an enumerated sum whose terms are
+-- densities of different dims reports the lowest dim among the possible terms
+-- and sums only the terms at that dim. Here the terms at (0, 3) are a dim-2
+-- density (b true: both slots Normal) and a dim-1 one (b false: the second
+-- slot is the atom 3.0), so the answer is the dim-1 term 0.5*phi(0). Pinned
+-- here because the corpus's sampling sweep cannot estimate a mixed
+-- atom/density point of a pair (corpus let-bindings/enumLetGatesFreshTupleDims
+-- holds the other rows).
+test_enumeratedSumLowestDimWins :: TestTree
+test_enumeratedSumLowestDimWins = testCase "enumeratedSumLowestDimWins" $ do
+  let src = "main = draw b = Uniform < 0.5 in if b then (Normal, Normal) else (Normal, 3.0)"
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  case runProb defaultCompilerConfig prog [] (VTuple (VFloat 0.0) (VFloat 3.0)) of
+    Right (VProbDim p d) -> do
+      assertEqual "the dim-1 term outvotes the dim-2 one" 1 d
+      assertBool ("expected 0.5*phi(0) = 0.19947, got " ++ show p) (abs (p - 0.5 / sqrt (2 * pi)) < 1.0e-9)
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
 -- Design mar-sum-types-observe §3: renormalising an observation needs no
@@ -1321,9 +1347,20 @@ engineApplicabilityTests = testGroup "Engine applicability (law-carrying-modalit
       assertHasNot "set-valued witnesses" es
       assertHas "affine marginalisation" es
   , testCase "no engine: the binding is sample-only, and the function Bottom" $ do
-      let src = "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
+      let src = "main = draw x = Normal in if sqrt x > 0.5 then x else 0.0 - x"
       assertEqual "certificates" [] (engines "x" src)
       assertEqual "main" Bottom (mainPTypeOf src)
+  , testCase "in place: a binding read once, with no binder on the way" $ do
+      let src = "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
+      assertEqual "certificates" ["in place"] (engines "x" src)
+      assertHasNot "in place" (engines "x" "main = draw x = Normal in (\\y -> sqrt x + y) 1.0 > 0.5")
+      assertHasNot "in place" (engines "x" "main = draw x = Normal in sqrt x > sqrt x")
+  , testCase "in place: not for a read inside a lambda, which may run any number of times" $ do
+      let src = "main = draw x = Normal in (\\f -> f 1.0 + f 2.0) (\\y -> sqrt x + y) > 0.5"
+      assertHasNot "in place" (engines "x" src)
+  , testCase "in place: the set-witness walk enters an inner binding read once" $ do
+      let src = "main = draw x = Normal in draw z = 0.5 in x < z"
+      assertHas "set-valued witnesses" (engines "x" src)
   , testCase "a deterministic binding needs no engine and records none" $
       assertEqual "" Nothing (map engineName <$> bindingJust "x" "main = draw x = 1.0 in x + Normal")
   , testCase "compare: two operands projecting from a plan read have the plan closed form" $
@@ -2096,7 +2133,7 @@ test_foldConstProjectionsOffSharedTuple = testCase "foldConstProjectionsOffShare
       -- The second field is read twice, so the binding stays a binding.
       body = IRConstruct TgTuple [ IRDestruct AcFst (IRVar "v")
                                  , IROp OpMult (IRDestruct AcSnd (IRVar "v")) (IRDestruct AcSnd (IRVar "v")) ]
-      opt = postProcess defaultCompilerConfig (IRLambda "s" (IRLetIn "v" bound body))
+      opt = postProcess defaultOptimizerConfig (IRLambda "s" (IRLetIn "v" bound body))
       mentionsFstV e = e == IRDestruct AcFst (IRVar "v") || any mentionsFstV (getIRSubExprs e)
       mentionsSndV e = e == IRDestruct AcSnd (IRVar "v") || any mentionsSndV (getIRSubExprs e)
   assertBool ("the agreed-constant field was not folded: " ++ show opt) (not (mentionsFstV opt))
@@ -2591,6 +2628,38 @@ test_recordSharedFieldGroupsCodeSizePolynomial = testCase "recordSharedFieldGrou
       , "neural see :: (Symbol -> Face)"
       , "main img = draw f = see img in Ans" ++ concat [ concat [" (a", show i, " f) (b", show i, " f) (a", show i, " f && b", show i, " f)"] | i <- [1 .. n] ] ]
 
+-- | A 3x3 grid of 10-way reads whose rows and columns must be all different
+-- (docs task grid-constraint-network-enumerated-jointly) compiled to nine
+-- nested loops, one per read: about 10^9 terms per call, more than ten
+-- minutes. Its clauses share the reads in a cycle, so IRCompiler now sums the
+-- reads out by variable elimination ('ConstraintNet'): tables over at most
+-- four reads, each built by one more loop. The loop nest of the probability
+-- body is the static trace of the difference: 9 deep before, 5 now.
+test_gridConstraintNetEliminated :: TestTree
+test_gridConstraintNetEliminated = testCase "gridConstraintNetEliminated" $ do
+  prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+            (tryParseProgram "gridConstraintNet" src)
+  env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+           (compile defaultCompilerConfig prog)
+  (probExpr, _) <- maybe (assertFailure "compiled main has no probability variant" >> error "unreachable")
+                     return (probFun (lookupIREnv "main" env))
+  let depth = loopDepth probExpr
+  assertBool ("the probability body of the 3x3 all-different grid nests " ++ show depth
+              ++ " loops; variable elimination needs at most 6, the joint enumeration 9") (depth <= 6)
+  where
+    loopDepth :: IRExpr -> Int
+    loopDepth (IRBuiltin BMap [IRLambda _ b, t]) = max (1 + loopDepth b) (loopDepth t)
+    loopDepth e = maximum (0 : map loopDepth (getIRSubExprs e))
+    src = unlines
+      [ "neural cell :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+      , "diff3 u v w = not (u == v) && not (u == w) && not (v == w)"
+      , "main a b c d e f g h i ="
+      , "  draw x1 = cell a in draw x2 = cell b in draw x3 = cell c in"
+      , "  draw x4 = cell d in draw x5 = cell e in draw x6 = cell f in"
+      , "  draw x7 = cell g in draw x8 = cell h in draw x9 = cell i in"
+      , "  diff3 x1 x2 x3 && diff3 x4 x5 x6 && diff3 x7 x8 x9 &&"
+      , "  diff3 x1 x4 x7 && diff3 x2 x5 x8 && diff3 x3 x6 x9" ]
+
 -- | A list literal of N field reads of one neural read, @[x1 f, .., xN f]@,
 -- was known-issues/listOfFieldReadsCompileGrowth (docs task
 -- list-of-field-reads-compile-exponential): Analysis listed every cell's
@@ -2615,10 +2684,89 @@ test_listOfFieldReadsCompileFlat = testCase "listOfFieldReadsCompileFlat" $ do
       , "neural see :: (Symbol -> Face)"
       , "main img = draw f = see img in [" ++ intercalate ", " [ "x" ++ show i ++ " f" | i <- [1 .. n] ] ++ "]" ]
 
+-- | The per-value veto @(t, not (t == c))@ over two V-value neural reads (docs
+-- task per-value-neural-equality-unrolled-sum, formerly the known-issues pin
+-- perValueGivenEqualityUnrolledSum): with @t@ known, the plan engine measured
+-- P(c == t) and P(not (c == t)) as a V-term sum of one-hot reads
+-- @raw[k] if k == t else 0.0@, so the per-value posterior's given step cost
+-- O(V) per value, O(V^2) per token (0.28 s over V = 2000 values). They are one
+-- indexed read @raw[t]@ and its complement now ('PLeafEq'). Every compiled
+-- body, at -O2 and -O0, must hold no such term; the values are checked by
+-- test/cases/neural/perValueVetoIndexedRead.
+test_perValueVetoIndexedRead :: TestTree
+test_perValueVetoIndexedRead = testGroup "perValueVetoIndexedRead"
+  [ check "-O2" defaultCompilerConfig
+  , check "-O0" defaultCompilerConfig { optimizerLevel = 0 }
+  ]
+  where
+    check lbl conf = testCase lbl $ do
+      prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+                (tryParseProgram "perValueVetoIndexedRead" src)
+      IREnv groups _ _ <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+                            (compile conf prog)
+      let bodies = [ (groupName g, b) | g <- groups, Just (b, _) <- [probFun g, integFun g] ]
+          offenders = [ (n, c) | (n, b) <- bodies, let c = oneHot b, c > 0 ]
+      assertBool "the program has probability bodies" (not (null bodies))
+      assertEqual "one-hot terms (raw[k] if k == x else 0.0) per body" [] offenders
+    oneHot e = (if isOneHot e then 1 else 0) + sum (map oneHot (getIRSubExprs e)) :: Int
+    isOneHot e = case e of
+      IRIf c (IRBuiltin BListIndex [_, IRConst (VInt _)]) (IRConst (VFloat 0.0)) -> keyTest c
+      _ -> False
+    keyTest c = case c of
+      IRUnaryOp OpNot c' -> keyTest c'
+      IROp OpEq (IRConst (VInt _)) _ -> True
+      IROp OpEq _ (IRConst (VInt _)) -> True
+      _ -> False
+    dom = "[" ++ intercalate ", " (map show [0 .. 99 :: Int]) ++ "]"
+    src = unlines
+      [ "neural lm :: (Symbol -> Int) of " ++ dom
+      , "neural lmAnti :: (Symbol -> Int) of " ++ dom
+      , "main ctx ctxC ="
+      , "  draw t = lm ctx in"
+      , "  draw c = lmAnti ctxC in"
+      , "  (t, not (t == c))"
+      , "posterior :: Symbol -> Symbol -> (Enumerated Int, Bool)"
+      , "posterior = main" ]
+
+-- | A bare neural Int read over an explicit V-value domain, @neural lm ::
+-- (Symbol -> Int) of [1, .., V]@ with @main ctx = lm ctx@, was
+-- known-issues/neuralIntReadDomainCompileGrowth (docs task
+-- neural-int-read-compile-quadratic-in-domain): the emitted module is linear
+-- in V, but the compile allocated ~V^2 (6.2 GB at V = 4000; V = 50257 did not
+-- finish in 20 min). Five walks were each quadratic down the V-deep index
+-- chain or writeLogits cons: 'firstAnyExceptIR' and 'propagateRefusals'
+-- collecting subterms by 'concatMap', the Python backend's per-level
+-- @else: if@ to @elif@ scan, 'fitPlanToSupport''s 'elem' subset test, and
+-- both text backends' String concatenation (a constant list's cons spine,
+-- and every Julia expression). Python at -O2 and -O0 (where the index chain
+-- stays an @indexOf@ over a V-element constant list) and Julia, each at
+-- slope about 1 now, 2 before; the bound admits linear growth.
+test_neuralIntReadDomainCompileLinear :: TestTree
+test_neuralIntReadDomainCompileLinear = testGroup "neuralIntReadDomainCompileLinear"
+  [ check "python" defaultCompilerConfig (SPLL.CodeGenPyTorch.generateFunctions True)
+  , check "python -O0" defaultCompilerConfig { optimizerLevel = 0 } (SPLL.CodeGenPyTorch.generateFunctions True)
+  , check "julia" defaultCompilerConfig SPLL.CodeGenJulia.generateFunctions
+  ]
+  where
+    check lbl conf codegen = testCase lbl $ do
+      verdict <- climb 1.5 [500, 1000, 2000] (compileAllocPointWith codegen "neuralIntReadDomainCompileLinear" conf src)
+      case verdict of
+        WithinBound _ -> return ()
+        Exceeds why -> assertFailure ("compiling a bare neural Int read grows faster than its domain \
+                                      \(task neural-int-read-compile-quadratic-in-domain): " ++ why)
+        Unmeasurable why -> assertFailure why
+    src v = unlines
+      [ "neural lm :: (Symbol -> Int) of [" ++ intercalate ", " (map show [1 .. v :: Int]) ++ "]"
+      , "main ctx = lm ctx" ]
+
 -- | The bytes a compile of the program @src n@ and its Python codegen
 -- allocate on this thread, under a 4 GB cap, as a 'climb' point.
 compileAllocPoint :: String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
-compileAllocPoint name conf src n = do
+compileAllocPoint = compileAllocPointWith (SPLL.CodeGenPyTorch.generateFunctions True)
+
+-- | 'compileAllocPoint' with the given backend's codegen in place of Python's.
+compileAllocPointWith :: (IREnv -> [String]) -> String -> CompilerConfig -> (Int -> String) -> Int -> IO Point
+compileAllocPointWith codegen name conf src n = do
   prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
             (tryParseProgram name (src n))
   r <- try $ flip finally disableAllocationLimit $ do
@@ -2626,7 +2774,7 @@ compileAllocPoint name conf src n = do
     enableAllocationLimit
     env <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
              (compile conf prog)
-    _ <- evaluate (length (concat (SPLL.CodeGenPyTorch.generateFunctions True env)))
+    _ <- evaluate (length (concat (codegen env)))
     remaining <- getAllocationCounter
     return (cap - toInteger remaining)
   return $ case r of
@@ -3392,14 +3540,14 @@ optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
   , testCase "optimizeLetIns keeps a multi-use generator binding shared" $ do
       let expr = IRLetIn "d" (IRVar "coin_gen")
                    (IROp OpPlus (IRVar "d") (IRVar "d"))
-          opt  = postProcess defaultCompilerConfig expr
+          opt  = postProcess defaultOptimizerConfig expr
       assertEqual "coin_gen sampled exactly once" 1 (countIRVar "coin_gen" opt)
   -- A pure bare-variable binding, by contrast, is copy-propagated into both uses
   -- (the binding disappears) -- the behaviour the old IRConst-only rule blocked.
   , testCase "optimizeLetIns copy-propagates a pure variable binding" $ do
       let expr = IRLetIn "d" (IRVar "x")
                    (IROp OpPlus (IRVar "d") (IRVar "x"))
-          opt  = postProcess defaultCompilerConfig expr
+          opt  = postProcess defaultOptimizerConfig expr
       assertEqual "d fully inlined" 0 (countIRVar "d" opt)
       assertEqual "x appears at both uses" 2 (countIRVar "x" opt)
   -- CSE must NOT collapse two occurrences of an expression built from a generator
@@ -3407,7 +3555,7 @@ optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
   , testCase "CSE does not share a repeated generator-referencing subexpression" $ do
       let sub  = IROp OpMult (IRVar "coin_gen") (IRConst (VFloat 2))
           expr = IROp OpPlus sub sub
-          opt  = postProcess defaultCompilerConfig expr
+          opt  = postProcess defaultOptimizerConfig expr
       assertEqual "both draws survive" 2 (countIRVar "coin_gen" opt)
   -- ...whereas a repeated pure subexpression is shared as usual (one binding, one
   -- occurrence of each pure leaf), confirming the refusal above is specific to
@@ -3415,7 +3563,7 @@ optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
   , testCase "CSE still shares a repeated pure subexpression" $ do
       let sub  = IROp OpMult (IRVar "x") (IRConst (VFloat 2))
           expr = IROp OpPlus sub sub
-          opt  = postProcess defaultCompilerConfig expr
+          opt  = postProcess defaultOptimizerConfig expr
       assertEqual "x read once through the shared binding" 1 (countIRVar "x" opt)
   ]
 
@@ -3537,7 +3685,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
     -- Optimize a whole environment (so 'deterministicGens' sees the call graph)
     -- and hand back the named group's generate body.
     optimizedGen n groups =
-      case optimizeEnv defaultCompilerConfig (IREnv groups [] []) of
+      case optimizeEnv defaultOptimizerConfig (IREnv groups [] []) of
         IREnv groups' _ _ ->
           case [b | g <- groups', groupName g == n, Just (b, _) <- [genFun g]] of
             (b:_) -> b
@@ -3601,7 +3749,7 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
   -- Repro 4: the condition re-tested as the first thing in its own branch.
   , testCase "an arm test is decided inside its own branches" $ do
       let c = IRDestruct AcIsLeft x
-      postProcess defaultCompilerConfig
+      postProcess defaultOptimizerConfig
         (IRIf c (IRIf c (IRVar "a") (IRVar "b")) (IRIf c (IRVar "d") (IRVar "e")))
         @?= IRIf c (IRVar "a") (IRVar "e")
   , testCase "a constructor test is decided inside its own branches" $ do
@@ -3612,7 +3760,7 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
   -- Repro 3: @if s: if not(not(s)) ...@ and @0.3 if not(s) else 0.0@ in the
   -- else arm.
   , testCase "a Bool variable is decided as a nested condition, through negations" $
-      postProcess defaultCompilerConfig
+      postProcess defaultOptimizerConfig
         (IRIf s (IRIf (IRUnaryOp OpNot (IRUnaryOp OpNot s)) (IRVar "a") (IRVar "b"))
                 (IRIf (IRUnaryOp OpNot s) (IRVar "d") (IRVar "e")))
         @?= IRIf s (IRVar "a") (IRVar "d")
@@ -3653,7 +3801,7 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
     ctorA = IRVar "A"
     ctorB = IRApply (IRVar "B")
     flagDecl = ADTDecl "Flag" [("A", []), ("B", [("v", TFloat)])] Nothing
-    flagEnv = optEnvFromADTs [flagDecl]
+    flagEnv = optEnvFromADTs [irADTDecl flagDecl]
     simp = simplify emptyOptEnv
     simpA = simplify flagEnv
     assertNoConstantTests src =
@@ -3662,8 +3810,8 @@ constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfo
         Right prog -> case compile defaultCompilerConfig prog of
           Left err -> assertFailure ("Compile error: " ++ show err)
           Right (IREnv groups decls _) -> do
-            let ctors = [(c, length fs) | d <- decls, (c, fs) <- constructors d]
-                derived = ["is" ++ c | (c, _) <- ctors] ++ [f | d <- decls, (_, fs) <- constructors d, (f, _) <- fs]
+            let ctors = [(c, length fs) | d <- decls, (c, fs) <- irConstructors d]
+                derived = ["is" ++ c | (c, _) <- ctors] ++ [f | d <- decls, (_, fs) <- irConstructors d, (f, _) <- fs]
                 bodies = [ b | g <- groups
                              , Just (b, _) <- [genFun g, probFun g, integFun g, writeLogitsFun g, normalFun g] ]
                 offending = [ e | b <- bodies, e <- flat b, constantTest ctors derived e ]
@@ -3752,13 +3900,13 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- anywhere else would reach the emitter, which has a case only for the
       -- float test below.
       assertRefusal "type-conformance check (IRConformsTo)"
-        (IROp OpAnd (IRVar "b") (IRConformsTo TBool (IRVar "sample")))
-  , testCase "a type-variable leaf's float test IRConformsTo TFloat is accepted" $
+        (IROp OpAnd (IRVar "b") (IRConformsTo ITBool (IRVar "sample")))
+  , testCase "a type-variable leaf's float test IRConformsTo ITFloat is accepted" $
       -- IRCompiler.leafEqIR dispatches a type-variable leaf's comparison on
       -- it; a slot's dtype is bucket-uniform, so it is a structural check
       -- (task polymorphic-parameter-compared-as-float).
       assertAccepted
-        (IRIf (IRConformsTo TFloat (IRVar "sample"))
+        (IRIf (IRConformsTo ITFloat (IRVar "sample"))
               (IROp OpApprox (IRVar "sample") (IRVar "s"))
               (IROp OpEq (IRVar "sample") (IRVar "s")))
   , testCase "isAny is accepted (M4: ANY-ness is part of the bucket signature)" $
@@ -3806,7 +3954,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- 'batchedGuard' walks the whole tree, not just the root.
       assertRefusal "type-conformance check (IRConformsTo)"
         (IRLetIn "a" (IRConst (VFloat 1.0))
-          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRConformsTo TBool (IRVar "sample"))) (IRVar "b")))
+          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRConformsTo ITBool (IRVar "sample"))) (IRVar "b")))
   -- Heterogeneous batching, M1: the list *spine* operations are in the fragment
   -- (within a shape bucket they are uniform Python structure over [B] leaves),
   -- but the branch that would have to *choose* between two structures is not --
@@ -3881,7 +4029,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   -- control flow. Emitting it as a torch.where instead evaluates both arms, and
   -- the masked-away one reaches a sibling constructor's field accessor.
   , testCase "an ADT constructor test is a structural condition" $ do
-      let env = adtEnv [ADTDecl { dataName = "Opt"
+      let env = adtEnv [irADTDecl ADTDecl { dataName = "Opt"
                                 , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                                 , adtDepth = Nothing }]
       assertBool "isNada(x) is not classified as structural"
@@ -3988,16 +4136,16 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   , testCase "only all-nullary ADTs are enumerations" $
       assertEqual "enumAdtNames"
         ["Color"]
-        (enumAdtNames [ colorDecl
-                      , ADTDecl { dataName = "Opt"
+        (enumAdtNames [ irADTDecl colorDecl
+                      , irADTDecl ADTDecl { dataName = "Opt"
                                 , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                                 , adtDepth = Nothing } ])
   , testCase "an all-nullary ADT's constructor test is not structural" $ do
-      let env = adtEnvWith ["Color"] [colorDecl]
+      let env = adtEnvWith ["Color"] [irADTDecl colorDecl]
       assertBool "isRed(x) is still structural under enum collapse"
         (not (structural env (IRApply (IRVar "isRed") (IRVar "x"))))
       assertBool "isRed(x) must stay structural when Color is not collapsed"
-        (structural (adtEnv [colorDecl]) (IRApply (IRVar "isRed") (IRVar "x")))
+        (structural (adtEnv [irADTDecl colorDecl]) (IRApply (IRVar "isRed") (IRVar "x")))
   , testCase "an all-nullary ADT is emitted collapsed, its tests per element" $
       case generateFunctionsBatched False (enumEnv (IRIf (IRApply (IRVar "isRed") (IRVar "sample"))
                                                        (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0)))) of
@@ -4027,7 +4175,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- the binding) chooses between list shapes and must fall back; Size's
       -- only selects a float, so the refusal is not its doing and it keeps
       -- its one-bucket collapse. A per-program fallback loses both.
-      case generateFunctionsBatched False (enumEnvWith [colorDecl, sizeDecl]
+      case generateFunctionsBatched False (enumEnvWith [irADTDecl colorDecl, irADTDecl sizeDecl]
              (IRConstruct TgTuple
                 [ IRLetIn "cse_0" (IRApply (IRVar "isRed") (IRDestruct AcFst (IRVar "sample")))
                     (IRIf (IRVar "cse_0") (IRConst (VList EmptyList)) oneElemList)
@@ -4058,7 +4206,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       in case generateFunctionsBatched False (enumEnv body) of
            Right ls -> assertFailure ("batched mode accepted a structure-choosing select: " ++ unlines ls)
            Left msg -> assertEqual "refusal differs from the uncollapsed backend's"
-                         (either id (const "") (batchedGuard (adtEnv [colorDecl]) "main" "forward" body))
+                         (either id (const "") (batchedGuard (adtEnv [irADTDecl colorDecl]) "main" "forward" body))
                          msg
   , testCase "a list-building recursive generate degrades to a stub, not a refusal" $
       -- The one narrow exception to the hard whole-program refusal rule: a
@@ -4132,7 +4280,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                        , constructors = [("Small", []), ("Large", [])]
                        , adtDepth = Nothing }
     oneElemList = IRConstruct TgCons [IRConst (VFloat 1.0), IRConst (VList EmptyList)]
-    enumEnv = enumEnvWith [colorDecl]
+    enumEnv = enumEnvWith [irADTDecl colorDecl]
     enumEnvWith decls body = IREnv
       [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample" body, "")
@@ -4149,7 +4297,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
-      [ADTDecl { dataName = "Opt"
+      [irADTDecl ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
       []
@@ -4163,7 +4311,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
-      [ADTDecl { dataName = "Opt"
+      [irADTDecl ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
       []
@@ -4184,7 +4332,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
-      [ADTDecl { dataName = "Opt"
+      [irADTDecl ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
       []
@@ -4199,7 +4347,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing, maskVariantOf = Nothing }]
-      [ADTDecl { dataName = "Dup"
+      [irADTDecl ADTDecl { dataName = "Dup"
                , constructors = [("A1", [("f", TFloat)]), ("B1", [("f", TFloat)])]
                , adtDepth = Nothing }]
       []
@@ -4675,7 +4823,7 @@ materializationTests = testGroup "Tier 0 marginal materialization"
       -- node's own count either.
       prog <- loadCorpusProgram "mNistAdd3"
       forM_ [0 .. 4] $ \q -> do
-        let bcConf' c = c { SPLL.IntermediateRepresentation.countBranches = True }
+        let bcConf' c = c { SPLL.CompilerConfig.countBranches = True }
         matR <- return (runProb (bcConf' defaultCompilerConfig)   prog digits3 (VInt q))
         refR <- return (runProb (bcConf' noMaterializationConfig) prog digits3 (VInt q))
         case (matR, refR) of
@@ -5731,6 +5879,30 @@ test_headHashDistinguishesConTagsAndAccessors = testCase
                             , h1 == h2 ]
     assertBool ("headHash collision(s) among ConTag/Accessor: " ++ show dupes) (null dupes)
 
+-- | The interpreter's neural primitive (design ir-package-boundary, B5): a
+-- name the injected oracle binds is answered by the oracle, applied directly
+-- or passed as a function value, and a local binding of the name shadows it.
+test_neuralOracleInterpretation :: TestTree
+test_neuralOracleInterpretation = testCase
+  "a neural call is answered by the injected oracle" $ do
+    let net = NeuralPrimitive
+          { neuralSignature = Just (ITArrow ITFloat (ITList ITFloat))
+          , neuralEval = \v -> case v of
+              VFloat x -> VList (ListCont (VFloat (x * 10)) EmptyList)
+              _ -> error "net: not a float" }
+        oracle = neuralOracle [("net", net)]
+        eval = generateDet oracle (IREnv [] [] []) []
+        arg = IRConst (VFloat 2)
+        expected = Right (VList (ListCont (VFloat 20) EmptyList))
+    eval (IRApply (IRVar "net") arg) @?= expected
+    -- First-class: (\g -> g 2) net
+    eval (IRApply (IRLambda "g" (IRApply (IRVar "g") arg)) (IRVar "net")) @?= expected
+    -- A local binding named like the network shadows it.
+    eval (IRApply (IRLambda "net" (IRApply (IRVar "net") arg)) (IRLambda "y" (IRVar "y"))) @?= Right (VFloat 2)
+    -- Without the oracle the name is unbound.
+    assertBool "no oracle, no network" (isLeft (evalClosedIR (IRApply (IRVar "net") arg)))
+    oracleSignatures oracle @?= [("net", ITArrow ITFloat (ITList ITFloat))]
+
 -- | 'IRInterpreter.generate' must evaluate every 'ConTag'/'Accessor' shape of
 -- 'IRConstruct'/'IRDestruct' correctly.
 test_irConstructDestructInterpreterDispatch :: TestTree
@@ -6036,6 +6208,36 @@ letBinderTagTests = testGroup "let binder threads DiscreteValues into the body"
     isPlusI (Expr _ (InjF (Named n) _)) = n == "plusI"
     isPlusI _ = False
 
+-- | A recursion called on closed-constant arguments is unrolled by the enum
+-- annotation (task recursive-consumer-of-recursive-random-list-refused):
+-- @rollout 3@ gets its four-list domain, which is what lets @len (rollout 3)@
+-- enumerate @len@'s argument. The bounds are pinned too: a tree recursion
+-- (two recursive calls) is not unrolled, and neither is one deeper than the
+-- fuel; both keep the old answer, no tag.
+recursionUnrollTagTests :: TestTree
+recursionUnrollTagTests = testGroup "enum annotation unrolls a recursion on constant arguments"
+  [ testCase "rollout 3 is tagged with its four lists" $
+      assertEqual "values of main" (Just 4) (length . multiValueToValueList <$> mainTag (rolloutSrc "3"))
+  , testCase "past the unroll fuel it stays untagged" $
+      assertEqual "values of main" Nothing (length . multiValueToValueList <$> mainTag (rolloutSrc "100"))
+  , testCase "a tree recursion is not unrolled" $
+      assertEqual "values of main" Nothing (mainTag (unlines
+        [ "fib n = if n < 2 then n else fib (n - 1) + fib (n - 2)"
+        , "main = fib 5" ]))
+  ]
+  where
+    rolloutSrc k = unlines
+      [ "rollout k = if k == 0 then [] else (if Uniform < 0.5 then [] else 1 : rollout (k - 1))"
+      , "main = rollout " ++ k ]
+    mainTag src =
+      let parsed = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+          rtyped = either (\e -> error ("rtype inference failed: " ++ show e)) id (tryAddRTypeInfo parsed)
+      in case lookup "main" (functions (annotateEnumsProg rtyped)) of
+           Just e -> case [mv | DiscreteValues mv <- tags (getTypeInfo e)] of
+             [mv] -> Just mv
+             _ -> Nothing
+           Nothing -> error "no main"
+
 -- | 'definitelyUntagged' lets the enum annotation refute a node from its shape
 -- before forcing any operand's value set (task
 -- plan-fold-mutual-recursion-blowup). The case that needs it is recursion
@@ -6194,13 +6396,13 @@ structuralListingBound = 65536
 -- 'listedTag' at every corpus node within the bound where it answers.
 directListing :: [ADTDecl] -> String -> [MultiValue] -> Maybe (Maybe MultiValue)
 directListing ds name operands
-  | name `elem` implicitFunctionNames ds = Just $
+  | name `elem` implicitFunctionNames (map irADTDecl ds) = Just $
       -- Without the whole-value 'nubValues' 'listedTag' applies first: it
       -- cannot change 'valueListToMultiValue''s answer, which de-duplicates
       -- every leaf, and over 2^20 values it would be most of the cost.
-      case [ implicitFunctionImpl ds name t
+      case [ implicitFunctionImpl (map irADTDecl ds) name t
            | t <- mapM multiValueToValueList operands
-           , implicitFunctionApplicable ds name t ] of
+           , implicitFunctionApplicable (map irADTDecl ds) name t ] of
         [] -> Nothing
         vals -> Just (valueListToMultiValue vals)
   | otherwise = Nothing
@@ -6517,6 +6719,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , letBinderTagTests
+  , recursionUnrollTagTests
   , valueSetTests
   , domainScaleTests
   , noGenerateNeuralSamplerTests
@@ -6543,7 +6746,11 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_helperApplicationsCompileLinear
   , test_markovBranchRandomRateCompilePolynomial
   , test_recordSharedFieldGroupsCodeSizePolynomial
+  , test_gridConstraintNetEliminated
   , test_listOfFieldReadsCompileFlat
+  , test_neuralIntReadDomainCompileLinear
+  , test_perValueVetoIndexedRead
+  , test_enumeratedSumLowestDimWins
   , test_noisyProductOfReadsPerCell
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
@@ -6576,6 +6783,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , sumTypeShowcaseTests
   , test_headHashDistinguishesConTagsAndAccessors
   , test_irConstructDestructInterpreterDispatch
+  , test_neuralOracleInterpretation
   , test_hasTailDescentRecognisesNewShape
   , test_valueDependentRecursionSplits
   , test_batchedPureCallees
@@ -6617,11 +6825,11 @@ slowInternalsTests = testGroup "Internals (slow)"
 
 -- | Evaluate a closed IR expression with no neural networks or globals.
 evalClosedIR :: IRExpr -> Either String IRValue
-evalClosedIR = generateDet [] [] (IREnv [] [] []) []
+evalClosedIR = generateDet noNeurals (IREnv [] [] []) []
 
 -- | Sample a closed IR expression with no neural networks or globals.
 sampleClosedIR :: IRExpr -> IRValue
-sampleClosedIR e = evalRand (generateRand [] [] (IREnv [] [] []) [] e) (mkStdGen 0)
+sampleClosedIR e = evalRand (generateRand noNeurals (IREnv [] [] []) [] e) (mkStdGen 0)
 
 -- ===========================================================================
 -- Inverse-CDF categorical index (neural-categorical-sampler-nests-v-deep)
@@ -6751,7 +6959,16 @@ gatherPassTests = testGroup "one-hot read as a gather (batched-mask-variant-neur
           Right ls -> do
             let m01 = takeWhile (not . ("class Main__m11" `isPrefixOf`)) (dropWhile (not . ("class Main__m01" `isPrefixOf`)) ls)
             assertBool "Main__m01 missing" (not (null m01))
-            assertBool "no nn_gather in Main__m01" (any ("nn_gather(l_0_nn_raw, (sample)[0])" `isInfixOf`) m01)
+            -- The read is the plan engine's own indexed read since task
+            -- per-value-neural-equality-unrolled-sum ('PLeafEq'), which the
+            -- optimizer inlines the network call into; one call either way.
+            assertBool "no nn_gather in Main__m01"
+              (any (\l -> any (`isInfixOf` l) ["nn_gather(l_0_nn_raw, (sample)[0])", "nn_gather(lmA(ctxA), (sample)[0])"]) m01)
+            let calls str
+                  | null str = 0 :: Int
+                  | "lmA(ctxA)" `isPrefixOf` str = 1 + calls (drop 9 str)
+                  | otherwise = calls (tail str)
+            assertEqual "network calls in Main__m01" 1 (sum (map calls m01))
             assertBool ("Main__m01 still reads constant slots:\n" ++ unlines m01) (not (any ("[..., " `isInfixOf`) m01))
   ]
   where
@@ -7095,7 +7312,10 @@ reservedNameTests = testGroup "reserved names"
       -- for the whole module (a definition `t` broke every tuple).
       forM_ ["pythonLib.py", "pythonLibBatched.py"] $ \lib -> do
         src <- readFile lib
-        let defined = [ takeWhile (`notElem` "(: ") rest | l <- lines src, Just rest <- [stripPrefix' "class " l] ]
+        -- A leading underscore is refused in SPLL source, so a private class
+        -- (the recursion memo's _MemoScope) cannot be clashed with.
+        let defined = [ c | l <- lines src, Just rest <- [stripPrefix' "class " l]
+                          , let c = takeWhile (`notElem` "(: ") rest, take 1 c /= "_" ]
         assertBool ("no classes found in " ++ lib) (not (null defined))
         forM_ defined $ \c ->
           assertBool (lib ++ " defines class " ++ c ++ ", missing from pythonRuntimeClassNames")
@@ -7218,11 +7438,11 @@ shapedNeuralInputTests = testGroup "shaped neural inputs"
       assertBool "" ("opaque handle" `isInfixOf` inputLayoutString TSymbol)
   , testCase "the query-type guard checks a tensor's shape and elements" $ do
       let conforms ty v = evalClosedIR (IRConformsTo ty (IRConst v))
-          t3 = TTensor [EFixed 3] TFloat
+          t3 = ITTensor [EFixed 3] ITFloat
       conforms t3 (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool True)
       conforms t3 (VTensor [EFixed 2] (map VFloat [1, 2])) @?= Right (VBool False)
       conforms t3 (VTensor [EFixed 3] (map VInt [1, 2, 3])) @?= Right (VBool False)
-      conforms (TTensor [EFixed 3, EFixed 1] TFloat) (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool False)
+      conforms (ITTensor [EFixed 3, EFixed 1] ITFloat) (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool False)
       conforms t3 (VFloat 1) @?= Right (VBool False)
   ]
 

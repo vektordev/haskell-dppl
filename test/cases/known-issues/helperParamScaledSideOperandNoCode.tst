@@ -9,4 +9,6 @@
 -- x2 = (0.2 - 0.21) - x3, x1 = 0.3 - x2 - x3; Jacobian 1, so
 -- p((0.4,(0.3,0.2))) = 0.0509396, dim 3. Docs task
 -- helper-param-scaled-side-operand-no-probability.
-expect-failure: no-code probability integrate
+-- Since task bottom-verdict-records-no-refusal-reason the absence carries a
+-- reason, naming the call of 'f' and its Gaussian arguments.
+expect-failure: refused "the call of 'f' at"

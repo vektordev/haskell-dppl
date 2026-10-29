@@ -1,0 +1,16 @@
+-- A 3x3 grid of independent neural reads over {0, 1, 2} whose rows and
+-- columns must each be all different (a Latin square). Every read sits in a
+-- row clause and a column clause, so the clauses share the reads in a cycle
+-- and IRCompiler sums the reads out by variable elimination rather than
+-- enumerating the grid jointly. Task grid-constraint-network-enumerated-jointly.
+neural cell :: (Symbol -> Int) of [0, 1, 2]
+
+neq u v = not (u == v)
+
+main a b c d e f g h i =
+  draw x1 = cell a in draw x2 = cell b in draw x3 = cell c in
+  draw x4 = cell d in draw x5 = cell e in draw x6 = cell f in
+  draw x7 = cell g in draw x8 = cell h in draw x9 = cell i in
+  neq x1 x2 && neq x1 x3 && neq x2 x3 && neq x4 x5 && neq x4 x6 && neq x5 x6 &&
+  neq x7 x8 && neq x7 x9 && neq x8 x9 && neq x1 x4 && neq x1 x7 && neq x4 x7 &&
+  neq x2 x5 && neq x2 x8 && neq x5 x8 && neq x3 x6 && neq x3 x9 && neq x6 x9
