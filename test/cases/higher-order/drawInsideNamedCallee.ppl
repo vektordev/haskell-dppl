@@ -1,0 +1,2 @@
+f x = draw z = x * Normal in (x, z)
+main = f Uniform

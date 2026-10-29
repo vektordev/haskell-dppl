@@ -251,11 +251,37 @@ local, a plan node outside the traversal), so their predicates are necessary
 conditions and the refusal stays the net. The predicates are permissive where
 the compiler might know more: a part with no fresh randomness of its own counts
 as deterministic (`permissiveDet`), since an enclosing variable may be
-recovered by the time the body is compiled. A named callee's binding is not
-floored, so a call no engine handles is still admitted and refused. The plan
+recovered by the time the body is compiled. The plan
 closed form of `compareGround` is the plan certificate too: both operands must
 project from plan reads through bindings (`JPlan`, `planDependent`), where
 any declaration containing a `ReadNN` used to qualify.
+
+**A named callee's binding** (task `named-callee-binding-not-floored`). A
+call whose head is not a literal lambda (`g u Normal`, a recursive `genS
+thetas (RP : ..)`) binds the parameter of the lambda forward chaining
+resolves the head to (`IRCompiler.resolveBinding`), and the `Apply` rule asks
+the engines of that binding at the call (`calleeBindingCerts`). The callee's
+body is the one written, not re-inferred (a recursive callee would re-enter
+itself), so each predicate is read permissively: enumeration is an argument
+with an enumerable domain (the compiler enumerates a call's argument on
+several paths), the plan engine an argument projecting from a plan read
+(`planRoots`), point inversion and the set-witness walk take every value as a
+known point, and the affine and in-place engines apply only to a body the
+compiler compiles inline (not a copy made per invocation, not a top-level
+function's). The law-independent part is solved once per declaration
+context (`icCallSyntax`). Where none applies, the call is sample-only in
+every part (`sampleOnlyOf`: not the callee's closure at a sample-only
+argument, which inside a recursive component costs the fixpoint an
+iteration per floored call), the certificates are recorded under
+`callBindingKey`, `-v` lists the binding as "binding of the call of 'g'",
+and `bindingWithoutEngine` names it. No engine is asked where the argument
+draws nothing fresh and reads only variables the compiler holds at a point
+where the call is compiled (`icPoint`): the parameters of the closure being
+evaluated (a caller passing a random argument there has its own binding),
+and `draw`-bound variables that enumeration, a plan read or point inversion
+answers. Not floored yet: a random leading argument of a call
+(`IRCompiler.leadingArgBinding`, `g Normal 0.5`), which is admitted and
+refused (docs task `leading-argument-binding-not-floored`).
 
 ## A static refusal is an absent variant, never a compile-killing error
 

@@ -669,6 +669,18 @@ arms. Before this, a callee whose body is an `if` had an empty copy. Copying
 every `if`'s arms and condition made the copies of a recursive body whole,
 which cost 5x on the Markov branch-chain family (now `TestInternals` `markovBranchRandomRateCompilePolynomial`).
 
+The copy also follows the equivalences of every `draw` in the body (the
+application is its lambda's body, each occurrence of the variable is the
+value), taken from `letEquivalenceClauses`, indexed once per compile. The
+clause set itself gains them one nesting level per iteration of
+`lambdasToHornClauses`' fixpoint, which is also where calls are copied, so a
+copy made first held nothing behind a `draw`: `f x = draw z = x * Normal in
+(x, z)` called as `f Uniform` did not witness `x`, and `main` was `Bottom`
+where the in-place twin compiles (task `named-callee-binding-not-floored`).
+They are not added to the clause set up front: that reorders it, which moves
+the slot a non-identifiable density is recovered through
+(`let-bindings/letWitnessedTupleFpUlp`'s warning).
+
 An `ANY` in the witnessing slot of an if-rooted program stays a runtime
 refusal: observation masks stop at an `if` root (`observation-masks.md`).
 Corpus `conditionals/witnessThroughDetIf*`, `distributions/ouChainRecursive`.

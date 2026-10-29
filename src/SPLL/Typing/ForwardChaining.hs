@@ -1589,8 +1589,9 @@ progToHornClauses Program{functions=fs, adts=adtsDecls} _ = nubOrdOn show $ init
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adtsDecls . snd) fs
-    topEquivClauses = constructTopLevelEquivalenceClauses initialRun fs
-    equivClauses = lambdasToHornClauses (initialRun ++ topEquivClauses) fs
+    lets = equivalencePartners (letEquivalenceClauses (map snd fs))
+    topEquivClauses = constructTopLevelEquivalenceClauses lets initialRun fs
+    equivClauses = lambdasToHornClauses lets (initialRun ++ topEquivClauses) fs
 
 -- Converts an expression with all its subexpressions into Horn clauses
 exprToHornClauses :: [ADTDecl] -> Expr -> [[HornClause]]
@@ -1661,38 +1662,61 @@ getEquivCNMaybe clauses = \cn -> case Map.findWithDefault [] cn index of
 -- 1. Bound variables are equivalent to the value of their binding apply
 -- 2. An Apply is equivalent to the body of the lambda it applies
 -- This function creates HornCLauses for these equivalences
-lambdasToHornClauses :: [[HornClause]] -> [FnDecl] -> [[HornClause]]
-lambdasToHornClauses clauses fns = fixpointLoop fExprs clauses
+lambdasToHornClauses :: LetEquivalences -> [[HornClause]] -> [FnDecl] -> [[HornClause]]
+lambdasToHornClauses lets clauses fns = fixpointLoop fExprs clauses
   where
     fExprs = map snd fns
-    fixpointLoop exprs cs = let extension = concatMap (constructEquivalenceClauses cs fExprs) exprs in if null extension then cs else fixpointLoop exprs (extension ++ cs)
+    fixpointLoop exprs cs = let extension = concatMap (constructEquivalenceClauses lets cs fExprs) exprs in if null extension then cs else fixpointLoop exprs (extension ++ cs)
 
 -- Top level functions act like an apply binding their body to their name
-constructTopLevelEquivalenceClauses :: [[HornClause]] -> [FnDecl] -> [[HornClause]]
-constructTopLevelEquivalenceClauses clauses decls = concatMap (constructTopLevelEquivalenceClauses' clauses (map snd decls)) decls
+constructTopLevelEquivalenceClauses :: LetEquivalences -> [[HornClause]] -> [FnDecl] -> [[HornClause]]
+constructTopLevelEquivalenceClauses lets clauses decls = concatMap (constructTopLevelEquivalenceClauses' lets clauses (map snd decls)) decls
 
-constructTopLevelEquivalenceClauses' :: [[HornClause]] -> [Expr] -> FnDecl -> [[HornClause]]
-constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (getTypeInfo expr) of
+constructTopLevelEquivalenceClauses' :: LetEquivalences -> [[HornClause]] -> [Expr] -> FnDecl -> [[HornClause]]
+constructTopLevelEquivalenceClauses' lets clauses exprs (name, expr) = case rType (getTypeInfo expr) of
   TArrow _ _ ->
    let (_, bodyExpr) = asLambda "constructTopLevelEquivalenceClauses'" expr
-       dependent = bodyDependentGroups clauses bodyExpr
+       dependent = bodyDependentGroups lets clauses bodyExpr
    in concat $ evalSupply $ mapM (\otherExpr -> do
     (varClauses, applyCnt) <- associateFunctionVariable name (getChainName expr) "" otherExpr
     let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
     return $ varClauses ++ taggedDependents) exprs
   _ -> concatMap (associateVariable name (getChainName expr) "") exprs
 
+-- | The equivalences of every @let@ (a lambda in place applied to a
+-- non-function value) in the program: the application is its lambda's body,
+-- and each occurrence of the bound variable is the value. They are
+-- syntactic, so every per-invocation copy of a function's body follows them
+-- ('getDependentGroups'), whether or not 'lambdasToHornClauses'' fixpoint has
+-- added them to the clause set yet. It adds them one nesting level per
+-- iteration, the same iteration that copies a callee's body per invocation,
+-- and a copy made before they existed did not follow a @draw@ inside the
+-- callee and lost every clause behind it: @f x = draw z = x * Normal in
+-- (x, z)@ called as @f Uniform@ had an empty copy, so @x@ was not witnessed
+-- from the call's observation, and the call typed 'Bottom' where its
+-- in-place twin compiles (task named-callee-binding-not-floored).
+letEquivalenceClauses :: [Expr] -> [[HornClause]]
+letEquivalenceClauses = concatMap lets
+  where
+    lets e@(Expr TypeInfo{chainName = exCn} (Apply (Expr _ (Lambda x b)) v))
+      | not (isArrowType (rType (getTypeInfo v))) =
+          createEquivHornClauseGroup AppliedEquivalence exCn (getChainName b)
+            : associateVariable x (getChainName v) "" b ++ concatMap lets (getSubExprs e)
+    lets e = concatMap lets (getSubExprs e)
+    isArrowType (TArrow _ _) = True
+    isArrowType _ = False
+
 -- Construct horn clauses for equivalences induced by Applies. See lambdasToHornClauses for more info
-constructEquivalenceClauses :: [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
+constructEquivalenceClauses :: LetEquivalences -> [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
 -- Partially applied to the clause set, the lookups below index it once and
 -- every Apply of the walk shares them: a scan per Apply was quadratic in the
 -- program (task noisy-operator-fold-compile-time-wall).
-constructEquivalenceClauses clauses exprs = go
+constructEquivalenceClauses lets clauses exprs = go
   where
     inClauseSet = isInClauseSet clauses
     equivCN = getEquivCN clauses
     equivCNMaybe = getEquivCNMaybe clauses
-    dependentGroups = bodyDependentGroups clauses
+    dependentGroups = bodyDependentGroups lets clauses
     exprWithCN = indexExprsByCN exprs
     go (Expr TypeInfo{chainName=exCn} (Apply l v)) | not (inClauseSet exCn) && (isLambdaExpr l || inClauseSet (getChainName l)) = do
         -- Find the declaration of the lambda on the left side of the Apply. Trivial if the lambda is directly there, else follow equivalences
@@ -1832,9 +1856,9 @@ tagHornClause tag (ParameterHornClause conc) = ParameterHornClause (conc ++ tag)
 --
 -- Partially applied to the clause set, it indexes it once ('dependencyIndex')
 -- and shares the index across every body it is then asked about.
-bodyDependentGroups :: [[HornClause]] -> Expr -> [[HornClause]]
-bodyDependentGroups clauses = let idx = dependencyIndex clauses in \fnBody ->
-  getDependentGroups idx (subtreeChainNames fnBody) (ifChildren fnBody) (getChainName fnBody)
+bodyDependentGroups :: LetEquivalences -> [[HornClause]] -> Expr -> [[HornClause]]
+bodyDependentGroups lets clauses = let idx = dependencyIndex clauses in \fnBody ->
+  getDependentGroups idx lets (subtreeChainNames fnBody) (ifChildren fnBody) (getChainName fnBody)
 
 -- | The arms of every if-then-else node of an expression whose condition
 -- draws no fresh randomness, by the node's chain name. An @if@ emits no
@@ -1884,17 +1908,28 @@ dependencyIndex clauses = DependencyIndex
       -- parameter could not be recovered from e.g. the head of the returned list
       -- (task named-function-list-head-witness-not-recovered).
       | otherwise = nubOrd [ c | cl <- g, isExprHornClause cl, [c] <- [premises cl] ]
-    partners g = case [ hc | hc@(EquivalenceHornClause [_] _ _ 0) <- g ] of
-      [EquivalenceHornClause [a] b _ _]
-        | a == b -> [(a, b)]
-        | otherwise -> [(a, b), (b, a)]
-      _ -> []
+
+-- | Each end of the two-ended equivalence group, with its other end.
+partners :: [HornClause] -> [(ChainName, ChainName)]
+partners g = case [ hc | hc@(EquivalenceHornClause [_] _ _ 0) <- g ] of
+  [EquivalenceHornClause [a] b _ _]
+    | a == b -> [(a, b)]
+    | otherwise -> [(a, b), (b, a)]
+  _ -> []
+
+-- | The equivalences of every @let@ in the program ('letEquivalenceClauses'),
+-- by each end, as 'diEquivalences' holds a clause set's: indexed once per
+-- compile and read by every per-invocation copy ('getDependentGroups').
+type LetEquivalences = Map.Map ChainName [([HornClause], ChainName)]
+
+equivalencePartners :: [[HornClause]] -> LetEquivalences
+equivalencePartners gs = Map.fromListWith (flip (++)) [ (c, [(g, other)]) | g <- gs, (c, other) <- partners g ]
 
 hasForwardClause :: [HornClause] -> Bool
 hasForwardClause = any ((== 0) . inversion)
 
-getDependentGroups :: DependencyIndex -> Set ChainName -> Map.Map ChainName [ChainName] -> ChainName -> [[HornClause]]
-getDependentGroups idx scope ifKids cn0 = fst (go Set.empty cn0)
+getDependentGroups :: DependencyIndex -> LetEquivalences -> Set ChainName -> Map.Map ChainName [ChainName] -> ChainName -> [[HornClause]]
+getDependentGroups idx lets scope ifKids cn0 = fst (go Set.empty cn0)
   where
     go seen c
       | c `Set.member` seen = ([], seen)
@@ -1907,8 +1942,12 @@ getDependentGroups idx scope ifKids cn0 = fst (go Set.empty cn0)
               -- binding-resolver-one-application-rule). One that leaves the
               -- body (a parameter bound at the call site, a call into another
               -- function) is not: that is the copy's own boundary.
+              -- A @let@'s are taken from 'LetEquivalences' where the clause
+              -- set does not hold them yet ('letEquivalenceClauses').
+              held = Map.findWithDefault [] c (diEquivalences idx)
               local = [ (g, other) | c `Set.member` scope
-                                   , (g, other) <- Map.findWithDefault [] c (diEquivalences idx)
+                                   , (g, other) <- held ++ [ e | e@(_, o) <- Map.findWithDefault [] c lets
+                                                               , o `notElem` map snd held ]
                                    , other `Set.member` scope ]
               nexts = concatMap forwardPremises direct ++ map snd local
                       ++ Map.findWithDefault [] c ifKids

@@ -968,13 +968,17 @@ fstProjectedBottomSrc = "main = fst (Uniform * Uniform, Uniform)"
 
 -- 'f' is refused by the set-witness engine (sqrt is outside the monotone
 -- transport table); 'main' is perfectly tractable apart from calling it.
--- The binding is a call of 'g', not a @draw@: a @draw@ no engine applies to
--- is typed Bottom (task engine-applicability-as-data), so 'f' would not be
--- admitted at all, while a call's binding is still admitted and refused.
+-- The binding is of a call's random /leading/ argument: a @draw@ no engine
+-- applies to is typed Bottom (task engine-applicability-as-data), and so is a
+-- call binding its last argument (task named-callee-binding-not-floored, which
+-- moved this fixture off @f u = g u Normal@), so 'f' would not be admitted at
+-- all, while a leading argument's binding ('IRCompiler.leadingArgBinding') is
+-- still admitted and refused (docs task
+-- leading-argument-binding-not-floored).
 refusedHelperSrc :: String
 refusedHelperSrc = unlines
-  [ "g u x = if sqrt x > u then 1.0 else 0.0"
-  , "f u = g u Normal"
+  [ "g x u = if sqrt x > u then 1.0 else 0.0"
+  , "f u = g Normal u"
   , "main = if Uniform < 0.5 then f 0.5 else 3.0"
   ]
 
@@ -994,6 +998,17 @@ refusedVariantTests = testGroup "RefusedVariant"
                               ("NeST refused to compile it" `isInfixOf` e && "f_prob" `isInfixOf` e)
           Left ex -> assertFailure ("crashed: " ++ show ex)
           Right (Right v) -> assertFailure ("main answered " ++ show v ++ " through a refused helper")
+  , testCase "a named callee's binding no engine applies to is Bottom, with the reason" $
+      -- Task named-callee-binding-not-floored: the engines of the binding a
+      -- call makes are asked at the call, so @g Normal@ (sqrt is outside the
+      -- monotone transport table) is typed Bottom, as a @draw@ is, rather
+      -- than admitted and refused at codegen.
+      withParsed (unlines [ "g x = if sqrt x > 0.5 then 1.0 else 0.0", "main = g Normal" ]) $ \prog -> do
+        let compiled = compile defaultCompilerConfig prog
+        expectVariantRefused "main" "prob" "no inference engine applies to the parameter bound by the call of 'g'" compiled
+        expectVariantRefused "main" "integ" "no inference engine applies to the parameter bound by the call of 'g'" compiled
+        assertBool "generate went down with the refused variants"
+          (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   , testCase "generate survives on both the helper and its caller" $
       withParsed refusedHelperSrc $ \prog -> do
         let compiled = compile defaultCompilerConfig prog
@@ -1031,7 +1046,8 @@ refusedVariantTests = testGroup "RefusedVariant"
         assertBool "generate went down with the refused variants"
           (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   ]
-  where setWitnessDiagnostic' = "set-valued witness construction failed for the binding of 'x'"
+  -- The leading argument's binding names a fresh variable for the parameter.
+  where setWitnessDiagnostic' = "set-valued witness construction failed for the binding of"
 
 generateBackedProjectionTests :: TestTree
 generateBackedProjectionTests = testGroup "GenerateBackedProjection"

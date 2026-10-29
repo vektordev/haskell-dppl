@@ -120,7 +120,7 @@ import SPLL.OptimizerProjection (optimizerConfig)
 import SPLL.CompilerConfig
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo, addModalityLaws)
-import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..), renderJustification, engineName)
+import SPLL.Typing.ModalityInfer (LawTable, Law(..), Justification(..), renderJustification, engineName, callBindingKey)
 import qualified Data.Map.Strict as Map
 import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
@@ -925,11 +925,19 @@ printStageWith _ _ _ _ = return ()
 engineReport :: Program -> LawTable -> String
 engineReport prog laws = unlines ("=== Engine applicability (the first listed is dispatched) ===" : rows)
   where
-    rows = [ row f x lti cs | (f, b) <- functions prog, (x, lti) <- bindings b
-                            , Just (Law _ (JBinding cs)) <- [Map.lookup (chainName lti) laws] ]
-    bindings e@(Expr _ (Apply (Expr lti (Lambda x _)) _)) = (x, lti) : concatMap bindings (getSubExprs e)
-    bindings e = concatMap bindings (getSubExprs e)
-    row f x lti cs = f ++ ": binding of '" ++ x ++ "'" ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
+    rows = [ row f what lti cs | (f, b) <- functions prog, (what, lti, key) <- bindings b
+                               , Just (Law _ (JBinding cs)) <- [Map.lookup key laws] ]
+    -- A literal @draw@ records on its lambda; a named callee's binding on
+    -- its call ('callBindingKey', task named-callee-binding-not-floored).
+    bindings e@(Expr ti nd) = here ++ concatMap bindings (getSubExprs e)
+      where here = case nd of
+              Apply (Expr lti (Lambda x _)) _ -> [("binding of '" ++ x ++ "'", lti, chainName lti)]
+              Apply _ _ | (Expr _ (Var g), _) <- spine e -> [("binding of the call of '" ++ g ++ "'", ti, callBindingKey (chainName ti))]
+                        | otherwise -> [("binding of the call", ti, callBindingKey (chainName ti))]
+              _ -> []
+    spine (Expr _ (Apply g a)) = let (h, as) = spine g in (h, as ++ [a])
+    spine h = (h, [])
+    row f what lti cs = f ++ ": " ++ what ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
       ++ ": " ++ (if null cs then "no engine applies (sample-only)" else intercalate ", " (map engineName cs))
 
 -- | The justification of each node's law, for the modality stage's dump.

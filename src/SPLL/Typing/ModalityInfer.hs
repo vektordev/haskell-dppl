@@ -47,6 +47,7 @@ module SPLL.Typing.ModalityInfer
   , EngineCert(..)
   , engineName
   , Engine(..)
+  , callBindingKey
   , engineOrder
   , engineLabel
   , bindingCerts
@@ -69,6 +70,7 @@ module SPLL.Typing.ModalityInfer
   ) where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Map.Lazy as LMap
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
 import SPLL.ReservedNames (uniformName, normalName)
@@ -80,14 +82,14 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isZeroValue, freeVarsExpr, readOnceInPlace)
 import SPLL.Analysis (enumerableDomain, enumerableApplication)
 import SPLL.AutoNeural (planReadOf, planProjectedReadOf)
-import Data.Maybe (isJust, listToMaybe, mapMaybe)
+import Data.Maybe (isJust, isNothing, listToMaybe, mapMaybe)
 import Control.Monad (guard)
 import Data.List (intercalate, find)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.Modality
-import SPLL.Typing.ForwardChaining (FCData(..), isWitnessedLambda, WitnessCert(..), pointWitnessCert, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet, unwrapLambdas)
+import SPLL.Typing.ForwardChaining (FCData(..), ExprInfo(..), InvChain, toInvExprMaybeWith, findEquivalentExpression, untag, isWitnessedLambda, WitnessCert(..), pointWitnessCert, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet, unwrapLambdas)
 import PredefinedFunctions (isFieldConstructor, propagateValuesLazily, isCollapse, collapseName)
 
 -- ---------------------------------------------------------------------------
@@ -620,16 +622,45 @@ data ICtx = ICtx
     -- every application asked about shares one forward-chaining solve
     -- ('withObs' keeps the two in step).
   , icWitnessed :: ChainName -> Bool
+    -- | Every node of the program, as written, by chain name: where a named
+    -- callee's lambda is looked up ('calleeBindingCerts'). Lazy, so built
+    -- only by a context that meets such a call.
+  , icNodes :: Map ChainName Expr
+    -- | 'calleeSyntax' of the head of every call in the program, by the
+    -- head's chain name: lazy in its values, so each is solved at most once
+    -- per declaration's context, however often a closure re-evaluates the
+    -- call (the fixpoint's convergence test evaluates every closure over the
+    -- whole input lattice). It does not read the observation, so 'withObs'
+    -- keeps it.
+  , icCallSyntax :: LMap.Map ChainName (Maybe CallSyntax)
+    -- | The variables in scope the compiler holds at a point when it
+    -- compiles this node, although their law may be random: the parameters
+    -- of the closures being evaluated around it (the 'Lambda' rule's), and
+    -- the variables of the @draw@s on the way whose binding an engine
+    -- answers at a point (enumeration, a plan read, point inversion;
+    -- 'letBinding'). A call binding only such variables has an argument
+    -- that is a point where it is compiled ('calleeBindingCerts').
+  , icPoint :: String -> Bool
   }
 
 -- | The inference context of the declaration observed at @obsCN@.
 mkICtx :: [ADTDecl] -> FCData -> ChainName -> Program -> ICtx
-mkICtx adtsDecls fcData obsCN prog =
-  ICtx adtsDecls fcData obsCN prog (planReadCNs prog) (isWitnessedLambda fcData adtsDecls obsCN)
+mkICtx adtsDecls fcData obsCN prog = ctx
+  where
+    ctx = ICtx adtsDecls fcData obsCN prog (planReadCNs prog) (isWitnessedLambda fcData adtsDecls obsCN)
+            (Map.fromList [ (cnOf e, e) | (_, b) <- functions prog, e <- universe b ])
+            (callSyntaxTable ctx) (const False)
+    universe e = e : concatMap universe (getSubExprs e)
 
 -- | The context with the observation moved to @obsCN@.
 withObs :: ICtx -> ChainName -> ICtx
 withObs ctx obsCN = ctx { icObs = obsCN, icWitnessed = isWitnessedLambda (icFC ctx) (icADTs ctx) obsCN }
+
+-- | 'icCallSyntax', for a context.
+callSyntaxTable :: ICtx -> LMap.Map ChainName (Maybe CallSyntax)
+callSyntaxTable ctx = LMap.fromList
+  [ (cnOf h, calleeSyntax ctx (cnOf h)) | (_, b) <- functions (icProg ctx), Expr _ (Apply h _) <- universe b ]
+  where universe e = e : concatMap universe (getSubExprs e)
 
 cnOf :: Expr -> ChainName
 cnOf = chainName . getTypeInfo
@@ -775,8 +806,9 @@ inferE ctx env expr = case expr of
 
   Expr ti (Lambda x body) ->
     let bodyTy = case rType ti of TArrow _ b -> b; _ -> TFloat
-        arr   = IArr gExact (\m -> let (bl,_,_) = inferE ctx (Map.insert x (bareLaw m) env) body in lawMod bl)
-        (bodyRepLaw, body', ba) = inferE ctx (Map.insert x (bareLaw (lambdaParamMod ti)) env) body
+        pctx  = ctx { icPoint = \v -> v == x || icPoint ctx v }
+        arr   = IArr gExact (\m -> let (bl,_,_) = inferE pctx (Map.insert x (bareLaw m) env) body in lawMod bl)
+        (bodyRepLaw, body', ba) = inferE pctx (Map.insert x (bareLaw (lambdaParamMod ti)) env) body
         bodyRepMod = lawMod bodyRepLaw
         -- What the body's law says whatever the argument ('argumentFree'):
         -- a body that is a known point under the parameter's representative
@@ -834,11 +866,28 @@ inferE ctx env expr = case expr of
          -- binding-resolver-one-application-rule). The callee's closure then
          -- sees its parameter witnessed exactly as a literal lambda's body
          -- does. A head that resolves to no lambda is answered unwitnessed.
+         --
+         -- The engines of that binding are asked at the call too, over the
+         -- resolved callee's body ('calleeBindingCerts'), and where none
+         -- applies the argument is bound sample-only, as 'letBinding' binds a
+         -- literal @draw@'s (task named-callee-binding-not-floored). The
+         -- certificates are recorded under 'callBindingKey'. A call whose
+         -- result is a known point even so needs no engine (@g z = 0.0 * z@),
+         -- as in 'letBinding'.
          _ ->
            let (fLaw, f', fa) = inferE ctx env f
-               m = applyI (lawMod fLaw) (lawMod (letBoundLaw ctx (cnOf f) argLaw))
+               bound = letBoundLaw ctx (cnOf f) argLaw
+               certs0 = calleeBindingCerts ctx env ti f arg' argLaw
+               m0 = applyI (lawMod fLaw) (lawMod bound)
+               point = isJust (lawValue (applyLaw fLaw m0 (Expr (setPType ti (projectNode (rType ti) m0)) (Apply f' arg'))))
+               floored = case certs0 of Just [] -> not point; _ -> False
+               m | floored = sampleOnlyOf (rType ti)
+                 | otherwise = m0
                e' = Expr (setPType ti (projectNode (rType ti) m)) (Apply f' arg')
-           in doneL (applyLaw fLaw m e') e' (fa ++ aa)
+               certs | point = Nothing
+                     | otherwise = certs0
+               certAcc = [ (callBindingKey (cnOf expr), Law (IG gExact) (JBinding cs)) | Just cs <- [certs] ]
+           in doneL (applyLaw fLaw m e') e' (certAcc ++ fa ++ aa)
 
   where
     doneL l e acc = (l, e, (cnOf e, l) : acc)
@@ -1129,8 +1178,8 @@ planReadCNs prog = Set.fromList [ cnOf e | (_, b) <- functions prog, e <- univer
 -- compiler's refusal stays the net.
 letBinding :: ICtx -> Env -> TypeInfo -> String -> Expr -> Expr -> Law -> (Env, Maybe [EngineCert], (Law, Expr, GAcc))
 letBinding ctx env lti x body arg argLaw
-  | needsEngine, null certs = (floored, Just certs, inferE ctx floored body)
-  | needsEngine, (CertJointAffine _ : _) <- certs = (jointEnv, Just certs, inferE ctx jointEnv body)
+  | needsEngine, null certs = (floored, Just certs, inferE bctx floored body)
+  | needsEngine, (CertJointAffine _ : _) <- certs = (jointEnv, Just certs, inferE bctx jointEnv body)
   | needsEngine = (env1, Just certs, inferred)
   | otherwise = (env1, Nothing, inferred)
   where
@@ -1145,7 +1194,16 @@ letBinding ctx env lti x body arg argLaw
     jointLatents (Law m (JAffine c)) =
       Law m (JAffine c { acLatents = Map.mapWithKey (\k r -> if r == Marginal && not (k `Set.member` outerLatents) then Joint else r) (acLatents c) })
     jointLatents l = l
-    inferred@(bodyLaw, body', _) = inferE ctx env1 body
+    inferred@(bodyLaw, body', _) = inferE bctx env1 body
+    -- Read only by a call in the body, so solved only there. The engines'
+    -- applicability, read before the body is annotated (the certificates
+    -- read the annotated body), and loosely: an enumerable argument, not
+    -- also a conditional body ('enumerableApplication' walks the body,
+    -- which made a let chain's calls quadratic in its length).
+    bctx = ctx { icPoint = \v -> if v == x then pointBound else icPoint ctx v }
+    pointBound = isJust (enumerableDomain (tags (getTypeInfo arg)))
+              || isJust (planProjectedReadOf (icProg ctx) arg)
+              || isJust (toInvExprMaybeWith (const True) (const True) (icFC ctx) (icADTs ctx) (chainName lti))
     needsEngine = gCap (outerI (lawMod argLaw)) /= Exact
                && not (isArrow (rType (getTypeInfo arg)))
                && x `Set.member` freeVarsExpr body
@@ -1159,6 +1217,130 @@ letBinding ctx env lti x body arg argLaw
     floored = Map.adjust (\(Law m _) -> Law (sampleOnlyI m) JUnjustified) x env1
     isArrow (TArrow _ _) = True
     isArrow _ = False
+
+-- | The law of a call whose binding no engine applies to: sample-only in
+-- every part. Not the callee's closure applied to a sample-only argument,
+-- which would keep the parts that do not read it: inside a recursive
+-- component that application reads the previous iterate's closures, so the
+-- fixpoint, seeded at the top, took an iteration more to converge for every
+-- floored call, and each iteration's closures apply the last one's, which is
+-- exponential in their number (@canFinish@ in TestInternals'
+-- @modalityThreadedBoolParamsGrowth@ went from 3s to over a minute).
+sampleOnlyOf :: RType -> IMod
+sampleOnlyOf rt = case rt of
+  Tuple a b   -> IProd (sampleOnlyOf a) (sampleOnlyOf b)
+  TEither a b -> ISum g (sampleOnlyOf a) (sampleOnlyOf b)
+  ListOf a    -> IRec g (sampleOnlyOf a)
+  TTensor _ a -> IRec topGround (sampleOnlyOf a)
+  TArrow _ b  -> IArr topGround (const (sampleOnlyOf b))
+  _           -> IG g
+  where g = groundMod SampleOnly Infinite FamNone
+
+-- | The key a named callee's binding records its engine certificates under
+-- in the 'LawTable': the call's own chain name carries the call's law, so the
+-- binding's ('JBinding') goes beside it.
+callBindingKey :: ChainName -> ChainName
+callBindingKey cn = cn ++ "#binding"
+
+-- | The engine certificates of the binding a call of a named callee (any
+-- head that is not a literal lambda) makes: forward chaining resolves the
+-- head to a lambda, whose parameter the argument binds
+-- ('IRCompiler.resolveBinding'). 'Nothing' where the binding needs no engine,
+-- on the same conditions as 'letBinding' (a point argument, a function
+-- value, a dead or witness-determined binding; the caller checks a result
+-- that is a known point), and where the head resolves to no lambda; also for
+-- a partial application, whose random leading argument the compiler binds by
+-- its own rule ('IRCompiler.leadingArgBinding').
+--
+-- The callee's body is the one written, not the copy this call binds, and
+-- is not re-inferred here: a recursive callee would re-enter itself, and its
+-- law is answered by its greatest-fixpoint summary through the closure the
+-- head evaluates to. So each predicate is the engine's necessary condition,
+-- read permissively (every value the body reads may be a known point), and
+-- the compiler's refusal stays the net where it holds and the construction
+-- still fails. Where even that admits no engine, no construction can.
+calleeBindingCerts :: ICtx -> Env -> TypeInfo -> Expr -> Expr -> Law -> Maybe [EngineCert]
+calleeBindingCerts ctx env ti f arg argLaw
+  -- Syntactic tests first: the argument's law is a thunk the callee's
+  -- closure may never force, and forcing it at every call a closure
+  -- re-evaluates cost the recursive canFinish of TestInternals'
+  -- modalityThreadedBoolParamsGrowth a third of its compile time.
+  | isArrow (rType ti) || isArrow (rType (getTypeInfo arg)) = Nothing
+  -- An argument that draws nothing fresh: random only through variables
+  -- the compiler holds at a point here ('icPoint'), or witnessed ones. A
+  -- caller that passes a random argument to an enclosing closure has its own
+  -- binding, at its own call, which floors where no engine applies, and
+  -- where one does the compiler evaluates this body at the recovered value,
+  -- through the callee's own inference function ('IRCompiler.namedCall'):
+  -- @h (k - 0.25)@ in @h k = if k < 0.25 then Normal else 1.0 + h (k - 0.25)@,
+  -- whose @k@ the @if@'s arm no longer reads witnessed ('conditionI'). Same
+  -- for a @draw@'s variable that point inversion recovers from the body's
+  -- value without the declaration's observation reaching it (@gen (snd e)@
+  -- in data-structures/anyMarkPassedAsRecursiveState). A call in the argument
+  -- draws whatever its callee draws, which 'hasRandomLeaf' does not see.
+  | not (hasRandomLeaf arg)
+  , all pinned (Set.toList (freeVarsExpr arg)) = Nothing
+  | gCap (outerI (lawMod argLaw)) == Exact = Nothing
+  | otherwise = do
+      syn <- maybe (calleeSyntax ctx headCN) id (LMap.lookup headCN (icCallSyntax ctx))
+      Just (mapMaybe (certOf syn) engineOrder)
+  where
+    headCN = cnOf f
+    pinned v
+      | icPoint ctx v = True
+      | isJust (lookup v (functions (icProg ctx))) = False
+      | otherwise = maybe True (inputIsPoint . lawMod) (Map.lookup v env)
+    certOf syn k = case k of
+      -- The compiler enumerates a call's argument on several paths (a
+      -- conditional callee, a curried one, a leading argument), each over
+      -- the argument's domain.
+      EnumerationEngine    -> CertEnumerable <$> enumerableDomain (tags (getTypeInfo arg))
+      PlanEngine           -> CertPlan <$> listToMaybe (planRoots ctx env arg)
+      PointInversionEngine -> (\chain -> CertWitnessed (WitnessCert chain (icWitnessed ctx headCN))) <$> csPoint syn
+      AffineEngine         -> CertAffine <$> (guard (csInline syn) >> latentForm)
+      JointAffineEngine    -> CertJointAffine <$> (guard (csInline syn) >> latentForm)
+      WorldsEngine         -> CertWorlds <$> csWorlds syn
+      InPlaceEngine        -> if csInPlace syn then Just CertInPlace else Nothing
+    latentForm = case affineOf (cnOf arg) argLaw of
+      Just c | not (Map.null (acLatents c)) -> Just c
+      _ -> Nothing
+    isArrow (TArrow _ _) = True
+    isArrow _ = False
+
+-- | What a named callee's binding has for engines whatever its argument's
+-- law ('calleeBindingCerts'), for the call whose head has chain name
+-- @headCN@: 'Nothing' where the head resolves to no lambda, or to one whose
+-- body does not read its parameter (a dead binding, which needs no engine).
+data CallSyntax = CallSyntax
+  { csPoint   :: Maybe InvChain
+  , csWorlds  :: Maybe WorldsShape
+    -- | The body is compiled inline at the call: not a copy made per
+    -- invocation, and not a top-level function's, which may be recursive
+    -- ('IRCompiler.bindInline'). The affine and in-place engines need it.
+  , csInline  :: Bool
+  , csInPlace :: Bool
+  }
+
+calleeSyntax :: ICtx -> ChainName -> Maybe CallSyntax
+calleeSyntax ctx headCN
+  | isNothing (Map.lookup headCN (chainNameInfo fc)) = Nothing
+  | otherwise = case findEquivalentExpression fc headCN of
+      Just (lamCN, LambdaInfo x _, tag)
+        | Just (Expr _ (Lambda _ body)) <- Map.lookup (untag lamCN) (icNodes ctx)
+        , occs@(_ : _) <- Map.findWithDefault [] (untag lamCN) (lambdaVarOccurrences fc)
+        , let inline = null tag && not (onTopSpine (untag lamCN))
+        -> Just CallSyntax
+             { csPoint = toInvExprMaybeWith (const True) (const True) fc (icADTs ctx) headCN
+             , csWorlds = worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) (const True)) occs body
+             , csInline = inline
+             , csInPlace = inline && readOnceInPlace x body }
+      _ -> Nothing
+  where
+    fc = icFC ctx
+    prog = icProg ctx
+    onTopSpine cn = any (spineHas cn . snd) (functions prog)
+    spineHas cn e@(Expr _ (Lambda _ b)) = cnOf e == cn || spineHas cn b
+    spineHas _ _ = False
 
 -- | Is a value a function of witnessed variables alone: it draws nothing
 -- fresh itself, and every variable it reads is a point or witnessed? The

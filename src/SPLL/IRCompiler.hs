@@ -948,10 +948,21 @@ bindingWithoutEngine :: LawTable -> Expr -> Maybe (String, ChainName)
 bindingWithoutEngine laws e@(Expr _ f) = case f of
   Apply (Expr lti (Lambda x _)) _
     | Just (ModalityInfer.Law _ (ModalityInfer.JBinding [])) <- Map.lookup (chainName lti) laws ->
-        Just (why x lti, chainName lti)
+        Just (why ("the binding of '" ++ x ++ "'") lti, chainName lti)
+  -- A named callee's binding, recorded on its call (task
+  -- named-callee-binding-not-floored). The argument first: it is evaluated
+  -- before the call binds it.
+  Apply g a
+    | Nothing <- bindingWithoutEngine laws a
+    , Just (ModalityInfer.Law _ (ModalityInfer.JBinding [])) <- Map.lookup (ModalityInfer.callBindingKey (chainName ti)) laws ->
+        Just (why ("the parameter bound by the call" ++ callee g) ti, chainName ti)
   _ -> listToMaybe (mapMaybe (bindingWithoutEngine laws) (getSubExprs e))
   where
-    why x lti = "no inference engine applies to the binding of '" ++ x ++ "'"
+    ti = getTypeInfo e
+    callee g = case fst (flattenApplySpine g) of
+      Expr _ (Var n) -> " of '" ++ n ++ "'"
+      _ -> ""
+    why what lti = "no inference engine applies to " ++ what
       ++ maybe "" ((" at " ++) . spanPretty) (srcPos lti)
       ++ ": its value is random and the body reads it, but it is not enumerable,"
       ++ " not a neural plan read, not point-invertible from the observation, has no"

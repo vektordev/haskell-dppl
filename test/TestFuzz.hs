@@ -3766,13 +3766,16 @@ admissionOracleTests = testGroup "Admission oracle"
       -- then known-issues/correlatedGaussianLetSharesLatent until
       -- affine-form-as-law-certificate typed it Bottom, then TestRejection's
       -- nested-let shared occurrence until engine-applicability-as-data typed
-      -- a @draw@ no engine applies to Bottom; a call's binding is still
-      -- admitted.) Not a crash, but
+      -- a @draw@ no engine applies to Bottom, then @g Normal@ with a
+      -- one-parameter @g@ until named-callee-binding-not-floored typed a
+      -- call's binding Bottom too; a random leading argument's binding is
+      -- still admitted, docs task leading-argument-binding-not-floored.)
+      -- Not a crash, but
       -- still a lattice bug, so its own class (task
       -- admission-oracle-promised-variants-present): the non-vacuity check
       -- that the property sees an over-promise, under the over-promise label
       -- and filed in 'knownOverPromises'.
-      rep <- oracleOn "g x = if sqrt x > 0.5 then 1.0 else 0.0\nmain = g Normal"
+      rep <- oracleOn "g x y = if sqrt x > y then 1.0 else 0.0\nmain = g Normal 0.5"
       assertNoViolation rep
       assertEqual "outcomes" [(ModeGenerate, "value"), (ModeProbability, "promised-absent"), (ModeIntegrate, "promised-absent")]
         (outcomesOf "main" rep)
