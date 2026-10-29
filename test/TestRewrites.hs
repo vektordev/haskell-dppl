@@ -826,7 +826,7 @@ rewritePool :: CorpusEntry -> Bool
 rewritePool e = Interpreter `elem` ceBackends e && null (neurals (ceProgram e)) && not (null (corpusQueries e))
 
 corpusQueries :: CorpusEntry -> [Query]
-corpusQueries e = [(s, params) | ProbTestCase _ s params _ <- ceCases e]
+corpusQueries e = [(s, params) | ProbTestCase _ s params _ _ <- ceCases e]
 
 -- ---------------------------------------------------------------------------
 -- Rewrite sequences (M4)

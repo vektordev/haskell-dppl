@@ -100,7 +100,23 @@ flags: -O 0 --noIntegrate
 repeats `BODY` (inclusive bounds, an optional separator, nestable). Metrics
 are `code-size` (the default, emitted Python bytes), `ir-size`, `alloc`
 (bytes allocated by the compile) and `wall-time`. Prefer the deterministic
-ones. `flags:` takes the CLI spellings `-O N`, `--noIntegrate`,
+ones.
+
+A program that compiles fast and small but whose emitted code is exponential
+to *run* takes `metric: eval-alloc` (or `eval-time`) and a `query:` line. Each
+point compiles and then answers that query on the IR interpreter, which runs
+the IR the backends emit; the metric is the query's own allocation (seconds).
+The query is one `p(...)`/`cdf(...)` row without `=` (its value is not
+checked) and is a template too:
+
+```
+-- defineBoundSumsComparedEvalGrowth.tst (the .ppl's neural domain is [0..D-1])
+expect-failure: growth above polynomial 4
+knob: D = 3, 4, 6, 8
+metric: eval-alloc
+query: p(True{{for t in 1..6}}, (2, [{{for i in 1..D sep ", "}}1.0{{end}}]){{end}})
+```
+ `flags:` takes the CLI spellings `-O N`, `--noIntegrate`,
 `--noProbability`, `--noGenerate`, `--pruneAnyChecks` and
 `--materializationBudget N`. The harness climbs the knob values in order and
 stops at the first consecutive pair whose log-log slope exceeds the degree
@@ -190,6 +206,15 @@ p(1.5, False, [0.2])=(0.5, 1.0)
 cdf(1.5, False, [0.2])=(0.75, 0.0)
 ```
 False and [0.2] would be passed as parameters to the main function in both cases.
+
+#### Rows at a support edge or a jump: `no-sample`
+Every `p(...)` row is also compared with an empirical estimate: the sampler checks (`Corpus.SamplingMatchesPDF` and the batched-generate differential) draw forward samples and count those inside a symmetric window around the point. At a support edge or a jump in the density the window straddles both sides and estimates the average of the two one-sided densities, which is half the pointwise value at the edge of a `Uniform`. A row at such a point carries the suffix `no-sample`:
+
+```
+p(3.0)=(1.0, 1.0, False) no-sample
+```
+
+The row is still checked exactly on every backend and in every other sweep; only the two sampler checks skip it. Use it for rows that pin the density *at* a boundary (the convention, e.g. that `Uniform` is closed at both ends), and say why in a comment. Only `p(...)` rows take the suffix.
 
 #### Argmax_p assertions
 Especially when dealing with neural networks, testing for exact probability densities becomes infeasible. The argmax_p assertion allows to specify which output should be the most likely. This is done using a MockNN in the interpreter that behaves like a well-trained NN.
