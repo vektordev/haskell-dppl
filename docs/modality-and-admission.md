@@ -180,7 +180,9 @@ order:
 | in place | `Lang.readOnceInPlace` (the body reads the variable once, under no lambda and in no nested `let`'s body) | none: the argument is measured at the read |
 
 For a `draw` (a lambda in place) whose argument is random, not a function of
-witnessed variables alone (`determinedByWitnesses`), and read by the body,
+witnessed variables alone (`determinedByWitnesses`) or of variables the
+compiler holds at a point there (`pointHere`: the parameters of the closure
+being evaluated, whose random argument the call binds), and read by the body,
 `letBinding` lists the certificates on the applied lambda (`JBinding`, shown
 by `-d`, and per binding by `-v`). Where the list is empty it binds the
 variable sample-only and re-infers the body, so the function is `Bottom`: no
@@ -203,8 +205,11 @@ not a source rewrite: a binding any other engine measures keeps that engine's
 code. The set-witness walk uses the same predicate to enter an inner binding
 whose body holds x (`draw c = x < 0.5 in if c ..`, `draw z = 0.5 in x < z`):
 it walks the body with the value in place, in `worldsShape` and
-`invertToWorldsStep` alike. Corpus `let-bindings/drawSingleReadInPlace*`,
-`set-witness/setWitness*InPlace`. Two reads (`draw x = Normal in x + x`) are
+`invertToWorldsStep` alike. The walk also enters an alias of a local
+variable (`draw g = f in ..`, `f` naming no declaration), wherever and however
+often its body reads it (`Lang.entersInPlace`): every read is that one value.
+Corpus `let-bindings/drawSingleReadInPlace*`,
+`set-witness/setWitness*InPlace`, `higher-order/aliasedFunctionParameterBetweenLambdas`. Two reads (`draw x = Normal in x + x`) are
 never in place; the affine engine owns that.
 
 **Why this order** (acceptance 6 of `dispatch-on-law-certificates`, measured at

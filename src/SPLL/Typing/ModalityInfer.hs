@@ -1208,6 +1208,14 @@ letBinding ctx env lti x body arg argLaw
                && not (isArrow (rType (getTypeInfo arg)))
                && x `Set.member` freeVarsExpr body
                && not (determinedByWitnesses env arg)
+               -- An alias of a parameter of the closure being evaluated
+               -- (@g c = draw d = c in \\n -> ..@): the compiler holds @c@ at a
+               -- point where it compiles this body, its random argument bound
+               -- at the call, which floors there where no engine applies
+               -- ('calleeBindingCerts'). The binding is that value's renaming,
+               -- as the alias inside both lambdas already was (task
+               -- alias-between-curried-lambdas-refuses-enumerable-and-function-arguments).
+               && not (pointHere ctx env arg)
                -- A body whose law is a known point (@0.0 * z@) takes that
                -- value whatever the variable draws: nothing reads the
                -- variable's value, so no engine needs to apply.
@@ -1278,18 +1286,13 @@ calleeBindingCerts ctx env ti f arg argLaw
   -- value without the declaration's observation reaching it (@gen (snd e)@
   -- in data-structures/anyMarkPassedAsRecursiveState). A call in the argument
   -- draws whatever its callee draws, which 'hasRandomLeaf' does not see.
-  | not (hasRandomLeaf arg)
-  , all pinned (Set.toList (freeVarsExpr arg)) = Nothing
+  | pointHere ctx env arg = Nothing
   | gCap (outerI (lawMod argLaw)) == Exact = Nothing
   | otherwise = do
       syn <- maybe (calleeSyntax ctx headCN) id (LMap.lookup headCN (icCallSyntax ctx))
       Just (mapMaybe (certOf syn) engineOrder)
   where
     headCN = cnOf f
-    pinned v
-      | icPoint ctx v = True
-      | isJust (lookup v (functions (icProg ctx))) = False
-      | otherwise = maybe True (inputIsPoint . lawMod) (Map.lookup v env)
     certOf syn k = case k of
       -- The compiler enumerates a call's argument on several paths (a
       -- conditional callee, a curried one, a leading argument), each over
@@ -1306,6 +1309,20 @@ calleeBindingCerts ctx env ti f arg argLaw
       _ -> Nothing
     isArrow (TArrow _ _) = True
     isArrow _ = False
+
+-- | Does a value draw nothing fresh where it is compiled: no primitive draw
+-- or neural read of its own, no call of a top-level declaration, and every
+-- variable it reads a point here -- one the compiler holds at a point
+-- ('icPoint'), or one whose law is a point or witnessed. Such a value is
+-- random only through bindings made, and measured, elsewhere, so binding it
+-- needs no engine of its own ('calleeBindingCerts', 'letBinding').
+pointHere :: ICtx -> Env -> Expr -> Bool
+pointHere ctx env arg = not (hasRandomLeaf arg) && all pinned (Set.toList (freeVarsExpr arg))
+  where
+    pinned v
+      | icPoint ctx v = True
+      | isJust (lookup v (functions (icProg ctx))) = False
+      | otherwise = maybe True (inputIsPoint . lawMod) (Map.lookup v env)
 
 -- | What a named callee's binding has for engines whatever its argument's
 -- law ('calleeBindingCerts'), for the call whose head has chain name

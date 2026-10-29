@@ -28,6 +28,7 @@ module SPLL.Typing.ForwardChaining
   , WorldsShape(..)
   , WorldsCtx(..)
   , worldsShape
+  , valueVar
   , hasRandomLeaf
   , permissiveDet
   , findEquivalentExpression
@@ -388,8 +389,9 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
         | op == "TCons", tgt == WTPoint -> WSTuple <$> walk os a WTPoint <*> walk os b WTPoint
       Expr _ (InjF (Named "not") [a]) -> WSConnective . (: []) <$> walk os a WTPoint
       -- An inner binding read once with no binder on the way is its value
-      -- at that read ('readOnceInPlace', the in-place engine's predicate), so
-      -- the body can be walked with the value in place ('enterInPlace'). That
+      -- at that read ('readOnceInPlace', the in-place engine's predicate), and
+      -- so is an alias of a local at every read ('entersInPlace'), so the
+      -- body can be walked with the value in place ('enterInPlace'). That
       -- is the walk where the body reads x too, or reads an x-free value it
       -- compares x against; where x is in the value alone, it is the
       -- fallback when the two-stage walk through the binding fails, as for a
@@ -399,14 +401,14 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
             through os (fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
               <|> inPlace
         | otherwise -> inPlace
-        where inPlace = if readOnceInPlace y b then walk os (enterInPlace e) tgt else Nothing
+        where inPlace = if entersInPlace (valueVar wc) y v b then walk os (enterInPlace (valueVar wc) e) tgt else Nothing
       Expr _ (Apply _ _) -> call os e tgt
       -- A projection of a literal pair is that field, also where an inner
       -- binding read in place holds the pair ('enterInPlace').
       Expr _ (InjF (Named "fst") [p])
-        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace p -> walk os a tgt
+        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace (valueVar wc) p -> walk os a tgt
       Expr _ (InjF (Named "snd") [p])
-        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace p -> walk os b tgt
+        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace (valueVar wc) p -> walk os b tgt
       -- One invertible step over the one operand the variable reaches, which
       -- does not transport as a whole: the step transported onto the
       -- operand, then the operand walked at the same kind of target.
@@ -470,6 +472,13 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
           | g `Set.member` seen = go seen gs
           | otherwise = go (Set.insert g seen) (callees g ++ gs)
         callees g = maybe [] (filter (`elem` map fst (wcDecls wc)) . Set.toList . freeVarsExpr) (lookup g (wcDecls wc))
+
+-- | Does a variable name a value, one the set-witness walk may substitute at
+-- every read ('SPLL.Lang.Lang.entersInPlace'): not a declaration (whose
+-- every read is a call, a fresh draw for a nullary one) and not a primitive
+-- distribution.
+valueVar :: WorldsCtx -> String -> Bool
+valueVar wc v = isNothing (lookup v (wcDecls wc)) && v /= normalName && v /= uniformName
 
 -- | The chain names of every node of an expression.
 subtreeCNs :: Expr -> [ChainName]
