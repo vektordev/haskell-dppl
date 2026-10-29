@@ -467,7 +467,9 @@ combine is still `srComplement` (max-product refuses `srMinus`).
 ## Affine Gaussian marginalisation of an unwitnessed `draw`
 
 A third answer to "no occurrence of the bound variable is point-invertible",
-tried before set-valued witnesses: if the binding's certificate is a Gaussian
+tried after joint affine marginalisation and before set-valued witnesses
+(the order and its measurement: `modality-and-admission.md`, "Why this
+order"): if the binding's certificate is a Gaussian
 affine form and **every** use of the variable flows affinely into **one**
 Gaussian density leaf, the variable needs no witness at all -- it is
 integrated out analytically inside that leaf (task
@@ -537,8 +539,8 @@ answers a partial observation like `(s1, s3)` of a three-step chain, as
 
 ### Joint affine marginalisation: correlated Gaussian fields
 
-The fourth engine, tried after the single-consumer collapse and before
-set-valued witnesses (design `affine-gaussian-forms` M2). It applies when the
+Tried after point inversion and before the single-consumer collapse
+(design `affine-gaussian-forms` M2). It applies when the
 binding's certificate is an affine form and the body is a let spine whose
 every binding is affine over the variables bound so far, ending in a tree of
 tuples (`jointAffineApplicable`, twin of `ModalityInfer.jointAffineBindingCert`).

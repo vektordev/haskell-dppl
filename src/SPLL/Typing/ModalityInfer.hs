@@ -530,8 +530,8 @@ data Engine
   = EnumerationEngine
   | PlanEngine
   | PointInversionEngine
-  | AffineEngine
   | JointAffineEngine
+  | AffineEngine
   | WorldsEngine
   | InPlaceEngine
   deriving (Eq, Ord, Enum, Bounded, Show)

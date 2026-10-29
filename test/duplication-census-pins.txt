@@ -14,17 +14,17 @@
 # program  group.variant=M ...
 absNTopLevelSetWitness absN.integ=6 absN.prob=6
 accumulatedPosition main.prob=5
-accumulatedSumBesideDrawFourthSlot main.prob=10 main__m001.prob=9 main__m100.prob=5 main__m101.prob=4
+accumulatedSumBesideDrawFourthSlot main.prob=10 main__m001.prob=9
 adtCoin main.integ=6 main.prob=8
 adtConstructorNamedRuntimeTest main.integ=4 main.prob=4
 adtConstructorTestNamedRuntimeTest main.integ=6 main.prob=8
 adtNeuralCountingAccum addTerm.prob=3
 adtNeuralCountingFlat countRed.prob=4
-affineChainEndpoint main.integ=7 main.prob=5
-affineChainPartial main__m10.prob=5
+affineChainEndpoint main.prob=3
+affineChainPartial main__m10.prob=3
 aliasReadTwice main.prob=6 main__m10.prob=6 main__m11.prob=4
-aliasedChainStepMarginalTail main.prob=25 main__m0001.prob=3 main__m0010.prob=6 main__m1010.prob=4
-aliasedDrawScaledChain main.prob=10 main__m100.prob=4
+aliasedChainStepMarginalTail main.prob=25 main__m0001.prob=3 main__m0010.prob=3
+aliasedDrawScaledChain main.prob=10
 aliasedDrawScaledSibling main.integ=8 main.prob=7
 aliasedDrawThroughScalingHelper main.integ=6 main.prob=6
 anyLeafReadAgainAsCondition main__m10.prob=4
@@ -90,7 +90,7 @@ fieldDiscardsComparedDraw main.integ=11 main.prob=8
 fstOfPairWrapperNestedStructuredDraw main.prob=20 main__m01.prob=4
 fstOfPairWrapperStructuredDraw main.prob=20 main__m01.prob=4
 fuzzLetWitnessSetValuedFst main.prob=3
-gaussianTrajectory4 main.prob=20 main__m0110.prob=5 main__m1100.prob=5 main__m1101.prob=5 main__m1110.prob=5
+gaussianTrajectory4 main.prob=20 main__m1101.prob=3 main__m1110.prob=3
 gaussianTrajectory8 main.prob=20
 guardSelectOverTupleResult main.integ=5 main.prob=5
 headOfArmDependentListLength main.integ=3 main.prob=3

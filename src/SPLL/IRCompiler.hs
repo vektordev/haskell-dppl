@@ -11142,7 +11142,7 @@ bindIfConditions meta binding chain = case used of
 
 -- | The probabilistic 'Apply' arm's engines, over one resolved application
 -- ('Binding'), in dispatch order ('engineOrder'): plan-guided enumeration,
--- point inversion with its body factor, affine and joint affine
+-- point inversion with its body factor, joint affine and affine
 -- marginalisation, set-valued witnesses, and in place.
 applyBinding :: CompilerMetadata -> Bool -> RType -> Binding -> IRExpr -> CompilerMonad PResult
 applyBinding meta cumulative rt binding sample = do
