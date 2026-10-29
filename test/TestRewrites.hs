@@ -80,7 +80,9 @@ import End2EndTesting (programRuntimeFields)
 --   theta* rows), gaussian-catch-all-dispatch-on-codegen-law
 --   (normalThroughFunctionParam, paramPairHelperFst,
 --   correlatedGaussianLetSharesLatent), alias-before-helper-built-tuple-tail-
---   approx-type-error and alias-chain-of-structured-draw-any-marginal-refused;
+--   approx-type-error and alias-chain-of-structured-draw-any-marginal-refused
+--   (resolved 2026-10-29 by the readsAnyChain fix of
+--   aliased-parameter-plus-zero-marginal-loses-dim);
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
 -- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates. Its
 --   in-place engine (a binding read once, with no binder on the way, measured
@@ -174,17 +176,7 @@ knownSequenceDivergences =
   -- of the same list: p([0.3, 1.3]) is impossible. Pinned by
   -- known-issues/listHelperReadBesideAffineSibling; reached by seed 20261016
   -- once the null-set-negation corpus additions moved what it draws.
-  [ KnownSeq "witnessThroughDetIfNamed" [InjFIdentity, HelperExtract] "list-parameter-helper-read-beside-affine-sibling-impossible"
-  -- The parameter aliased, the noise drawn into a binding and `+ 0.0` added:
-  -- the (x, ANY) marginal loses the Uniform's dimension. Pinned by
-  -- known-issues/aliasedParameterPlusZeroMarginalDim; reached by seed
-  -- 20261017 after the same corpus additions.
-  , KnownSeq "rewriteProbeHelperScaledNoise" [DrawIntro, InjFIdentity, AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim"
-  -- The same marginal with the parameter aliased twice and no `+ 0.0`.
-  -- Pinned by known-issues/aliasedParameterTwiceMarginalDim; reached by seed
-  -- 20261015 once the set-witness-walk-stops-at-identity-injf-wrapper corpus
-  -- additions moved what it draws.
-  , KnownSeq "rewriteProbeHelperScaledNoise" [AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim" ]
+  [ KnownSeq "witnessThroughDetIfNamed" [InjFIdentity, HelperExtract] "list-parameter-helper-read-beside-affine-sibling-impossible" ]
 
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =
