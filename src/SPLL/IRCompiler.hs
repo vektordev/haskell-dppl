@@ -6775,7 +6775,7 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       -- higher-order/namedFunctionCurriedWitness).
       IRLetIn n v irBody ->
         let v' = go callResults v
-            callee = holdsCalleeResult isCall callResults v
+            callee = holdsCalleeResult isCall outer callResults v
         in IRLetIn n (if callee then stripLocalArms v' else v')
                      (go (rebind n callee callResults) irBody)
       IRLambda n irBody ->
@@ -6811,14 +6811,23 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- sample: read as a callee's result, the third and fourth fields of that
     -- value were shifted like a result's bc and flag (task
     -- trajectory-tail-bound-as-tuple-type-error).
-    holdsCalleeResult isCall env v = case v of
+    --
+    -- Only where that arm collapses it, i.e. under @outer@. A generate body
+    -- ('stripGen') keeps every lambda body at full width, so a packed triple
+    -- in a redex there stays four fields wide and is read as a local value:
+    -- a 'collapse' operand's moments bind an inlined probability of its
+    -- condition (@(\\k -> (cdf, (0, (1.0, False)))) 0.25@, the draw-intro
+    -- rewrite of collapseMixture) and, read as a callee result, the shifted
+    -- flag projection read @(1.0, False)@ as a Bool (the regression of
+    -- 415173b, task trajectory-tail-bound-as-tuple-type-error).
+    holdsCalleeResult isCall outer env v = case v of
       IRApply (IRLambda _ irBody) _
         | tails <- returnedTuples irBody, not (null tails) ->
-            any isPackedTriple tails
+            outer && any isPackedTriple tails
       IRApply _ _      -> isCall v
       IRVar x          -> x `Set.member` env
-      IRLetIn n b irBody -> holdsCalleeResult isCall (rebind n (holdsCalleeResult isCall env b) env) irBody
-      IRIf _ t f       -> holdsCalleeResult isCall env t || holdsCalleeResult isCall env f
+      IRLetIn n b irBody -> holdsCalleeResult isCall outer (rebind n (holdsCalleeResult isCall outer env b) env) irBody
+      IRIf _ t f       -> holdsCalleeResult isCall outer env t || holdsCalleeResult isCall outer env f
       _                -> False
 
     -- The tuples a lambda body returns, through its let-bindings, both arms

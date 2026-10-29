@@ -1,0 +1,1 @@
+main = collapse (if (draw k = 0.25 in Uniform < k) then Normal * 2.0 else Normal + 4.0)
