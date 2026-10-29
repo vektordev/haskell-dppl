@@ -48,7 +48,7 @@ import SPLL.AutoNeural hiding (planReadOf, planProjectedReadOf)
 import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
-import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf, lawValue)
+import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf, lawValue, Engine(..), engineOrder, engineLabel)
 import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
@@ -7510,6 +7510,15 @@ invertToWorldsStep meta occs exprBody target = do
       -- catch-all. The occurrence of x sits in `e`, so `e` is never x-free and
       -- the deterministic-given-scope admission cannot apply; the fix is to
       -- invert THROUGH the binding rather than to look past it.
+      -- An inner binding the body reads once, with no binder on the way
+      -- ('readOnceInPlace'), where x is in the body (with or without `e`):
+      -- the read has the value's own law, so the body is inverted with the
+      -- value in place, as 'worldsShape' walks it (task
+      -- dispatch-on-law-certificates). The two-stage inversion below keeps
+      -- the case of x in `e` alone.
+      Expr _ (Apply (Expr _ (Lambda y b)) e)
+        | subtreeHasOcc occs b, readOnceInPlace y b ->
+            invertToWorlds meta occs (substituteVar y e b) target
       Expr _ (Apply (Expr lamTI (Lambda _ b)) e)
         -- x in `e` only. With x in `b` as well, x-sets from `e` and y-sets
         -- from `b` would have to be mixed in one intersection, and with x in
@@ -10888,6 +10897,26 @@ planApplicable meta rt binding
   | isJust (bindScope binding), not (isTArrowType rt) = planProjectedReadOf meta (bindArg binding)
   | otherwise = Nothing
 
+-- | The in-place engine's applicability to a binding, and the expression it
+-- compiles: a lambda in place whose body reads its variable once, with no
+-- binder on the way ('readOnceInPlace', the predicate of the modality
+-- engine's 'CertInPlace'), is the body with the argument at that read. The
+-- read has the argument's own law, so this is the binding's meaning, not a
+-- rewrite of it; it is the last engine, for bindings no other one measures
+-- ('dispatchEngines').
+--
+-- Only a body compiled inline here qualifies ('bindInline', no invocation
+-- tag, no leading argument, not function-valued): the body handed to the
+-- engines is then the lambda's own, and every node it holds on the way to
+-- the read is compiled from this tree, not looked up by chain name.
+inPlaceApplicable :: RType -> Binding -> Maybe Expr
+inPlaceApplicable rt binding
+  | bindInline binding, not (bindLeadingArg binding), null (bindTag binding)
+  , null (bindOuterVars binding), not (isTArrowType rt)
+  , readOnceInPlace (bindVar binding) (bindBody binding)
+  = Just (substituteVar (bindVar binding) (bindArg binding) (bindBody binding))
+  | otherwise = Nothing
+
 -- | The set-witness engine's applicability to a binding: the shape walk of
 -- 'SPLL.Typing.ForwardChaining.worldsShape' over its body, as the modality
 -- engine's let rule asks it.
@@ -10937,8 +10966,9 @@ bindIfConditions meta binding chain = case used of
     readsOuter c = any (`Set.member` freeVarsExpr c) (bindOuterVars binding)
 
 -- | The probabilistic 'Apply' arm's engines, over one resolved application
--- ('Binding'): plan-guided enumeration, point inversion with its body factor,
--- set-valued witnesses and affine marginalisation, in that order.
+-- ('Binding'), in dispatch order ('engineOrder'): plan-guided enumeration,
+-- point inversion with its body factor, affine and joint affine
+-- marginalisation, set-valued witnesses, and in place.
 applyBinding :: CompilerMetadata -> Bool -> RType -> Binding -> IRExpr -> CompilerMonad PResult
 applyBinding meta cumulative rt binding sample = do
   let clauses = fcData meta
@@ -11403,30 +11433,36 @@ applyBinding meta cumulative rt binding sample = do
                   return (unpackResult r)
             go enumLeaves id
    -- The engines of a probabilistic application, as data, in dispatch order
-   -- (task engine-applicability-as-data): each entry's applicability is the
-   -- predicate the modality engine's let rule reads too, and its
+   -- ('engineOrder', the one statement of it, which the modality engine's
+   -- 'bindingCerts' lists certificates in too): each entry's applicability is
+   -- the predicate the modality engine's let rule reads, and its
    -- construction. First applicable wins. A construction that declines
    -- ('Left') passes its diagnostic on to the next applicable engine; one
-   -- that refuses refuses the variant. Enumeration comes before all of them,
-   -- at the Apply arm's first equation ('isEnumerableApplication'), ahead of
-   -- the dead-binding and leading-argument handling a 'Binding' needs.
+   -- that refuses refuses the variant. Enumeration is first in the order but
+   -- is not constructed here: it is tried at the Apply arm's earlier
+   -- equations ('isEnumerableApplication', under the materialization budget),
+   -- ahead of the dead-binding and leading-argument handling a 'Binding'
+   -- needs, so a binding reaching this point is one it declined.
    -- Where none applies, the set-witness engine is asked anyway, for its
    -- diagnostic: its predicate is its necessary condition only.
-   let engines =
-         [ ("plan-guided enumeration", planApplicable meta rt binding <&> \_ _ ->
-              planWitnessApply meta cumulative rt binding sample)
-         , ("point inversion", pointInversion <&> \chain diag -> do
+   let engineFor k = case k of
+         EnumerationEngine -> Nothing
+         PlanEngine -> planApplicable meta rt binding <&> \_ _ ->
+              planWitnessApply meta cumulative rt binding sample
+         PointInversionEngine -> pointInversion <&> \chain diag -> do
               bound <- bindIfConditions meta binding chain
               case bound of
                 Just chain' -> Right <$> pointInvert chain'
-                Nothing -> return (Left diag))
-         , ("affine marginalisation", affineMarginalisable meta rt binding <&> \(x, lamBody) _ ->
-              Right <$> affineCollapse x lamBody)
-         , ("joint affine marginalisation", jointAffineApplicable meta rt binding <&> \ja _ ->
-              jointAffineApply meta cumulative binding ja sample)
-         , ("set-valued witnesses", setWitnessApplicable meta binding <&> \_ diag ->
-              Right <$> setWitnessApply meta cumulative rt binding diag sample)
-         ]
+                Nothing -> return (Left diag)
+         AffineEngine -> affineMarginalisable meta rt binding <&> \(x, lamBody) _ ->
+              Right <$> affineCollapse x lamBody
+         JointAffineEngine -> jointAffineApplicable meta rt binding <&> \ja _ ->
+              jointAffineApply meta cumulative binding ja sample
+         WorldsEngine -> setWitnessApplicable meta binding <&> \_ diag ->
+              Right <$> setWitnessApply meta cumulative rt binding diag sample
+         InPlaceEngine -> inPlaceApplicable rt binding <&> \inPlace _ ->
+              Right <$> toIRInference meta cumulative inPlace sample
+   let engines = [ (engineLabel k, engineFor k) | k <- engineOrder ]
    -- Set-valued witnesses invert the observation structurally into guarded
    -- constraint sets on the bound variable (intervals from comparisons, case
    -- splits from ifs, intersections across occurrences) and measure them

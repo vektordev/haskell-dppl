@@ -46,6 +46,9 @@ module SPLL.Typing.ModalityInfer
   , Recovery(..)
   , EngineCert(..)
   , engineName
+  , Engine(..)
+  , engineOrder
+  , engineLabel
   , bindingCerts
   , mkICtx
   , ICtx
@@ -74,10 +77,10 @@ import Data.Graph (SCC(..), stronglyConnComp)
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
   , Value, GenericValue(..), GenericList(..), Tag(..), MultiValue, GenericMultiValue(..) )
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isZeroValue, freeVarsExpr)
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, isZeroValue, freeVarsExpr, readOnceInPlace)
 import SPLL.Analysis (enumerableDomain, enumerableApplication)
 import SPLL.AutoNeural (planReadOf, planProjectedReadOf)
-import Data.Maybe (isJust, catMaybes, listToMaybe)
+import Data.Maybe (isJust, listToMaybe, mapMaybe)
 import Control.Monad (guard)
 import Data.List (intercalate, find)
 import SPLL.Typing.Typing (setPType)
@@ -506,6 +509,44 @@ data EngineCert
   | CertWorlds WorldsShape
     -- ^ Set-valued witnesses: how the observation inverts onto the variable
     -- ('SPLL.Typing.ForwardChaining.worldsShape').
+  | CertInPlace
+    -- ^ The argument measured at the variable's one read
+    -- ('SPLL.Lang.Lang.readOnceInPlace'): the body reads the variable once,
+    -- with no binder on the way, so the read has the argument's own law
+    -- (which is how 'bindParam' already types it) and the binding denotes
+    -- @body[x := arg]@. Last: it is the engine of a binding no other engine
+    -- measures, and moves no code of one another engine does.
+
+-- | The engines of a random binding (law-carrying-modality decision 1). The
+-- constructor order is the dispatch order, and 'engineOrder' is its one
+-- statement: 'bindingCerts' lists certificates in it, and IRCompiler's
+-- 'applyBinding' tries its constructions in it. Each seam where two engines
+-- can both apply has its reason, measured over the corpus, in
+-- @docs/modality-and-admission.md@ ("Engine applicability").
+data Engine
+  = EnumerationEngine
+  | PlanEngine
+  | PointInversionEngine
+  | AffineEngine
+  | JointAffineEngine
+  | WorldsEngine
+  | InPlaceEngine
+  deriving (Eq, Ord, Enum, Bounded, Show)
+
+-- | The dispatch order of the binding engines.
+engineOrder :: [Engine]
+engineOrder = [minBound .. maxBound]
+
+-- | An engine's name, as @-v@'s "compiled by" line prints it.
+engineLabel :: Engine -> String
+engineLabel k = case k of
+  EnumerationEngine    -> "enumeration"
+  PlanEngine           -> "plan-guided enumeration"
+  PointInversionEngine -> "point inversion"
+  AffineEngine         -> "affine marginalisation"
+  JointAffineEngine    -> "joint affine marginalisation"
+  WorldsEngine         -> "set-valued witnesses"
+  InPlaceEngine        -> "in place"
 
 -- | The engine a certificate is for, as @-d@ and @-v@ print it.
 engineName :: EngineCert -> String
@@ -516,6 +557,7 @@ engineName c = case c of
   CertAffine _     -> "affine marginalisation"
   CertJointAffine _ -> "joint affine marginalisation"
   CertWorlds _     -> "set-valued witnesses"
+  CertInPlace      -> "in place"
 
 -- | One line per law, for the @-d@ dump and for tests.
 renderJustification :: Justification -> String
@@ -1151,20 +1193,19 @@ pointGivenWitnesses ctx env e
 
 -- | The certificates of the engines that apply to a random binding: the
 -- literal lambda @lam@ (its body annotated) applied to @arg@, of law
--- @argLaw@. In IRCompiler's dispatch order: enumeration, plan-guided
--- enumeration, point inversion, affine marginalisation, joint affine
--- marginalisation, set-valued witnesses. Lazy, so asking whether any applies evaluates the predicates
+-- @argLaw@, in dispatch order ('engineOrder'). Lazy, so asking whether any applies evaluates the predicates
 -- only up to the first that does.
 bindingCerts :: ICtx -> Expr -> Expr -> Law -> [EngineCert]
-bindingCerts ctx lam arg argLaw = catMaybes
-  [ CertEnumerable <$> enumerableApplication fc prog lam arg
-  , (\(n, _, _, _) -> CertPlan n) <$> planProjectedReadOf prog arg
-  , CertWitnessed <$> pointWitnessCert fc (icADTs ctx) (icObs ctx) lamCN
-  , CertAffine <$> affineBindingCert x arg argLaw body
-  , CertJointAffine <$> jointAffineBindingCert x arg argLaw body
-  , CertWorlds <$> worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) permissiveDet) occs body
-  ]
+bindingCerts ctx lam arg argLaw = mapMaybe certOf engineOrder
   where
+    certOf k = case k of
+      EnumerationEngine    -> CertEnumerable <$> enumerableApplication fc prog lam arg
+      PlanEngine           -> (\(n, _, _, _) -> CertPlan n) <$> planProjectedReadOf prog arg
+      PointInversionEngine -> CertWitnessed <$> pointWitnessCert fc (icADTs ctx) (icObs ctx) lamCN
+      AffineEngine         -> CertAffine <$> affineBindingCert x arg argLaw body
+      JointAffineEngine    -> CertJointAffine <$> jointAffineBindingCert x arg argLaw body
+      WorldsEngine         -> CertWorlds <$> worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) permissiveDet) occs body
+      InPlaceEngine        -> if readOnceInPlace x body then Just CertInPlace else Nothing
     fc = icFC ctx
     prog = icProg ctx
     lamCN = cnOf lam

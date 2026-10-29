@@ -26,6 +26,7 @@ module SPLL.Lang.Lang (
 , varsOfExpr
 , freeVarsExpr
 , substituteVar
+, readOnceInPlace
 , renameFreeVar
 , containsRandomSource
 , predicateExpr
@@ -152,6 +153,31 @@ substituteVar x r = go
           in Expr t (Lambda y' (go (renameFreeVar y y' b)))
       | otherwise = Expr t (Lambda y (go b))
     go (Expr t f) = Expr t (fmap go f)
+
+-- | @readOnceInPlace x body@: does @body@ read @x@ exactly once, with no
+-- binder on the way to the read? The read may not sit under a lambda (a
+-- function value, which may be called any number of times) nor in the body of
+-- a nested @let@ (the applied literal lambda the parser makes of one). Such a
+-- read is evaluated at most once, by the body itself, so the variable's
+-- marginal law is the bound value's own law there, and @body[x := arg]@
+-- denotes what the binding does. No binder lies on the way, so the
+-- substitution captures nothing.
+--
+-- The single predicate of the in-place engine (task
+-- dispatch-on-law-certificates): the modality engine's certificate
+-- ('SPLL.Typing.ModalityInfer.CertInPlace'), the compiler's construction and
+-- the set-witness walk's entry into an inner binding all read it.
+readOnceInPlace :: String -> Expr -> Bool
+readOnceInPlace x body = go body == Just (1 :: Int)
+  where
+    go (Expr _ (Var v)) = Just (if v == x then 1 else 0)
+    go (Expr _ (Lambda y b))
+      | y == x || not (x `Set.member` freeVarsExpr b) = Just 0
+      | otherwise = Nothing
+    go (Expr _ (Apply (Expr _ (Lambda y b)) a))
+      | y /= x, x `Set.member` freeVarsExpr b = Nothing
+      | otherwise = go a
+    go (Expr _ f) = sum <$> traverse go (foldr (:) [] f)
 
 -- | @renameFreeVar old new e@ renames the free occurrences of @old@ in @e@ to
 -- @new@; each keeps its own annotation, so chain names are untouched. The

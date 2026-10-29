@@ -365,9 +365,14 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
         | op `elem` ["and", "or"] -> (\x y -> WSConnective [x, y]) <$> walk os a WTPoint <*> walk os b WTPoint
         | op == "TCons", tgt == WTPoint -> WSTuple <$> walk os a WTPoint <*> walk os b WTPoint
       Expr _ (InjF (Named "not") [a]) -> WSConnective . (: []) <$> walk os a WTPoint
-      Expr _ (Apply (Expr lamTI (Lambda _ b)) v)
+      Expr _ (Apply (Expr lamTI (Lambda y b)) v)
         | hasOcc os v && not (hasOcc os b) ->
             through os (fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
+        -- The body reads x too, or reads an x-free value it compares x
+        -- against: an inner binding read once with no binder on the way is
+        -- its value at that read ('readOnceInPlace', the in-place engine's
+        -- predicate), so the body is walked with the value in place.
+        | hasOcc os b, readOnceInPlace y b -> walk os (substituteVar y v b) tgt
         | otherwise -> Nothing
       Expr _ (Apply _ _) -> call os e tgt
       -- A projection of a literal pair is that field.
