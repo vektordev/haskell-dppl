@@ -306,7 +306,7 @@ queryRows = filter isQuery
 -- only an exact (within-tolerance) match to the idealized row counts as "may
 -- be fixed now".
 assertStillBroken :: Backend -> String -> Program -> IREnv -> TestCase -> IO ()
-assertStillBroken Interpreter name prog env (ProbTestCase caseName sample params expct) =
+assertStillBroken Interpreter name prog env (ProbTestCase caseName sample params expct _) =
   checkStillBroken name caseName expct (runProbC prog env params sample)
 assertStillBroken Interpreter name prog env (CumulTestCase caseName sample params expct) =
   checkStillBroken name caseName expct (runIntegC prog env params sample)
@@ -330,7 +330,7 @@ assertStillBroken _ _ _ _ _ = return ()
 -- it. Anything else -- a different value, a crash, a refused query, a
 -- non-prob/dim result -- means the bug moved or was fixed.
 assertStillWrong :: Backend -> String -> Program -> IREnv -> TestCase -> IO ()
-assertStillWrong Interpreter name prog env (ProbTestCase caseName sample params expct) =
+assertStillWrong Interpreter name prog env (ProbTestCase caseName sample params expct _) =
   checkStillWrong name caseName expct (runProbC prog env params sample)
 assertStillWrong Interpreter name prog env (CumulTestCase caseName sample params expct) =
   checkStillWrong name caseName expct (runIntegC prog env params sample)
@@ -403,7 +403,7 @@ checkStillWrong name caseName expct er = do
     Right (Right res) -> assertFailure (here ++ "got a non-prob/dim result " ++ show res ++ triage)
 
 rowName :: TestCase -> String
-rowName (ProbTestCase n _ _ _)  = n
+rowName (ProbTestCase n _ _ _ _)  = n
 rowName (CumulTestCase n _ _ _) = n
 rowName _                       = "?"
 

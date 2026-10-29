@@ -145,7 +145,11 @@ expectationImposs :: Expectation -> Maybe Bool
 expectationImposs (Possible _ _ mImp) = mImp
 expectationImposs Impossible = Just True
 
-data TestCase = ProbTestCase String IRValue [IRValue] Expectation
+-- | A density row. The trailing 'Bool' is the @no-sample@ marker (see
+-- 'pNoSampleMarker'): @True@ exempts the row from the two empirical sampler
+-- checks only (@Corpus.SamplingMatchesPDF@ and the batched-generate
+-- differential); every other sweep treats it as an ordinary row.
+data TestCase = ProbTestCase String IRValue [IRValue] Expectation Bool
               | CumulTestCase String IRValue [IRValue] Expectation
               | ArgmaxPTestCase String [IRValue] IRValue
               | WriteLogitsLengthTestCase String String [IRValue] Int             -- target fn, explicit args, expected output list length
@@ -153,7 +157,7 @@ data TestCase = ProbTestCase String IRValue [IRValue] Expectation
               deriving (Show)
 
 isProbTestCase :: TestCase -> Bool
-isProbTestCase (ProbTestCase _ _ _ _) = True
+isProbTestCase (ProbTestCase _ _ _ _ _) = True
 isProbTestCase _ = False
 
 isArgmaxPTestCase :: TestCase -> Bool
@@ -173,7 +177,7 @@ isWriteLogitsSlotTestCase (WriteLogitsSlotTestCase {}) = True
 isWriteLogitsSlotTestCase _ = False
 
 testCaseName :: TestCase -> String
-testCaseName (ProbTestCase name _ _ _) = name
+testCaseName (ProbTestCase name _ _ _ _) = name
 testCaseName (CumulTestCase name _ _ _) = name
 testCaseName (ArgmaxPTestCase name _ _) = name
 testCaseName (WriteLogitsLengthTestCase name _ _ _) = name
@@ -266,9 +270,18 @@ pProbTestCase name = do
   params <- pIRValue `sepBy` symbol ","
   symbol ")"
   expct <- pExpectation
+  noSample <- pNoSampleMarker
   case params of
     [] -> fail "ProbTestCase must have at least one parameter (the sample)"
-    _  -> return $ ProbTestCase name (head params) (tail params) expct
+    _  -> return $ ProbTestCase name (head params) (tail params) expct noSample
+
+-- | The optional @no-sample@ row suffix: the row's density is checked exactly
+-- on every backend, but the empirical sampler checks skip it. A window
+-- estimate straddles a support edge or a jump and reports the average of the
+-- two one-sided densities, so a row at such a point opts out. Only density
+-- (@p(...)@) rows take it.
+pNoSampleMarker :: MonadParser m => m Bool
+pNoSampleMarker = option False (True <$ try (symbol "no-sample"))
 
 pArgmaxPTestCase :: MonadParser m => String -> m TestCase
 pArgmaxPTestCase name = do

@@ -90,8 +90,20 @@ corpusPoolEntry e = Interpreter `elem` ceBackends e && null (neurals (ceProgram 
 -- (its own "a === 0 .||. d === outDim" checks), so those rows contributed
 -- nothing to this pool's properties even when they were included.
 probCasesOf :: [CorpusEntry] -> [CorpusProbCase]
-probCasesOf es = [ (ceName e, (ceProgram e, queryPoint, params, (expectedProb e prob, dim)))
-                 | e <- es, ProbTestCase _ queryPoint params (Possible prob dim _) <- ceCases e ]
+probCasesOf = probCasesWhere (const True)
+
+-- | The p() rows the empirical sampler check may use: a row marked
+-- @no-sample@ is checked exactly everywhere but is left out here, since a
+-- symmetric window over drawn samples averages the two sides of a support
+-- edge or a jump.
+sampledProbCasesOf :: [CorpusEntry] -> [CorpusProbCase]
+sampledProbCasesOf = probCasesWhere (not . noSample)
+  where noSample (ProbTestCase _ _ _ _ ns) = ns
+        noSample _ = False
+
+probCasesWhere :: (TestCase -> Bool) -> [CorpusEntry] -> [CorpusProbCase]
+probCasesWhere keep es = [ (ceName e, (ceProgram e, queryPoint, params, (expectedProb e prob, dim)))
+                 | e <- es, tc@(ProbTestCase _ queryPoint params (Possible prob dim _) _) <- ceCases e, keep tc ]
 
 -- | The cdf(...) rows of the same slice, for the invariants that hold
 -- of a CDF as much as of a point probability ('TopKNeverInflatesCdf').
@@ -141,9 +153,9 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
   -- pass. The hit probability of a window estimate scales with density * eps^dim,
   -- so reliable multivariate estimates need prohibitively many samples; those
   -- cases are value-checked exactly by End2End.Interpreter instead.
-  , corpusProperty SweepSpec
+  , corpusSweepAll corpus SweepSpec
       { sweepName = "Corpus.SamplingMatchesPDF", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "the empirical frequency of forward samples estimates the .tst density" } $ \probPool _ ->
+      , sweepSelect = corpusPoolEntry, sweepNote = "the empirical frequency of forward samples estimates the .tst density (rows marked no-sample excepted)" } $ \es -> return $ let probPool = sampledProbCasesOf es in
       testProperty "SamplingMatchesPDF" $ once $ conjoin
       [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool

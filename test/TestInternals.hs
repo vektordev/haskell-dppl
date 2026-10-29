@@ -1062,7 +1062,7 @@ test_tstDimIsInt :: TestTree
 test_tstDimIsInt = testCase "tstDimIsInt" $ do
   let dimOf src = case parseTestCasesFromString "dim.tst" src of
         Left err -> Left err
-        Right (_, _, _, [ProbTestCase _ _ _ e]) -> Right (expectationDim e)
+        Right (_, _, _, [ProbTestCase _ _ _ e _]) -> Right (expectationDim e)
         Right (_, _, _, tcs) -> Left ("expected one row, got " ++ show tcs)
   assertEqual "an integer dim" (Right (Just 1)) (dimOf "p(0.5)=(0.35, 1)\n")
   assertEqual "a float spelling of an integral dim" (Right (Just 2)) (dimOf "p(0.5)=(0.35, 2.0)\n")
@@ -1685,7 +1685,7 @@ planEnumTopKAndBCTest testName baseName = testCase testName $ do
   (_, _, _, tcs) <- case parseTestCasesFromString tstPath tstSrc of
     Left err -> assertFailure ("tst parse error: " ++ err)
     Right r  -> return r
-  let probCases = [ (s, ps, expectationProb expct) | ProbTestCase _ s ps expct <- tcs ]
+  let probCases = [ (s, ps, expectationProb expct) | ProbTestCase _ s ps expct _ <- tcs ]
   assertBool (baseName ++ ".tst should contain prob cases") (not (null probCases))
   -- compile once per config, evaluate every pinned case against each
   let compiledWith conf = either (error . show) id (compile conf prog)

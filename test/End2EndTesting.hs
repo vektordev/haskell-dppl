@@ -12,7 +12,7 @@ import Data.List (groupBy)
 import Data.Function (on)
 import Control.Monad.Random
 import Data.Maybe
-import Data.List (intercalate, nub, isInfixOf, isPrefixOf, stripPrefix, transpose, zip4, sort)
+import Data.List (intercalate, nub, isInfixOf, isPrefixOf, stripPrefix, transpose, zip4, zip5, sort)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -170,7 +170,7 @@ budgetZeroDifferentialTests corpus manifest = corpusSweep corpus SweepSpec
                                 (conjoin (map (planMatchesDense n p zeroEnv defEnv) tcs)))
   where
     knownDivergentRow n tc = case tc of
-      ProbTestCase _ sample _ _ -> (n, sample) `elem` budgetZeroKnownDivergentRows
+      ProbTestCase _ sample _ _ _ -> (n, sample) `elem` budgetZeroKnownDivergentRows
       _                         -> False
 
 -- | Non-neural corpus programs whose budget-0 answer differs from the default
@@ -235,7 +235,7 @@ neuralLogSpaceSweep name version note conf corpus manifest = corpusSweep corpus 
                                   (conjoin (map (logMatchesLinear p linEnv logEnv) (ceCases e))))
   where
     logMatchesLinear p linEnv logEnv tc = case tc of
-      ProbTestCase  n sample params _ -> cmp (n ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
+      ProbTestCase  n sample params _ _ -> cmp (n ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
       CumulTestCase n sample params _ -> cmp (n ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
       _ -> property True
       where
@@ -265,7 +265,7 @@ planEngineCorpus =
 
 planMatchesDense :: String -> Program -> Either CompilerError IREnv -> Either CompilerError IREnv -> TestCase -> Property
 planMatchesDense n p planEnv denseEnv tc = case tc of
-  ProbTestCase  name sample params _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
+  ProbTestCase  name sample params _ _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
   CumulTestCase name sample params _ -> cmp (name ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
   _ -> property True
   where
@@ -283,7 +283,7 @@ planMatchesDense n p planEnv denseEnv tc = case tc of
 -- Takes the program's scalar/batched compiles already done, shared across
 -- every query point of that program.
 selectNoOp :: Program -> Either CompilerError IREnv -> Either CompilerError IREnv -> TestCase -> Property
-selectNoOp p scalarEnv batchedEnv (ProbTestCase  name sample params _) =
+selectNoOp p scalarEnv batchedEnv (ProbTestCase  name sample params _ _) =
   selectNoOpCmp scalarEnv batchedEnv name (\c -> runProbC  p c params sample)
 selectNoOp p scalarEnv batchedEnv (CumulTestCase name sample params _) =
   selectNoOpCmp scalarEnv batchedEnv name (\c -> runIntegC p c params sample)
@@ -353,7 +353,7 @@ checkExpectation probLabel name Impossible outProb _outDim res =
     checkImposs name (Just True) res
 
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
-testInterpreter p compiledE (ProbTestCase name sample params expct) = ioProperty $ do
+testInterpreter p compiledE (ProbTestCase name sample params expct _) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right res@(VProbDim outProb outDim)) -> checkExpectation "Probability" name expct outProb outDim res
@@ -755,7 +755,7 @@ envelopesShapeable p = and [ inTy == TSymbol || inputWidth inTy >= SPLL.AutoNeur
 -- inputs.
 shapeNeuralTestCase :: Program -> TestCase -> TestCase
 shapeNeuralTestCase p tc = case tc of
-  ProbTestCase n s ps e  -> ProbTestCase n s (shapeNeuralParams p ps) e
+  ProbTestCase n s ps e m -> ProbTestCase n s (shapeNeuralParams p ps) e m
   CumulTestCase n s ps e -> CumulTestCase n s (shapeNeuralParams p ps) e
   _                      -> tc
 
@@ -793,7 +793,7 @@ resolveNeuralParams p params = zipWith resolve (paramNetworks p ++ repeat Nothin
 -- A no-op on a non-neural program (every parameter position resolves to
 -- 'Nothing') and on any non-prob/cumulative case.
 resolveNeuralTestCase :: Program -> TestCase -> TestCase
-resolveNeuralTestCase p (ProbTestCase n s ps e)  = ProbTestCase  n s (resolveNeuralParams p ps) e
+resolveNeuralTestCase p (ProbTestCase n s ps e m)  = ProbTestCase  n s (resolveNeuralParams p ps) e m
 resolveNeuralTestCase p (CumulTestCase n s ps e) = CumulTestCase n s (resolveNeuralParams p ps) e
 resolveNeuralTestCase _ tc                       = tc
 
@@ -807,7 +807,7 @@ resolveNeuralTestCase _ tc                       = tc
 -- of two different plans has no single literal envelope, and stays as it is.
 literalSymbolEnvelopes :: Program -> TestCase -> TestCase
 literalSymbolEnvelopes p tc = case tc of
-  ProbTestCase n s ps e  -> ProbTestCase n s (zipWith lit params ps) e
+  ProbTestCase n s ps e m -> ProbTestCase n s (zipWith lit params ps) e m
   CumulTestCase n s ps e -> CumulTestCase n s (zipWith lit params ps) e
   _                      -> tc
   where
@@ -1280,10 +1280,10 @@ juliaModuleTestCases modName tcs =
     ) tcs)
   where
     (_, _, exampleParams, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params expct) = (name, sample, params, expct)
+    unpackTestCase (ProbTestCase name sample params expct _) = (name, sample, params, expct)
     unpackTestCase (CumulTestCase name sample params expct) = (name, sample, params, expct)
     unpackTestCase tc = error (harnessRoutingError "Julia" tc)
-    mainName (ProbTestCase _ _ _ _) = "main_prob"
+    mainName (ProbTestCase _ _ _ _ _) = "main_prob"
     mainName (CumulTestCase _ _ _ _) = "main_integ"
     mainName tc = error (harnessRoutingError "Julia" tc)
     -- Each program is wrapped in its own module, so its ADT constructors are
@@ -1325,10 +1325,10 @@ pythonTestCode src tcs =
   concatMap pyCase tcs
   where
     (_, _, exampleParams, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params expct) = (name, sample, params, expct)
+    unpackTestCase (ProbTestCase name sample params expct _) = (name, sample, params, expct)
     unpackTestCase (CumulTestCase name sample params expct) = (name, sample, params, expct)
     unpackTestCase tc = error (harnessRoutingError "Python" tc)
-    mainName (ProbTestCase _ _ _ _) = "main.forward"
+    mainName (ProbTestCase _ _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
     mainName tc = error (harnessRoutingError "Python" tc)
     -- The dim's value is checked only when the .tst row's 'Expectation'
@@ -2954,6 +2954,10 @@ data BatchGroup = BatchGroup
   , bgSamples    :: [IRValue]
   , bgExpProb    :: [Double]
   , bgExpDim     :: [Int]
+  -- | Per point, the row's @no-sample@ marker: the generate differential
+  -- (an empirical window estimate) skips these points; every other check
+  -- uses them. Always False for a cumulative group.
+  , bgNoSample   :: [Bool]
   -- | How the samples go to the kernel ('batchSamples').
   , bgBatch      :: SampleBatch
   } deriving (Show)
@@ -2976,28 +2980,29 @@ batchGroups enumOf isNeural tcs = mapM build grouped
     -- is the one still-unsupported case and is dropped, the same treatment
     -- 'containsAnyExceptV' below gives it -- one such point no longer keeps
     -- every *other* point of that program out of the differential either.
-    keyed = [ q | t <- tcs, Just q@(_, _, sm, _, _) <- [asQuery t], not (containsAnyExceptV sm) ]
+    keyed = [ q | t <- tcs, Just q@(_, _, sm, _, _, _) <- [asQuery t], not (containsAnyExceptV sm) ]
     grouped
-      | isNeural  = groupBy ((==) `on` (\(c, _, _, _, _) -> c)) keyed
-      | otherwise = groupBy ((==) `on` (\(c, ps, _, _, _) -> (c, show ps))) keyed
-    build g@((c, _, _, _, _):_) =
-      let samples = [s | (_, _, s, _, _) <- g]
-          paramRows = [ps | (_, ps, _, _, _) <- g]
+      | isNeural  = groupBy ((==) `on` (\(c, _, _, _, _, _) -> c)) keyed
+      | otherwise = groupBy ((==) `on` (\(c, ps, _, _, _, _) -> (c, show ps))) keyed
+    build g@((c, _, _, _, _, _):_) =
+      let samples = [s | (_, _, s, _, _, _) <- g]
+          paramRows = [ps | (_, ps, _, _, _, _) <- g]
       in do sb <- batchSamples enumOf samples
             paramExprs <- if isNeural
               then batchSymParamCols paramRows
               else Just (map pyVal (head paramRows))
             Just BatchGroup { bgIsCumul = c, bgParamExprs = paramExprs
                             , bgParamRows = paramRows, bgSamples = samples
-                            , bgExpProb = [ep | (_, _, _, ep, _) <- g]
-                            , bgExpDim  = [ed | (_, _, _, _, ed) <- g]
+                            , bgExpProb = [ep | (_, _, _, ep, _, _) <- g]
+                            , bgExpDim  = [ed | (_, _, _, _, ed, _) <- g]
+                            , bgNoSample = [ns | (_, _, _, _, _, ns) <- g]
                             , bgBatch   = sb }
     build [] = Nothing
     -- 'Impossible' rows (no stated dim) fall through to the final wildcard and
     -- are simply not batched, the same treatment 'containsAnyExceptV' above
     -- gives a 'VAnyExcept'-carrying query point.
-    asQuery (ProbTestCase _ s ps (Possible (VFloat ep) ed _))  = Just (False, ps, s, ep, ed)
-    asQuery (CumulTestCase _ s ps (Possible (VFloat ep) ed _)) = Just (True,  ps, s, ep, ed)
+    asQuery (ProbTestCase _ s ps (Possible (VFloat ep) ed _) ns)  = Just (False, ps, s, ep, ed, ns)
+    asQuery (CumulTestCase _ s ps (Possible (VFloat ep) ed _)) = Just (True,  ps, s, ep, ed, False)
     asQuery _ = Nothing
 
 -- | Batch the positional symbol arguments of a neural program across points.
@@ -3316,7 +3321,7 @@ batchedDriver accArg eligible = unlines $
       [ "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
-    groupCall name (BatchGroup isCumul paramExprs _ _ expP expD sb) =
+    groupCall name (BatchGroup isCumul paramExprs _ _ expP expD _ sb) =
       let method = if isCumul then "integrate" else "forward"
           -- A topK-compiled prob function takes an accumulated-probability
           -- parameter right after the sample, then the runtime cutoff (see
@@ -3802,16 +3807,16 @@ runBatchedGenerate py eligible
              , null netNames
              , let points = [ (pyVal s, ep, ed)
                             | g <- groups, not (bgIsCumul g)
-                            , (s, ep, ed) <- zip3 (bgSamples g) (bgExpProb g) (bgExpDim g)
-                            , isScalarSample s, densityLivesOnScalar s ed ]
+                            , (s, ep, ed, ns) <- zip4 (bgSamples g) (bgExpProb g) (bgExpDim g) (bgNoSample g)
+                            , not ns, isScalarSample s, densityLivesOnScalar s ed ]
              , not (null points) ]
     neuralProbes = [ (name, src, netNames, bgParamExprs g, points)
              | (name, src, groups, netNames) <- eligible
              , not (null netNames)
              , (g:_) <- [[gr | gr <- groups, not (bgIsCumul gr)]]
              , let points = [ (pyVal s, ep, ed, i)
-                            | (i, s, ep, ed) <- zip4 [0 :: Int ..] (bgSamples g) (bgExpProb g) (bgExpDim g)
-                            , isScalarSample s, densityLivesOnScalar s ed ]
+                            | (i, s, ep, ed, ns) <- zip5 [0 :: Int ..] (bgSamples g) (bgExpProb g) (bgExpDim g) (bgNoSample g)
+                            , not ns, isScalarSample s, densityLivesOnScalar s ed ]
              , not (null points) ]
 
 -- | The scalar twin of @TestCorpus.densityLivesOnSamples@: a window over drawn
@@ -4037,7 +4042,7 @@ loadBranchCountCase name = do
       row t = case runOf t of
         Right (VProbDimBC p d bc) -> (t, p, d, bc)
         other -> error (name ++ ": branch-counted run gave " ++ show other)
-        where runOf (ProbTestCase _ s ps _)  = runProbC prog env ps s
+        where runOf (ProbTestCase _ s ps _ _)  = runProbC prog env ps s
               runOf (CumulTestCase _ s ps _) = runIntegC prog env ps s
               runOf _ = error "not a query case"
   return (name, prog, env, map row queries)
@@ -4076,7 +4081,7 @@ branchCountPython name env rows = ioProperty $ do
   return $ case c of
     ExitSuccess   -> property True
     ExitFailure _ -> counterexample (name ++ ": branch-counted Python differed from the interpreter") False
-  where pyCall (ProbTestCase _ s ps _)  = (s, ps, "main.forward")
+  where pyCall (ProbTestCase _ s ps _ _)  = (s, ps, "main.forward")
         pyCall (CumulTestCase _ s ps _) = (s, ps, "main.integrate")
         pyCall _ = error "not a query case"
 
@@ -4115,7 +4120,7 @@ branchCountJulia loaded = ioProperty $ do
   return $ case code of
     ExitSuccess   -> property True
     ExitFailure _ -> counterexample "branch-counted Julia differed from the interpreter" False
-  where jlCall (ProbTestCase _ s ps _)  = (s, ps, "main_prob")
+  where jlCall (ProbTestCase _ s ps _ _)  = (s, ps, "main_prob")
         jlCall (CumulTestCase _ s ps _) = (s, ps, "main_integ")
         jlCall _ = error "not a query case"
 
@@ -4135,12 +4140,12 @@ branchCountLogSpace name prog rows =
         , counterexample (name ++ "/" ++ tcName tc ++ ": branch count " ++ show lbc ++ " /= " ++ show bc)
             (lbc == bc) ]
       other -> counterexample (name ++ ": log-space run gave " ++ show other) False
-    runOf env (ProbTestCase _ s ps _)  = runProbC prog env ps s
+    runOf env (ProbTestCase _ s ps _ _)  = runProbC prog env ps s
     runOf env (CumulTestCase _ s ps _) = runIntegC prog env ps s
     runOf _ _ = error "not a query case"
 
 tcName :: TestCase -> String
-tcName (ProbTestCase n _ _ _)  = n
+tcName (ProbTestCase n _ _ _ _)  = n
 tcName (CumulTestCase n _ _ _) = n
 tcName _ = "?"
 
