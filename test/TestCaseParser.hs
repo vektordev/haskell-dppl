@@ -648,6 +648,11 @@ data TstFile = TstFile
     -- ^ A standalone @no-normalization@ line: keep the program out of
     -- End2End's Normalization sweep, which samples the output and cannot
     -- cover a wide support. The file's comment says why.
+  , tstIrContract      :: Maybe String
+    -- ^ An @ir-contract: violated "<substring>"@ line: the compiler's output
+    -- for this program is known not to type-check against the IR contract
+    -- ('TestIRContract'), and the checker's message contains the substring.
+    -- Fails when the program starts to check, like an @expect-failure:@.
   , tstCases           :: [TestCase]
   } deriving (Show)
 
@@ -656,7 +661,7 @@ data TstFile = TstFile
 -- never 'allBackends'. A missing
 -- `expect-failure:` header means 'Nothing' -- an ordinary corpus program.
 pHeaders :: MonadParser m => m TstFile
-pHeaders = go (TstFile defaultBackends False Nothing False [])
+pHeaders = go (TstFile defaultBackends False Nothing False Nothing [])
   where
     go h =
       (try pBackendsHeader >>= \bs' -> go h { tstBackends = bs' ++ filter (`notElem` bs') (extraTokens h) }) <|>
@@ -664,9 +669,18 @@ pHeaders = go (TstFile defaultBackends False Nothing False [])
       (try (pFlagLine "dense") >> go (addToken Dense h)) <|>
       (try (pFlagLine "no-normalization") >> go h { tstNoNormalization = True }) <|>
       (try pExpectFailureHeader >>= \ef' -> go h { tstExpectFailure = Just ef' }) <|>
+      (try pIrContractHeader >>= \m -> go h { tstIrContract = Just m }) <|>
       return h
     extraTokens h = filter (== Dense) (tstBackends h)
     addToken b h = if b `elem` tstBackends h then h else h { tstBackends = tstBackends h ++ [b] }
+
+-- | @ir-contract: violated "some substring"@, the substring of the IR type
+-- checker's message for a program whose compiled IR is known to violate the
+-- contract.
+pIrContractHeader :: MonadParser m => m String
+pIrContractHeader = do
+  symbol "ir-contract:"
+  symbol "violated" >> pQuotedString <* pNewline
 
 -- | A standalone header line holding one word.
 pFlagLine :: MonadParser m => String -> m ()

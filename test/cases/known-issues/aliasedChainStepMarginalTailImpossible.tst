@@ -8,4 +8,5 @@
 -- (TestRewrites.knownDivergences). Docs task
 -- aliased-chain-step-marginal-tail-impossible.
 expect-failure: broken
+ir-contract: violated "in main__m1101_prob: cannot match (Float, a) with Float"
 p((0.0, (0.5, (1.0, ANY))))=(0.04944889338563758, 3.0)

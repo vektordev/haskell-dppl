@@ -24,6 +24,7 @@ import TestObservationMask (observationMaskTests, slowVariantCorpusTests, chartW
 import TestPerValue (perValueTests)
 import TestMonomorphize (monomorphizeTests)
 import TestIRTypeCheck (irTypeCheckTests)
+import TestIRContract (irContractTests, slowIrContractTests)
 import IRFuzz (irFuzzGeneratorTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
@@ -561,6 +562,7 @@ main = do
   showcase <- showcaseTests
   writeLogitsRoundtrip <- writeLogitsRoundtripTests corpus
   knownIssues <- knownIssuesTests manifest
+  irContract <- irContractTests corpus
   -- Names corpus members, but reads only the front end (0.1 s for the whole
   -- corpus), so it runs by default rather than in Slow.
   chartWarnings <- chartWarningCorpusTests corpus
@@ -576,6 +578,7 @@ main = do
   -- they read the whole corpus, `slow` programs included, so they live here
   -- (docs-repo task demote-tick-redundant-corpus-programs-to-slow).
   slowPlanDiff <- slowPlanEngineDifferentialTests corpus manifest
+  slowIrContract <- slowIrContractTests corpus
   slowVariants <- slowVariantCorpusTests corpus
   juliaFreeNames <- juliaFreeNamesTests corpus
   -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
@@ -596,7 +599,7 @@ main = do
   generateCensus <- generateCensusTests corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
-        if isNothing runSlow then [] else [slowInternals, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, rewriteSequences, rewriteIntegration, ofToggleCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
+        if isNothing runSlow then [] else [slowInternals, slowIrContract, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, rewriteSequences, rewriteIntegration, ofToggleCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it
@@ -638,6 +641,7 @@ main = do
     , rejectionTests
     , monomorphizeTests
     , irTypeCheckTests
+    , irContract
     , irFuzzGeneratorTests
     , modalityTests
     , modalityInfer

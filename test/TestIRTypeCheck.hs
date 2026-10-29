@@ -14,17 +14,15 @@ import SPLL.Examples (testDiceAdd, testRecursion, testThetaTree, testLetIn, test
 
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertFailure)
-import System.FilePath (takeBaseName)
 
 irTypeCheckTests :: TestTree
 irTypeCheckTests = testGroup "IRTypeCheck"
   [ compilerOutputTests
-  , formerlyRejectedTests
   ]
 
 -- | Programs the compiler compiles today must check: the checker is a
 -- contract the compiler's output already meets. A small spread rather than
--- the corpus (see the task document for the corpus survey).
+-- the corpus; the corpus itself is checked by 'TestIRContract'.
 compilerOutputTests :: TestTree
 compilerOutputTests = testGroup "compiler output"
   ([ accepts name p | (name, p) <-
@@ -54,43 +52,3 @@ compilerOutputTests = testGroup "compiler output"
           [ "addTwice x = x + x"
           , "main = (addTwice Normal, addTwice (if Uniform < 0.5 then 1 else 2))" ])
       ]
-
--- | Corpus programs whose compiled IR the checker rejected until task
--- ir-contract-violations-in-compiler-output fixed the compiler (an open
--- body's unbound witness variable, a function compared for equality, a
--- mixed result layout after branch-count stripping) or the checker (tensor
--- equality). Their corpus rows passed throughout: the offending code was
--- unreachable, so only the checker sees a regression.
-formerlyRejectedTests :: TestTree
-formerlyRejectedTests = testGroup "formerly rejected corpus programs"
-  [ testCase (takeBaseName path) $ do
-      src <- readFile path
-      case tryParseProgram path src of
-        Left _ -> assertFailure "does not parse"
-        Right p -> case compile defaultCompilerConfig p of
-          Left err -> assertFailure ("does not compile: " ++ show err)
-          Right env -> case checkIREnvWith (oracleSignatures (programMockOracle p)) env of
-            Left err -> assertFailure (showIRTypeError err)
-            Right _ -> return ()
-  | path <- map ("test/cases/" ++)
-      [ "data-structures/drawBoundListElementGuardsEmptyTail.ppl"
-      , "distributions/ouChainUnrolled.ppl"
-      , "higher-order/aliasedDrawThroughScalingHelper.ppl"
-      , "higher-order/curriedTupleBodyBothProbabilistic.ppl"
-      , "higher-order/functionInTupleCdfWildcardSlot.ppl"
-      , "higher-order/namedFunctionCurriedWitness.ppl"
-      , "let-bindings/aliasedDrawScaledChain.ppl"
-      , "let-bindings/aliasedDrawScaledSibling.ppl"
-      , "let-bindings/anyLeafReadAgainThroughHelper.ppl"
-      , "let-bindings/gaussianTrajectory4.ppl"
-      , "let-bindings/gaussianTrajectory8.ppl"
-      , "let-bindings/letTwoUniformIndirect.ppl"
-      , "let-bindings/letTwoUniform.ppl"
-      , "let-bindings/letWitnessedChain.ppl"
-      , "let-bindings/maskFreshSiblingDraw.ppl"
-      , "let-bindings/maskIndependentLatents.ppl"
-      , "let-bindings/maskShiftedWitness.ppl"
-      , "let-bindings/tupleCdfThroughDrawIndependentSlot.ppl"
-      , "neural/listOfFieldReads.ppl"
-      , "neural/tensorDiffusionTrajectory.ppl"
-      ] ]

@@ -16,4 +16,5 @@
 -- exp-continuous-hybrid-simulation-retest.
 backends: interpreter, python
 expect-failure: broken
+ir-contract: violated "in main__m001_prob: cannot match (a, Float) with Float"
 p((0.0, (0.0, (0.0, 0.0))))=(6.349363593424097e-2, 3.0)

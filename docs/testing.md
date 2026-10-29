@@ -169,7 +169,9 @@ checks the rows on the dense entry points), a line of its own;
 (keeps a program out of `End2End.Normalization`, which samples the output and
 cannot cover a wide support; the file's leading comment says why); and, for a
 `test/cases/known-issues/` file only, `expect-failure: <shape>` (design
-testcases-corpus-restructure — see "Known-issues corpus" below).
+testcases-corpus-restructure — see "Known-issues corpus" below); and
+`ir-contract: violated "<substring>"` for a program whose compiled IR is known
+not to type-check ("The IR contract on the corpus").
 
 **The interpreter is the oracle** (impact analysis M2, docs-repo task
 `impact-analysis-m2-drop-runtime-from-key`). An ordinary corpus file names no
@@ -420,6 +422,40 @@ existing `TestRejection.hs` groups onto it is out of scope. Seeded with
 correlated-gaussian-let-shares-latent), the `diagnostic` shape, whose fuller
 multi-assertion sibling is `TestRejection.SetWitnessSharedLatent`. That seed
 has since been fixed and moved to `let-bindings/` (affine-gaussian-forms M2).
+
+### The IR contract on the corpus
+
+`IRContract` (`test/TestIRContract.hs`) compiles each corpus program and runs
+the IR type checker (`checkIREnvWith`, with the program's mock oracle as
+externals) on two environments of the same compile: the IR before the
+optimizer, after the select pass (`"After Select Pass"`, which is where
+`IRSelect` enters under `--batched`), and the final one. A failure names
+the stage: `pre-optimizer` is a compiler violation, `final` alone an optimizer
+or batched post-pass one. A corpus row can pass over a violating IR whose
+offending code is unreachable, so this checks what the rows cannot.
+
+- **Default tier**, `IRContract.Corpus`: every non-`slow` program, compiled at
+  the default config and with `--batched`; and `IRContract.KnownIssues`, the
+  known-issues programs (but not the performance pins, which have no program
+  to check). About 4 s wall, 20 s summed. The checker itself is cheap (about a
+  second over the whole corpus); the cost is the compile, which the sweep does
+  not share with other sweeps.
+- **Slow tier**, `Slow.IRContractConfigs (slow)`: `--logSpace` and
+  `--countBranches` for every program, and all four configs for the `slow`
+  programs.
+- **Not covered**: `--topK`. Under it, 187 corpus programs fail the checker
+  because every `writeLogits` function reads `main_prob` as if it took no
+  cutoff (docs task `topk-writelogits-contract-violation`).
+- **Known violations.** `ir-contract: violated "<substring>"` in a `.tst`
+  (ordinary or known-issues) requires some check to be rejected with a
+  message containing the substring, and fails the day the program checks, like
+  `expect-failure:`; a rejection with another message fails too (the violation
+  changed shape). Put it on the known-issue that causes it. A program that
+  does not compile has no IR and passes.
+- **No impact skipping.** The verdict depends on the checker, which the
+  manifest's keys do not cover, and the compile is never skipped; the sweep
+  runs every time. A skipped End2End check is therefore no gap in the contract
+  check.
 
 ### Duplication census: catching a fan-out at depth 2
 

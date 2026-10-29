@@ -9,4 +9,5 @@
 -- trajectory-tail-bound-as-tuple-type-error.
 backends: interpreter
 expect-failure: broken
+ir-contract: violated "in main__m10_prob: cannot match (Float, Float) with Float"
 p((2.5, (2.1, (1.6, 1.2))), ThetaTree [0.45, 0.2] [])=(13.97119230165127, 4.0)

@@ -7,6 +7,7 @@
 -- program with the callee inlined as a lambda literal answers correctly
 -- (higher-order/arrowApplyRandomFunction). Rows are the idealized values.
 expect-failure: broken
+ir-contract: violated "in main_integ: cannot match Float -> (Float, "
 p(4.0)=(0.5, 0.0, False)
 p(6.0)=(0.5, 0.0, False)
 p(5.0) is impossible

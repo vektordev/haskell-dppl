@@ -7,5 +7,6 @@
 -- alpha-rename family. Docs task callee-body-name-sensitive-across-call.
 backends: interpreter
 expect-failure: broken
+ir-contract: violated "in main_prob: cannot match Int with Either a Int"
 p(Right 1)=(0.3, 0.0)
 p(Left ())=(0.7, 0.0)

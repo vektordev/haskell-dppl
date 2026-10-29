@@ -115,6 +115,7 @@ data CorpusEntry = CorpusEntry
   , ceSlow          :: Bool
   , ceExpectFailure :: Maybe ExpectFailure
   , ceNoNormalization :: Bool      -- ^ the @no-normalization@ header line
+  , ceIrContract    :: Maybe String -- ^ the @ir-contract: violated@ header line
   , ceCases         :: [TestCase]
   }
 
@@ -157,7 +158,7 @@ loadCorpus = do
     prog <- parseProgram ppl
     t <- parseTstFile tst
     return (CorpusEntry (takeBaseName ppl) ppl tst prog (tstBackends t) (tstSlow t) (tstExpectFailure t)
-                        (tstNoNormalization t) (tstCases t))
+                        (tstNoNormalization t) (tstIrContract t) (tstCases t))
   let stale = [ n | n <- slowForCompileCost, n `notElem` [ ceName e | e <- entries, ceSlow e ] ]
   when (not (null stale)) $
     error ("CorpusSweep.slowForCompileCost names no slow corpus program: " ++ intercalate ", " stale)
