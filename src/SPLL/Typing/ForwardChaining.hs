@@ -81,6 +81,10 @@ data FCData = FCData
   -- | Every if-then-else node, by its chain name: what the point inverse
   -- needs to split the observation over the two arms ('toInvExprMaybeWith').
   , fcIfConds :: Map.Map ChainName IfCond
+  -- | Every @let@ (an application of a literal lambda), by the chain name of
+  -- the application: the point inverse steps through one into its body on
+  -- the way to an if-then-else ('toInvExprMaybeWith').
+  , fcLetSteps :: Map.Map ChainName LetStep
   -- | The equivalence clauses of 'hornClauses', by conclusion, in clause
   -- order ('findEquivalentExpression' follows them per lookup).
   , fcEquivByConclusion :: Map.Map ChainName [HornClause]
@@ -97,6 +101,18 @@ data IfCond = IfCond
   , icThenNodes :: Set ChainName
   , icElseNodes :: Set ChainName
   , icCondRandom :: Bool
+  }
+
+-- | A @let@ (@(\\y -> b) v@) as the point inverse steps through it: the
+-- chain names of its body and of its value, every node of the value, and
+-- whether the value draws fresh randomness itself ('hasRandomLeaf'). The
+-- application's value is its body's, so an observation of the one is an
+-- observation of the other.
+data LetStep = LetStep
+  { lsBody :: ChainName
+  , lsValue :: ChainName
+  , lsValueNodes :: Set ChainName
+  , lsValueRandom :: Bool
   }
 
 -- Information on what type of expression a HornClause originated from
@@ -230,10 +246,13 @@ isWitnessedLambda fcData adtsDecls obsCN = \lambdaCN -> case inversionSetup fcDa
        -- variable arm by arm ('toInvExprMaybeWith'). The shared reach test
        -- goes first: the inverse is seeded per application, so it is the
        -- expensive conjunct.
-       || (Map.member (untag (conclusion paramClause)) (fcIfConds fcData)
+       || (splitsAt (untag (conclusion paramClause))
            && reached (conclusion paramClause) && isJust (toInvExprMaybe fcData adtsDecls lambdaCN))
   Nothing -> False
   where
+    -- An if-then-else, possibly under @let@s ('toInvExprMaybeWith').
+    splitsAt cn = Map.member cn (fcIfConds fcData)
+               || maybe False (splitsAt . lsBody) (Map.lookup cn (fcLetSteps fcData))
     (unwrappedObsCN, _) = unwrapLambdas fcData obsCN
     obsClause = ParameterHornClause unwrappedObsCN
     reached = isJust . toValueExpr (hornClauses fcData) [obsClause] adtsDecls
@@ -261,12 +280,14 @@ data WitnessCert = WitnessCert
 -- @headCN@ resolves to, in the declaration observed at @obsCN@: 'Nothing'
 -- when no occurrence of the bound variable is point-invertible from the
 -- lambda's body. A chain name forward chaining never saw (a node a later pass
--- synthesized) has no certificate.
-pointWitnessCert :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe WitnessCert
-pointWitnessCert fcData adtsDecls obsCN headCN
+-- synthesized) has no certificate. The predicate says which @let@ values on
+-- the way to an if-then-else are known points ('toInvExprMaybeWith'), by
+-- their law.
+pointWitnessCert :: (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe WitnessCert
+pointWitnessCert valueKnown fcData adtsDecls obsCN headCN
   | isNothing (Map.lookup headCN (chainNameInfo fcData)) = Nothing
   | otherwise = do
-      chain <- toInvExprMaybe fcData adtsDecls headCN
+      chain <- toInvExprMaybeWith (const True) valueKnown fcData adtsDecls headCN
       Just (WitnessCert chain (isWitnessedLambda fcData adtsDecls obsCN headCN))
 
 -- | The set-witness engine's certificate (design set-valued-witnesses): how
@@ -508,7 +529,7 @@ toInvExpr fcData adtsDecls lambdaCN = merged
 -- 'mergeExpr'). The set-valued witness fallback in IRCompiler dispatches on
 -- this instead of the hard error.
 toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
-toInvExprMaybe = toInvExprMaybeWith (const True)
+toInvExprMaybe = toInvExprMaybeWith (const True) (const True)
 
 -- | 'toInvExprMaybe', which also inverts through an if-then-else whose
 -- condition is known at the binding (task
@@ -523,17 +544,39 @@ toInvExprMaybe = toInvExprMaybeWith (const True)
 --
 -- The condition enters the chain as the free variable 'ifConditionVars'
 -- names, which the caller binds to the condition's value in its scope. The
--- predicate says which conditions (by untagged chain name) the caller can
--- compile as known; the syntactic floor -- no occurrence of the bound
--- variable, no fresh randomness -- is checked here.
-toInvExprMaybeWith :: (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
-toInvExprMaybeWith condKnown fcData adtsDecls lambdaCN = do
+-- first predicate says which conditions (by untagged chain name) the caller
+-- can compile as known; the syntactic floor -- no occurrence of the bound
+-- variable, no fresh randomness -- is checked here. The second says the same
+-- of the value of a @let@ the split is reached through: the binding is
+-- stepped into only where its value is known, which is where a condition
+-- reading its variable is.
+toInvExprMaybeWith :: (ChainName -> Bool) -> (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
+toInvExprMaybeWith condKnown valueKnown fcData adtsDecls lambdaCN = do
   (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
   let seeded occs seed =
         case informative (mapMaybe (toPointValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
           []  -> throughIf occs seed
           ves -> Just (mergeExpr toInvVarName lambdaCN occs ves)
-      throughIf occs seed = do
+      throughIf occs seed = splitIf occs seed <|> throughLet occs seed
+      -- A @let@ whose value reads none of the occurrences: its body is
+      -- observed as the application is, so the occurrences are recovered
+      -- from the body. The binding's value must be known here, as an @if@'s
+      -- condition must (a condition reading the let-bound variable is known
+      -- exactly when the value is): a @draw c = 0.2 < 0.5@ ahead of
+      -- @if c then .. else ..@ splits as the inline condition does (task
+      -- if-split-ignores-draw-bound-point-condition).
+      throughLet occs seed = do
+        ls <- Map.lookup (untag seed) (fcLetSteps fcData)
+        let tag = getTag seed
+        if lsValueRandom ls || any ((`Set.member` lsValueNodes ls) . untag) occs || not (valueKnown (lsValue ls))
+          then Nothing
+          else do
+            c <- seeded occs (lsBody ls ++ tag)
+            let at field = IRLetIn (lsBody ls ++ tag) (IRVar seed) (field c)
+            Just InvChain { invValue = at invValue, invCoV = at invCoV, invGuard = at invGuard
+                          , invReadsAny = at invReadsAny, invCumValue = at invCumValue
+                          , invCumGuard = at invCumGuard }
+      splitIf occs seed = do
         ic <- Map.lookup (untag seed) (fcIfConds fcData)
         let tag = getTag seed
             inside nodes = filter ((`Set.member` nodes) . untag) occs
@@ -1469,6 +1512,7 @@ progToFCData anchors prog =
          , fcAnchors = anchorInstances
          , lambdaVarOccurrences = firstWins (progToLambdaVarOccurrences prog)
          , fcIfConds = Map.unions [ ifConds e | (_, e) <- functions prog ]
+         , fcLetSteps = Map.unions [ letSteps e | (_, e) <- functions prog ]
          , fcEquivByConclusion = Map.fromListWith (flip (++))
              [ (conclusion hc, [hc]) | g <- anchorClauses ++ baseClauses, hc <- g, isEquivalenceHornClause hc ] }
   where
@@ -1499,6 +1543,12 @@ progToFCData anchors prog =
       , icCondNodes = subtreeChainNames c, icThenNodes = subtreeChainNames t
       , icElseNodes = subtreeChainNames f, icCondRandom = hasRandomLeaf c }
     here _ = Map.empty
+
+    letSteps e = Map.unions (letHere e : map letSteps (getSubExprs e))
+    letHere e@(Expr _ (Apply (Expr _ (Lambda _ b)) v)) = Map.singleton (getChainName e) LetStep
+      { lsBody = getChainName b, lsValue = getChainName v, lsValueNodes = subtreeChainNames v
+      , lsValueRandom = hasRandomLeaf v }
+    letHere _ = Map.empty
 
 -- Every chain name appearing as a premise or conclusion anywhere in a clause set.
 allClauseChainNames :: [[HornClause]] -> [ChainName]

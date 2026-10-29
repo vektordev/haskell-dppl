@@ -1,0 +1,1 @@
+main = draw x = Normal in draw c = 2.0 < 0.5 in if c then [x] else x : [x]

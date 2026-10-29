@@ -641,7 +641,13 @@ randomness and holds no occurrence of the variable,
 `ForwardChaining.toInvExprMaybeWith` inverts each arm on its own, seeded at the
 arm, and selects the two chains field by field with an `IRIf` on the
 condition. Nested ifs split recursively. An arm where the variable is dead
-leaves the whole split without an inverse.
+leaves the whole split without an inverse. The seed may also be a `let`
+(`fcLetSteps`) whose value holds no occurrence, draws no fresh randomness and
+is a known point: the split continues at its body, so
+`draw c = 0.2 < 0.5 in if c then [x] else x : [x]` inverts as the inline
+condition does. Which values are known is a second predicate, read off the
+law: IRCompiler asks the same `Deterministic` test it asks of a condition,
+the modality's `pointWitnessCert` the value's inferred `pType` in the body.
 
 The condition enters the chain as a free variable (`ifConditionVars`: its
 chain name plus the invocation tag). `IRCompiler.bindIfConditions` binds it to
@@ -649,7 +655,8 @@ the condition compiled where the body means what it means in the callee
 (`enterBindingScope`), so `t < 0.5` reads the call's argument for `t`. The
 engine declines when the body can't be entered, when the condition is not in
 the body this binding compiles (a leading-argument binding), or when the
-condition reads a parameter of a function-valued body. The caller's predicate
+condition reads a parameter of a function-valued body. A condition that reads
+a variable bound by a `let` on the way is compiled under those bindings. The caller's predicate
 admits a condition only when it is `Deterministic` after re-inferring the
 recovered variables. A cumulative query never splits, because the point path
 refuses a variable read more than once, and the set-witness engine splits the

@@ -11034,8 +11034,15 @@ bindIfConditions meta binding chain = case used of
   where
     fields = [invValue chain, invCoV chain, invGuard chain, invReadsAny chain, invCumValue chain, invCumGuard chain]
     used = [ vc | vc@(v, _) <- ifConditionVars (fcData meta) (bindTag binding), any (freeInIR v) fields ]
+    -- The condition, under the @let@s on the way to it whose variables it
+    -- reads: a split reached through a @let@ ('toInvExprMaybeWith') has a
+    -- condition that may read the let-bound variable (@draw c = 0.2 < 0.5 in
+    -- if c ..@), which the binding's scope does not bind.
     findCond cn e
       | chainName (getTypeInfo e) == cn = Just e
+      | Expr ti (Apply (Expr lti (Lambda y b)) v) <- e
+      , Just c <- findCond cn b
+      = Just (if y `Set.member` freeVarsExpr c then Expr ti (Apply (Expr lti (Lambda y c)) v) else c)
       | otherwise = listToMaybe (mapMaybe (findCond cn) (getSubExprs e))
     readsOuter c = any (`Set.member` freeVarsExpr c) (bindOuterVars binding)
 
@@ -11098,7 +11105,7 @@ applyBinding meta cumulative rt binding sample = do
    -- engine splits the same if and answers it.
    let condKnown cn = not cumulative && pType (getTypeInfo (reinferRecovered meta (recoveredVars meta) (exprWithCN meta cn))) == Deterministic
    let pointInversion = if fieldWitnessUnfolded then Nothing
-                        else toInvExprMaybeWith condKnown clauses localAdts lChainName
+                        else toInvExprMaybeWith condKnown condKnown clauses localAdts lChainName
    -- A binding whose certificate is an affine Gaussian form, all of whose
    -- uses flow affinely into one density leaf, needs no witness at all: it is
    -- integrated out analytically inside that leaf (task
