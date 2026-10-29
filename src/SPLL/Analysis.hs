@@ -115,6 +115,16 @@ annotateIn adtsParam funEnv fuel visited env e = withNewTypeInfo
     -- threaded in c63277a (2026-08-30) to fix
     -- enumerable-injf-operand-loses-tag-across-apply.
     withNewSubExpr = case e of
+      -- Inside an unrolled body (@fuel@ below 'unrollFuel', where the
+      -- annotated tree is discarded for its tag), a closed constant bound
+      -- by a `let` is substituted like the unrolled callee's own parameters
+      -- ('applyTags'), so an alias of one (@rollout k = draw j = k in ..@)
+      -- still decides the arm ('liveArm') and leaves the recursive call's
+      -- arguments closed (task
+      -- alias-of-recursive-helper-parameter-refuses-with-random-argument).
+      Expr _ (Apply l@(Expr _ (Lambda param lamBody)) v)
+        | fuel < unrollFuel, closedConstant v ->
+            setSubExprs e [setSubExprs l [rec (substituteVar param v lamBody)], rec v]
       Expr _ (Apply l@(Expr _ (Lambda param lamBody)) v) ->
         let annotatedV = rec v
             bodyEnv = (param, tags (getTypeInfo annotatedV)) : env
@@ -586,6 +596,10 @@ definitelyUntagged funEnv visited e = case e of
     (Expr _ (Var n), args@(_:_))
       | n `notElem` visited
       , Just calleeBody <- lookup n funEnv -> bodyUntagged (n:visited) calleeBody (length args)
+    -- Inside an unrolled body a closed constant's `let` is substituted
+    -- ('annotateIn'), which may close a condition or a recursive call's
+    -- arguments: a "maybe".
+    (Expr _ (Lambda _ _), [v]) | closedConstant v -> False
     (Expr _ (Lambda _ lamBody), [_]) -> definitelyUntagged funEnv visited lamBody
     (l@(Expr _ (Lambda _ _)), args@(_:_)) -> bodyUntagged visited l (length args)
     _ -> True

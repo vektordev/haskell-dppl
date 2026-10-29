@@ -75,10 +75,12 @@ import End2EndTesting (programRuntimeFields)
 --   needs no engine; the set-witness walk enters an alias of a local in
 --   place), which also cleared leadingRandomStateMarkovChain,
 --   listIndexFromSample, recursionDepthFromSample and the
---   decreasingRecursion* rows. Those left belong to open tickets, so the
---   family stays log-only until they resolve:
---   alias-of-recursive-helper-parameter-refuses-with-random-argument
---   (recursiveLengthOfRecursiveList, recursiveCountOfRecursiveBoolList),
+--   decreasingRecursion* rows, and 7 after task alias-of-recursive-helper-
+--   parameter-refuses-with-random-argument (Analysis's unrolling of a
+--   recursion on constants substitutes a let-bound closed constant too:
+--   recursiveLengthOfRecursiveList, recursiveCountOfRecursiveBoolList).
+--   Those left belong to open tickets, so the family stays log-only until
+--   they resolve:
 --   theta-anchor-through-callee-local-binding (the three theta* rows),
 --   gaussian-catch-all-dispatch-on-codegen-law (normalThroughFunctionParam,
 --   paramPairHelperFst), and an ANY-mask variant refused after an alias in
