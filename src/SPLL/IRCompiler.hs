@@ -85,10 +85,6 @@ data CompilerMetadata = CompilerMetadata {
   adtDecls :: [ADTDecl],
   compilingProgram :: Program,
   accProb :: IRExpr,
-  -- | Variables already recovered by an enclosing body-factor fold. Body
-  -- expressions are re-fetched from the (original) program at every fold
-  -- level, so the deterministic re-typing must be replayed with the full set.
-  recoveredVars :: [String],
   -- | The decomposability verdict per binary InjF node of the whole program,
   -- keyed by chain name (unique program-wide): True = the node's two operands
   -- may share an enumerated latent, so its marginal must NOT be tabulated by
@@ -103,7 +99,7 @@ data CompilerMetadata = CompilerMetadata {
   -- | The latent identities (the chain names of their draws, as
   -- 'bindLatent' keys them) that enclosing enumeration loops have fixed:
   -- inside @enumerateAppliedLambda@'s loop over @let x = v@, @v@ holds one
-  -- value. The latent counterpart of 'recoveredVars'.
+  -- value. The latent counterpart of a recovered variable ('recoveredVars').
   fixedLatents :: Set.Set ChainName,
   -- | The @_gen@ function names whose evaluation draws no randomness, from
   -- 'SPLL.Typing.Determinism.functionSummaries'. Consumed by
@@ -131,16 +127,6 @@ data CompilerMetadata = CompilerMetadata {
   -- 'compilerConfig meta', for exactly this reason) automatically compiling
   -- under the overridden family with no change of its own.
   semiringFamily :: SemiringFamily,
-  -- | The compiled coefficients of the 'lawEnv' bindings marginalised as
-  -- affine Gaussian forms rather than witnessed (task
-  -- affine-gaussian-closure-lost-across-let-bindings; design
-  -- affine-gaussian-forms). Which bindings those are is their certificate's
-  -- call ('affineMarginalisable' reads the argument's 'JAffine' law,
-  -- law-carrying-modality M4); this holds only the IR the certificate has no
-  -- room for. A variable here has no runtime value in the emitted code: it is
-  -- only ever read through 'affineFormOf', i.e. inside the one Gaussian
-  -- density leaf that consumes it. Folded into 'lawEnv' at M7.
-  affineEnv :: [(String, AffineForm)],
   -- | What 'reinferRecovered' needs to re-run modality inference on a body
   -- under the recovered variables; built once per compile.
   reinferContext :: ReinferCtx,
@@ -155,14 +141,17 @@ data CompilerMetadata = CompilerMetadata {
   -- | The modality engine's certificate for every node of the program, by
   -- chain name ('SPLL.Typing.ModalityInfer.inferProgram'; design
   -- law-carrying-modality §B). Not a 'TypeInfo' field: a 'Law' holds closures.
-  -- Read by nothing that dispatches yet (milestone M3).
+  -- Read through 'nodeLaw'. It certifies the program as written: a node
+  -- re-inferred under recovered variables ('reinferRecovered') gets new types,
+  -- not a new entry here.
   lawTable :: LawTable,
-  -- | The law of every variable bound by an enclosing binder of the code
-  -- being compiled: a lambda's parameter ('extendMetaForLambda') and, at
-  -- every 'Binding', the bound parameter at the argument's law
-  -- ('withBindingLaw'). Extended by the modality engine's own binder rule
-  -- ('bindingLawEnv'), so it is the environment 'inferE' had there. Read by
-  -- nothing that dispatches yet (milestone M3).
+  -- | Every variable bound by an enclosing binder of the code being
+  -- compiled ('BoundVar'): a lambda's parameter ('extendMetaForLambda') and,
+  -- at every 'Binding', the bound parameter at the argument's law
+  -- ('withBindingLaw'), by the modality engine's own binder rule
+  -- ('bindingLawEnv'), so its laws are the environment 'inferE' had there.
+  -- It also records what an engine did with a variable: fixed it
+  -- ('recoverVars') or marginalised it as an affine form ('marginaliseAs').
   lawEnv :: LawEnv,
   -- | Whether every enclosing enumerated sum keeps its terms' dims
   -- ('enumSumTerms'; task enumerated-sum-over-density-body). True outside
@@ -177,7 +166,7 @@ data CompilerMetadata = CompilerMetadata {
 -- | A value's law as an affine combination of independent standard-normal
 -- latents, @c + Σᵢ aᵢ·εᵢ@. The latents are keyed by the chain name of the
 -- env-free Gaussian leaf that introduced them, so two reads of one
--- 'affineEnv' variable share their latents (@x + x@ is @2ε@, not
+-- marginalised variable ('affineVars') share their latents (@x + x@ is @2ε@, not
 -- @ε₁ + ε₂@), while every other leaf is a fresh draw.
 data AffineForm = AffineForm
   { afConst  :: IRExpr
@@ -728,7 +717,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty [] laws Map.empty True
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct reinferC Set.empty [] laws Map.empty True
     reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
@@ -2007,10 +1996,9 @@ bindRenamed :: CompilerMetadata -> [(String, RType, Expr)] -> CompilerMetadata
 bindRenamed meta [] = meta
 bindRenamed meta binds =
   meta { typeEnv = [ (fresh, (rty, hasInf rty)) | (fresh, rty, _) <- binds ] ++ typeEnv meta
-       , recoveredVars = [ fresh | (fresh, _, _) <- binds ] ++ recoveredVars meta
        , boundLambdas = [ (fresh, lam) | (fresh, _, arg) <- binds, Just lam <- [visibleLambda arg] ]
                         ++ boundLambdas meta
-       , lawEnv = foldr (\(fresh, _, arg) -> Map.insert fresh (nodeLaw meta arg)) (lawEnv meta) binds }
+       , lawEnv = foldr (\(fresh, _, arg) -> Map.insert fresh ((boundAt (nodeLaw meta arg)) { bvRecovered = True })) (lawEnv meta) binds }
   where
     hasInf (TArrow (TArrow _ _) _) = True
     hasInf _ = False
@@ -2114,10 +2102,68 @@ extendMetaForLambda meta t name =
         other -> error ("extendMetaForLambda: parameter '" ++ name ++ "' of a non-function type " ++ show other)
       hasInference = case paramRType of { TArrow (TArrow _ _) _ -> True; _ -> False }
   in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta
-          , lawEnv = Map.insert name (lambdaParamLaw t) (lawEnv meta) }
+          , lawEnv = Map.insert name (boundAt (lambdaParamLaw t)) (lawEnv meta) }
 
--- | The binder environment the modality engine had at a node: a variable's law.
-type LawEnv = ModalityInfer.Env
+-- | The compiler's binder environment ('lawEnv'), by variable.
+type LawEnv = Map.Map String BoundVar
+
+-- | A variable bound by an enclosing binder: the law the modality engine had
+-- for it there, and what the engine compiling its binding did with it.
+data BoundVar = BoundVar
+  { bvLaw :: Law
+  , bvForm :: Maybe AffineForm
+    -- ^ Marginalised as an affine Gaussian form (task
+    -- affine-gaussian-closure-lost-across-let-bindings; design
+    -- affine-gaussian-forms): the form's coefficients, as IR. Which bindings
+    -- those are is their certificate's call ('affineMarginalisable' reads the
+    -- argument's 'JAffine' law); this holds only the IR the certificate has no
+    -- room for. Such a variable has no runtime value in the emitted code: it
+    -- is only ever read through 'affineFormOf', inside the one Gaussian
+    -- density leaf that consumes it.
+  , bvRecovered :: Bool
+    -- ^ Fixed by an enclosing engine: a point-inversion witness, an
+    -- enumeration loop, a residue factor. It holds one value, so a body is
+    -- re-inferred with it 'Exact' ('reinferRecovered'). Body expressions are
+    -- re-fetched from the (original) program at every fold level, so the
+    -- re-inference is replayed with the full set.
+  }
+
+-- | A variable at its law, nothing done with it yet.
+boundAt :: Law -> BoundVar
+boundAt l = BoundVar l Nothing False
+
+-- | The modality engine's environment: the laws of 'lawEnv'.
+envLaws :: CompilerMetadata -> ModalityInfer.Env
+envLaws = Map.map bvLaw . lawEnv
+
+-- | The variables an enclosing engine has fixed ('bvRecovered').
+recoveredVars :: CompilerMetadata -> [String]
+recoveredVars meta = [ v | (v, bv) <- Map.toList (lawEnv meta), bvRecovered bv ]
+
+-- | Record these variables as fixed ('bvRecovered'). One no binder put in
+-- 'lawEnv' (an engine's own loop variable) enters at a point law.
+recoverVars :: [String] -> CompilerMetadata -> CompilerMetadata
+recoverVars ns meta = meta { lawEnv = foldr (Map.alter (Just . maybe fresh mark)) (lawEnv meta) ns }
+  where
+    fresh = (boundAt (bareLawOfPType Deterministic)) { bvRecovered = True }
+    mark bv = bv { bvRecovered = True }
+
+-- | Record variable @x@ as marginalised with this affine form ('bvForm'). One
+-- no binder put in 'lawEnv' (a callee's parameter the affine algebra enters,
+-- 'affineCallForm') enters at a Gaussian law.
+marginaliseAs :: String -> AffineForm -> CompilerMetadata -> CompilerMetadata
+marginaliseAs x f meta = meta { lawEnv = Map.alter (Just . maybe fresh mark) x (lawEnv meta) }
+  where
+    fresh = (boundAt (bareLawOfPType PNormal)) { bvForm = Just f }
+    mark bv = bv { bvForm = Just f }
+
+-- | The affine form of a marginalised variable ('bvForm').
+affineFormOfVar :: CompilerMetadata -> String -> Maybe AffineForm
+affineFormOfVar meta x = Map.lookup x (lawEnv meta) >>= bvForm
+
+-- | The variables marginalised as affine forms ('bvForm').
+affineVars :: CompilerMetadata -> Set.Set String
+affineVars meta = Map.keysSet (Map.filter (isJust . bvForm) (lawEnv meta))
 
 -- | The metadata for compiling a binding's body: its parameter, under the
 -- name @var@ the body reads it by, bound in 'lawEnv' at the argument's law,
@@ -2125,8 +2171,10 @@ type LawEnv = ModalityInfer.Env
 -- certificate ('lawTable'); an argument the table does not hold (a node an
 -- engine synthesized) is taken at the law its annotation projects.
 withBindingLaw :: CompilerMetadata -> Binding -> String -> CompilerMetadata
-withBindingLaw meta b var = meta { lawEnv = bindingLawEnv (reinferContext meta) headCN var (bindArg b) argLaw (lawEnv meta) }
+withBindingLaw meta b var = meta { lawEnv = Map.insert var (boundAt varLaw) (lawEnv meta) }
   where
+    varLaw = Map.findWithDefault (bareLawOfPType (pType (getTypeInfo (bindArg b)))) var
+               (bindingLawEnv (reinferContext meta) headCN var (bindArg b) argLaw (envLaws meta))
     headCN = chainName (getTypeInfo (bindHead b))
     argLaw = nodeLaw meta (bindArg b)
 
@@ -2701,7 +2749,7 @@ toIRNormalParams _ e = refuse (chainName (getTypeInfo e)) $ "toIRNormalParams: c
 momentsOf :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 momentsOf meta e@(Expr ti nd)
   | semiringFamily meta /= SRSumProduct = refuse cn "collapse: moment matching needs the sum-product semiring"
-  | any (`elem` map fst (affineEnv meta)) (Set.toList (freeVarsExpr e)) =
+  | mentionsAffineVar meta e =
       refuse cn "collapse: the operand reads a marginalised random binding, so it has no moments given its variables"
   | ModalityInfer.collapsePoint isTop e = do
       v <- toIRGenerate meta e
@@ -2753,13 +2801,13 @@ momentsOf meta e@(Expr ti nd)
       return (IRVar v)
     bindPair (m, s) = (,) <$> bind "collapse_m" m <*> bind "collapse_s" s
 
--- | True if the expression reads a variable bound in 'affineEnv'.
+-- | True if the expression reads a variable marginalised as an affine form
+-- ('affineVars').
 mentionsAffineVar :: CompilerMetadata -> Expr -> Bool
-mentionsAffineVar meta e =
-  not (null (affineEnv meta)) && any (`Set.member` freeVarsExpr e) (map fst (affineEnv meta))
+mentionsAffineVar meta e = not (Set.disjoint (freeVarsExpr e) (affineVars meta))
 
 -- | The affine form of an expression 'isAffineOver' accepts. Subterms reading
--- no 'affineEnv' variable are leaves: a Deterministic one is a constant, and a
+-- no marginalised variable ('affineVars') are leaves: a Deterministic one is a constant, and a
 -- Gaussian one is compiled by the ordinary scalar extractor and enters as one
 -- fresh latent keyed by its own chain name. Only the four rules of design
 -- affine-gaussian-forms §3 look inside a node.
@@ -2776,7 +2824,7 @@ affineFormOf meta e@(Expr ti nd)
   | InjF (Named n) [_] <- nd, isCollapse n = do
       (mu, s) <- toIRNormalParams meta e
       return (AffineForm mu (Map.singleton (chainName ti) s))
-  | Var n <- nd, Just form <- lookup n (affineEnv meta) = return form
+  | Var n <- nd, Just form <- affineFormOfVar meta n = return form
   | InjF (Named "plus") [a, b] <- nd = do
       fa <- affineFormOf meta a
       fb <- affineFormOf meta b
@@ -2801,7 +2849,7 @@ isAffineConstant :: CompilerMetadata -> Expr -> Bool
 isAffineConstant meta e = pType (getTypeInfo e) == Deterministic && not (mentionsAffineVar meta e)
 
 -- | @isAffineOver meta names e@: 'affineFormOf' can build a form for @e@ once
--- every name in @names@ is in 'affineEnv'. The static twin of that function;
+-- every name in @names@ is marginalised ('affineVars'). The static twin of that function;
 -- keep the two in step.
 isAffineOver :: CompilerMetadata -> Set.Set String -> Expr -> Bool
 isAffineOver meta names e@(Expr ti nd)
@@ -2864,7 +2912,7 @@ affineCall meta e
 
 -- | The affine form of a call ('affineCall'): the callee's body under its
 -- parameters, a constant argument let-bound under a fresh name, any other
--- entering 'affineEnv' with its own form. The latents the body itself draws
+-- marginalised with its own form ('marginaliseAs'). The latents the body itself draws
 -- are keyed by the call site as well as by their own chain name, so two calls
 -- of one function draw independent latents (forward chaining's per-invocation
 -- identity, in the affine algebra's terms); the arguments' latents keep their
@@ -2883,9 +2931,8 @@ affineCallForm meta callCN pas calleeBody = do
         return (Right (p, fa))
   let renames = [ r | Left r <- bound ]
       forms = [ f | Right f <- bound ]
-      meta' = meta { typeEnv = [ (fresh, (rty, False)) | (_, fresh, rty) <- renames ] ++ typeEnv meta
-                   , recoveredVars = [ fresh | (_, fresh, _) <- renames ] ++ recoveredVars meta
-                   , affineEnv = forms ++ affineEnv meta }
+      meta' = recoverVars [ fresh | (_, fresh, _) <- renames ]
+                (foldr (uncurry marginaliseAs) meta { typeEnv = [ (fresh, (rty, False)) | (_, fresh, rty) <- renames ] ++ typeEnv meta } forms)
       calleeBody' = reinferRecovered meta' [ fresh | (_, fresh, _) <- renames ]
                 (foldr (\(p, fresh, _) -> renameFreeVar p fresh) calleeBody renames)
   form <- affineFormOf meta' calleeBody'
@@ -2905,7 +2952,7 @@ collapseAffine (AffineForm c coeffs) = case Map.elems coeffs of
 -- its law is an affine Gaussian form (the argument's 'JAffine' law, read by
 -- 'affineOf') and all of its uses flow into a single Gaussian density leaf.
 -- Answers the bound variable and the body to compile, with the variable to be
--- put in 'affineEnv'. 'isAffineOver' stays as the check that this compiler
+-- marginalised ('marginaliseAs'). 'isAffineOver' stays as the check that this compiler
 -- can build the form's IR ('affineFormOf' is its twin), which a certificate
 -- issued over the program as written cannot promise inside a callee entered
 -- at a call site.
@@ -2932,7 +2979,7 @@ affineMarginalisable meta rt b
   = Just (x, lamBody)
   | otherwise = Nothing
   where
-    envNames = Set.fromList (map fst (affineEnv meta))
+    envNames = affineVars meta
     -- The form of @v@ is built here, in the binding's scope, and read at the
     -- consumer; a binder in between that shadows one of @v@'s free variables
     -- would change what that IR refers to, so it is refused.
@@ -2959,7 +3006,7 @@ data JointAffine = JointAffine
     -- is not a tuple is one field at the empty path.
   , jaNames  :: Set.Set String
     -- ^ Every variable read through an affine form at the fields: the
-    -- enclosing 'affineEnv', the bound variable and the spine's.
+    -- enclosing marginalised ones, the bound variable and the spine's.
   }
 
 -- | When no single affine consumer takes a Gaussian binding
@@ -2982,7 +3029,7 @@ jointAffineApplicable meta rt b
   | otherwise = Nothing
   where
     v = bindArg b
-    envNames = Set.fromList (map fst (affineEnv meta))
+    envNames = affineVars meta
     -- @bound@ holds the free variables of the values met so far: their forms
     -- are built in their own scope and read at the fields, so a binder in
     -- between must not shadow one.
@@ -3032,7 +3079,7 @@ stepInto :: IRExpr -> Bool -> IRExpr
 stepInto s b = IRDestruct (if b then AcSnd else AcFst) s
 
 -- | The joint affine engine ('jointAffineApplicable'). Every spine variable
--- enters 'affineEnv' with its form. The fields reading the spine are grouped
+-- is marginalised with its form. The fields reading the spine are grouped
 -- into classes that covary (a covariance links two fields unless it is a
 -- constant zero); a class of one is a scalar Gaussian leaf, and a larger one
 -- a multivariate Gaussian density ('jointGaussianDensity') over its observed
@@ -3047,11 +3094,10 @@ jointAffineApply meta cumulative binding ja sample = do
       x = bindVar binding
       cn = chainName (getTypeInfo (bindHead binding))
   form0 <- affineFormOf meta (bindArg binding)
-  let meta0 = (withBindingLaw (extendMetaForLambda meta (getTypeInfo (bindHead binding)) x) binding x)
-                { affineEnv = (x, form0) : affineEnv meta }
+  let meta0 = marginaliseAs x form0 (withBindingLaw (extendMetaForLambda meta (getTypeInfo (bindHead binding)) x) binding x)
   meta' <- foldM (\m (lti, y, val) -> do
                     f <- affineFormOf m val
-                    return ((extendMetaForLambda m lti y) { affineEnv = (y, f) : affineEnv m }))
+                    return (marginaliseAs y f (extendMetaForLambda m lti y)))
                  meta0 (jaSpine ja)
   let (affine, indep) = partition (readsAffine (jaNames ja) . snd) (jaFields ja)
   forms <- mapM (affineFormOf meta' . snd >=> shareForm) affine
@@ -3351,12 +3397,12 @@ gaussianLeaf :: CompilerMetadata -> Expr -> Bool
 gaussianLeaf meta e = readsMarginalised meta e || not (hasOwnInferenceHandler meta e)
 
 -- | Does this scalar expression read a binding marginalised as an affine form
--- ('affineEnv'), with an affine form over it ('isAffineOver')?
+-- ('affineVars'), with an affine form over it ('isAffineOver')?
 readsMarginalised :: CompilerMetadata -> Expr -> Bool
 readsMarginalised meta e =
   not (isTArrowType (rType (getTypeInfo e)))
     && mentionsAffineVar meta e
-    && isAffineOver meta (Set.fromList (map fst (affineEnv meta))) e
+    && isAffineOver meta (affineVars meta) e
 
 -- | A Gaussian (or lognormal) leaf whose scale can be zero at run time is a
 -- point mass there, not a density: @z * Normal@ with @z = 0@ is the Dirac at
@@ -5420,7 +5466,7 @@ enumerateBinding meta l v preTable compileBody = do
     -- reads this (the over-budget nested application in 'toIREnumerate'); there
     -- the plan traversal must see the loop variable as fixed, not as an enclosing
     -- random binding shared across factors ('planFactorExternals').
-    let bodyMeta = meta{ typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta
+    let bodyMeta = recoverVars [boundVar] meta{ typeEnv=newTypeEnv
                        , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta)
                        , dimAwareEnum = keepsDims }
     bodyRes <- compileBody bodyMeta lBodyExpr
@@ -5769,8 +5815,7 @@ compileConstraintNet meta net sample = do
     u <- mkVariable "net_unary"
     setVariables [(u, IRBuiltin BMap [IRLambda xv (closeExpr o id), tensorDomainSR mv])]
     return u
-  let metaC = meta { typeEnv = [ (x, (rType (getTypeInfo v), False)) | (x, v) <- draws ] ++ typeEnv meta
-                   , recoveredVars = map fst draws ++ recoveredVars meta }
+  let metaC = recoverVars (map fst draws) meta { typeEnv = [ (x, (rType (getTypeInfo v), False)) | (x, v) <- draws ] ++ typeEnv meta }
   clauseIRs <- mapM (toIRGenerate metaC . fst) (cnClauses net)
   let eliminate fs k = do
         let (touch, rest) = partition (elem k . netFactorScope) fs
@@ -5876,8 +5921,7 @@ latentCellSum meta cumulative densityDim e k
             return (fresh, renameFreeVar x fresh b)
           else return (x, b)
       let sr = semiringOf meta
-          bodyMeta = meta{ typeEnv = (boundVar, (rType (getTypeInfo v), False)) : typeEnv meta
-                         , recoveredVars = boundVar : recoveredVars meta
+          bodyMeta = recoverVars [boundVar] meta{ typeEnv = (boundVar, (rType (getTypeInfo v), False)) : typeEnv meta
                          , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
       innerO <- scoped (do
         pRaw <- (unP . rProb) <$> toIRInference meta False (reinferReading meta (recoveredVars meta) v) (IRVar boundVar)
@@ -5973,8 +6017,7 @@ enumerateCurriedArgument meta cumulative mkBody v sample = do
       loopVar = Expr (vTi {pType = Deterministic, tags = []}) (Var boundVar)
       loopBody = mkBody loopVar
       (keepsDims, dimBound) = enumSumDims meta (rType (getTypeInfo loopBody))
-      bodyMeta = meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
-                      , recoveredVars = boundVar : recoveredVars meta
+      bodyMeta = recoverVars [boundVar] meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
                       , dimAwareEnum = keepsDims }
   irTuple <- scoped (do
     pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
@@ -7935,8 +7978,7 @@ residueFactor :: CompilerMetadata -> Expr -> String -> RType -> IRExpr -> IRExpr
 residueFactor meta subtree boundName boundRT value target = do
   let recovered = boundName : recoveredVars meta
   let retyped = reinferRecovered meta recovered subtree
-  let fMeta = meta { typeEnv = (boundName, (boundRT, False)) : typeEnv meta
-                   , recoveredVars = recovered }
+  let fMeta = recoverVars [boundName] meta { typeEnv = (boundName, (boundRT, False)) : typeEnv meta }
   block <- scoped (toIRInference fMeta False retyped target) <&> generateLetInBlock fMeta
   fv <- mkVariable "residue_factor"
   return (WFactor (openWith [(fv, IRLetIn boundName value block)] (unpackResult fv)))
@@ -11065,8 +11107,7 @@ applyBinding meta cumulative rt binding sample = do
    -- set-witness engine's fallback).
    let affineCollapse x lamBody = do
           form <- affineFormOf meta v
-          let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) x) binding x)
-                           { affineEnv = (x, form) : affineEnv meta }
+          let bodyMeta = marginaliseAs x form (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) x) binding x)
           toIRInference bodyMeta cumulative lamBody sample
    -- Point inversion: the witness recovered by the inverse chain, the
    -- change of variables, and the body factor at the witness.
@@ -11182,7 +11223,7 @@ applyBinding meta cumulative rt binding sample = do
         let bodyExpr = reinferRecovered meta recovered (bindBody binding)
         -- The body references the bound variable, so it must be in scope in the type
         -- environment (mirrors how the Lambda arm descends into a lambda body).
-        let bodyMeta = (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN) { recoveredVars = recovered }
+        let bodyMeta = recoverVars recovered (withBindingLaw (extendMetaForLambda meta (getTypeInfo l) toInvCN) binding toInvCN)
         -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
         -- appliedSample is VAny at runtime iff the slot FC recovers this binding
         -- from was queried marginally. If the binding is a "sink" — a single

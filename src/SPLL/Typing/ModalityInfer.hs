@@ -361,9 +361,8 @@ fromClosurePType _             = gIntegrate
 -- 'projectI' exactly as before) together with /why/ -- the data an engine
 -- would need to act on it ('lawJust').
 --
--- Nothing dispatches on the justification yet (milestone M3). It is issued so
--- that later milestones can make each engine consume its own row rather than
--- re-derive the fact from syntax.
+-- Each engine consumes its own row rather than re-deriving the fact from
+-- syntax (design law-carrying-modality); 'Justification' names the consumers.
 data Law = Law
   { lawMod  :: IMod
   , lawJust :: Justification

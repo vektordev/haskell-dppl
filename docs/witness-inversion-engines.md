@@ -491,11 +491,11 @@ once) and each field's residual; where two factors integrate the same
 the joint affine engine integrates (below) is `Joint` instead, and sharing it
 is not a reason to floor.
 
-**The compiler.** `CompilerMetadata.affineEnv` holds the IR of such a variable's
-form, `c + sum a_i * eps_i` over independent standard normals, keyed the same
+**The compiler.** The variable's entry in `CompilerMetadata.lawEnv` holds the IR
+of its form (`BoundVar.bvForm`, set by `marginaliseAs`), `c + sum a_i * eps_i` over independent standard normals, keyed the same
 way: by the chain name of the env-free Gaussian leaf that introduced each
 latent. `toIRNormalParams` collapses a form (`mu = c`, `sigma` the norm of the
-coefficient vector) **only** for expressions reading an `affineEnv` variable,
+coefficient vector) **only** for expressions reading such a variable (`affineVars`),
 so everything else emits exactly what it did before. The Gaussian catch-all
 takes such an expression (`readsMarginalised`) whether or not it has a handler
 of its own. The rules are `plus`, `mult` by a deterministic operand, `neg` and
@@ -524,7 +524,7 @@ keeps the scalar collapse sound. Otherwise the binding goes to
 A saturated call of a non-recursive top-level function is affine when its
 arguments are, and its body is affine over the parameters they bind
 (`affineCall`, `affineCallForm`): constant arguments are let-bound, the others
-enter `affineEnv`. The latents the body draws are keyed by the call site too,
+are marginalised with their forms. The latents the body draws are keyed by the call site too,
 so two calls of one helper draw independent latents, while a latent reaching
 the body through an argument keeps its key and stays shared.
 
@@ -542,8 +542,8 @@ set-valued witnesses (design `affine-gaussian-forms` M2). It applies when the
 binding's certificate is an affine form and the body is a let spine whose
 every binding is affine over the variables bound so far, ending in a tree of
 tuples (`jointAffineApplicable`, twin of `ModalityInfer.jointAffineBindingCert`).
-The engine does not dispatch the nested bindings: every spine variable enters
-`affineEnv` with its form. The fields reading the spine (at most
+The engine does not dispatch the nested bindings: every spine variable is
+marginalised with its form. The fields reading the spine (at most
 `jointAffineMaxSlots` = 3) are jointly Gaussian, with means their constants
 and covariance the Gram matrix of their coefficient vectors. The other fields
 read none of it and are independent factors, compiled as usual.
