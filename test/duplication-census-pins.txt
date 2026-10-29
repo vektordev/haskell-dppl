@@ -109,7 +109,7 @@ intMultKnownFactor main.integ=48 main.prob=4
 intTimesNegativeInlineCdf main.integ=48 main.prob=4
 isNullFalse main.prob=4
 isNullTrue main.prob=4
-letAliasRandomBinding main.prob=3
+letAliasRandomBinding main.prob=3 main__m11.prob=4
 letBoundEitherDestructure main.prob=15
 letChainNormalVarTuple main.prob=6 main__m10.prob=4
 letInProbChainedMults main.integ=11 main.prob=8

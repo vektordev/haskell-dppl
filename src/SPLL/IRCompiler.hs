@@ -7210,9 +7210,9 @@ invertToWorldsStep meta occs exprBody target = do
       -- value in place, as 'worldsShape' walks it (task
       -- dispatch-on-law-certificates). The two-stage inversion below keeps
       -- the case of x in `e` alone.
-      Expr _ (Apply (Expr _ (Lambda y b)) _)
-        | subtreeHasOcc occs b, readOnceInPlace y b ->
-            invertToWorlds meta occs (enterInPlace exprBody) target
+      Expr _ (Apply (Expr _ (Lambda y b)) e)
+        | subtreeHasOcc occs b, entersInPlace isValue y e b ->
+            invertToWorlds meta occs (enterInPlace isValue exprBody) target
       Expr _ (Apply (Expr lamTI (Lambda y b)) e)
         -- x in `e` only. With x in `b` as well, x-sets from `e` and y-sets
         -- from `b` would have to be mixed in one intersection, and with x in
@@ -7229,7 +7229,7 @@ invertToWorldsStep meta occs exprBody target = do
             -- bound pair, @draw v = (x, 0.0) in fst v@), a binding read in
             -- place is entered in place, as 'worldsShape' falls back to.
             case twoStage of
-              Nothing | readOnceInPlace y b -> invertToWorlds meta occs (enterInPlace exprBody) target
+              Nothing | entersInPlace isValue y e b -> invertToWorlds meta occs (enterInPlace isValue exprBody) target
               _ -> return twoStage
       -- A call -- of a named function, a function parameter, a let-bound
       -- lambda -- is the same binding as a @let@ (task
@@ -7250,15 +7250,19 @@ invertToWorldsStep meta occs exprBody target = do
       -- binding read in place that holds the pair is entered first
       -- ('enterInPlace'), as 'worldsShape' does.
       Expr _ (InjF (Named "fst") [p])
-        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace p -> invertToWorlds meta occs a target
+        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace isValue p -> invertToWorlds meta occs a target
       Expr _ (InjF (Named "snd") [p])
-        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace p -> invertToWorlds meta occs b target
+        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace isValue p -> invertToWorlds meta occs b target
       Expr _ (InjF (Named op) args)
         | op `notElem` structuralInjFs, not (isFieldConstructor (adtDecls meta) op)
         , [a] <- filter (subtreeHasOcc occs) args
         , all (\o -> subtreeHasOcc occs o || pType (getTypeInfo o) == Deterministic) args
         -> invertThroughStep meta occs exprBody a target
       _ -> return Nothing
+  where
+    -- The variables an inner binding may alias and be entered in place at
+    -- every read, as 'worldsShape' enters it ('entersInPlace').
+    isValue = valueVar (WorldsCtx (fcData meta) (adtDecls meta) (functions (compilingProgram meta)) permissiveDet)
 
 -- | The InjFs 'invertToWorldsStep' and 'worldsShape' invert structurally
 -- rather than as one step of a transport.

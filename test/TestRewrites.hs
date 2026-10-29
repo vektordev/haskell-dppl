@@ -68,22 +68,24 @@ import End2EndTesting (programRuntimeFields)
 --
 -- * 'AliasIntro': was assigned to M1, reinfer-body-under-recovered-bindings,
 --   which cut its logged frontier from 75 to 50 but did not close it. At
---   8924628 promoting it fails 22 corpus programs and 1 sequence seed (20261015), all
---   refusals of the rewritten program that the original answers. They belong
---   to open tickets, so the family stays log-only until those resolve:
---   alias-between-curried-lambdas-refuses-enumerable-and-function-arguments
---   (leadingRandomArgumentCurried, namedHof*, observePredicateParameterLambda,
---   witnessThroughDetIfNamed(Last)), alias-of-recursive-helper-parameter-
---   refuses-with-random-argument (recursive*, decreasingRecursion*,
---   recursionDepthFromSample, leadingRandomStateMarkovChain,
---   listIndexFromSample), theta-anchor-through-callee-local-binding (the two
---   theta* rows), gaussian-catch-all-dispatch-on-codegen-law
---   (normalThroughFunctionParam, paramPairHelperFst,
---   correlatedGaussianLetSharesLatent); alias-chain-of-structured-draw-any-
---   marginal-refused (resolved 2026-10-29 by the readsAnyChain fix of
---   aliased-parameter-plus-zero-marginal-loses-dim) and alias-before-helper-
---   built-tuple-tail-approx-type-error (resolved 2026-10-29, stripBranchCount
---   classifying a literal-lambda redex by its body) are closed;
+--   8924628 promoting it failed 22 corpus programs and 1 sequence seed
+--   (20261015). At 6f026cd it fails 21 of the Slow.RewriteInvarianceCorpus
+--   programs, and 9 after task alias-between-curried-lambdas-refuses-
+--   enumerable-and-function-arguments (an alias of a closure's parameter
+--   needs no engine; the set-witness walk enters an alias of a local in
+--   place), which also cleared leadingRandomStateMarkovChain,
+--   listIndexFromSample, recursionDepthFromSample and the
+--   decreasingRecursion* rows. Those left belong to open tickets, so the
+--   family stays log-only until they resolve:
+--   alias-of-recursive-helper-parameter-refuses-with-random-argument
+--   (recursiveLengthOfRecursiveList, recursiveCountOfRecursiveBoolList),
+--   theta-anchor-through-callee-local-binding (the three theta* rows),
+--   gaussian-catch-all-dispatch-on-codegen-law (normalThroughFunctionParam,
+--   paramPairHelperFst), and an ANY-mask variant refused after an alias in
+--   aliasedChainStepMarginalTail and drawnArgumentChainInNamedCallee
+--   (not yet ticketed; see promote-alias-intro-rewrite-family-to-hard-
+--   failure); alias-chain-of-structured-draw-any-marginal-refused
+--   and alias-before-helper-built-tuple-tail-approx-type-error are closed;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
 -- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates. Its
 --   in-place engine (a binding read once, with no binder on the way, measured
