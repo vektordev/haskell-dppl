@@ -126,11 +126,12 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `Typing/Modality`, `Typing/ModalityInfer` — the capability lattice and its inference, projected to `PType`.
 - `Typing/Infer` — legacy all-in-one typing entry point, used by tests.
 - `InferenceRule` — `RType` schemes of the built-in expression forms, used by RInfer.
-- `Analysis` — `DiscreteValues` tags, enumeration domains and applicability, and decomposability verdicts.
+- `Analysis` — `DiscreteValues` tags, enumeration domains and applicability, and decomposability verdicts (latent sharing, `materializationVerdicts`).
 - `DrawSinking` — moves enumerable `draw`s into the operand that reads them.
 - `ObservationMask`, `MaskVariants` — which `ANY` query shapes a function answers, plus their per-mask variants and runtime dispatcher.
 - `PerValue` — per-value queries: a signature's `Enumerated` slot answered as one vector over its domain.
 - `IRCompiler` — AST to IR for all three variants, holding all the inference engines.
+- `IRCompiler/Affine` — the pure part of the affine/joint-Gaussian machinery: `AffineForm`, its collapse, tuple-field paths, the Cholesky density.
 - `Semiring` — `PResult` combinators over the linear/log/max-product semirings.
 - `AutoNeural` — generated readLogits/writeLogits functions and partition plans for neural declarations.
 - `CompileWarnings` — compile-time warnings (non-blocking diagnostics), computed by `Prelude.programWarnings`/`compiledWarnings`.
@@ -169,6 +170,7 @@ the frontend is a sign something belongs IR-side: put the vocabulary in
 - `IRSelectPass` — `IRIf` → `IRSelect` for batched mode.
 - `IRGatherPass` — batched only: a one-hot sum reading a logit tensor over a contiguous key range → one guarded `nn_gather`.
 - `IRLeafTablePass` — batched only: a neural leaf decode a nested enumeration loop reads per world → one table bound ahead of the outer loop.
+- `IRUtil` — pure helpers over `IRExpr`: free variables, let-chain surgery, renaming, substitution, node counts.
 - `IROptimizer` — constant folding, CSE and let-in optimization.
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.
 - `PythonNesting` — CPython's per-line bracket and indentation limits, and the deep-line spill both Python backends share.

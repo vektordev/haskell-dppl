@@ -29,6 +29,8 @@ module SPLL.IRCompiler (
 
 import SPLL.ReservedNames (distributionPrimitiveNames, queryParamName, accProbParamName, topKCutoffName, topKCutoffParamName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
 import SPLL.IntermediateRepresentation
+import SPLL.IRUtil
+import SPLL.IRCompiler.Affine
 import SPLL.OptimizerProjection (optimizerConfig)
 import SPLL.CompilerConfig
 import SPLL.Lang.Lang
@@ -38,7 +40,7 @@ import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
 import PrettyPrint (pPrintValue)
 import PredefinedFunctions
-import SPLL.Analysis (getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
+import SPLL.Analysis (isEnumerable, LatentBinder(..), latentDependencies, sharesEnumeratedLatent, isCandidateBinaryEnumInjF, injFLatentVerdicts, materializationVerdicts, materializationScopes, sharesLatentGiven, getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (partitionEithers)
@@ -162,16 +164,6 @@ data CompilerMetadata = CompilerMetadata {
   -- would report it as a mass.
   dimAwareEnum :: Bool
 }
-
--- | A value's law as an affine combination of independent standard-normal
--- latents, @c + Σᵢ aᵢ·εᵢ@. The latents are keyed by the chain name of the
--- env-free Gaussian leaf that introduced them, so two reads of one
--- marginalised variable ('affineVars') share their latents (@x + x@ is @2ε@, not
--- @ε₁ + ε₂@), while every other leaf is a fresh draw.
-data AffineForm = AffineForm
-  { afConst  :: IRExpr
-  , afCoeffs :: Map.Map ChainName IRExpr
-  } deriving (Show)
 
 semiringOf :: CompilerMetadata -> Semiring
 semiringOf meta = mkSemiring (semiringFamily meta) (logSpace (compilerConfig meta))
@@ -916,10 +908,6 @@ getGlobalTypeEnv p = funcEnv ++ implicitFuncEnv ++ neuralEnv
         implicitFuncEnv = map (\(name, rt) -> (name, (rt, False))) (implicitFunctionsRTypeProg p)
         neuralEnv = map (\(name, rt, _) -> (name, (rt, False))) (neurals p)
 
--- | Does the node carry an enumerable domain ('SPLL.Analysis.enumerableDomain',
--- the one producer of that fact)?
-isEnumerable :: [Tag] -> Bool
-isEnumerable = isJust . enumerableDomain
 
 -- | The first comparison (@<@\/@>@) in an expression that modality inference
 -- left intractable although both its operands are tractable -- the node where
@@ -1166,240 +1154,6 @@ enumeratedCount mv = case mv of
   MultiTuple a b   -> (*) <$> enumeratedCount a <*> enumeratedCount b
   MultiEither a b  -> (+) <$> enumeratedCount a <*> enumeratedCount b
   MultiADT cs      -> sum <$> mapM (fmap product . mapM enumeratedCount . snd) cs
-
--- ===== Decomposability gate (design decomposability-gate-shared-latent) =====
---
--- A static analysis answering, for a binary enumerable InjF node, whether its
--- two operands may share an *enumerated latent* -- a 'let'-bound enumerable,
--- non-deterministic value that both operands' subtrees read, directly or
--- through tuple/ADT components or a user-function's parameters. If they do,
--- the operands are NOT independent and must not be tabulated (weighted and
--- summed) separately; the correct answer requires enumerating the shared
--- latent jointly. This is the correctness precondition for a future
--- per-operand marginal tabulation (design materialize-discrete-marginals);
--- it is pure analysis with no consumer yet, so it does not gate any of this
--- module's existing compilation decisions and changes no emitted code. See
--- TestInternals for direct unit coverage of the predicate.
---
--- Mechanism: track, per in-scope local variable, the set of latent chain
--- names ('LatentScope') its value structurally depends on -- 'Nothing' means
--- unknown/unanalysable rather than "no dependency", so it propagates through
--- later reads of that variable instead of silently looking independent. A
--- scope is NOT optional: an operand's free variables only resolve relative
--- to the 'let's that lexically enclose it, so the gate must be queried with
--- the scope in effect at that point in the program (see 'injFLatentVerdicts'
--- for a whole-program walk that builds it correctly; querying with an empty
--- scope on an operand pulled from deep inside nested 'let's silently answers
--- "independent" for everything, which is the false negative this analysis
--- exists to avoid).
---
--- A 'let x = v in body' (@Apply (Lambda x body) v@, 'bindLatent') looks up
--- whatever 'v' itself depends on and, if 'v' is itself a fresh enumerable
--- non-deterministic draw, mints a new latent identity keyed by 'v's own
--- chain name -- so two textually identical-looking draws bound by two
--- distinct 'let's are never conflated (chain names are unique per AST
--- occurrence). A saturated call to a top-level function needs no body
--- inlining to catch latents crossing the call boundary: since SPLL has no
--- closures over a caller's 'let's, a callee can only see its own parameters,
--- so the latent set of `f a1 .. an` is exactly the union of the arguments'
--- latent sets, and the generic 'Apply'-chain case below already computes
--- that by unrolling currying. Anything this can't see through -- a
--- first-class 'Lambda' value reached anywhere other than directly as a
--- 'let' RHS -- reports unknown ('Nothing'), which 'sharesEnumeratedLatent'
--- treats conservatively as "may share": an unnecessary refusal costs
--- performance, a missed one costs correctness silently.
-type LatentScope = Map.Map String (Maybe (Set.Set ChainName))
-
-latentDependencies :: LatentScope -> Expr -> Maybe (Set.Set ChainName)
-latentDependencies scope (Expr _ (Var x))       = Map.findWithDefault (Just Set.empty) x scope
-latentDependencies _     (Expr _ (Constant _))  = Just Set.empty
-latentDependencies _     (Expr _ (Lambda _ _))  = Nothing
-latentDependencies scope (Expr _ (ThetaI e _))  = latentDependencies scope e
-latentDependencies scope (Expr _ (Subtree e _)) = latentDependencies scope e
-latentDependencies scope (Expr _ (ReadNN _ e))  = latentDependencies scope e
-latentDependencies scope (Expr _ (IfThenElse c t e)) =
-  mconcat <$> mapM (latentDependencies scope) [c, t, e]
-latentDependencies scope (Expr _ (InjF _ params)) =
-  mconcat <$> mapM (latentDependencies scope) params
-latentDependencies scope (Expr _ (Apply (Expr _ (Lambda x lambdaBody)) v)) =
-  latentDependencies (bindLatent scope x v) lambdaBody
-latentDependencies scope (Expr _ (Apply l v)) =
-  mconcat <$> mapM (latentDependencies scope) [l, v]
-
--- | Extend a 'LatentScope' with a 'let x = v in ...' binding: 'x' depends on
--- whatever 'v' depends on, plus (if 'v' is itself a fresh enumerable
--- non-deterministic draw) a new latent identity of its own. Shared between
--- 'latentDependencies' (which needs it to descend into a 'let's body) and
--- 'injFLatentVerdicts' (which needs it to build the scope for OTHER nodes
--- reached later in the same walk) so the two never disagree on what a 'let'
--- binds.
-bindLatent :: LatentScope -> String -> Expr -> LatentScope
-bindLatent scope x v = Map.insert x xLatent scope
-  where
-    vTi = getTypeInfo v
-    freshLatent
-      | isEnumerable (tags vTi) && pType vTi /= Deterministic = Set.singleton (chainName vTi)
-      | otherwise = Set.empty
-    xLatent = (<> freshLatent) <$> latentDependencies scope v
-
--- | The gate itself: under the given scope, may these two operands of a
--- binary node (typically a binary enumerable InjF) share an enumerated
--- latent? Conservative on the unknown case -- see 'latentDependencies'.
-sharesEnumeratedLatent :: LatentScope -> Expr -> Expr -> Bool
-sharesEnumeratedLatent scope l r =
-  case (latentDependencies scope l, latentDependencies scope r) of
-    (Just ls, Just rs) -> not (Set.disjoint ls rs)
-    _                  -> True
-
--- | True for the exact shape the per-operand tabulation paths above
--- (isEnumerable/isEnumerable && non-Deterministic/non-Deterministic guards
--- on 'left'/'right', e.g. the enumerate-both and invert-one-side InjF
--- clauses) require of a binary InjF's two operands. Today's Analysis pass
--- only tags DiscreteValues on a handful of shapes (ReadNN, InjF-of-enum,
--- discrete-conditioned IfThenElse, Constant, ADT accessors -- see
--- Analysis.md), NOT on the result of an ordinary user-function call; so a
--- node like `(contrib u 1) ++ (contrib u 1)`, whose operands are finite Ints
--- in the shape's own logic but untagged, does not currently satisfy this
--- narrower predicate even though 'sharesEnumeratedLatent' answers it fine.
--- That tag-propagation gap is a separate, pre-existing concern; this
--- predicate names what a consumer wired into the paths above must ALSO
--- require; it deliberately does not filter 'injFLatentVerdicts' itself.
--- Tier 0 marginal materialization is that consumer ('isNestedEnumInjF').
-isCandidateBinaryEnumInjF :: Expr -> Expr -> Bool
-isCandidateBinaryEnumInjF l r =
-     isEnumerable (tags (getTypeInfo l)) && pType (getTypeInfo l) /= Deterministic
-  && isEnumerable (tags (getTypeInfo r)) && pType (getTypeInfo r) /= Deterministic
-
--- | Every binary InjF node inside 'e', paired with the gate's verdict for
--- its own two operands, evaluated under the 'let'-scope actually in effect
--- at that node -- built by this same top-down walk via 'bindLatent', so
--- each node's free variables resolve against exactly the 'let's lexically
--- enclosing it. Deliberately not filtered to 'isCandidateBinaryEnumInjF'
--- (see its doc): the latent-sharing question is well-defined for any binary
--- InjF regardless of today's tag coverage, and a real consumer can intersect
--- with that narrower predicate itself. Exposed purely for direct testing
--- (see TestInternals); not wired into any compilation decision.
-injFLatentVerdicts :: Expr -> [(ChainName, Bool)]
-injFLatentVerdicts = latentVerdictWalk False
-
--- | 'injFLatentVerdicts' for the whole program, with bare (non-'let') lambda
--- parameters bound rather than left to default to "depends on no latent" --
--- and keyed by chain name, which is unique program-wide, so one map answers
--- for every function.
---
--- The parameter handling is the difference between an analysis and a
--- CONSUMER-GRADE analysis, and it is the unsound direction if skipped:
--- 'injFLatentVerdicts' walks each function body from an empty scope, so a
--- parameter read is an unbound 'Var' and 'latentDependencies' answers
--- @Just empty@ for it -- making @f x = x ++ x@ (and every latent that reaches
--- a callee through an argument) read as INDEPENDENT. That is harmless for the
--- pure analysis, whose fixtures all query 'main' where the 'let's are in
--- scope, but it is the unsound direction for a materializer, which sees the
--- callee's node too. 'bindLambdaParam' closes it -- defence in depth rather
--- than a live hole, since such a node is not a materialization candidate for
--- an independent reason spelled out there.
-materializationVerdicts :: Program -> Map.Map ChainName Bool
-materializationVerdicts p =
-  Map.fromList (concatMap (latentVerdictWalk True . snd) (functions p))
-
--- | A binder enclosing a binary InjF node, outermost first: what
--- 'latentVerdictWalk' folds into the node's 'LatentScope'.
-data LatentBinder = LetBinder String Expr | ParamBinder ChainName String
-
--- | Every binary InjF node of the program with the binders enclosing it and its
--- two operands, keyed by chain name: 'materializationVerdicts' before the
--- verdict is taken, so that it can be retaken /given/ some enumerated
--- bindings ('sharesLatentGiven').
-materializationScopes :: Program -> Map.Map ChainName ([LatentBinder], Expr, Expr)
-materializationScopes p = Map.fromList (concatMap (go [] . snd) (functions p))
-  where
-    go binders e = case node e of
-      InjF _ [l, r] ->
-        (chainName (getTypeInfo e), (reverse binders, l, r)) : go binders l ++ go binders r
-      Apply (Expr _ (Lambda x lambdaBody)) v -> go (LetBinder x v : binders) lambdaBody ++ go binders v
-      Lambda x lambdaBody -> go (ParamBinder (chainName (getTypeInfo e)) x : binders) lambdaBody
-      _ -> concatMap (go binders) (getSubExprs e)
-
--- | The decomposability verdict of 'materializationVerdicts', retaken with the
--- enumerated bindings whose draws (by chain name) are in @fixed@ each holding
--- one value, as they do inside their enumeration loops: such a binding
--- contributes no latent, so two operands that read it and share nothing else
--- are independent given it. Consumed by Tier 0 materialization, whose tables
--- are built inside those loops; this is what lets
--- @draw c = readQ q in match c (readC s1) ++ match c (readC s2) ++ ..@
--- tabulate its per-slot chain inside the loop over @c@ (task
--- shared-enumerated-latent-loses-per-slot-factorization). A variable bound
--- from @c@ inside the loop is fixed along with it, since the scope is rebuilt
--- binder by binder rather than patched afterwards.
---
--- A lambda parameter is fixed along the same lines when every read of it the
--- verdict can see -- in either operand or in an enclosing @let@'s right-hand
--- side -- is 'Deterministic': it is then one value per call, an input rather
--- than a latent, and two operands that both read it are independent given it.
--- That is the shape draw sinking leaves for a product-ADT neural scene,
--- @hit (o1 (readScene s)) + hit (o2 (readScene s)) + ..@, every slot reading
--- the entry's symbol parameter (task
--- product-scene-discrete-count-enumerates-slot-patterns: untabulated, the
--- count enumerated the C(10, k) slot-hit patterns). Done here, not in
--- 'bindLambdaParam', so the occurrence pTypes are forced only at a candidate
--- node the whole-program verdict already flagged (see that function on why
--- forcing them program-wide is not affordable).
-sharesLatentGiven :: Set.Set ChainName -> ([LatentBinder], Expr, Expr) -> Bool
-sharesLatentGiven fixed (binders, l, r) = sharesEnumeratedLatent (foldl bind Map.empty binders) l r
-  where
-    bind scope (LetBinder x v)
-      | chainName (getTypeInfo v) `Set.member` fixed = Map.insert x (Just Set.empty) scope
-      | otherwise = bindLatent scope x v
-    bind scope (ParamBinder cn x)
-      | all ((== Deterministic) . pType . getTypeInfo) (concatMap (varReads x) visible) =
-          Map.insert x (Just Set.empty) scope
-      | otherwise = bindLambdaParam scope cn x
-    visible = l : r : [v | LetBinder _ v <- binders]
-    -- Every 'Var' node named @x@, shadowing ignored: a shadowed read is one
-    -- more read to check, which can only keep the parameter's identity.
-    varReads x e = case node e of
-      Var y | y == x -> [e]
-      _ -> concatMap (varReads x) (getSubExprs e)
-
--- | Shared implementation of the two walks above. @bindVars@ selects
--- whether a bare 'Lambda' binds its parameter ('bindLambdaParam') or is
--- descended into with the parameter left unbound (the historical behaviour
--- 'injFLatentVerdicts' pins).
-latentVerdictWalk :: Bool -> Expr -> [(ChainName, Bool)]
-latentVerdictWalk bindVars = go Map.empty
-  where
-    go scope e = case node e of
-      InjF _ [l, r] ->
-        (chainName (getTypeInfo e), sharesEnumeratedLatent scope l r) : go scope l ++ go scope r
-      Apply (Expr _ (Lambda x lambdaBody)) v -> go (bindLatent scope x v) lambdaBody ++ go scope v
-      Lambda x lambdaBody | bindVars -> go (bindLambdaParam scope (chainName (getTypeInfo e)) x) lambdaBody
-      _ -> concatMap (go scope) (getSubExprs e)
-
--- | Bind a bare lambda parameter, whose value comes from a call site this walk
--- cannot see, to a latent identity of its OWN -- keyed by the binding lambda's
--- chain name, so it can never collide with a real draw's identity or with
--- another parameter's. Two operands that both read the same parameter therefore
--- report "may share" (@twice x = x ++ x@), while operands reading different
--- parameters stay independent -- which is what lets
--- @main a b = readMNist(a) ++ readMNist(b)@ be tabulated at all.
---
--- Two parameters of the same function CAN receive correlated arguments
--- (@pair (f u) (g u)@), and this does not see that: answering it needs a
--- whole-program call-site aliasing analysis Tier 0 deliberately does not build.
--- What makes the gap unreachable rather than merely unlikely is the compiler's
--- own convention for callee bodies: a parameter is typed 'Deterministic' there
--- (it is fixed by the enumeration the CALLER compiles a probabilistic argument
--- into), and 'Analysis' propagates no 'DiscreteValues' tag through one -- so any
--- operand whose randomness comes from a parameter fails
--- 'isCandidateBinaryEnumInjF' on both counts and never reaches the materializer.
--- Testing the parameter's own pType here instead would be the direct statement
--- of that argument, and is deliberately NOT done: forcing a parameter
--- occurrence's pType is exponential in the number of parameters (~7x per added
--- one, 9s at seven), a pre-existing property of the modality annotations that
--- no other consumer happens to hit.
-bindLambdaParam :: LatentScope -> ChainName -> String -> LatentScope
-bindLambdaParam scope lambdaCn x =
-  Map.insert x (Just (Set.singleton ("param:" ++ lambdaCn ++ ":" ++ x))) scope
 
 -- ===== Tier 0: materialized discrete marginals =====
 -- (task materialize-discrete-marginals, design materialized-marginals-semiring)
@@ -1713,32 +1467,6 @@ pointQueryTable meta e dom@(v0 : vs) = do
       cellName <- mkVariable "mat_leaf"
       setVariables [(cellName, p)]
       return (IRVar cellName)
-
--- | Node count of an IR expression, for the unrolling-size budget above.
-irNodeCount :: IRExpr -> Int
-irNodeCount e = 1 + sum (map irNodeCount (getIRSubExprs e))
-
--- | 'irNodeCount' with every literal-data subtree counted as one node: the
--- per-copy size 'pointQueryTable' gates a leaf on. A literal (constants,
--- constructors and tensors built only of literals) is the same in every
--- per-value copy of a leaf, so the optimizer's CSE binds it once for the whole
--- table; its node count measures the size of an enumeration DOMAIN, not of the
--- leaf's logic. The case that needed this (task
--- batched-count-chain-enumeration-factorial): a neural ADT read under a
--- predicate, @match (readAttrs s)@, enumerates the 97 values of its @Attrs@
--- domain, and that tensor literal was 98 of the leaf's 138 folded nodes -- over
--- 'maxTabulatedLeafNodes' with a 40-node body, so the table was declined and
--- an n-slot count chain went factorial under @--batched@. Does not bear on the
--- cardinality budget, which still counts every node.
-irLogicNodeCount :: IRExpr -> Int
-irLogicNodeCount e
-  | isLiteralData e = 1
-  | otherwise       = 1 + sum (map irLogicNodeCount (getIRSubExprs e))
-  where
-    isLiteralData (IRConst _)                    = True
-    isLiteralData (IRConstruct _ es)             = all isLiteralData es
-    isLiteralData (IRBuiltin (BTensor _) es)     = all isLiteralData es
-    isLiteralData _                              = False
 
 -- | How large a leaf's compiled inference may be and still be worth copying
 -- once per domain value. Not a second cardinality budget -- a statement about
@@ -2372,99 +2100,6 @@ usesThroughBinders x = go
       | otherwise = go arg * max 1 (usesThroughBinders y b) + go b
     go e = sum (map go (getSubExprs e))
 
--- | Drop dead let-bindings from a forward-chaining inverse expression.
--- 'toValueExpr' deliberately over-emits: its letin chain can bind clause
--- values unrelated to the recovered variable ("superfluous clauses ... easily
--- detected by an optimizer"). Relying on the optimizer for that is not just a
--- performance matter: 'IRLetIn' is strict, so under a marginal (ANY) query an
--- unrelated binding can run arithmetic on VAny and crash an unoptimized run
--- even though the live inverse path never touches the ANY slot. Prune to the
--- live chain at emission time.
-pruneDeadLetIns :: IRExpr -> IRExpr
-pruneDeadLetIns e =
-  let e' = irMap prune e
-  in if e' == e then e' else pruneDeadLetIns e'
-  where
-    prune (IRLetIn n _ b) | not (freeInIR n b) = b
-    prune x = x
-
--- | True if the given variable name appears free in an IR expression.
-freeInIR :: String -> IRExpr -> Bool
-freeInIR v (IRVar v')           = v == v'
-freeInIR v (IRLetIn n val irBody) = freeInIR v val || (v /= n && freeInIR v irBody)
-freeInIR v (IRLambda n irBody)    = v /= n && freeInIR v irBody
-freeInIR v (IRApply f a)        = freeInIR v f  || freeInIR v a
-freeInIR v (IROp _ a b)         = freeInIR v a  || freeInIR v b
-freeInIR v (IRUnaryOp _ e)      = freeInIR v e
-freeInIR v (IRIf c a b)         = freeInIR v c  || freeInIR v a  || freeInIR v b
-freeInIR v (IRConstruct _ args) = any (freeInIR v) args
-freeInIR v (IRDestruct _ a)     = freeInIR v a
--- Every builtin, over all its arguments. This arm is deliberately generic:
--- 'BMapList'/'BListIndex' once had one each, and the tensor builtins had none
--- at all -- so a variable free inside a 'BMap' body was answered "not free"
--- by the catch-all below. That was latent rather than harmless: 'freeInIR' is
--- what 'pruneDeadLetIns' asks before dropping a binding, so a wrong "no"
--- deletes a binding the loop body still reads. It only ever fired on the
--- max-product semiring, whose enumerated reduction was the one built in
--- tensor form; task retire-irenumsum put EVERY enumerated reduction in that
--- form, which would have made it the common case. A binder inside a builtin
--- is always an 'IRLambda' argument, and that arm above already excludes it.
-freeInIR v (IRBuiltin _ args)   = any (freeInIR v) args
-freeInIR v (IRDensity _ _ x)    = freeInIR v x
-freeInIR v (IRCumulative _ _ x) = freeInIR v x
-freeInIR v (IRIsPossible _ x)   = freeInIR v x
-freeInIR _ _                    = False
-
--- | Flatten all leading IRLetIn bindings into a list, returning the core expression.
-flattenLetIns :: IRExpr -> ([(String, IRExpr)], IRExpr)
-flattenLetIns (IRLetIn n v irBody) = let (rest, core) = flattenLetIns irBody in ((n, v) : rest, core)
-flattenLetIns e = ([], e)
-
--- | Rebuild an IRLetIn chain from a list of bindings around a core expression.
-buildLetIns :: [(String, IRExpr)] -> IRExpr -> IRExpr
-buildLetIns binds core = foldr (\(n, v) e -> IRLetIn n v e) core binds
-
--- | Split the bindings of an IRLetIn chain into those that are loop-invariant
--- (do not mention `loopVar` and do not depend on any variant binding) and the
--- rest.  Both sublists preserve their original relative order.  Returns
--- (invariant bindings, remaining IRExpr with variant bindings).
-hoistInvariantBindings :: String -> IRExpr -> ([(String, IRExpr)], IRExpr)
-hoistInvariantBindings loopVar expr =
-  let (allBinds, core) = flattenLetIns expr
-      (invBinds, varBinds) = partition' loopVar allBinds []
-  in (invBinds, buildLetIns varBinds core)
-  where
-    partition' _ [] _ = ([], [])
-    partition' lv ((n, v) : rest) varNames
-      | not (lv `freeInIR` v) && not (any (`freeInIR` v) varNames) =
-          let (inv, var) = partition' lv rest varNames
-          in ((n, v) : inv, var)
-      | otherwise =
-          let (inv, var) = partition' lv rest (n : varNames)
-          in (inv, (n, v) : var)
-
--- | Split a guarded scope's bindings into those that may be evaluated outside
--- the guard and those that must stay under it. A binding may leave when it is
--- pure ('isPure': no draw, no generator reference) and mentions none of the
--- @blocked@ names -- the loop variables and every name bound per iteration --
--- nor any binding that stays behind. Both sublists keep their relative order,
--- so the leaving prefix is well-scoped on its own.
---
--- This is 'hoistInvariantBindings' for bindings a guard has already wrapped,
--- where the free-variable test alone is not enough: leaving the guard moves
--- evaluation from "only in cells that pass" to "unconditionally", which is
--- sound for a pure expression that cannot observe the guard's variables, and
--- would re-order or fuse draws for an impure one.
-splitHoistable :: [String] -> [(String, IRExpr)] -> ([(String, IRExpr)], [(String, IRExpr)])
-splitHoistable = go
-  where
-    go _ [] = ([], [])
-    go blocked ((n, v) : rest)
-      | isPure v && not (any (`freeInIR` v) blocked) =
-          let (out, stay) = go blocked rest in ((n, v) : out, stay)
-      | otherwise =
-          let (out, stay) = go (n : blocked) rest in (out, (n, v) : stay)
-
 -- | True when `sample` is VAny or contains VAny one level inside a Left/Right wrapper.
 -- Used to detect samples like (Left ANY) that would crash arithmetic inverses.
 -- Only the Either tag test and payload accessors are used here; these are already VAny-safe.
@@ -2485,13 +2120,6 @@ mkSafeInvExpr sample =
   IRIf (IRDestruct AcIsLeft sample)
     (IRConstruct TgLeft [IRConst VAny])
     (IRConstruct TgRight [IRConst VAny])
-
-renameVar :: String -> String -> IRExpr -> IRExpr
-renameVar old new = irMap (renameVar' old new)
-
-renameVar' :: String -> String -> IRExpr -> IRExpr
-renameVar' old new (IRVar n) | n == old = IRVar new
-renameVar' _ _ x = x
 
 toIRInferenceSave :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 toIRInferenceSave meta cumulative (Expr t (Lambda name subExpr)) sample = do
@@ -2645,9 +2273,6 @@ toIRNormal meta e
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
   -- Invariant, not a refusal (task static-refusals-become-absent-variants): callers check the pType first.
   | otherwise = error $ "toIRNormal: expression is neither PNormal nor PLogNormal: " ++ show (pType (getTypeInfo e))
-
-irSqrt :: IRExpr -> IRExpr
-irSqrt x = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog x))
 
 -- | @sqrt(a*a + b*b)@, the scale of a sum of two independent Gaussians.
 --
@@ -2951,13 +2576,6 @@ affineCallForm meta callCN pas calleeBody = do
       key k = if k `Set.member` argKeys then k else k ++ "@" ++ callCN
   return form { afCoeffs = Map.mapKeys key (afCoeffs form) }
 
--- | Collapse a form to a scalar Normal's @(mu, sigma)@: the constant, and the
--- Euclidean norm of the coefficient vector (the latents are independent).
-collapseAffine :: AffineForm -> (IRExpr, IRExpr)
-collapseAffine (AffineForm c coeffs) = case Map.elems coeffs of
-  [a] -> (c, IRUnaryOp OpAbs a)
-  as  -> (c, irSqrt (foldr1 (IROp OpPlus) [IROp OpMult a a | a <- as]))
-
 -- | When the probabilistic Apply arm finds no point inversion for a let-bound
 -- variable, it marginalises the variable analytically if its certificate says
 -- its law is an affine Gaussian form (the argument's 'JAffine' law, read by
@@ -3059,36 +2677,6 @@ jointAffineApplicable meta rt b
         fields = tupleFieldPaths t
         affine = filter (readsAffine names . snd) fields
 
--- | Does an expression read one of these variables?
-readsAffine :: Set.Set String -> Expr -> Bool
-readsAffine names e = not (Set.null (freeVarsExpr e `Set.intersection` names))
-
--- | The fields of a tree of tuple constructors, each with its access path.
-tupleFieldPaths :: Expr -> [([Bool], Expr)]
-tupleFieldPaths (Expr _ (InjF (Named "TCons") [a, b])) =
-  [ (False : p, e) | (p, e) <- tupleFieldPaths a ] ++ [ (True : p, e) | (p, e) <- tupleFieldPaths b ]
-tupleFieldPaths e = [([], e)]
-
--- | The sample of a tuple field, and whether it is @ANY@: the field's own
--- sample or any tuple around it. The test reads each enclosing sample only
--- once the one outside it is known not to be @ANY@, since an accessor on
--- @ANY@ fails.
-fieldSampleAt :: IRExpr -> [Bool] -> (IRExpr, IRExpr)
-fieldSampleAt sample path = (foldl stepInto sample path, anyAlong sample path)
-  where
-    anyAlong s [] = IRUnaryOp OpIsAny s
-    anyAlong s (b : bs) = IRIf (IRUnaryOp OpIsAny s) constTrueIR (anyAlong (stepInto s b) bs)
-
--- | Whether a tuple enclosing the field at this path is @ANY@ (the field's
--- own sample excluded).
-anyOutsideField :: IRExpr -> [Bool] -> IRExpr
-anyOutsideField _ [] = constFalseIR
-anyOutsideField s [_] = IRUnaryOp OpIsAny s
-anyOutsideField s (b : bs) = IRIf (IRUnaryOp OpIsAny s) constTrueIR (anyOutsideField (stepInto s b) bs)
-
-stepInto :: IRExpr -> Bool -> IRExpr
-stepInto s b = IRDestruct (if b then AcSnd else AcFst) s
-
 -- | The joint affine engine ('jointAffineApplicable'). Every spine variable
 -- is marginalised with its form. The fields reading the spine are grouped
 -- into classes that covary (a covariance links two fields unless it is a
@@ -3185,71 +2773,6 @@ jointAffineApply meta cumulative binding ja sample = do
       ps -> Just <$> share "cov" (foldr1 (IROp OpPlus) ps)
     staticZero Nothing = True
     staticZero (Just e) = irConstFloat e == Just 0
-
--- | The density of a multivariate Gaussian at residual @r@ (sample minus
--- mean), covariance entries @cov i j@, through its Cholesky factor @L@: with
--- @z = L⁻¹ r@ the density is @∏ φ(zᵢ) / Lᵢᵢ@, a product of standard normal
--- leaves the semiring multiplies, so log space keeps a deep tail's precision
--- as the scalar leaf does. Unrolled into let-bindings local to the density,
--- which is selected on which fields are ANY and must not be evaluated
--- outside its arm. With @guarded@, a pivot that is not positive at run time
--- (a covariance singular for these inputs) is an error rather than a NaN.
-jointGaussianDensity :: Semiring -> Bool -> [IRExpr] -> (Int -> Int -> IRExpr) -> CompilerMonad IRExpr
-jointGaussianDensity sr guarded resid cov = go 0 Map.empty Map.empty []
-  where
-    n = length resid
-    go i ls zs factors
-      | i == n = return (foldr1 (srTimes sr) (reverse factors))
-      | otherwise = do
-          -- The off-diagonal entries of row i of L, then its pivot.
-          (binds, ls') <- foldM (\(bs, m) j -> do
-                v <- mkVariable "chol"
-                let e = IROp OpDiv (IROp OpSub (cov i j) (sumOf [ IROp OpMult (m Map.! (i, k)) (m Map.! (j, k)) | k <- [0 .. j - 1] ]))
-                                   (m Map.! (j, j))
-                return (bs ++ [(v, e)], Map.insert (i, j) (IRVar v) m)) ([], ls) [0 .. i - 1]
-          pv <- mkVariable "pivot"
-          lv <- mkVariable "chol"
-          zv <- mkVariable "z"
-          let pivot = IROp OpSub (cov i i) (sumOf [ IROp OpMult (ls' Map.! (i, k)) (ls' Map.! (i, k)) | k <- [0 .. i - 1] ])
-              ls'' = Map.insert (i, i) (IRVar lv) ls'
-              z = IROp OpDiv (IROp OpSub (resid !! i) (sumOf [ IROp OpMult (ls'' Map.! (i, k)) (zs Map.! k) | k <- [0 .. i - 1] ])) (IRVar lv)
-              factor = scaledNormalDensity sr (IRVar zv) [IRVar lv]
-          rest <- go (i + 1) ls'' (Map.insert i (IRVar zv) zs) (factor : factors)
-          let pivoted = IRLetIn lv (irSqrt (IRVar pv)) (IRLetIn zv z rest)
-              checked
-                | guarded = IRIf (IROp OpGreaterThan (IRVar pv) const0) pivoted
-                    (IRError "joint Gaussian density: the covariance of the correlated tuple fields is singular for these inputs (design affine-gaussian-forms M4)")
-                | otherwise = pivoted
-          return (foldr (\(v, e) acc -> IRLetIn v e acc) (IRLetIn pv pivot checked) binds)
-    sumOf [] = const0
-    sumOf xs = foldr1 (IROp OpPlus) xs
-
--- | Is a constant symmetric matrix positive definite? Its Cholesky pivots
--- stay clear of zero, relative to the diagonal.
-choleskyPositive :: [[Double]] -> Bool
-choleskyPositive m = go 0 Map.empty
-  where
-    n = length m
-    at i j = m !! i !! j
-    go :: Int -> Map.Map (Int, Int) Double -> Bool
-    go i ls
-      | i == n = True
-      | otherwise =
-          let ls' = foldl (\acc j -> Map.insert (i, j) ((at i j - sum [ acc Map.! (i, k) * acc Map.! (j, k) | k <- [0 .. j - 1] ]) / acc Map.! (j, j)) acc) ls [0 .. i - 1]
-              pivot = at i i - sum [ (ls' Map.! (i, k)) ^ (2 :: Int) | k <- [0 .. i - 1] ]
-          in pivot > 1e-12 * max 1 (abs (at i i)) && go (i + 1) (Map.insert (i, i) (sqrt pivot) ls')
-
--- | The value of an IR expression built from number literals by arithmetic.
-irConstFloat :: IRExpr -> Maybe Double
-irConstFloat e = case e of
-  IRConst (VFloat d) -> Just d
-  IRConst (VInt k) -> Just (fromIntegral k)
-  IROp OpPlus a b -> (+) <$> irConstFloat a <*> irConstFloat b
-  IROp OpSub a b -> (-) <$> irConstFloat a <*> irConstFloat b
-  IROp OpMult a b -> (*) <$> irConstFloat a <*> irConstFloat b
-  IRUnaryOp OpNeg a -> negate <$> irConstFloat a
-  IRUnaryOp OpAbs a -> abs <$> irConstFloat a
-  _ -> Nothing
 
 -- | A *saturated* call to a top-level function whose result is Normal-derived.
 -- Reuse the callee's own compiled @<name>_normal@ (which returns its (mu, sigma)
@@ -6945,13 +6468,6 @@ irRuntimeContainsAny (IRConstruct TgLeft [a]) = irRuntimeContainsAny a
 irRuntimeContainsAny (IRConstruct TgRight [a]) = irRuntimeContainsAny a
 irRuntimeContainsAny (IRLetIn n v b) = IRLetIn n v (irRuntimeContainsAny b)
 irRuntimeContainsAny e = IRUnaryOp OpIsAny e
-
--- | Substitutes every occurrence of the IR variable @n@ with @val@. Not
--- capture-avoiding -- fine here, where it is only ever used to eliminate the
--- single free variable of a small inverse-witness template built from a
--- globally-unique "astN" chain name, never shadowed by a nested binder.
-substIRVar :: String -> IRExpr -> IRExpr -> IRExpr
-substIRVar n val = irMap (\e -> case e of { IRVar n' | n' == n -> val; _ -> e })
 
 -- | Guards are Bool-valued IR over the sample and deterministic scope; a world
 -- contributes only when all guards hold. The factors are independent
