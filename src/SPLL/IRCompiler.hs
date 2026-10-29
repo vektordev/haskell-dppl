@@ -6676,15 +6676,22 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
                        , integFun = fmap stripFun (integFun fg)
                        , normalFun = fmap stripFun (normalFun fg)
                        , genFun = fmap stripGen (genFun fg) }
-    stripFun (expr, doc) = (strip (const True) True Set.empty expr, doc)
-    stripGen (expr, doc) = (strip callsInference False Set.empty expr, doc)
+    -- In an inference body any call may return a packed result (a closure
+    -- parameter applied to the sample is one), except a call of a generate
+    -- function: its value is a sample, whatever its shape. The deterministic-
+    -- application leaf binds @mk_gen(s1)(s2)(s3)(s4)@ to compare it against
+    -- the query, and a four-deep tuple read as a callee's result lost its
+    -- last fields (task trajectory-tail-bound-as-tuple-type-error).
+    stripFun (expr, doc) = (strip (not . callsNamed generateNames) True Set.empty expr, doc)
+    stripGen (expr, doc) = (strip (callsNamed inferenceNames) False Set.empty expr, doc)
 
     inferenceNames = Set.fromList (concat [ [groupName fg ++ "_prob" | isJust (probFun fg)]
                                            ++ [groupName fg ++ "_integ" | isJust (integFun fg)]
                                          | fg <- funcs ])
-    callsInference e = case e of
-      IRApply f _ -> callsInference f
-      IRVar n -> n `Set.member` inferenceNames
+    generateNames = Set.fromList [ groupName fg ++ "_gen" | fg <- funcs, isJust (genFun fg) ]
+    callsNamed names e = case e of
+      IRApply f _ -> callsNamed names f
+      IRVar n -> n `Set.member` names
       _ -> False
 
     -- Scope-aware rewrite. @callResults@ holds the variables currently bound to
@@ -6724,7 +6731,7 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       -- higher-order/namedFunctionCurriedWitness).
       IRLetIn n v irBody ->
         let v' = go callResults v
-            callee = holdsCalleeResult isCall callResults v'
+            callee = holdsCalleeResult isCall callResults v
         in IRLetIn n (if callee then stripLocalArms v' else v')
                      (go (rebind n callee callResults) irBody)
       IRLambda n irBody ->
@@ -6749,22 +6756,44 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- keeps its four fields. Both branch forms must agree, and an alias
     -- inherits the classification of what it aliases.
     --
-    -- A redex of a literal lambda is a let, and is read as one: it holds a
-    -- callee result only if the lambda's body does. In a probability
-    -- function every other application counts as a call (@isCall@ is
-    -- @const True@ there), and the deterministic-application leaf binds
+    -- A redex of a literal lambda is classified by what the lambda returns
+    -- (it is read before rewriting, as the lambda arm above leaves it). A
+    -- packed result triple, which that arm collapses ('stripOuterTriple'),
+    -- answers at the callee's width; any other tuple the body assembles is a
+    -- value and keeps every field; a body ending in anything else falls back
+    -- to @isCall@. In a probability function @isCall@ is @const True@, and
+    -- the deterministic-application leaf binds
     -- @(\\p2 -> (s1, (p2, (s3, 0.0)))) (s1 + s2)@ to compare it against the
-    -- sample: read as a callee's result, its third and fourth fields were
-    -- shifted like a result's bc and flag (task
+    -- sample: read as a callee's result, the third and fourth fields of that
+    -- value were shifted like a result's bc and flag (task
     -- trajectory-tail-bound-as-tuple-type-error).
     holdsCalleeResult isCall env v = case v of
-      IRApply (IRLambda n irBody) b ->
-        holdsCalleeResult isCall (rebind n (holdsCalleeResult isCall env b) env) irBody
+      IRApply (IRLambda _ irBody) _
+        | tails <- returnedTuples irBody, not (null tails) ->
+            any isPackedTriple tails
       IRApply _ _      -> isCall v
       IRVar x          -> x `Set.member` env
       IRLetIn n b irBody -> holdsCalleeResult isCall (rebind n (holdsCalleeResult isCall env b) env) irBody
       IRIf _ t f       -> holdsCalleeResult isCall env t || holdsCalleeResult isCall env f
       _                -> False
+
+    -- The tuples a lambda body returns, through its let-bindings, both arms
+    -- of an 'IRIf' and nested literal-lambda redexes (a let too); empty when
+    -- some arm ends in anything but a tuple construction.
+    returnedTuples e = case e of
+      IRLetIn _ _ irBody -> returnedTuples irBody
+      IRApply (IRLambda _ irBody) _ -> returnedTuples irBody
+      IRIf _ t f -> case (returnedTuples t, returnedTuples f) of
+        (ts@(_:_), fs@(_:_)) -> ts ++ fs
+        (ts, []) | isError f -> ts
+        ([], fs) | isError t -> fs
+        _ -> []
+      IRConstruct TgTuple _ -> [e]
+      _ -> []
+    isError (IRError _) = True
+    isError _ = False
+    isPackedTriple (IRConstruct TgTuple [_, IRConstruct TgTuple [_, IRConstruct TgTuple [_, _]]]) = True
+    isPackedTriple _ = False
 
     -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers,
     -- and through the query-type guard's IRIf (whose then-branch carries the real triple;
