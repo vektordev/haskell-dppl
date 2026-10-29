@@ -103,10 +103,23 @@ loops over that argument's domain exactly as `enumerateAppliedLambda` loops
 over a `let`'s. A random enumerable *leading* argument, when it is the call's
 only random argument, is enumerated the same way (`leadingEnumerableArgument`:
 the loop body is the call with that position fixed) wherever the binding path
-(`leadingArgBinding`) refuses, so whether a call is answered does not depend on
-where its author put the random parameter
-(`walk (trans fog) (n - 1)` and `walk (n - 1) (trans fog)` agree, corpus
-`leadingRandomStateMarkovChain`, `leadingRandomArgumentCurried`). Several random
+(`leadingArgBinding`) refuses. For the probability variant this makes the two
+spellings agree on the values tested (`walk (trans fog) (n - 1)` and
+`walk (n - 1) (trans fog)`, corpus `leadingRandomStateMarkovChain`,
+`leadingRandomArgumentCurried`). The two spellings are **not** equivalent in
+general:
+
+- the cumulative variant has no leading-argument enumeration, so
+  `g (Uniform < 0.3) 5` refuses a CDF that `g 5 (Uniform < 0.3)` answers;
+- the leading enumeration is a last-resort retry outside the engine list, so
+  for a leading argument enumeration is tried last, where for a last argument
+  it is tried first. Nested leading calls retry at every level and compile in
+  exponential time, while the trailing spelling compiles in linear time;
+- batched mode refuses some trailing spellings that it compiles in the leading
+  order.
+
+Docs-repo tasks `leading-argument-enumeration-as-binding-engine` and
+`nested-leading-random-argument-compile-exponential`. Several random
 arguments, or one without a finite domain, have only the binding path
 (`witness-inversion-engines.md`); and `enumerateAppliedLambda` measures its bound value with the enclosing
 latents fixed, which is what `draw v = contrib u 1` (u enumerated outside,

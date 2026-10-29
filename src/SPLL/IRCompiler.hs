@@ -4073,7 +4073,12 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply l v)) sample 
   -- own refusal is the one reported. Not for the cumulative variant, which
   -- the binding path does not take either: there it would admit integrate
   -- variants that were absent before (corpus observePredicateParameterLambda),
-  -- which batched mode cannot tensorize.
+  -- which batched mode cannot tensorize. Both restrictions work around
+  -- symptoms and are not design choices. The engine order now depends on the
+  -- argument's position, and nested leading calls compile in exponential time
+  -- through these retries. Docs-repo tasks
+  -- leading-argument-enumeration-as-binding-engine and
+  -- nested-leading-random-argument-compile-exponential.
   case leadingEnumerableArgument meta expr of
     Just (mkBody, ai) | not cumulative
                       , enumerationWithinMaterializationBudget meta (tags (getTypeInfo ai)) -> do
