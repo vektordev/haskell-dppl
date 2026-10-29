@@ -131,6 +131,8 @@ knownDivergences =
   -- projecting helper behind a second one (`g x = h x`).
   [ Known "drawDestructuredShared" DrawIntro "" structuredReread
   , Known "drawDestructuredShared" AliasIntro "" structuredReread
+  , Known "drawDestructuredShared" HelperExtract "extract (draw a" structuredReread
+  , Known "setWitnessTupleDisjointFields" HelperExtract "extract (TCons (fst e) (snd e))" structuredReread
   , Known "fstOfPairWrapperStructuredDraw" DrawIntro "" structuredReread
   , Known "fstOfPairWrapperStructuredDraw" AliasIntro "" structuredReread
   , Known "fstOfPairWrapperStructuredDraw" HelperExtract "extract (TCons" structuredReread
@@ -149,10 +151,9 @@ knownDivergences =
   -- instead of impossible.
   , Known "maskSwappedWrapper" DrawIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" AliasIntro "" variantsSilenceReread
-  , Known "maskSwappedWrapper" HelperExtract "" variantsSilenceReread
+  -- (The helper-extract and pair-fst sites of maskSwappedWrapper no longer
+  -- diverge; the IgnoreSlow sweep showed their entries stale.)
   -- The M3 families (task transformation-differential-testing-m3-catalog-expansion).
-  -- The same impossible (0.7, 0.6) answered 1.0 as the other families above.
-  , Known "maskSwappedWrapper" TupleLaw "pair-fst" variantsSilenceReread
   -- `1.0 > NaN` answers p(True) = 1 (the mirrored `NaN < 1.0` is right).
   , Known "nanConstantMixture" CompareFlip "compare-swap" nanComparison
   -- The if-flip's `not` is swapped back into the arms, but a negation behind
@@ -173,6 +174,9 @@ knownDivergences =
   -- A theta anchor in a helper the callee calls reads the caller's
   -- namesake of the parameter, as the direct callee did before task
   -- callee-body-name-sensitive-across-call: p(2.5) answers 0.0 for 1.0.
+  -- `x < 0.5` rewritten to a negation inside an if condition over a
+  -- continuous arm: p(f x) 1/3 becomes 2/3 at the fifth row.
+  , Known "rewriteProbeHelperIfGate" CompareFlip "compare-negate" "compare-negate-in-if-condition-over-continuous-arm-doubles-density"
   , Known "thetaArgumentNotCallerNamesake" HelperExtract "" thetaThroughCalleeLocal
   ]
   where
@@ -809,18 +813,30 @@ rewriteTests = testGroup "RewriteInvariance" [unitTests, probeTests]
 -- when 'rewriteKey' differs from the one recorded at the program's last pass
 -- ('ImpactManifest').
 rewriteCorpusTests :: Corpus -> Manifest -> IO TestTree
-rewriteCorpusTests corpus manifest = corpusSweep corpus SweepSpec
-  { sweepName = "Slow.RewriteInvarianceCorpus", sweepTier = Slow, sweepSlow = SkipSlow
+rewriteCorpusTests corpus manifest = corpusSweepAll corpus SweepSpec
+  { sweepName = "Slow.RewriteInvarianceCorpus", sweepTier = Slow, sweepSlow = IgnoreSlow
   , sweepSelect = rewritePool
-  , sweepNote = "every rewrite family at every site agrees with the original at its p() rows" } $ \e ->
+  , sweepNote = "every rewrite family at every site agrees with the original at its p() rows" }
+  (\es -> return (testGroup "RewriteInvarianceCorpus"
+             (knownDivergencesSwept (map ceName es) : map perProgram es)))
+  where
+   perProgram e =
     testCaseInfo (ceName e) $ do
       let n = ceName e; p = ceProgram e; qs = queries e
       (orig, vs) <- compileSweep p
       r <- cachedAction manifest "Slow.RewriteInvarianceCorpus" n (rewriteKey manifest p qs orig vs)
              (sweepCompiled n p qs orig vs >>= report n)
       return (either ("skipped: unchanged since " ++) id r)
-  where
-    queries = corpusQueries
+   queries = corpusQueries
+
+-- | Every 'knownDivergences' entry names a program this sweep runs. An entry
+-- on a program outside the pool is never checked for staleness.
+knownDivergencesSwept :: [String] -> TestTree
+knownDivergencesSwept swept = testCase "knownDivergences programs are swept" $
+  case [kProg k | k <- knownDivergences, kProg k `notElem` swept] of
+    [] -> return ()
+    missing -> assertFailure ("knownDivergences names programs the sweep does not run: "
+                              ++ unwords (nub missing))
 
 -- | The programs the rewrite sweeps take: interpreter-routed, not neural,
 -- with at least one probability row.
@@ -1157,7 +1173,7 @@ rewriteKey m p qs orig vs
 -- that runs out of time is logged.
 ofToggleCorpusTests :: Corpus -> IO TestTree
 ofToggleCorpusTests corpus = corpusSweep corpus SweepSpec
-  { sweepName = "Slow.OfToggleCompilesIdentically", sweepTier = Slow, sweepSlow = SkipSlow
+  { sweepName = "Slow.OfToggleCompilesIdentically", sweepTier = Slow, sweepSlow = IgnoreSlow
   , sweepSelect = \e -> not (null (ofToggles (ceProgram e)))
   , sweepNote = "removing or writing out a round-tripping of clause compiles to the same IREnv" } $ \e ->
     testCaseInfo (ceName e) $ do
