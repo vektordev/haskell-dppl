@@ -5211,7 +5211,22 @@ equalityGuardBody self (TEither lr rr) v sample =
   IRIf (IRDestruct AcIsLeft v)
     (IRIf (IRDestruct AcIsLeft sample) (self lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (IRConst $ VBool False))
     (IRIf (IRDestruct AcIsLeft sample) (IRConst $ VBool False) (self rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)))
+-- A function has no equality (the IR contract's 'OpEq' takes none, and the
+-- interpreter has no case for a closure). A function in a component of a
+-- tuple or Either is compared only where its query slot is not a wildcard,
+-- and no query value holds a concrete closure, so this is a run-time error
+-- that a reachable comparison would raise, as the cdf's is
+-- ('functionCdfMessage'). Before, @(\y -> (\x -> x, y)) 1.0@ at
+-- @(ANY, 1.0)@ emitted @fst sample == fst v@ at the function type behind the
+-- slot's wildcard test (task ir-contract-violations-in-compiler-output).
+equalityGuardBody _    (TArrow _ _) _ _ = IRError functionProbMessage
 equalityGuardBody _    _ v sample = IROp OpEq sample v
+
+-- | The runtime diagnostic for a p() query that compares a function-valued component.
+functionProbMessage :: String
+functionProbMessage =
+  "p(): no probability is defined at a function value -- functions carry no "
+  ++ "equality to compare a query value against."
 
 -- | Bool-valued IR comparing two leaves of type @rt@ (callers pass the query
 -- sample first). A float is compared with 'OpApprox' (see 'equalityGuard' for
@@ -6656,9 +6671,19 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       IRDestruct AcSnd (IRDestruct AcSnd (IRDestruct AcSnd (IRVar x))) | x `Set.member` callResults -> IRDestruct AcSnd (IRDestruct AcSnd (IRVar x))
       -- Binding forms: rebind the name, so shadowing cannot leak a stale
       -- classification into an inner scope.
+      --
+      -- A value that holds a callee result in one arm is read as one in every
+      -- arm, so an arm that packs a result locally (an impossible fallback
+      -- beside a guarded call) is collapsed to the callee's width too. Left
+      -- at full width, one 'IRIf' answered two layouts and the shifted flag
+      -- projection read a tuple on the local arm (task
+      -- ir-contract-violations-in-compiler-output,
+      -- higher-order/namedFunctionCurriedWitness).
       IRLetIn n v irBody ->
         let v' = go callResults v
-        in IRLetIn n v' (go (rebind n (holdsCalleeResult isCall callResults v') callResults) irBody)
+            callee = holdsCalleeResult isCall callResults v'
+        in IRLetIn n (if callee then stripLocalArms v' else v')
+                     (go (rebind n callee callResults) irBody)
       IRLambda n irBody ->
         IRLambda n ((if outer then stripOuterTriple else id) (go (rebind n False callResults) irBody))
       -- A tensor map's lambda is an enumeration LOOP binder, not a function
@@ -6702,6 +6727,13 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     stripOuterTriple (IRConstruct TgTuple [a, IRConstruct TgTuple [b, IRConstruct TgTuple [_, imp]]]) =
       IRConstruct TgTuple [a, IRConstruct TgTuple [b, imp]]
     stripOuterTriple e                         = e
+
+    -- 'stripOuterTriple' through the arms of a bound value only: a lambda in
+    -- a bound value is a closure, not that value's result.
+    stripLocalArms (IRLetIn n v irBody) = IRLetIn n v (stripLocalArms irBody)
+    stripLocalArms (IRIf c t e) = IRIf c (stripLocalArms t) (stripLocalArms e)
+    stripLocalArms e@(IRConstruct TgTuple _) = stripOuterTriple e
+    stripLocalArms e = e
 
 -- ===== Set-valued witnesses (design set-valued-witnesses) =====
 --
@@ -11211,15 +11243,20 @@ applyBinding meta cumulative rt binding sample = do
                   TArrow _ _ -> do
                     let impossible = packResult (impossibleP sr)
                     let guardedCall = IRIf guard (IRIf bodyReadable call impossible) impossible
+                    -- Outside the inverse's domain the closure answers an
+                    -- impossible event, flagged, as 'guardedZero' does for a
+                    -- value result: an unflagged zero made @mk Normal 1.0@
+                    -- (@mk x y = x : [x + y]@) answer p([]) as a possible
+                    -- zero (task ir-contract-violations-in-compiler-output).
                     return (detP (guarded
                       (wrapInLambdas (IRLetIn callVar guardedCall (packResult (withBody (unpackResult callVar)))))
-                      (wrapInLambdas (packResult (detP (srZero sr))))))
+                      (wrapInLambdas impossible)))
                   _ -> do
                     bodyRes <- closeResult sr "body_factor" [guard, bodyReadable]
                                  (openWith [(callVar, call)] (unpackResult callVar))
                     return (withBody bodyRes)
           TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
-                                       (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr)))))))
+                                       (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (impossibleP sr))))))
           -- Integrate mode, a binding read more than once, whatever its head
           -- (a named callee's single witness answered these CDFs wrong too,
           -- e.g. @f x = (x, x + 1.0)@ at @cdf((0.3, 1.0))@ 0.618 for 0.5): the
@@ -11347,10 +11384,24 @@ applyBinding meta cumulative rt binding sample = do
               -- holds a probabilistic let is bound: the copies compound only
               -- through such nesting, and a leaf block's constant dim and flag
               -- fold away inline but not through the shared tuple.
+              --
+              -- The open body is read only where the witness is a wildcard,
+              -- and the binding's one occurrence is read only behind its
+              -- slot's own wildcard test, so it is never evaluated. It is still
+              -- a free variable of the block, which the IR contract does not
+              -- allow, whatever the evaluation order (task
+              -- ir-contract-violations-in-compiler-output: @draw x = Uniform
+              -- in draw y = Uniform in (x, y)@ at @(ANY, 0.5)@ read @x@ in an
+              -- arm that bound it nowhere). So it is replaced by the wildcard
+              -- it stands for: the witness's own value where that is
+              -- evaluable, and a value the dead read cannot tell from it where
+              -- not. Substituted rather than bound: a leaf block is copied per
+              -- field, and a binding with it.
               case r of
                 Just openO ->
                   shareUnlessLeaf sr "open_body" (holdsProbabilisticLet openBody)
-                    [guard, if bindingIsSink then readsAnyW else anyW] openO
+                    [guard, if bindingIsSink then readsAnyW else anyW]
+                    (substFreeOpen toInvCN (IRConst VAny) openO)
                 Nothing -> return (constResult anyRefusal)
             let whenAny whenAnySink whenUneval
                   | bindingIsSink = IRIf readsAnyW whenUneval whenAnySink

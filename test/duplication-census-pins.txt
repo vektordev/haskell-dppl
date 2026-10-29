@@ -48,7 +48,7 @@ crossLatentSideOperandJacobian main.prob=12 main__m10.prob=7
 ctorTestOverTransformedDraw main.integ=24 main.prob=24
 ctorTestOverTransformedField main.integ=16 main.prob=16
 curriedHelperEnumArg match.integ=3 match.prob=3
-curriedTupleBodyBothProbabilistic main.integ=3 main.prob=4
+curriedTupleBodyBothProbabilistic main.prob=4
 decreasingRecursionEnumeratedArgumentDensity loop.prob=5 main.prob=5
 defineDestructured main.integ=8 main.prob=10
 diffusionToy1D main.prob=9 step.prob=18
@@ -58,7 +58,7 @@ drawBoundIntChainMixedSignsCdf main.integ=32 main.prob=8
 drawBoundIntPlusThenNegativeCdf main.integ=20 main.prob=8
 drawBoundIntTimesNegative main.integ=20 main.prob=8
 drawBoundIntTimesPositiveCdf main.integ=20 main.prob=8
-drawBoundListElementGuardsEmptyTail main.prob=6
+drawBoundListElementGuardsEmptyTail main.prob=3
 drawBoundMixtureOverSharedContinuousCondition main__m10.prob=6 main__m11.prob=4
 drawBoundScaledWitness main__m11.prob=4
 drawBoundSceneIntermediate main.integ=3 main.prob=3 main.writeLogits=10
@@ -111,7 +111,7 @@ letBoundEitherDestructure main.prob=15
 letChainNormalVarTuple main.prob=6 main__m10.prob=4
 letInProbChainedMults main.integ=11 main.prob=8
 letThreadEnumerable contrib.prob=3
-letTwoUniform main.integ=3 main.prob=4
+letTwoUniform main.prob=4
 letTwoUniformIndirect main.prob=20 main__m01.prob=6
 letWitnessedChain main.prob=6 main__m011.prob=4 main__m111.prob=4
 letWitnessedEitherFpUlp main.prob=18 main__m001.prob=11 main__m010.prob=14 main__m100.prob=16
@@ -123,7 +123,7 @@ map main.prob=3
 mapEither main.integ=15 main.prob=18
 mapMultList main.prob=3
 maskComplementSlot main__m10.prob=4
-maskIndependentLatents main.integ=3 main.prob=4
+maskIndependentLatents main.prob=4
 maskShiftedWitness main.integ=8 main.prob=7 main__m1.prob=4
 maskSummedSlot main.prob=12 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
 maskSwappedWrapper f__m10.prob=4 main.prob=14 main__m10.prob=6

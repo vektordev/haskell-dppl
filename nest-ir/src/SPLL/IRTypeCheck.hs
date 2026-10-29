@@ -116,7 +116,7 @@ varsOf (ITADT _) = []
 data Constraint
   = CNumeric IRType                     -- ^ Float or Int.
   | COrdered IRType                     -- ^ What 'OpLessThan' compares: numbers, and tuples and lists of them.
-  | CEquatable IRType                   -- ^ What 'OpEq' compares: no functions, tensors or theta trees.
+  | CEquatable IRType                   -- ^ What 'OpEq' compares: no functions or theta trees; a tensor of equatable elements.
   | CMap IRType IRType IRType           -- ^ function, tensor, result of 'BMap'.
   | CReduce Int IRType IRType           -- ^ axis, tensor, result of 'BReduce'.
   | CIndex Int IRType IRType            -- ^ axis, tensor, result of 'BIndex'.
@@ -220,7 +220,7 @@ attempt (Pending e c) = case c of
     other -> bad "an ordered type (numbers, or tuples or lists of them)" other
   CEquatable t -> shallow t >>= \t' -> case t' of
     ITArrow _ _ -> bad "a type with equality" t'
-    ITTensor _ _ -> bad "a type with equality" t'
+    ITTensor _ a -> defer e (CEquatable a) >> done
     ITThetaTree -> bad "a type with equality" t'
     ITList a -> defer e (CEquatable a) >> done
     ITTuple a b -> defer e (CEquatable a) >> defer e (CEquatable b) >> done
@@ -367,7 +367,10 @@ closedScheme t = Scheme (nub (varsOf t)) [] t
 -- * 'IROp': 'OpPlus', 'OpMult', 'OpSub', 'OpMax' take two numbers of one
 --   type; 'OpDiv' two floats; 'OpIntDiv', 'OpMod' two ints; 'OpOr', 'OpAnd'
 --   two bools; 'OpGreaterThan', 'OpLessThan' two ordered values of one type;
---   'OpEq' two values of one type with equality; 'OpApprox' two floats.
+--   'OpEq' two values of one type with equality (not a function or theta
+--   tree; a tensor compares shape and elements, as the interpreter does and
+--   the compiler emits for a witnessed tensor state checked against its list
+--   slot); 'OpApprox' two floats.
 -- * 'IRUnaryOp': 'OpNeg', 'OpSign', 'OpAbs' on a number; 'OpExp', 'OpLog'
 --   on a float; 'OpNot' on a bool; 'OpIsAny' on anything, answering a bool.
 -- * 'IRConst': the value's type. A marginal-query hole ('VAny',

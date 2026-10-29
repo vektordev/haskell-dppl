@@ -130,6 +130,11 @@ builtinTests = testGroup "builtins"
       hasType "Float" (IRBuiltin BListIndex [xs, i 1])
       hasType "Int" (IRBuiltin (BCategoricalIndex 0 2) [IRSample IRUniform, xs])
       hasType "Int" (IRBuiltin (BCategoricalIndex 1 1) [IRSample IRUniform, tensor [2] [f 1, f 2]])
+  , testCase "tensor equality" $
+      -- The interpreter compares shape and elements, and the compiler checks a
+      -- witnessed tensor state against its list slot this way
+      -- (neural/tensorDiffusionTrajectory).
+      hasType "Bool" (IROp OpEq (tensor [2] [f 1, f 2]) (tensor [2] [f 1, f 2]))
   ]
 
 rejectionTests :: TestTree
@@ -140,7 +145,9 @@ rejectionTests = testGroup "rejections"
       rejects "cannot match Int with Float" (IROp OpDiv (i 1) (i 2))
       rejects "expected an ordered type" (IROp OpLessThan (b True) (b False))
       rejects "expected a type with equality" (IROp OpEq (IRLambda "x" (v "x")) (IRLambda "y" (v "y")))
-      rejects "expected a type with equality" (IROp OpEq (tensor [1] [f 1]) (tensor [1] [f 1]))
+      -- A tensor compares shape and elements; one of functions does not.
+      rejects "expected a type with equality"
+        (IROp OpEq (tensor [1] [IRLambda "x" (v "x")]) (tensor [1] [IRLambda "y" (v "y")]))
       rejects "cannot match" (IRUnaryOp OpNot (f 1))
       rejects "expected a number" (IRUnaryOp OpAbs (b True))
   , testCase "a condition is a Bool and both arms agree" $ do

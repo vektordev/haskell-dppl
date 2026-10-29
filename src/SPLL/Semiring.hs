@@ -55,7 +55,7 @@ module SPLL.Semiring (
   CompilerMonad, CompilerM, refuse, runCompilerMonad, mkVariable, setVariables, generateLetInExpr,
   -- * Scopes
   Open, scoped, openWith, openValue, closeExpr, inline, splitOpen, openNames, openReads, openIterates, openNests,
-  openIsEmpty, openBlockSize, unsafeDistributeBlock
+  openIsEmpty, openBlockSize, unsafeDistributeBlock, substFreeOpen
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -180,6 +180,25 @@ inline (Open a binds) = setVariables binds >> return a
 splitOpen :: ([(Varname, IRExpr)] -> ([(Varname, IRExpr)], [(Varname, IRExpr)]))
           -> Open a -> (Open (), Open a)
 splitOpen part (Open a binds) = let (out, stay) = part binds in (Open () out, Open a stay)
+
+-- | Replace the free occurrences of a variable throughout a scope, its block
+-- and its result: a variable the scope reads but nothing binds, given the
+-- value it stands for. A binding of the same name in the block, or a binder
+-- inside an expression, shadows it from there on. Adds no binding, so the
+-- block is no larger (a binding copied into each field of a leaf block would
+-- be).
+substFreeOpen :: Varname -> IRExpr -> Open PResult -> Open PResult
+substFreeOpen n val (Open a binds0) = go binds0 []
+  where
+    go [] acc = Open (eachField subst a) (reverse acc)
+    go ((m, v) : rest) acc
+      | m == n    = Open a (reverse acc ++ (m, subst v) : rest)
+      | otherwise = go rest ((m, subst v) : acc)
+    subst e = case e of
+      IRVar m | m == n -> val
+      IRLetIn m v b | m == n -> IRLetIn m (subst v) b
+      IRLambda m _ | m == n -> e
+      _ -> irDescend subst e
 
 -- | The names the scope binds (no values: a name alone copies nothing).
 openNames :: Open a -> [Varname]
