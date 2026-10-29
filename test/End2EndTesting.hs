@@ -1791,9 +1791,10 @@ batchedRefusalTable =
   -- batched-prob-path-calls-recursive-helper-gen and
   -- batched-prob-path-calls-helper-normal-params: both are pure callees,
   -- emitted as ordinary batched methods. A call to a *random* recursive
-  -- generator is still refused; its only corpus trigger is a known-issues
-  -- miscompile (`namedHofRandomFunctionArg`), so it is a synthetic row in
-  -- "TestInternals" ('test_batchedPureCallees').
+  -- generator is still refused; no corpus program reaches it (the one that
+  -- did, `namedHofRandomFunctionArg`, was a miscompile, fixed by task
+  -- named-hof-random-function-argument-miscompiled), so it is a synthetic
+  -- row in "TestInternals" ('test_batchedPureCallees').
   --
   -- Refusals pinned as open bugs under universal batched admission (task
   -- batched-admission-universal), one row per refusal class without a row

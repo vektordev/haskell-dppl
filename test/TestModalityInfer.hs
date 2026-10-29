@@ -674,8 +674,8 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" PNormal $
             mainPType "compose f g z = f (g z)\nmain = compose (\\a -> a * 2.0) (\\b -> b + 1.0) Normal"
       , testCase "a random function passed to a named higher-order function is Integrate" $
-          -- Miscompiled downstream: known-issues/namedHofRandomFunctionArg,
-          -- ticket named-hof-random-function-argument-miscompiled
+          -- Compiled and answered: corpus higher-order/namedHofRandomFunctionArg
+          -- (task named-hof-random-function-argument-miscompiled)
           assertEqual "" Integrate $
             mainPType "app f x = f x\nmain = app (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) 3.0"
       , testCase "a random function passed as the only argument is Integrate" $

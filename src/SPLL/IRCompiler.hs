@@ -4134,12 +4134,21 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply l v)) sample 
         Left _ -> enumerateCurriedArgument meta False mkBody ai sample
     _ -> viaBinding
 -- Probabilistic bound expression
-toIRInference meta cumulative (Expr TypeInfo{rType=_, chainName=_} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
+toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
   vIR <- (unP . rProb) <$> toIRInference meta cumulative v sample
-  applied <- mkVariable "call"
-  setVariables [(applied, IRApply lIR vIR)]
-  return (unpackResult applied)
+  -- The result is not a tuple if the return value is a closure, as in the
+  -- deterministic arms above: @app g x@ with @g@ random reaches here as
+  -- @(app g) x@, and @app g@ is a function still awaiting @x@. Unpacking it
+  -- projected @fst@ out of a closure (task
+  -- named-hof-random-function-argument-miscompiled); the enclosing
+  -- application applies it and unpacks the PResult it then returns.
+  case rt of
+    TArrow _ _ -> return (detP (IRApply lIR vIR))
+    _ -> do
+      applied <- mkVariable "call"
+      setVariables [(applied, IRApply lIR vIR)]
+      return (unpackResult applied)
 toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt, chainName=_} (Apply l v)) sample | pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
