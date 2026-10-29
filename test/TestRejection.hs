@@ -1537,13 +1537,19 @@ setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
 -- table (sqrt/recip/sq: partial domain or non-monotone on the line) and for
 -- mult by a deterministic operand that is not a literal, whose sign -- and
 -- so the transported endpoints' order -- is not statically known.
+--
+-- The arms read x again: a body reading x once, with no binder on the way,
+-- is the in-place engine's (task dispatch-on-law-certificates), which
+-- compiles @if sqrt Normal > 0.5 ...@ exactly as that spelling compiles
+-- (wrongly for recip, docs-repo task recip-comparison-ignores-sign-change,
+-- and for sq, sq-inverse-drops-nonpositive-preimages).
 setWitnessTransportTests :: TestTree
 setWitnessTransportTests = testGroup "SetWitnessTransport"
-  [ refused "sqrt on the spine" "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
-  , refused "recip on the spine" "main = draw x = Normal in if recip x > 0.5 then 1.0 else 0.0"
-  , refused "sq on the spine" "main = draw x = Normal in if sq x > 0.5 then 1.0 else 0.0"
+  [ refused "sqrt on the spine" "main = draw x = Normal in if sqrt x > 0.5 then x else 0.0 - x"
+  , refused "recip on the spine" "main = draw x = Normal in if recip x > 0.5 then x else 0.0 - x"
+  , refused "sq on the spine" "main = draw x = Normal in if sq x > 0.5 then x else 0.0 - x"
   , refused "mult by a non-literal deterministic operand"
-      "main = draw x = Normal in if (x * (0.0 - 2.0)) > 1.0 then 1.0 else 0.0"
+      "main = draw x = Normal in if (x * (0.0 - 2.0)) > 1.0 then x else 0.0 - x"
   ]
   where
     refused what src = testCase (what ++ " is refused, not silently measured") $

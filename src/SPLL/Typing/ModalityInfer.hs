@@ -515,7 +515,9 @@ data EngineCert
     -- with no binder on the way, so the read has the argument's own law
     -- (which is how 'bindParam' already types it) and the binding denotes
     -- @body[x := arg]@. Last: it is the engine of a binding no other engine
-    -- measures, and moves no code of one another engine does.
+    -- measures, and moves no code of one another engine does. The compiler
+    -- tries it after the set-witness engine's fallback as well
+    -- ('IRCompiler.applyBinding'), so it must stay last in 'engineOrder'.
 
 -- | The engines of a random binding (law-carrying-modality decision 1). The
 -- constructor order is the dispatch order, and 'engineOrder' is its one

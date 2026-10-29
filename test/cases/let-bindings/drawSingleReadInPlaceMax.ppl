@@ -1,0 +1,5 @@
+-- A random binding read once, with no binder on the way, that no other engine
+-- measures: max of an enumerable value behind a draw. The in-place engine (task
+-- dispatch-on-law-certificates) measures it at its read, as the inline spelling
+-- enumerability/maxEnumerateDet does.
+main = draw z = if Uniform < 0.5 then 1.0 else 0.0 in max z 0.5

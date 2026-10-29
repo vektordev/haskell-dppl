@@ -11460,8 +11460,11 @@ applyBinding meta cumulative rt binding sample = do
               jointAffineApply meta cumulative binding ja sample
          WorldsEngine -> setWitnessApplicable meta binding <&> \_ diag ->
               Right <$> setWitnessApply meta cumulative rt binding diag sample
-         InPlaceEngine -> inPlaceApplicable rt binding <&> \inPlace _ ->
-              Right <$> toIRInference meta cumulative inPlace sample
+         -- Last, after the set-witness engine's fallback below too: that
+         -- one can answer where the set-witness predicate, only its
+         -- necessary condition, declined (the all-ANY mask variant of
+         -- let-bindings/letWitnessedChain), and must keep doing so.
+         InPlaceEngine -> Nothing
    let engines = [ (engineLabel k, engineFor k) | k <- engineOrder ]
    -- Set-valued witnesses invert the observation structurally into guarded
    -- constraint sets on the bound variable (intervals from comparisons, case
@@ -11471,4 +11474,15 @@ applyBinding meta cumulative rt binding sample = do
          traceM ("binding of '" ++ userBound ++ "' (" ++ lChainName ++ ", "
                  ++ (if cumulative then "integrate" else "probability") ++ ") compiled by " ++ name)
        userBound = case l of Expr _ (Lambda n _) -> n; _ -> toInvCN
-   dispatchEngines compiledFrom engines (\diag -> setWitnessApply meta cumulative rt binding diag sample)
+   -- Where no engine applies, the set-witness engine is asked anyway, and
+   -- where it refuses, the in-place engine answers if it applies.
+   let fallback diag = case inPlaceApplicable rt binding of
+         Nothing -> setWitnessApply meta cumulative rt binding diag sample
+         Just inPlace -> do
+           sw <- (Right <$> scoped (setWitnessApply meta cumulative rt binding diag sample)) `catchError` (return . Left)
+           case sw of
+             Right o -> inline o
+             Left _ -> do
+               compiledFrom (engineLabel InPlaceEngine)
+               toIRInference meta cumulative inPlace sample
+   dispatchEngines compiledFrom engines fallback

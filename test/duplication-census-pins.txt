@@ -59,6 +59,7 @@ drawBoundIntPlusThenNegativeCdf main.integ=20 main.prob=8
 drawBoundIntTimesNegative main.integ=20 main.prob=8
 drawBoundIntTimesPositiveCdf main.integ=20 main.prob=8
 drawBoundListElementGuardsEmptyTail main.prob=6
+drawBoundMixtureOverSharedContinuousCondition main__m10.prob=6 main__m11.prob=4
 drawBoundScaledWitness main__m11.prob=4
 drawBoundSceneIntermediate main.integ=3 main.prob=3 main.writeLogits=10
 drawDestructuredAgreementHelperArm pair.integ=8 pair.prob=8
@@ -67,6 +68,7 @@ drawProductReadPerField main.integ=3 main.prob=3
 drawProductReadPerField20 main.integ=5 main.prob=5
 drawProductReadPerField4 main.integ=3 main.prob=3
 drawProductReadUnderBinding main.integ=8 main.prob=4
+drawSingleReadInPlaceMap main.prob=3
 eitherIfDeconstructObserve main.prob=3
 eitherIntegral main.integ=8 main.prob=8
 either_arith_inv main.integ=15 main.prob=22
@@ -177,12 +179,12 @@ planMultiReaderInnerDraw numRed.prob=4
 planMultiReaderPlusIf numRed.prob=4
 planMultiReaderTuplePair numRed.prob=4
 planOverBudgetInnerDraw main.integ=3 main.prob=3 numRed.prob=4
-planOverBudgetList main.prob=3 numRed.prob=4
+planOverBudgetList main.integ=3 main.prob=3 numRed.prob=4
 planOverBudgetLocalLambda main.integ=3 main.prob=3 numRed.prob=4
 planOverBudgetMult main.integ=3 main.prob=3 numRed.prob=4
 planOverBudgetPlus main.integ=3 main.prob=3 numRed.prob=4
-planOverBudgetTupleConst main.prob=3 numRed.prob=4
-planOverBudgetTupleOuter main.integ=3 main.prob=3 main__m1.prob=3 numRed.prob=4
+planOverBudgetTupleConst main.integ=3 main.prob=3 numRed.prob=4
+planOverBudgetTupleOuter main.integ=3 main.prob=3 main__m1.integ=3 main__m1.prob=3 numRed.prob=4
 planRecursiveHelperOnDrawnRead main.integ=3 main.prob=3
 planRecursiveHelperOnInlineRead main.integ=3 main.prob=3
 planSceneFloatPassthroughFactored main.prob=16
@@ -200,6 +202,7 @@ sceneCountConditionalEdit main.writeLogits=8
 setWitnessEqFalseInTupleArmApplied main.prob=4
 setWitnessEqualityThroughExpOffImage main.integ=14 main.prob=14
 setWitnessExceptInteriorPoint main.prob=4
+setWitnessInnerTupleInPlace main__m01.prob=3 main__m11.prob=4
 setWitnessNegatedComparisonBoundary main.prob=4
 setWitnessNestedLetObserve main.prob=3
 setWitnessSiblingBoolAny main.prob=3

@@ -1347,9 +1347,20 @@ engineApplicabilityTests = testGroup "Engine applicability (law-carrying-modalit
       assertHasNot "set-valued witnesses" es
       assertHas "affine marginalisation" es
   , testCase "no engine: the binding is sample-only, and the function Bottom" $ do
-      let src = "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
+      let src = "main = draw x = Normal in if sqrt x > 0.5 then x else 0.0 - x"
       assertEqual "certificates" [] (engines "x" src)
       assertEqual "main" Bottom (mainPTypeOf src)
+  , testCase "in place: a binding read once, with no binder on the way" $ do
+      let src = "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
+      assertEqual "certificates" ["in place"] (engines "x" src)
+      assertHasNot "in place" (engines "x" "main = draw x = Normal in (\\y -> sqrt x + y) 1.0 > 0.5")
+      assertHasNot "in place" (engines "x" "main = draw x = Normal in sqrt x > sqrt x")
+  , testCase "in place: not for a read inside a lambda, which may run any number of times" $ do
+      let src = "main = draw x = Normal in (\\f -> f 1.0 + f 2.0) (\\y -> sqrt x + y) > 0.5"
+      assertHasNot "in place" (engines "x" src)
+  , testCase "in place: the set-witness walk enters an inner binding read once" $ do
+      let src = "main = draw x = Normal in draw z = 0.5 in x < z"
+      assertHas "set-valued witnesses" (engines "x" src)
   , testCase "a deterministic binding needs no engine and records none" $
       assertEqual "" Nothing (map engineName <$> bindingJust "x" "main = draw x = 1.0 in x + Normal")
   , testCase "compare: two operands projecting from a plan read have the plan closed form" $

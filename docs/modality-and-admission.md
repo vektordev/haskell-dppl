@@ -177,6 +177,7 @@ order:
 | affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |
 | joint affine marginalisation | `ModalityInfer.jointAffineBindingCert` (an affine form with latents, read by a spine of affine bindings ending in a tuple of at most 3 affine fields) | the form |
 | set-valued witnesses | `ForwardChaining.worldsShape`, `invertToWorlds`' shape walk without its IR | the shape |
+| in place | `Lang.readOnceInPlace` (the body reads the variable once, under no lambda and in no nested `let`'s body) | none: the argument is measured at the read |
 
 For a `draw` (a lambda in place) whose argument is random, not a function of
 witnessed variables alone (`determinedByWitnesses`), and read by the body,
@@ -184,9 +185,27 @@ witnessed variables alone (`determinedByWitnesses`), and read by the body,
 by `-d`, and per binding by `-v`). Where the list is empty it binds the
 variable sample-only and re-infers the body, so the function is `Bottom`: no
 inference variant is promised, and `bindingWithoutEngine` records the reason
-on the absent variants. `applyBinding` tries the engines as a declared list
-(`dispatchEngines`); enumeration is tried earlier, at the `Apply` arm's first
-equation.
+on the absent variants. The order is stated once, as the constructor order of
+`ModalityInfer.Engine` (`engineOrder`): `bindingCerts` lists certificates in
+it and `applyBinding` tries its constructions in it (`dispatchEngines`).
+Enumeration is tried earlier, at the `Apply` arm's first equation; the
+in-place engine is tried last, after the set-witness engine's fallback (which
+can answer where its predicate declined).
+
+**The in-place engine** (task `dispatch-on-law-certificates`, law-carrying-modality
+M6). A binding whose body reads its variable once, under no lambda and in no
+nested `let`'s body, has the argument's own law at that read, which is how
+`bindParam` types the read anyway. So `body[x := arg]` is what the binding
+denotes, and the engine compiles that (`inPlaceApplicable`; only for a lambda
+in place compiled inline, so every node on the way is compiled from this
+tree). It is an engine with a certificate (`CertInPlace`), last in the order,
+not a source rewrite: a binding any other engine measures keeps that engine's
+code. The set-witness walk uses the same predicate to enter an inner binding
+whose body holds x (`draw c = x < 0.5 in if c ..`, `draw z = 0.5 in x < z`):
+it walks the body with the value in place, in `worldsShape` and
+`invertToWorldsStep` alike. Corpus `let-bindings/drawSingleReadInPlace*`,
+`set-witness/setWitness*InPlace`. Two reads (`draw x = Normal in x + x`) are
+never in place; the affine engine owns that.
 
 The plan traversal and the set-witness IR can still decline what their
 predicate admits (a transported sentinel, an x-free factor reading a random

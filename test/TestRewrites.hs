@@ -76,12 +76,15 @@ import End2EndTesting (programRuntimeFields)
 --   refusing an ANY marginal. Those belong to M2 and M6, so the family stays
 --   log-only until the later of the two lands;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
--- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates, which
---   cut the promoted draw-intro frontier from 16 failing tests to 13 (probe
---   rows 5, 8 and 9: the affine certificate of a fresh draw beside a
---   recovered variable is now the one compiled) and left it there: most of the rest is a single-read random
---   binding no engine measures in place, which waits on a decision recorded
---   in that task; linear-inline fails only on gaussianTrajectory4's masks.
+-- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates. Its
+--   in-place engine (a binding read once, with no binder on the way, measured
+--   at its read) and the set-witness walk's entry into such an inner binding
+--   cut the promoted frontier, over the Slow sweep, the probes and the
+--   sequences, from 55 failing tests to 35 (at 1a09132). What is left is
+--   classified in that task: mostly other milestones' classes (Gaussian
+--   rules reading syntax, M7; named callees; point inversion through a
+--   deterministic if behind a binding; recursion; ANY-mask runtime refusals;
+--   interpreter type errors), so both stay log-only.
 refusalIsHard :: Family -> Bool
 refusalIsHard AliasIntro = False
 refusalIsHard HelperExtract = False
