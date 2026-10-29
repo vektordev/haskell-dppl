@@ -156,12 +156,27 @@ knownDivergences =
   , Known "observeNegatedContinuousEqualsLetfree" DrawIntro "draw-intro (eq Normal 0.5)" hiddenNegation
   , Known "observeNegatedContinuousEqualsLetfree" HelperExtract "extract (not" hiddenNegation
   , Known "observeNegatedContinuousEqualsLetfree" TupleLaw "pair-fst (not" hiddenNegation
+  -- A finite leaf of the point witness whose domain 'fieldDomainOf' cannot
+  -- see once the rewrite moves it behind a binding or a pair: the query's
+  -- ANY reaches the body's other read of the leaf as a value (0.398942 for
+  -- 0.279260 and 0.119683). Present before the 2026-10-29 dispatch run.
+  , Known "anyLeafReadAgainThroughHelper" DrawIntro "" wildcardLeafNoDomain
+  , Known "anyLeafReadAgainThroughHelper" HelperExtract "" wildcardLeafNoDomain
+  , Known "anyLeafReadAgainThroughHelper" TupleLaw "pair-fst" wildcardLeafNoDomain
+  , Known "anyLeafReadAgainThroughAlias" TupleLaw "pair-fst" wildcardLeafNoDomain
+  , Known "aliasChainOfStructuredDrawAnyMarginal" TupleLaw "pair-fst" wildcardLeafNoDomain
+  -- A theta anchor in a helper the callee calls reads the caller's
+  -- namesake of the parameter, as the direct callee did before task
+  -- callee-body-name-sensitive-across-call: p(2.5) answers 0.0 for 1.0.
+  , Known "thetaArgumentNotCallerNamesake" HelperExtract "" thetaThroughCalleeLocal
   ]
   where
     hiddenNegation = "if-complement-drops-hidden-negation-density"
     nanComparison = "nan-operand-comparison-measured-through-cdf"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
+    wildcardLeafNoDomain = "wildcard-leaf-without-domain-reaches-reads-as-value"
+    thetaThroughCalleeLocal = "theta-anchor-through-callee-local-binding"
 
 -- | A divergence only a composition of rewrites reaches, for the sequence
 -- property: a sequence on the program whose steps include every family listed
