@@ -1,0 +1,1 @@
+main = draw h = Normal in (h == 1.0)

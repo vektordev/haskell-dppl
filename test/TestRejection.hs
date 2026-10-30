@@ -1119,11 +1119,12 @@ generateBackedProjectionTests = testGroup "GenerateBackedProjection"
 
 -- Three lines, no neural network: a constructor test of a field (reached
 -- through head/col) inverts to VAnyExcept on its False branch. The task's
--- original reproducer spelled the test `col (head scene) == Red`; an == step
--- of a point inversion now refuses its False arm at run time instead
--- (task fuzz-unconsumed-vanyexcept-reaches-codegen, 'eqSetWitnessTests'), so
--- that spelling no longer carries the placeholder. The constructor test still
--- does (task point-inversion-vanyexcept-witness-crashes).
+-- original reproducer spelled the test `col (head scene) == Red`. Both
+-- spellings once left the placeholder in the compiled IR; a point inversion
+-- now declines a chain that holds it, and the set-witness engine answers the
+-- complement (task point-inversion-vanyexcept-witness-crashes), so neither
+-- does any more. The refusal stays as the codegen safety net, checked below
+-- on an IR the placeholder is planted in.
 vAnyExceptProgSrc :: String
 vAnyExceptProgSrc = unlines
   [ "data Color = Red | Green"
@@ -1131,12 +1132,7 @@ vAnyExceptProgSrc = unlines
   , "main = draw scene = [if Uniform < 0.5 then Obj Red else Obj Green] in isRed (col (head scene))"
   ]
 
--- | The original reproducer above, spelled with ==. A point inversion through
--- an == observed False recovers only a set, which no engine measures as a
--- point: every engine now refuses that query by name at run time (the
--- interpreter died on a type error), and the module compiles to both text
--- backends, so the True query answers there too (task
--- fuzz-unconsumed-vanyexcept-reaches-codegen).
+-- | The original reproducer above, spelled with ==.
 eqSetWitnessSrc :: String
 eqSetWitnessSrc = unlines
   [ "data Color = Red | Green"
@@ -1144,32 +1140,30 @@ eqSetWitnessSrc = unlines
   , "main = draw scene = [if Uniform < 0.5 then Obj Red else Obj Green] in col (head scene) == Red"
   ]
 
-eqSetWitnessTests :: TestTree
-eqSetWitnessTests = testGroup "EqSetWitness"
-  [ testCase "the False query is refused by name, not a type error" $
-      withParsed eqSetWitnessSrc $ \prog -> do
-        outcome <- try (evaluate (length (show (runProb defaultCompilerConfig prog [] (VBool False)))))
-        case outcome of
-          Right _ -> assertFailure "expected a runtime refusal at False"
-          Left (ex :: SomeException) ->
-            assertBool ("expected the set-witness refusal, got: " ++ show ex)
-              ("any value but one" `isInfixOf` show ex && not ("Type error" `isInfixOf` show ex))
-  , testCase "the True query still answers" $
-      withParsed eqSetWitnessSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VBool True))
-        case res of
-          Left e -> assertFailure ("the True query should answer, got: " ++ show e)
-          Right _ -> return ()
-  , testCase "both text backends compile it" $
-      withParsed eqSetWitnessSrc $ \prog ->
+-- | Both polarities of a reproducer answer 0.5 at dim 0, and its module
+-- carries no placeholder.
+answersBothPolarities :: String -> [TestTree]
+answersBothPolarities src =
+  [ testCase ("p(" ++ show b ++ ") answers 0.5") $
+      withParsed src $ \prog ->
+        case runProb defaultCompilerConfig prog [] (VBool b) of
+          Right (VProbDim p 0) | abs (p - 0.5) < 1e-9 -> return ()
+          other -> assertFailure ("expected (0.5, dim 0), got " ++ show other)
+  | b <- [False, True] ] ++
+  [ testCase "both text backends compile it" $
+      withParsed src $ \prog ->
         case compile defaultCompilerConfig prog of
           Left err -> assertFailure ("compile failed: " ++ show err)
           Right env -> assertEqual "a VAnyExcept survived" Nothing (firstAnyExceptIR env)
+  ]
+
+eqSetWitnessTests :: TestTree
+eqSetWitnessTests = testGroup "EqSetWitness" $
+  answersBothPolarities eqSetWitnessSrc ++
   -- The shrunk program of Slow prop_Fuzz_BackendsAgree
   -- --quickcheck-replay=129863: the same == under `right`, its operand a
-  -- mixture, beside a dead neural binding. Its cumulative function inverted
-  -- the == too, which transports no bound, and is refused outright.
-  , testCase "the fuzz seed's program compiles to both text backends" $
+  -- mixture, beside a dead neural binding.
+  [ testCase "the fuzz seed's program compiles to both text backends" $
       withParsed (unlines
         [ "neural nn :: (Symbol -> Bool)"
         , "main v0 = (\\v1 -> (\\v2 -> right (v2 == 0)) (if Uniform < 0.5 then 2 else 1)) (nn v0)" ]) $ \prog ->
@@ -1179,38 +1173,19 @@ eqSetWitnessTests = testGroup "EqSetWitness"
   ]
 
 vAnyExceptCodegenTests :: TestTree
-vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal"
-  [ testCase "the interpreter answers the reproducer directly (the reference this refusal is measured against)" $
-      withParsed vAnyExceptProgSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VBool True))
-        case res of
-          Left e  -> assertFailure ("interpreter should answer this program, got: " ++ show e)
-          Right _ -> return ()
-  , testCase "the compiled IR does carry a VAnyExcept placeholder (guards against a stale reproducer)" $
+vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal" $
+  answersBothPolarities vAnyExceptProgSrc ++
+  [ testCase ("the " ++ lang ++ " codegen refusal names VAnyExcept, not a value-rendering panic") $
       withParsed vAnyExceptProgSrc $ \prog ->
         case compile defaultCompilerConfig prog of
           Left err -> assertFailure ("compile failed: " ++ show err)
-          Right env -> case firstAnyExceptIR env of
-            Just _  -> return ()
-            Nothing -> assertFailure
-              "expected a VAnyExcept placeholder in the compiled IR; the reproducer may have stopped reproducing"
-  , testCase "Python codegen refuses with a diagnostic naming VAnyExcept, not a pyVal panic" $
-      withParsed vAnyExceptProgSrc $ \prog ->
-        case compile defaultCompilerConfig prog of
-          Left err -> assertFailure ("compile failed: " ++ show err)
-          Right env -> case anyExceptCodegenRefusal "Python" env of
-            Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
-                                    ("VAnyExcept" `isInfixOf` msg)
-            Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
-  , testCase "Julia codegen refuses with a diagnostic naming VAnyExcept, not a juliaVal panic" $
-      withParsed vAnyExceptProgSrc $ \prog ->
-        case compile defaultCompilerConfig prog of
-          Left err -> assertFailure ("compile failed: " ++ show err)
-          Right env -> case anyExceptCodegenRefusal "Julia" env of
-            Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
-                                    ("VAnyExcept" `isInfixOf` msg)
-            Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
-  ]
+          Right (IREnv groups decls consts) -> do
+            let plant g = g { probFun = Just (IRConst (VAnyExcept [IRConst (VBool True)]), "") }
+            case anyExceptCodegenRefusal lang (IREnv (map plant groups) decls consts) of
+              Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
+                                      ("VAnyExcept" `isInfixOf` msg)
+              Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
+  | lang <- ["Python", "Julia"] ]
 
 -- | A wildcard the inversion chain makes up itself (fst's inverse answers
 -- @(s, ANY)@) and an arithmetic step then reads (task

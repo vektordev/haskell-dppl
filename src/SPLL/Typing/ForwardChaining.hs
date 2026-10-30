@@ -52,6 +52,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Maybe
+import Control.Monad (mfilter)
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
 import Data.Char (isUpper)
@@ -567,11 +568,19 @@ toInvExprMaybe = toInvExprMaybeWith (const True) (const True)
 -- of the value of a @let@ the split is reached through: the binding is
 -- stepped into only where its value is known, which is where a condition
 -- reading its variable is.
+--
+-- A chain through an '==' or a constructor test recovers, on the False
+-- polarity, the set "any value but this one" ('VAnyExcept'), not a point,
+-- and every caller measures this witness as a point: the interpreter died on
+-- a type error or answered the sentinel as a point (@h == 0@ at False answered
+-- 0), and no text backend can render it. Such a chain is no point inverse;
+-- the set-witness engine turns that polarity into an exclusion set and
+-- answers both (task point-inversion-vanyexcept-witness-crashes).
 toInvExprMaybeWith :: (ChainName -> Bool) -> (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
-toInvExprMaybeWith condKnown valueKnown fcData adtsDecls lambdaCN = do
+toInvExprMaybeWith condKnown valueKnown fcData adtsDecls lambdaCN = mfilter (not . hasAnyExceptExpr . invValue) $ do
   (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
   let seeded occs seed =
-        case informative (mapMaybe (toPointValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
+        case informative (mapMaybe (toValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
           []  -> throughIf occs seed
           ves -> Just (mergeExpr toInvVarName lambdaCN occs ves)
       throughIf occs seed = splitIf occs seed <|> throughLet occs seed
@@ -670,36 +679,9 @@ toSeededInvExpr fcData adtsDecls seedCN occCN =
 -- result afterward): the value expression itself crashes on out-of-domain input
 -- (observe-partials-umbrella N1b).
 toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
-toValueExpr = toValueExprWith (const id)
-
--- | 'toValueExpr' for the lambda-witness point inversion ('toInvExprMaybe'),
--- whose caller measures the recovered value as a point. An '==' step
--- observed False recovers the set "any value but this one" ('VAnyExcept')
--- instead, and every reader of it there -- a density, an enumerated
--- comparison, the body factor's own '==' -- died on it in the interpreter with
--- a type error, while no text backend could render it at all, so
--- 'anyExceptCodegenRefusal' refused the whole module, every other query
--- included (task fuzz-unconsumed-vanyexcept-reaches-codegen, second seed).
--- That arm is a runtime refusal here instead, the same in every engine; the
--- True arm is untouched. The cumulative value keeps the sentinel, which
--- IRCompiler refuses statically (no bound crosses an '=='), and so does a
--- constructor test's: the interpreter answers some of those through it
--- (task point-inversion-vanyexcept-witness-crashes).
-toPointValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
-toPointValueExpr = toValueExprWith refuseEqSet
-  where
-    refuseEqSet (ExprHornClause _ _ (InjFInfo "eq") inv) | inv > 0 = irMap $ \e -> case e of
-      IRConst (VAnyExcept _) -> IRError
-        ("cannot compute marginal: an == observed False recovers its operand only as the set"
-         ++ " 'any value but one', which this engine cannot measure as a point"
-         ++ " (task point-inversion-vanyexcept-witness-crashes)")
-      _ -> e
-    refuseEqSet _ = id
-
-toValueExprWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
 -- Partially applied up to the ADTs, it solves the clause set once and is
 -- shared by every start it is then asked about ('toValuePath').
-toValueExprWith pointStep clauses paramClauses adtsDecls = let pathTo = toValuePath clauses paramClauses in \startCN -> do
+toValueExpr clauses paramClauses adtsDecls = let pathTo = toValuePath clauses paramClauses in \startCN -> do
   relevantSortedClauses <- pathTo startCN
   -- The change of variables is the derivative along the spine alone: a
   -- side computation recovering another latent (the divisor of a @mult@
@@ -712,12 +694,11 @@ toValueExprWith pointStep clauses paramClauses adtsDecls = let pathTo = toValueP
   -- ('injectedWildcards').
   let wild = injectedWildcards adtsDecls relevantSortedClauses
   let passWild = passInjectedWildcard adtsDecls wild
-  let pointWild c = passWild c . pointStep c
   -- Generate code
   Just InvChain
-    { invValue    = toLetInBlockWith pointWild clauses adtsDecls relevantSortedClauses
-    , invCoV    = wrapInLetInBlockWith pointWild clauses adtsDecls relevantSortedClauses deriv
-    , invGuard    = guardChain pointStep wild clauses adtsDecls relevantSortedClauses
+    { invValue    = toLetInBlockWith passWild clauses adtsDecls relevantSortedClauses
+    , invCoV    = wrapInLetInBlockWith passWild clauses adtsDecls relevantSortedClauses deriv
+    , invGuard    = guardChain wild clauses adtsDecls relevantSortedClauses
     -- Over the needed steps only, as 'computesOnCertainWildcard' is: the
     -- path may hold steps toward other occurrences ('neededClauses'), which
     -- the caller prunes from the inverse ('pruneDeadLetIns'), and a wildcard
@@ -986,10 +967,8 @@ cumulativeStep adtsDecls path jac c = do
 --
 -- A step reading a chain-introduced wildcard is within its domain
 -- ('passWildApp').
--- A hook rewrites each step's value first ('toPointValueExpr').
-guardChain :: (HornClause -> IRExpr -> IRExpr) -> [(ChainName, Bool)] -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
-guardChain post wild clauses adtsDecls =
-  guardChainWith (\c -> Just (post c (hornClauseToIRExpr clauses adtsDecls c), clauseApplicability adtsDecls c)) wild clauses adtsDecls
+guardChain :: [(ChainName, Bool)] -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+guardChain = guardChainWith (const Nothing)
 
 -- | 'guardChain' with some steps' value and applicability replaced (Just), as
 -- 'cumulativeStep' replaces the rounded ones.

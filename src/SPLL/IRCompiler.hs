@@ -7224,6 +7224,23 @@ invertToWorldsStep meta occs (Expr _ (InjF (Named "eq") [lop, rop])) target@(WPo
       | otherwise = Nothing
     isBareOcc (Expr ti (Var _)) = chainName ti `elem` occs
     isBareOcc _ = False
+-- A constructor test @isC e@ whose operand reaches the bound variable through
+-- further inverse steps (@isRed (col (head scene))@) is split the same way, and
+-- for the same reason: its inverse on the False polarity is the 'VAnyExcept'
+-- sentinel "any value but @C _ ..@", and the steps below it (a field accessor
+-- building @Obj sentinel@, @head@ building a list around that) bury it inside a
+-- structure no set reads back out. Observed True it is @e@ at the point @C@
+-- with every field the wildcard -- the inverse's own True arm -- and observed
+-- False the complement of that point ('complementWorlds'). A bare occurrence
+-- (@isC x@) keeps the path that already answers it ('witnessSet').
+invertToWorldsStep meta occs (Expr _ (InjF (Named name) [side])) target@(WPoint _ _)
+  | name /= "eq", hasAnyExcept (adtDecls meta) name
+  , subtreeHasOcc occs side, not (isBareOcc side)
+  , FPair _ [FDecl {body = IRIf _ pos (IRConst (VAnyExcept _))}] <- lookupFPair (adtDecls meta) name =
+      complementWorlds meta occs side pos target
+  where
+    isBareOcc (Expr ti (Var _)) = chainName ti `elem` occs
+    isBareOcc _ = False
 invertToWorldsStep meta occs exprBody target = do
   direct <- transportDirect meta occs exprBody target
   case direct of
@@ -7896,6 +7913,15 @@ witnessSet value cov = case anyExceptSampleShape value of
 equalityWorlds :: CompilerMetadata -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
 equalityWorlds meta occs side other target = do
   b <- toIRGenerate meta other
+  complementWorlds meta occs side b target
+
+-- | The worlds of a test "@side@ is the point @b@" observed at @target@: the
+-- True outcome inverts @side@ at @b@, the False one is that point world's
+-- complement ('equalityWorlds', which states the rule). @b@ may hold field
+-- wildcards (a constructor test's @C ANY ..@), and the excepted mass is then
+-- the marginal mass of the pattern.
+complementWorlds :: CompilerMetadata -> [ChainName] -> Expr -> IRExpr -> WSet -> CompilerMonad (Maybe [WWorld])
+complementWorlds meta occs side b target = do
   wsT <- invertToWorlds meta occs side (WPoint b const1)
   return $ case wsT of
     -- A transport that may read a wildcard target ('transportDirect') wraps
@@ -10872,16 +10898,13 @@ applyBinding meta cumulative rt binding sample = do
         -- backend can render it, so 'anyExceptCodegenRefusal' refused the whole
         -- module, the probability function's queries included (task
         -- fuzz-unconsumed-vanyexcept-reaches-codegen, second seed). Either
-        -- polarity is wrong, so the cumulative variant is refused. A step handed
+        -- polarity is wrong here, so the chain is refused. A step handed
         -- a wildcard the chain made up never shows the sentinel here: forward
         -- chaining replaces it by the wildcard ('injectedWildcards').
         --
-        -- A point query's '==' arm is refused at run time by forward chaining
-        -- ('SPLL.Typing.ForwardChaining.toPointValueExpr'); a constructor
-        -- test's keeps the sentinel, which the bound value's own inference
-        -- answers in some shapes (a single-constructor value observed False is
-        -- impossible, tupleCtorTestOfSharedDraw at @(False, ANY)@; task
-        -- point-inversion-vanyexcept-witness-crashes).
+        -- 'toInvExprMaybeWith' no longer offers a chain whose point value holds
+        -- the sentinel, and the cumulative value is built from the same steps,
+        -- so this is a backstop (task point-inversion-vanyexcept-witness-crashes).
         when (cumulative && hasAnyExceptExpr invExprP0) $
           refuse lChainName ("cannot compute a cumulative distribution through binding '"
             ++ (case l of Expr _ (Lambda n _) -> n; _ -> toInvCN)

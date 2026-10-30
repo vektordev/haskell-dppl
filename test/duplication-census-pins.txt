@@ -41,6 +41,8 @@ clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
 collapseGivenParam main.prob=3
 collapseMixture main.integ=3 main.prob=4
 countFoldRelateDigitEncoded hit.integ=4 hit.prob=4 main.integ=10 main.prob=10
+ctorTestFalseBesideValue main.prob=5 main__m01.prob=4
+ctorTestFalseThroughAccessors main.prob=4
 ctorTestOverTransformedDraw main.integ=18 main.prob=18
 ctorTestOverTransformedField main.integ=16 main.prob=16
 curriedHelperEnumArg match.integ=3 match.prob=3
@@ -76,6 +78,7 @@ enumDeadLetFreshDrawTuple main.integ=3 main.prob=7
 enumLetGatesFreshDrawCondition main.prob=5
 enumLetGatesFreshDrawTwoObs main__m011.prob=7
 enumNeuralDeadBranchFreshDraw main.prob=4
+eqFalseThroughPlusInTuple main.prob=3 main__m01.prob=5
 equals oneOfThree.integ=4 oneOfThree.prob=4
 equalsCoin main.prob=3
 fieldDiscardsComparedDraw main.integ=11 main.prob=8
@@ -223,7 +226,7 @@ tensorDiffusionTrajectory main.prob=12 step.prob=13
 topKComplementAnyExcept main.prob=3
 topKComplementCdfFlip main.integ=4 main.prob=4
 trajectoryTailBoundAsTuple main.prob=5 main__m10.prob=5
-tupleCtorTestOfSharedDraw main__m01.prob=18
+tupleCtorTestOfSharedDraw main__m01.prob=9
 tupleDiscreteDistrib main.integ=5 main.prob=5
 tupleOfEithersAny main.integ=5 main.prob=10
 tupleRoundtrip main.prob=25 main__m01.prob=4 main__m10.prob=4
