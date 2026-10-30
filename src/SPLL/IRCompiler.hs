@@ -26,7 +26,6 @@ module SPLL.IRCompiler (
   -- the cdf() diagnostic for a Symbol-valued node (see 'compareValueExpr')
   symbolCdfMessage
 )where
-
 import SPLL.ReservedNames (distributionPrimitiveNames, queryParamName, accProbParamName, topKCutoffName, topKCutoffParamName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
 import SPLL.IntermediateRepresentation
 import SPLL.IRUtil
@@ -40,24 +39,23 @@ import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
 import PrettyPrint (pPrintValue)
 import PredefinedFunctions
-import SPLL.Analysis (isEnumerable, LatentBinder(..), latentDependencies, sharesEnumeratedLatent, isCandidateBinaryEnumInjF, injFLatentVerdicts, materializationVerdicts, materializationScopes, sharesLatentGiven, getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
+import SPLL.Analysis (isEnumerable, latentDependencies, sharesEnumeratedLatent, isCandidateBinaryEnumInjF, injFLatentVerdicts, materializationVerdicts, materializationScopes, sharesLatentGiven, getValuesFromExpr, enumerableDomain, enumerableApplication, headIsConditional, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (partitionEithers)
-import Data.List (isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate, sort, partition)
+import Data.List (isPrefixOf, isSuffixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate, sort, partition)
 import Data.Functor ((<&>))
 import SPLL.AutoNeural hiding (planReadOf, planProjectedReadOf)
 import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
-import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, reinferLawGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf, lawValue, Engine(..), engineOrder, engineLabel)
+import SPLL.Typing.ModalityInfer (reinferCtx, reinferGiven, reinferLawGiven, LawTable, Law, lambdaParamLaw, AffineCert(..), affineOf, Engine(..), engineOrder, engineLabel)
 import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
-import SPLL.IR.Type (IRType(..))
 import SPLL.IRTypeBridge (irConformanceType)
 import SPLL.Semiring
-import Control.Monad (foldM, forM, mfilter, unless, void, when, zipWithM, (>=>))
+import Control.Monad (foldM, forM, unless, void, when, zipWithM, (>=>))
 import Debug.Trace (traceM)
 import Control.Monad.State.Strict (StateT, runStateT, get, gets, put, modify, lift)
 import Control.Monad.Except (catchError)
@@ -66,151 +64,7 @@ import qualified Data.Set as Set
 import Data.Char (isUpper)
 import Data.Graph (SCC(..), stronglyConnComp, flattenSCC)
 import GHC.Stack (HasCallStack)
-
--- | 'PResult', its combinator vocabulary, and the 'Semiring' abstraction that
--- makes the probability field's arithmetic mode-agnostic (linear vs. log-space)
--- now live in 'SPLL.Semiring' (task semiring-discipline-enforcement): moving
--- them out of this module -- the one whose dispatch code caused both known
--- instances of the "hand-rolled linear arithmetic on a probability" bug class
--- -- lets the probability field be a newtype whose constructor only
--- 'SPLL.Semiring' can see, so a 'toIRInference' case here cannot drop a bare
--- 'IROp'/'IRIf' into it without going through a Semiring-aware combinator or
--- a named, greppable escape hatch ('unsafeLinearP'/'sealP').
-
--- (name, ((RType of (Var name)), (Has _gen _prop _integ (if applicable) functions)))
-type TypeEnv = [(String, (RType, Bool))]
-
-data CompilerMetadata = CompilerMetadata {
-  compilerConfig :: CompilerConfig,
-  fcData :: FCData,
-  typeEnv :: TypeEnv,
-  adtDecls :: [ADTDecl],
-  compilingProgram :: Program,
-  accProb :: IRExpr,
-  -- | The decomposability verdict per binary InjF node of the whole program,
-  -- keyed by chain name (unique program-wide): True = the node's two operands
-  -- may share an enumerated latent, so its marginal must NOT be tabulated by
-  -- convolving them separately. Precomputed once per compile because the
-  -- verdict depends on the 'let'-scope lexically enclosing the node, which a
-  -- 'toIRInference' case looking at a node in isolation cannot reconstruct.
-  latentVerdicts :: Map.Map ChainName Bool,
-  -- | What 'latentVerdicts' is computed from, per binary InjF node
-  -- ('materializationScopes'), for the one consumer that retakes the verdict
-  -- given the latents an enclosing enumeration has fixed.
-  latentScopes :: Map.Map ChainName ([LatentBinder], Expr, Expr),
-  -- | The latent identities (the chain names of their draws, as
-  -- 'bindLatent' keys them) that enclosing enumeration loops have fixed:
-  -- inside @enumerateAppliedLambda@'s loop over @let x = v@, @v@ holds one
-  -- value. The latent counterpart of a recovered variable ('recoveredVars').
-  fixedLatents :: Set.Set ChainName,
-  -- | The @_gen@ function names whose evaluation draws no randomness, from
-  -- 'SPLL.Typing.Determinism.functionSummaries'. Consumed by
-  -- 'requireDeterministicUnderEnum' (and only there) as the deterministic-generator
-  -- set 'isPureGiven' needs: 'isEffectfulVar' is a name test that calls /every/
-  -- @_gen@ reference random, and an enumerated inference body is written almost
-  -- entirely in terms of deterministic helper calls.
-  detGenNames :: Set.Set Varname,
-  -- | The @_gen@ names of the top-level functions that sit on a call-graph
-  -- cycle (self-recursion included). 'toIREnumerate' reads this to tell a
-  -- fresh draw it can hand to 'toIRInference' (a primitive, a neural read, a
-  -- call into a non-recursive helper) from one whose probability function
-  -- could re-enter the very enumeration being compiled with an unchanged
-  -- argument -- the unbounded @... else main@ shape, which stays refused
-  -- (task enum-let-latent-gates-fresh-draw).
-  cyclicGenNames :: Set.Set Varname,
-  -- | Which 'SemiringFamily' 'semiringOf' builds this compile's 'Semiring'
-  -- from (task semiring-parametric-marginals). 'SRSumProduct' for every
-  -- ordinary compiled body; overridden to one of 'extraSemirings''s entries
-  -- only for the extra probability-mode 'IRFunGroup's 'envToIRUnoptimized''
-  -- builds alongside the ordinary ones -- see 'extraSemiringGroups'. Kept on
-  -- 'CompilerMetadata' rather than read straight off 'CompilerConfig' so that
-  -- override is a plain record update at the one call site that needs it,
-  -- with every recursive call (all ~50 of which read 'semiringOf meta', not
-  -- 'compilerConfig meta', for exactly this reason) automatically compiling
-  -- under the overridden family with no change of its own.
-  semiringFamily :: SemiringFamily,
-  -- | What 'reinferRecovered' needs to re-run modality inference on a body
-  -- under the recovered variables; built once per compile.
-  reinferContext :: ReinferCtx,
-  -- | The 'mult'/'multI' nodes (by chain name) whose deterministic factor is
-  -- already branched on at run time ('runtimeZeroFactor'), so the recursive
-  -- compile of the nonzero arm takes the ordinary inversion.
-  zeroGuardedProducts :: Set.Set ChainName,
-  -- | Function parameters an engine has bound to a lambda it can see, under
-  -- the fresh names 'enterBindingScope' gives them: a call through one is a
-  -- binding of that lambda's parameter ('callBindingAt').
-  boundLambdas :: [(String, Expr)],
-  -- | The callee bodies 'enterBindingScope' has made meaningful here, each
-  -- as the chain names of its nodes and the renames of its leading
-  -- parameters to their fresh names. An engine compiles such a body renamed,
-  -- but a forward-chaining anchor in it is fetched by chain name from the
-  -- program as written ('materializeAnchors'), so the anchor is renamed the
-  -- same way ('anchorAtCall'); otherwise it reads the caller's namesake of
-  -- the parameter (task theta-anchor-through-callee-local-binding).
-  enteredScopes :: [(Set.Set ChainName, [(String, String)])],
-  -- | The modality engine's certificate for every node of the program, by
-  -- chain name ('SPLL.Typing.ModalityInfer.inferProgram'; design
-  -- law-carrying-modality §B). Not a 'TypeInfo' field: a 'Law' holds closures.
-  -- Read through 'nodeLaw'. It certifies the program as written: a node
-  -- re-inferred under recovered variables ('reinferRecovered') gets new types,
-  -- not a new entry here.
-  lawTable :: LawTable,
-  -- | Every variable bound by an enclosing binder of the code being
-  -- compiled ('BoundVar'): a lambda's parameter ('extendMetaForLambda') and,
-  -- at every 'Binding', the bound parameter at the argument's law
-  -- ('withBindingLaw'), by the modality engine's own binder rule
-  -- ('bindingLawEnv'), so its laws are the environment 'inferE' had there.
-  -- It also records what an engine did with a variable: fixed it
-  -- ('recoverVars') or marginalised it as an affine form ('marginaliseAs').
-  lawEnv :: LawEnv,
-  -- | Whether every enclosing enumerated sum keeps its terms' dims
-  -- ('enumSumTerms'; task enumerated-sum-over-density-body). True outside
-  -- any enumeration; an enumeration whose body's type has no static bound on
-  -- its dim ('floatLeafBound') sums its terms as masses and clears it for
-  -- everything below. 'forwardOrInfer' reads it: a delegated body that may
-  -- be a density needs its run-time guard only when some enclosing sum
-  -- would report it as a mass.
-  dimAwareEnum :: Bool
-}
-
-semiringOf :: CompilerMetadata -> Semiring
-semiringOf meta = mkSemiring (semiringFamily meta) (logSpace (compilerConfig meta))
-
--- | Compile a sub-expression with topK pruning switched off.
---
--- A topK-pruned probability is a LOWER bound on the exact one: a dropped arm
--- contributes zero, never less than zero. Lower bounds compose under the
--- operations the rest of this module applies to them -- products, sums, and
--- the lowest-dimension-wins mixture -- but not under a complement or a
--- subtraction: @1 - lower@ and @a - lower@ are UPPER bounds. So the operand of
--- every 'srComplement' / 'srMinus' ('mixSubP') / CDF-difference site must be
--- compiled through this wrapper, or pruning below it silently inflates the
--- result above the exact value (task topk-inflates-probability-int-comparison-mix:
--- @if (if Uniform < 0.95 then False else True) then 1.0 else 2.0@ answered
--- @p(2.0) = 1.0@ at threshold 0.1, because the condition's own True-probability
--- pruned to 0 and its else-weight was then the complement 1 - 0).
---
--- Pruning is switched off by seeding the accumulated path probability with the
--- semiring's infinity rather than by a flag: every guard in this module (the
--- 'IfThenElse' arms, the enumerable-'InjF' term filter, the materialised
--- table's per-cell test) compares @accProb ⊗ p@ against the cutoff, and
--- @∞ ⊗ p = ∞@ fails every "below cutoff" test in both the linear (@∞ · p@) and
--- the log (@∞ + log p@) semiring. Being a value rather than a flag is what lets
--- it cross a function-call boundary unchanged: a callee's @_prob@ takes its
--- @acc_prob@ as an argument and needs no second, unpruned variant. The one
--- corner is @p = 0@, where @∞ ⊗ 0@ is NaN: every comparison against NaN is
--- False, so such an arm is not pruned -- the same outcome the dead-arm
--- short-circuit ('deadArm') already gives a zero-probability arm.
---
--- The cost is that nothing under a complement is pruned. An 'IfThenElse'
--- condition is no longer such a site wherever 'condWeights' builds its two
--- weights directly: a condition that is itself a Bool @if@ (or a @not@ of
--- one) gets both weights from one pass over its children, each a pruned lower
--- bound, so pruning reaches into it. Only the leaves of that recursion still
--- complement, and they compile unpruned. The subtraction sites (AnyExcept,
--- CDF differences, comparison flips) keep this wrapper.
-unpruned :: CompilerMetadata -> CompilerMetadata
-unpruned meta = meta { accProb = IRConst (VFloat (1 / 0)) }
+import SPLL.IRCompiler.Monad hiding (toIRGenerate, toIRInference, toIRInferenceSave)
 
 -- | Whether a condition weight is (approximately) the semiring zero, the test
 -- an 'IfThenElse' arm guard reads. Linear 0.0 is tested approximately;
@@ -316,68 +170,6 @@ singleDerivation (Expr ti nd)
         _   -> False
       _ -> False
 
-
--- | A call into another definition's compiled inference function. Under
--- 'topKThreshold' a @_prob@ function takes the caller's accumulated path
--- probability as a second parameter (see 'baseFunGroup''s @probFun@); an
--- @_integ@ function does not -- its root seeds its own 'accProb' with the
--- semiring's one -- so a cumulative-mode call passes only the sample. (Passing
--- @acc_prob@ there applied the callee's result tuple to a second argument:
--- "Expression is not a closure" on every topK CDF query through a call.) A
--- callee integral pruned from its own root rather than the caller's is pruned
--- less, never more, so the lower-bound reading of topK is unaffected.
---
--- Under 'topKThreshold' both variants also take the runtime cutoff
--- ('topKCutoffParamName', after @acc_prob@ for a @_prob@ and after the sample
--- for an @_integ@), forwarded unchanged so the whole call tree prunes at the
--- threshold the root was called with (task runtime-parametric-topk-threshold).
-inferenceCall :: CompilerMetadata -> Bool -> IRExpr -> IRExpr -> IRExpr
-inferenceCall meta cumulative callee sample =
-  case topKThreshold (compilerConfig meta) of
-    Just _ | not cumulative -> IRApply (IRApply (IRApply callee sample) (accProb meta)) cutoff
-           | otherwise      -> IRApply (IRApply callee sample) cutoff
-    Nothing                 -> IRApply callee sample
-  where cutoff = IRVar topKCutoffParamName
-
--- | Whether an inverse's derivative is a literal positive constant, so that in
--- cumulative mode 'scaleCoV' will pass the operand's CDF through unflipped.
--- Only then may the operand stay pruned: a decreasing (or not statically
--- signed) transform flips the CDF through 'srComplement', which needs an
--- 'unpruned' operand. 'plus'/'plusI' declare literal @1@; 'neg' declares @-1@
--- and 'mult' a @1 / a@ that is only known at run time, so both compile their
--- cumulative operand unpruned.
-staticallyIncreasing :: IRExpr -> Bool
-staticallyIncreasing (IRConst (VFloat d)) = d > 0
-staticallyIncreasing _                    = False
-
--- | The metadata to compile an inverted operand under: pruned in probability
--- mode (the Jacobian is a positive factor), and in cumulative mode only when
--- the CDF is statically known not to be flipped -- see 'staticallyIncreasing'.
-covOperandMeta :: Bool -> IRExpr -> CompilerMetadata -> CompilerMetadata
-covOperandMeta cumulative deriv meta
-  | cumulative && not (staticallyIncreasing deriv) = unpruned meta
-  | otherwise                                      = meta
-
--- | The change of variables through one point inverse, for either mode
--- (task cdf-through-discrete-inverse-wrong). Probability mode and a
--- statically increasing inverse are plain 'scaleCoV'. A cumulative query
--- through an inverse that may be decreasing needs @P(v >= x)@, which is the
--- flipped CDF plus the operand's own mass at @x@ ('scaleCoVAtom'); @atomM@
--- compiles that point result, and is run only here.
---
--- When the point result cannot be compiled (a refusal), the flip falls back
--- to the plain complement. That is exact for an operand with no atoms -- a
--- density, which is what a probability-mode refusal under a cumulative
--- variant overwhelmingly is -- and the answer every such transform gave
--- before, so no variant that compiled before becomes absent.
-pointInverseCoV :: CompilerMetadata -> Bool -> IRExpr -> PResult -> CompilerMonad PResult
-                -> CompilerMonad PResult
-pointInverseCoV meta cumulative deriv res atomM
-  | cumulative && not (staticallyIncreasing deriv) = do
-      mAtom <- (Just <$> atomM) `catchError` (\_ -> return Nothing)
-      return (maybe (scaleCoV sr True deriv res) (\atom -> scaleCoVAtom sr deriv atom res) mAtom)
-  | otherwise = return (scaleCoV sr cumulative deriv res)
-  where sr = semiringOf meta
 
 -- | The inverse body and applicability test to invert a bound through, in
 -- the given mode. A point query takes the declaration's own. A cumulative one
@@ -824,7 +616,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct reinferC Set.empty [] [] laws Map.empty True
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct reinferC Set.empty [] [] laws Map.empty True knot
     reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
@@ -859,12 +651,6 @@ runCompile meta codeGen = generateLetInBlock meta <$> (runCompilerMonad $ do
                 return (unpackResult "l_r")
   --
   )
-
-generateLetInBlock :: CompilerMetadata -> Open PResult -> IRExpr
-generateLetInBlock _ codeGen = closeExpr codeGen $ \res ->
-  case unP (rProb res) of
-    p@(IRLambda _ _) -> p --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
-    _ -> packResult res
 
 -- | Compile a PNormal/PLogNormal expression to a function returning (mu, sigma) as
 -- an @IRConstruct TgTuple@ pair.  Lambda wrappers are preserved so the result has
@@ -1185,34 +971,6 @@ enumeratedBoundShape meta l r
     isLocal v = case lookup v (typeEnv meta) of
       Just (t, False) -> not (isTArrowType t)
       _ -> False
-
--- | True when `Apply l v` should be compiled by enumerating the argument's discrete
--- support (marginalising over a random draw). This requires:
---   * the applied function is conditional (its body is enumerable-compilable, not
---     something forward chaining must algebraically invert), and
---   * the argument is a *probabilistic* discrete draw -- it carries DiscreteValues and
---     is not Deterministic. The Deterministic exclusion is essential: a constant or
---     deterministic input (e.g. `dice 4.0`, where `4.0` carries a DiscreteValues tag)
---     is a fixed value with nothing to marginalise over, and must take the ordinary
---     application path instead of being enumerated.
---   * the application is saturated -- its result is a value, not another
---     function. Enumerating a *partial* application would generate a closure and
---     compare it against the sample, which is not a comparison at all (the
---     interpreter rejects it: "Equals can only evaluate on two values").
---     Analysis tags only saturated applications ('SPLL.Analysis.applyTags'),
---     but this is stated here because it is a precondition of enumerating, not
---     a consequence of that. A saturated curried spine whose random argument
---     is the last one is 'curriedEnumerableCallee''s case, not this one.
--- | Peel a curried application spine (@Apply (Apply (Apply f a) b) c@) down to
--- its head and the left-to-right list of arguments applied to it
--- (@(f, [a, b, c])@). Used to build a whole saturated call to a top-level
--- function in one shot instead of one 'IRApply' per source-level argument
--- (task curried-call-spine-needs-optimizer-to-typecheck).
-flattenApplySpine :: Expr -> (Expr, [Expr])
-flattenApplySpine = go []
-  where
-    go args (Expr _ (Apply l v)) = go (v : args) l
-    go args e = (e, args)
 
 -- | The enumeration engine's applicability ('SPLL.Analysis.enumerableApplication'),
 -- in this compile's program.
@@ -1662,71 +1420,6 @@ binaryInputVars :: String -> FDecl -> (String, String)
 binaryInputVars _ FDecl{inputVars=[a, b]} = (a, b)
 binaryInputVars name d = error ("InjF '" ++ name ++ "' is applied as a binary function but declares input variables " ++ show (inputVars d))
 
--- | The lambda that forward chaining resolves a chain name to. These sites are
--- reached only after the clause set has established the equivalence, so a miss
--- (or a non-lambda) means chaining and compilation disagree.
--- Returns (resolved chain name, bound variable, body chain name, invocation tag).
-equivalentLambda :: String -> FCData -> ChainName -> (ChainName, String, ChainName, String)
-equivalentLambda ctx fcd cn = case findEquivalentExpression fcd cn of
-  Just (rCN, LambdaInfo boundVar bodyCN, tag) -> (rCN, boundVar, bodyCN, tag)
-  other -> error (ctx ++ ": chain name '" ++ cn ++ "' should resolve to a lambda, but resolved to " ++ show other)
-
--- | One probabilistic application @l v@, resolved to the parameter it binds,
--- whatever the head: a lambda in place (a @draw@), a named function, a function
--- parameter or a let-bound lambda (task binding-resolver-one-application-rule,
--- design law-carrying-modality §C). Every engine of the probabilistic 'Apply'
--- arm reads its application through this record, so they agree on what is
--- bound and on where its body may be compiled.
---
--- Nothing is inlined in the AST: the body is the resolved lambda's own, and
--- the per-invocation identity is the one forward chaining already gives the
--- call ('bindTag').
-data Binding = Binding
-  { bindHead   :: Expr
-    -- ^ The callee as written.
-  , bindArg    :: Expr
-    -- ^ The argument.
-  , bindLambda :: ChainName
-    -- ^ The lambda forward chaining resolves the head to (untagged).
-  , bindVar  :: String
-    -- ^ Its parameter.
-  , bindBodyCN :: ChainName
-    -- ^ Its body (untagged).
-  , bindTag    :: String
-    -- ^ The invocation tag forward chaining copied the body's clauses under,
-    -- @""@ for a lambda in place. It names forward chaining's per-call
-    -- inversion variables and nothing else: no engine decides on it.
-  , bindOccs   :: [ChainName]
-    -- ^ The parameter's occurrences in the body.
-  , bindBody   :: Expr
-    -- ^ The body, as the engines compile it: the resolved lambda's own
-    -- ('bindBodyCN'), or for a leading-argument binding the call it was taken
-    -- from ('leadingArgBinding').
-  , bindOuterVars :: [String]
-    -- ^ The parameters of a function-valued body ('unwrapLambdas'), which the
-    -- result is wrapped back into.
-  , bindLeadingArg :: Bool
-    -- ^ Whether this binds a random leading argument of a call, taken first
-    -- ('leadingArgBinding').
-  , bindScope  :: Maybe [(String, Expr)]
-    -- ^ How the body is made meaningful at this call site: the enclosing
-    -- parameters it reads, each paired with the spine argument binding it
-    -- (deterministic given the enclosing recovered variables), to be bound
-    -- under fresh names ('enterBindingScope'). @Just []@ for a body that reads
-    -- nothing but its parameter and names in scope here -- a lambda in place,
-    -- a top-level function's outermost lambda, a closed lambda reached through
-    -- a function parameter. 'Nothing': it reads a variable this call site
-    -- cannot bind (a leading parameter whose argument is random, or a lambda
-    -- closing over a scope this one never entered).
-  , bindTopLevel :: Maybe String
-    -- ^ The top-level function whose lambda spine holds the resolved lambda.
-    -- Its body is never compiled inline as a body factor, because a top-level
-    -- function may be recursive and inlining a recursive body at compile time
-    -- does not terminate: the body factor is a call of the callee's own
-    -- inference function instead (the greatest-fixpoint summary's runtime
-    -- counterpart), or nothing.
-  }
-
 -- | Resolve the application @l v@ ('Binding'). Partial like
 -- 'equivalentLambda': the probabilistic 'Apply' arm checks first that the head
 -- resolves to a lambda.
@@ -1928,12 +1621,6 @@ calleeBodyInScope meta l = case findEquivalentExpression (fcData meta) (chainNam
 deadBindingBody :: CompilerMetadata -> Expr -> Maybe Expr
 deadBindingBody meta l = exprWithCN meta <$> deadBindingBodyCN meta l
 
--- | The expression carrying a chain name, looked up in the program being compiled.
-exprWithCN :: CompilerMetadata -> ChainName -> Expr
-exprWithCN meta cn =
-  let Program{functions=fs} = compilingProgram meta
-  in findExprWithCN (map snd fs) cn
-
 -- | As 'equivalentLambda', but where only the resolved chain name is wanted and
 -- the expression behind it need not be a lambda.
 equivalentChainName :: String -> FCData -> ChainName -> ChainName
@@ -1968,59 +1655,6 @@ extendMetaForLambda meta t name =
   in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta
           , lawEnv = Map.insert name (boundAt (lambdaParamLaw t)) (lawEnv meta) }
 
--- | The compiler's binder environment ('lawEnv'), by variable.
-type LawEnv = Map.Map String BoundVar
-
--- | A variable bound by an enclosing binder: the law the modality engine had
--- for it there, and what the engine compiling its binding did with it.
-data BoundVar = BoundVar
-  { bvLaw :: Law
-  , bvForm :: Maybe AffineForm
-    -- ^ Marginalised as an affine Gaussian form (task
-    -- affine-gaussian-closure-lost-across-let-bindings; design
-    -- affine-gaussian-forms): the form's coefficients, as IR. Which bindings
-    -- those are is their certificate's call ('affineMarginalisable' reads the
-    -- argument's 'JAffine' law); this holds only the IR the certificate has no
-    -- room for. Such a variable has no runtime value in the emitted code: it
-    -- is only ever read through 'affineFormOf', inside the one Gaussian
-    -- density leaf that consumes it.
-  , bvRecovered :: Bool
-    -- ^ Fixed by an enclosing engine: a point-inversion witness, an
-    -- enumeration loop, a residue factor. It holds one value, so a body is
-    -- re-inferred with it 'Exact' ('reinferRecovered'). Body expressions are
-    -- re-fetched from the (original) program at every fold level, so the
-    -- re-inference is replayed with the full set.
-  }
-
--- | A variable at its law, nothing done with it yet.
-boundAt :: Law -> BoundVar
-boundAt l = BoundVar l Nothing False
-
--- | The modality engine's environment: the laws of 'lawEnv'.
-envLaws :: CompilerMetadata -> ModalityInfer.Env
-envLaws = Map.map bvLaw . lawEnv
-
--- | The variables an enclosing engine has fixed ('bvRecovered').
-recoveredVars :: CompilerMetadata -> [String]
-recoveredVars meta = [ v | (v, bv) <- Map.toList (lawEnv meta), bvRecovered bv ]
-
--- | Record these variables as fixed ('bvRecovered'). One no binder put in
--- 'lawEnv' (an engine's own loop variable) enters at a point law.
-recoverVars :: [String] -> CompilerMetadata -> CompilerMetadata
-recoverVars ns meta = meta { lawEnv = foldr (Map.alter (Just . maybe fresh mark)) (lawEnv meta) ns }
-  where
-    fresh = (boundAt (bareLawOfPType Deterministic)) { bvRecovered = True }
-    mark bv = bv { bvRecovered = True }
-
--- | Record variable @x@ as marginalised with this affine form ('bvForm'). One
--- no binder put in 'lawEnv' (a callee's parameter the affine algebra enters,
--- 'affineCallForm') enters at a Gaussian law.
-marginaliseAs :: String -> AffineForm -> CompilerMetadata -> CompilerMetadata
-marginaliseAs x f meta = meta { lawEnv = Map.alter (Just . maybe fresh mark) x (lawEnv meta) }
-  where
-    fresh = (boundAt (bareLawOfPType PNormal)) { bvForm = Just f }
-    mark bv = bv { bvForm = Just f }
-
 -- | The affine form of a marginalised variable ('bvForm').
 affineFormOfVar :: CompilerMetadata -> String -> Maybe AffineForm
 affineFormOfVar meta x = Map.lookup x (lawEnv meta) >>= bvForm
@@ -2028,42 +1662,6 @@ affineFormOfVar meta x = Map.lookup x (lawEnv meta) >>= bvForm
 -- | The variables marginalised as affine forms ('bvForm').
 affineVars :: CompilerMetadata -> Set.Set String
 affineVars meta = Map.keysSet (Map.filter (isJust . bvForm) (lawEnv meta))
-
--- | The metadata for compiling a binding's body: its parameter, under the
--- name @var@ the body reads it by, bound in 'lawEnv' at the argument's law,
--- by the modality engine's own binder rule. The argument's law is its node
--- certificate ('lawTable'); an argument the table does not hold (a node an
--- engine synthesized) is taken at the law its annotation projects.
-withBindingLaw :: CompilerMetadata -> Binding -> String -> CompilerMetadata
-withBindingLaw meta b var = meta { lawEnv = Map.insert var (boundAt varLaw) (lawEnv meta) }
-  where
-    varLaw = Map.findWithDefault (bareLawOfPType (pType (getTypeInfo (bindArg b)))) var
-               (bindingLawEnv (reinferContext meta) headCN var (bindArg b) argLaw (envLaws meta))
-    headCN = chainName (getTypeInfo (bindHead b))
-    argLaw = nodeLaw meta (bindArg b)
-
--- | The value a node's certificate ('nodeLaw') fixes it to, when it is a
--- point mass of statically known value and not itself a literal (whose own
--- equations measure it), nor a function. A NaN point (@Infinity -
--- Infinity@) is left to the node's own equations: like the optimizer's
--- folds ('IROptimizer.isNaNResult'), the compiler never embeds a NaN
--- literal, which the optimizer's fixpoint test would compare unequal to
--- itself forever.
-lawPoint :: CompilerMetadata -> Expr -> Maybe Value
-lawPoint meta e@(Expr ti nd)
-  | Constant _ <- nd = Nothing
-  | isTArrowType (rType ti) = Nothing
-  | otherwise = mfilter (not . hasNaN) (lawValue (nodeLaw meta e))
-  where
-    -- Structured values hold their floats at any depth; a symbol spelt
-    -- "NaN" only costs the shortcut.
-    hasNaN v = "NaN" `isInfixOf` show v
-
--- | A node's certificate ('lawTable'), or for a node the table does not hold
--- (one an engine synthesized), the law its annotation projects.
-nodeLaw :: CompilerMetadata -> Expr -> Law
-nodeLaw meta e = fromMaybe (bareLawOfPType (pType ti)) (Map.lookup (chainName ti) (lawTable meta))
-  where ti = getTypeInfo e
 
 -- | Whether variable @x@ occurs free in @e@ underneath a field constructor
 -- (@Cons@, @TCons@, a user ADT constructor). Shadowing-aware, and followed
@@ -2255,18 +1853,6 @@ toIRInferenceSave meta cumulative expr sample = do
   o <- scoped (toIRInference meta cumulative expr sample)
   anySafeShared (semiringOf meta) sample o
 
--- | The marginal operand of the marginal-minus-point split ('mixSubP' of this
--- and the excepted point's result): 'toIRInferenceSave' at the wildcard sample
--- 'VAny', without compiling anything. At that sample 'anySafe' answers every
--- field with its default, so for any non-lambda expression the result is the
--- constant (one, dim 0, no branches, possible), and compiling the body only
--- built dead code -- three compiles per level of a nested @==@ chain instead
--- of two (task anyexcept-any-arm-compiled-instead-of-constant). A 'Lambda'
--- still goes through 'toIRInferenceSave', which returns a closure there.
-anyMarginal :: CompilerMetadata -> Bool -> Expr -> CompilerMonad PResult
-anyMarginal meta cumulative e@(Expr _ (Lambda _ _)) = toIRInferenceSave meta cumulative e (IRConst VAny)
-anyMarginal meta _ _ = return (detP (srOne (semiringOf meta)))
-
 -- | Does every value of this type necessarily contribute dimension 0 -- i.e.
 -- is it discrete through and through?
 --
@@ -2318,77 +1904,6 @@ dimZeroByType decls = go []
       -- TFloat, TVarR (may be instantiated continuous), TThetaTree, TArrow,
       -- BottomTuple, GreaterType, NotSetYet.
       _            -> False
-
--- | Isolate a sub-inference's own let-in bindings into a fresh scope
--- and re-embed them gated on @guards@ -- baking the guard into the bound
--- value via 'closeResult' -- rather than running the action directly in the
--- ambient scope and applying a guard to the returned 'PResult' only
--- afterwards (task recursive-list-prob-missed-cse).
---
--- Every call site of 'toIRInferenceSave'/'toIRInference' below this point
--- that follows its result with a 'guardP' or a 'zipResult'-style runtime
--- selection has exactly this shape: the sub-inference is compiled first,
--- unconditionally, and the guard is layered on top of the finished
--- 'PResult'. That is fine as long as the sub-inference's own let-in
--- bindings stay lexically embedded at their point of use -- which is what
--- 'anySafeShared' does when it declines to share (the 'anySafe' fallback,
--- gated by 'blockIterates'). But 'anySafeShared' may instead choose to
--- SHARE a sub-inference's own bindings, e.g. when they contain a call
--- that is itself expensive or self-recursive (the standard "coin-flip
--- list" pattern, @main = if Uniform>p then [] else X:main@, whose tail
--- field is compiled exactly through this path). Sharing binds the block
--- via a plain 'setVariables' with no guard of its own, in the AMBIENT
--- scope -- which, without this wrapper, is the guard-free scope the
--- caller compiles in, ahead of any 'guardP'/'zipResult' that comes after.
--- A deconstructing inverse applied on the wrong arm crashes
--- (observe-partials-umbrella N1b's reasoning applies here identically),
--- and a self-referential recursive call can fail to terminate.
---
--- Isolating the scope here and re-threading it through
--- 'closeResult' with @guards@ fixes that: whether or not the inner call
--- decides to share, the guard ends up baked inside the returned value
--- itself, so any later, unguarded read of it (another 'setVariables', a
--- CSE'd duplicate, an enclosing combinator's own eager bind) still only
--- evaluates the protected computation when the guard holds.
-guardedSubInference :: CompilerMetadata -> [IRExpr] -> CompilerMonad PResult -> CompilerMonad PResult
-guardedSubInference meta guards action = do
-  o <- scoped action
-  closeResult (semiringOf meta) "guarded" guards o
-
--- | Keep a scope tried for a 'Just': its bindings are emitted when it
--- answered, dropped when it declined.
-inlineIfJust :: Open (Maybe a) -> CompilerMonad (Maybe a)
-inlineIfJust o = case openValue o of
-  Just _  -> inline o
-  Nothing -> return Nothing
-
--- | Recognise a sample that is an 'IRIf' selecting between a plain value and
--- the 'VAnyExcept' placeholder -- the shape 'transportDirect' produces when it
--- substitutes a known True/False polarity into a seeded '==' (or ADT
--- constructor-test) inversion without reducing the 'IRIf' away. Returns
--- (condition, which polarity is the AnyExcept side, the non-AnyExcept arm, the
--- excepted expression), mirroring the destructuring the InjF 'hasAnyExcept'
--- combinator performs on an inverse's own two arms.
-anyExceptIfSplit :: IRExpr -> Maybe (IRExpr, Bool, IRExpr, IRExpr)
-anyExceptIfSplit (IRIf c pos (IRConst (VAnyExcept [ex]))) = Just (c, False, pos, ex)
-anyExceptIfSplit (IRIf c (IRConst (VAnyExcept [ex])) neg) = Just (c, True, neg, ex)
-anyExceptIfSplit _ = Nothing
-
--- | Peel a sample's leading 'IRLetIn' chain (e.g. 'transportDirect's
--- materialised anchors) off to see whether the expression underneath is a
--- 'VAnyExcept' placeholder -- bare, or still 'IRIf'-wrapped ('anyExceptIfSplit').
--- Returns the peeled bindings alongside whichever shape matched, so a caller
--- that reconstructs a result from the pieces inside can re-wrap it in the same
--- bindings (the pieces may reference names those bindings introduce).
-anyExceptSampleShape :: IRExpr -> Maybe ([(Varname, IRExpr)], Either IRExpr (IRExpr, Bool, IRExpr, IRExpr))
-anyExceptSampleShape sample = case core of
-  IRConst (VAnyExcept [ex]) -> Just (binds, Left ex)
-  _ | Just split <- anyExceptIfSplit core -> Just (binds, Right split)
-  _ -> Nothing
-  where
-    (binds, core) = stripLetIns sample
-    stripLetIns (IRLetIn v val inner) = let (bs, c) = stripLetIns inner in ((v, val) : bs, c)
-    stripLetIns e = ([], e)
 
 -- | Dispatch to the appropriate param extractor based on PType.
 -- Returns (mu, sigma) for PNormal and (mu_log, sigma) for PLogNormal.
@@ -3023,12 +2538,6 @@ toIRLogNormalParams meta (Expr _ (Var name))
 toIRLogNormalParams meta e | Just act <- normalParamsViaCall meta PLogNormal e = act
 toIRLogNormalParams _ e = refuse (chainName (getTypeInfo e)) $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
 
--- | True for a function type, i.e. an expression that evaluates to a callable
--- rather than to a value a density can be taken of.
-isTArrowType :: RType -> Bool
-isTArrowType (TArrow _ _) = True
-isTArrowType _            = False
-
 -- | The Gaussian a @PNormal@ node's codegen law certifies it as, which the
 -- catch-all answers from its (mu, sigma): a leaf (a primitive, a neural
 -- read, a @collapse@), read by the scalar extractor, or an affine form,
@@ -3153,9 +2662,6 @@ scaleMayVanish = not . nonzero
     nonzero (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IROp OpPlus (IROp OpMult a _) (IROp OpMult b _))))) =
       nonzero a || nonzero b
     nonzero _ = False
-
-failConversion :: Expr -> IRExpr
-failConversion = error "Cannot convert VClosure"
 
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
@@ -4710,80 +4216,6 @@ holdsProbabilisticLet e = case e of
   Expr _ (Apply (Expr _ (Lambda _ _)) v) | pType (getTypeInfo v) /= Deterministic -> True
   _ -> any holdsProbabilisticLet (getSubExprs e)
 
--- Bind the forward-chaining anchors a generated inverse lands on. An anchor
--- chain name that appears free in the inverse (e.g. a ThetaI/Subtree operand FC
--- inverted through) is not bound by the wrapping sample lambda, so we materialise
--- its value from the anchor node's generate-mode IR and let-bind it. Plain
--- constants need no binding (they render as IRConst); only non-constant anchors
--- show up free here (modality-split-forwardchaining, anchor wiring).
-materializeAnchors :: CompilerMetadata -> IRExpr -> CompilerMonad IRExpr
-materializeAnchors meta expr = foldM bindAnchor expr usedAnchors
-  where
-    usedAnchors = filter (`freeInIR` expr) (Set.toList (fcAnchors (fcData meta)))
-    fns = map snd (functions (compilingProgram meta))
-    -- The free var is a (possibly invocation-tagged) anchor chain name; the
-    -- source node to generate its value from is the untagged original.
-    bindAnchor irBody cn = do
-      anchorIR <- toIRGenerate meta (anchorAtCall meta (getTag cn) (findExprWithCN fns (untag cn)))
-      return (IRLetIn cn anchorIR irBody)
-
--- | An anchor node as its value is computed at this call site. An anchor in a
--- callee's per-invocation copy (tag @t@) reads the callee's parameters, which
--- are not in scope here: each such occurrence is replaced by the argument
--- the invocation passed ('boundArgument'), itself resolved the same way where
--- the call sits in another copied body. Going by the clause rather than by
--- name is what keeps the anchor from reading whatever the caller happens to
--- bind under the parameter's name, or crashing on an unbound name when it
--- binds none (task callee-body-name-sensitive-across-call).
---
--- A variable bound inside the copied body itself (a @draw t2 = ts in ..@
--- around the anchor) has its clause only untagged: the copy follows the
--- equivalences of the nodes it chains through, and the anchor is not one of
--- them. Its value lies in the same function body as the occurrence, so in
--- the same per-invocation copy, and is resolved under the same tag. A value
--- in another function's body is not: tags are only unique per function, so
--- the tag is never carried across one (task
--- theta-anchor-through-callee-local-binding).
---
--- An untagged anchor sits in the scope being compiled and is left as it is,
--- except where it lies in a callee body an engine entered here
--- ('enteredScopes'): there a leading parameter is read under its fresh
--- name, and a variable the body binds itself by its value, which the
--- materialized anchor is not under the binder of.
-anchorAtCall :: CompilerMetadata -> String -> Expr -> Expr
-anchorAtCall meta "" e0 = go Set.empty e0
-  where
-    go bound e@(Expr t (Var n))
-      | not (n `Set.member` bound)
-      , (nodes, renames) : _ <- [ sc | sc@(nodes, _) <- enteredScopes meta, cn `Set.member` nodes ]
-      = case boundArgument (fcData meta) cn of
-          Just valCN | valCN `Set.member` nodes -> anchorAtCall meta "" (exprWithCN meta valCN)
-          _ -> Expr t (Var (fromMaybe n (lookup n renames)))
-      where cn = chainName (getTypeInfo e)
-    go bound (Expr t (Lambda x b)) = Expr t (Lambda x (go (Set.insert x bound) b))
-    go bound (Expr t f) = Expr t (fmap (go bound) f)
-anchorAtCall meta tag e0 = go Set.empty e0
-  where
-    go bound e@(Expr _ (Var n))
-      | not (n `Set.member` bound)
-      , Just argCN <- boundArgument (fcData meta) (cn ++ tag)
-      = anchorAtCall meta (getTag argCN) (exprWithCN meta (untag argCN))
-      | not (n `Set.member` bound)
-      , Just valCN <- boundArgument (fcData meta) cn
-      , null (getTag valCN)
-      , Just f <- functionOf cn
-      , functionOf valCN == Just f
-      = anchorAtCall meta tag (exprWithCN meta valCN)
-      where cn = chainName (getTypeInfo e)
-    go bound (Expr t (Lambda x b)) = Expr t (Lambda x (go (Set.insert x bound) b))
-    go bound (Expr t f) = Expr t (fmap (go bound) f)
-    functionOf cn = listToMaybe
-      [ f | (f, fBody) <- functions (compilingProgram meta), cn `Set.member` nodeChainNames fBody ]
-
--- | The chain names of every node of an expression.
-nodeChainNames :: Expr -> Set.Set ChainName
-nodeChainNames e = Set.insert (chainName (getTypeInfo e)) (Set.unions (map nodeChainNames (getSubExprs e)))
-
 createHOInverse :: CompilerMetadata -> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse meta (fVar, f) = do
   let fcData' = fcData meta
@@ -4872,77 +4304,6 @@ runtimeZeroFactor a b = case (det a, det b) of
     isZeroLit (VInt 0) = True
     isZeroLit _ = False
 
--- | Discrete value-equality / step-CDF masses (used both for a deterministic
--- Constant's cumulative "0 below, 1 at-or-above" step function and for
--- equality indicators), built as semiring one/zero rather than the literal
--- linear 1.0/0.0 so it stays correct under 'logSpace' (task
--- log-space-probability-computation).
---
--- A scalar wildcard in the sample bounds nothing: P(v <= ANY) is the semiring
--- one, tested before the comparison reads the sentinel. The root wildcard is
--- answered by 'anySafe', but one inside a tuple reaches here whenever the
--- sample was built by an inverse rather than queried -- @snd@'s inverse puts
--- ANY in the slot it discards (fuzz-admission-oracle-bugs item 5). The test
--- folds away wherever the sample component is statically concrete.
-compareValueExpr :: Semiring -> RType -> IRExpr -> IRExpr -> IRExpr
-compareValueExpr sr TFloat v sample = anyBoundsNothing sr sample (IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr))
-compareValueExpr sr TInt v sample = anyBoundsNothing sr sample (IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr))
-compareValueExpr sr TBool v sample = anyBoundsNothing sr sample (IRIf (IROp OpAnd (IRUnaryOp OpNot sample) v) (srZero sr) (srOne sr))
-compareValueExpr sr TUnit _ _ = srOne sr
-compareValueExpr sr (Tuple ft st) v sample = srTimes sr (compareValueExpr sr ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (compareValueExpr sr st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
-compareValueExpr sr (TEither lr rr) v sample =
-  IRIf (IRDestruct AcIsLeft v)
-    (IRIf (IRDestruct AcIsLeft sample) (compareValueExpr sr lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (srZero sr))
-    (IRIf (IRDestruct AcIsRight sample) (compareValueExpr sr rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)) (srZero sr))
-compareValueExpr sr (TVarR _) v sample = anyBoundsNothing sr sample (IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr))
--- A deterministic list contributes an equality indicator: it is the semiring
--- one exactly when the sample matches (in particular the empty-list base of a
--- Cons chain yields the semiring one, the multiplicative identity, so a list
--- CDF reduces to the product of its element CDFs).
-compareValueExpr sr (ListOf _) v sample = maskSR sr (IROp OpEq sample v)
--- A literal @[]@ can keep its own 'NullList' annotation through typing:
--- 'SPLL.Typing.RInfer.unifies' accepts @ListOf _ ~ NullList@ without binding
--- anything, so whether the literal's type variable ends up 'ListOf' or
--- 'NullList' depends on constraint order (a @[]@ in a nested-if branch of a
--- recursive list), and a bare @main = []@ has no element type to learn at
--- all. Either way the only inhabitant is the empty list, so it takes the same
--- equality indicator as 'ListOf' (task comparevalueexpr-nulllist-cdf-gap).
-compareValueExpr sr NullList v sample = maskSR sr (IROp OpEq sample v)
--- An ADT carries no order, so there is nothing for a CDF to integrate along.
--- This case and the TSymbol one below are refusals rather than gaps: every call
--- site is on the @cumulative = True@ path, so reaching it means a cdf() query was
--- asked of an ADT-valued program. See 'adtCdfMessage'.
-compareValueExpr _ (TADT n) _ _ = IRError (adtCdfMessage n)
--- A Symbol is unordered too, so it gets the same treatment as an ADT. Here it is
--- also routine to build the comparison: a helper that returns a Symbol (picking
--- a board image by index, say) gets an integrate variant like every other
--- function, so this has to compile to an IRError that only fires when it is
--- called. The callers' own CDFs, over ordered types, don't call it (task
--- symbol-selected-by-helper-crashes-cdf-compile).
-compareValueExpr _ TSymbol _ _ = IRError symbolCdfMessage
--- A function is unordered as well. The leaf sites that would compare a whole
--- function value refuse statically (see the arrow-typed InjF equation of
--- 'toIRInference'); what still gets here is a function in a component of a
--- tuple or Either reached some other way, whose sample slot may be a wildcard
--- an inverse put there -- then it bounds nothing, as for a scalar -- or a
--- concrete closure, which no CDF is defined over (task
--- function-value-compared-in-probability-mode).
-compareValueExpr sr (TArrow _ _) _ sample = anyBoundsNothing sr sample (IRError functionCdfMessage)
--- A tensor has no CDF here either: its order would be the componentwise one,
--- which nothing compiles (task tensor-gaussian-heads-rd-diffusion). Built
--- routinely -- a trajectory of tensors gets an integrate variant like any list
--- -- so it is a runtime error that fires only when a cdf() reaches it.
-compareValueExpr sr (TTensor _ _) _ sample = anyBoundsNothing sr sample (IRError tensorCdfMessage)
-
--- Invariant, not a refusal (task static-refusals-become-absent-variants): a CDF comparison is only built for first-order result types.
-compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
-
--- | The runtime diagnostic for a cdf() query that reaches a function-valued component.
-functionCdfMessage :: String
-functionCdfMessage =
-  "cdf(): no cumulative distribution is defined over a function value -- functions "
-  ++ "carry no order to integrate along."
-
 -- | Whether a value of this type has a function anywhere inside it.
 containsArrow :: RType -> Bool
 containsArrow (TArrow _ _)      = True
@@ -4965,152 +4326,8 @@ containsArrow BottomTuple = False
 containsArrow (TVarR _)   = False
 containsArrow SPLL.Typing.RType.NotSetYet = False
 
--- | The runtime diagnostic for a cdf() query that reaches a Symbol-valued node.
-tensorCdfMessage :: String
-tensorCdfMessage =
-  "cdf(): no cumulative distribution is defined over a tensor value -- its "
-  ++ "componentwise order is not compiled. Use p() for a point query on this value."
-
-symbolCdfMessage :: String
-symbolCdfMessage =
-  "cdf(): no cumulative distribution is defined over a Symbol -- symbols carry "
-  ++ "no order to integrate along. Use p() for a point query on this value."
-
--- | See 'compareValueExpr': a wildcard sample component is the whole mass.
-anyBoundsNothing :: Semiring -> IRExpr -> IRExpr -> IRExpr
-anyBoundsNothing sr sample = IRIf (IRUnaryOp OpIsAny sample) (srOne sr)
-
--- | Bool-valued IR: is deterministic value @v@ equal to @sample@? This is the
--- equality analogue of 'compareValueExpr' (which builds a '<='-style CDF
--- indicator): a continuous leaf (TFloat/TVarR) recovered via inverse
--- arithmetic is one ulp away from the query point far more often than it is
--- bit-identical, so it is compared with 'OpApprox' (floatApproxEqThresh,
--- 1e-10 -- well inside the .tst harness's 1e-4 probTolerance) rather than
--- bit-exact 'OpEq'. Discrete/exact types (Bool, Int, ListOf, TADT, Symbol)
--- keep bit-exact 'OpEq': their values are never fp-recovered, so exactness is
--- both correct and cheaper. Tuple/Either recurse structurally so a compound
--- value's float leaves get the approximate treatment too, mirroring
--- compareValueExpr's own recursion shape.
---
--- Every recursion step of 'equalityGuard' additionally wraps an Any-wildcard
--- guard around itself first: the plain 'OpEq'/'OpApprox' this replaces relied
--- on a single flat comparison whose runtime semantics (IRInterpreter's
--- 'cmp', pythonLib's 'T'/'Left'/'Right' '__eq__') already treat a VAny
--- operand at *any* depth as an automatic match (a partial marginal query
--- like @p((0.5, ANY))@ or @p(Left ANY)@). Once the comparison is decomposed
--- into per-field IR (IRDestruct AcFst/AcFromLeft), that recursive Any-awareness must
--- be rebuilt explicitly at each step, or a nested ANY reaches a leaf
--- comparison op that errors (OpApprox on a non-float) or silently returns
--- False (OpEq's own base case treats VAny as never equal to anything --
--- correct as a *fallback*, wrong as the first thing tried). The guard is
--- spelled as nested 'IRIf', never 'IROp OpOr'/'OpAnd': both operands of an
--- IR boolean op are evaluated, and the real comparison beneath the guard is
--- exactly the op that would crash on a genuine VAny operand.
---
--- 'equalityGuardStatic' is the same structural recursion without that guard,
--- for the plan-guided-lazy-enumeration caller ('planDetGuard'): it builds
--- purely compile-time constraint IR over concrete plan values that are never
--- themselves a runtime VAny, and the Any-check nodes confuse that engine's
--- own static analysis of the guard IR (occurrence counting for accessor
--- pruning) -- adding it there produced spurious "constructor ... not present
--- in the plan" refusals on the plan-enum corpus without fixing anything the
--- guard is for. The set-witness engine's 'memberGuard' used to share it and
--- no longer does: its point is a projection of the query sample, which a
--- marginal query does make a runtime VAny (see there).
-equalityGuard :: RType -> IRExpr -> IRExpr -> IRExpr
---
--- The sample is tested first, and a tuple @v@ builds syntactically (under
--- its let-bindings) is compared field by field, each field under its own
--- let-bindings only: an observed wildcard constrains nothing, and the part of
--- @v@ it observes need not be evaluable there. A residue factor fixes a bound
--- variable at a wildcard witness ('transportDirect'), and @(x + 0.0, 1.0)@ at
--- @x = ANY@ against @(ANY, 1.0)@ evaluated @x + 0.0@ -- a raw type error --
--- to test the whole tuple, and again to project its second field (task
--- any-slot-through-injf-inverse-reaches-condition). A constructed tuple is
--- never itself a wildcard, so its own 'OpIsAny' test is not needed.
-equalityGuard rt v sample =
-  IRIf (IRUnaryOp OpIsAny sample) constTrueIR $ case (rt, constructedTuple v) of
-    (Tuple ft st, Just (wrap, a, b)) ->
-      IROp OpAnd (equalityGuard ft (wrap a) (IRDestruct AcFst sample))
-                 (equalityGuard st (wrap b) (IRDestruct AcSnd sample))
-    _ -> IRIf (IRUnaryOp OpIsAny v) constTrueIR (equalityGuardBody equalityGuard rt v sample)
-  where
-    constructedTuple (IRConstruct TgTuple [a, b]) = Just (id, a, b)
-    -- A nested tuple's field is its own let-bound construction.
-    constructedTuple (IRLetIn n e (IRVar n')) | n == n' = constructedTuple e
-    constructedTuple (IRLetIn n e inner) = do
-      (wrap, a, b) <- constructedTuple inner
-      return (pruneDeadLetIns . IRLetIn n e . wrap, a, b)
-    constructedTuple _ = Nothing
-
 equalityGuardStatic :: RType -> IRExpr -> IRExpr -> IRExpr
 equalityGuardStatic = equalityGuardBody equalityGuardStatic
-
-equalityGuardBody :: (RType -> IRExpr -> IRExpr -> IRExpr) -> RType -> IRExpr -> IRExpr -> IRExpr
-equalityGuardBody _    TFloat    v sample = leafEqIR TFloat sample v
-equalityGuardBody _    rt@(TVarR _) v sample = leafEqIR rt sample v
-equalityGuardBody _    TUnit _ _ = constTrueIR
-equalityGuardBody self (Tuple ft st) v sample =
-  IROp OpAnd (self ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (self st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
-equalityGuardBody self (TEither lr rr) v sample =
-  IRIf (IRDestruct AcIsLeft v)
-    (IRIf (IRDestruct AcIsLeft sample) (self lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (IRConst $ VBool False))
-    (IRIf (IRDestruct AcIsLeft sample) (IRConst $ VBool False) (self rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)))
--- A function has no equality (the IR contract's 'OpEq' takes none, and the
--- interpreter has no case for a closure). A function in a component of a
--- tuple or Either is compared only where its query slot is not a wildcard,
--- and no query value holds a concrete closure, so this is a run-time error
--- that a reachable comparison would raise, as the cdf's is
--- ('functionCdfMessage'). Before, @(\y -> (\x -> x, y)) 1.0@ at
--- @(ANY, 1.0)@ emitted @fst sample == fst v@ at the function type behind the
--- slot's wildcard test (task ir-contract-violations-in-compiler-output).
-equalityGuardBody _    (TArrow _ _) _ _ = IRError functionProbMessage
-equalityGuardBody _    _ v sample = IROp OpEq sample v
-
--- | The runtime diagnostic for a p() query that compares a function-valued component.
-functionProbMessage :: String
-functionProbMessage =
-  "p(): no probability is defined at a function value -- functions carry no "
-  ++ "equality to compare a query value against."
-
--- | Bool-valued IR comparing two leaves of type @rt@ (callers pass the query
--- sample first). A float is compared with 'OpApprox' (see 'equalityGuard' for
--- why), anything with an exact representation with 'OpEq'.
---
--- A type variable is neither: nothing in the function constrained it, so the
--- value may be a float at one call and a Bool, Int, tuple or ADT at another.
--- 'OpApprox' is defined on floats only (the interpreter refuses anything
--- else), and 'OpEq' alone would lose the tolerance for a float the caller
--- computed, so it dispatches on the run-time tag of @a@ (task
--- polymorphic-parameter-compared-as-float). 'IRConformsTo' accepts a wildcard
--- as a float, so an ANY operand reaches 'OpApprox' exactly as it did before
--- this dispatch existed; callers keep owning the ANY guard. The batched
--- backend emits the tag test as a bucket-uniform dtype check
--- ('SPLL.CodeGenPyTorchBatched.structural').
-leafEqIR :: RType -> IRExpr -> IRExpr -> IRExpr
-leafEqIR TFloat    a b = IROp OpApprox a b
-leafEqIR (TVarR _) a b = IRIf (IRConformsTo ITFloat a) (IROp OpApprox a b) (IROp OpEq a b)
-leafEqIR _         a b = IROp OpEq a b
-
-
--- Must be used in conjunction with irMap, as it does not recurse
-uniqueify :: [Varname] -> String -> IRExpr -> IRExpr
-uniqueify vars prefix (IRVar name) | name `elem` vars = IRVar (prefix ++ name)
-uniqueify vars prefix (IRLetIn name boundExpr bodyExpr) | name `elem` vars = IRLetIn (prefix ++ name) (uniqueify vars prefix boundExpr) (uniqueify vars prefix bodyExpr)
--- 'SPLL.Semiring.enumSumNode'/'enumSumP' build an enumerated reduction as
--- 'IRBuiltin BMap [IRLambda v body, ...]', reusing the SAME enumeration
--- variable name as the 'IRLambda's binder. Without this case, 'irMap's generic
--- descent (this function relies on for recursion -- see the comment above)
--- renames free occurrences of that name inside 'bodyExpr' (correctly, per the
--- 'IRVar' case above) while leaving the 'IRLambda' binder untouched, splitting
--- one identifier into two: every *use* of the loop variable pointed at a name
--- nothing bound any more. Added for the max-product semiring, whose reduction
--- was the first built in tensor form (testCases/applyEnumOperandPair.ppl under
--- '--semiring=map' is the canary); task retire-irenumsum made every enumerated
--- reduction that shape, so it now guards the whole double-enumeration
--- ('applyUnique') site rather than one semiring's corner of it.
-uniqueify vars prefix (IRLambda name bodyExpr) | name `elem` vars = IRLambda (prefix ++ name) (uniqueify vars prefix bodyExpr)
-uniqueify _ _ e = e
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
 -- That's what the type system is for though.
@@ -11478,3 +10695,13 @@ applyBinding meta cumulative rt binding sample = do
                compiledFrom (engineLabel InPlaceEngine)
                toIRInference meta cumulative inPlace sample
    dispatchEngines compiledFrom engines fallback
+
+
+-- | The 'Recur' every compile's 'CompilerMetadata' carries: the translators
+-- themselves, for the engine modules below this one to call back into.
+knot :: Recur
+knot = Recur
+  { recInference     = toIRInference
+  , recInferenceSave = toIRInferenceSave
+  , recGenerate      = toIRGenerate
+  }
