@@ -84,7 +84,7 @@ showed it: an unwitnessed Gaussian argument still gives a Gaussian.
 Once an engine fixes a variable's value -- the point-witness fold recovering it
 from the observation, an enumeration loop binding it, a residue factor fixing
 it at its witness -- the rest of the compile must see it as `Deterministic`.
-`IRCompiler.reinferRecovered` does that by re-running the modality engine
+`IRCompiler.Binding.reinferRecovered` does that by re-running the modality engine
 (`ModalityInfer.reinferGiven`) on the body, with the recovered names bound
 `Exact` (task `reinfer-body-under-recovered-bindings`, design
 `law-carrying-modality` M1). It replaced `retypeDetGiven`, a syntactic
@@ -129,7 +129,7 @@ form or a plan read names nodes of the callee's body, which every call would
 share), and `n` the arguments still to apply. `h z = 0.0 * z` returns the
 point 0.0, and `h z = (0.0 * z, Normal)` a pair whose `fst` is that point. The
 compiler measures any non-literal node of known point from that value
-(`IRCompiler.lawPoint`).
+(`IRCompiler.Monad.lawPoint`).
 
 `lawEnv` holds a binding's law as the modality engine issued it. A variable an
 engine then recovers or enumerates is pinned through `recoveredVars` and
@@ -165,7 +165,7 @@ multi-use binding keeps the refusal.
 
 `toIRInference`'s `PNormal` catch-all (one Gaussian density from a node's
 `(mu, sigma)`) takes a node iff its law is a primitive leaf or an affine form
-(`IRCompiler.gaussianLeaf`), and builds the `(mu, sigma)` by that law: a leaf
+(`IRCompiler.Gaussian.gaussianLeaf`), and builds the `(mu, sigma)` by that law: a leaf
 through the scalar extractor (`toIRNormalParams`), an affine form through the
 affine algebra (`affineFormOf`, collapsed), which follows calls, lambda
 redexes and the binder environment the extractor does not see through
@@ -322,7 +322,7 @@ The fourth size-only seam, affine < in place, cannot hold in a total order:
 in place must follow set-valued witnesses (that seam trades variants) and
 affine must precede them (that seam loses one), so affine precedes in place.
 The compiler also tries in place after the set-witness fallback
-(`IRCompiler.applyBinding`).
+(`IRCompiler.Dispatch.applyBinding`).
 
 So the order is enumeration, plan, joint affine, affine, point inversion,
 set-valued witnesses, in place. Set-valued witnesses < in place trades one
@@ -344,7 +344,7 @@ any declaration containing a `ReadNN` used to qualify.
 **A named callee's binding** (task `named-callee-binding-not-floored`). A
 call whose head is not a literal lambda (`g u Normal`, a recursive `genS
 thetas (RP : ..)`) binds the parameter of the lambda forward chaining
-resolves the head to (`IRCompiler.resolveBinding`), and the `Apply` rule asks
+resolves the head to (`IRCompiler.Binding.resolveBinding`), and the `Apply` rule asks
 the engines of that binding at the call (`calleeBindingCerts`). The callee's
 body is the one written, not re-inferred (a recursive callee would re-enter
 itself), so each predicate is read permissively: enumeration is an argument
@@ -365,7 +365,7 @@ where the call is compiled (`icPoint`): the parameters of the closure being
 evaluated (a caller passing a random argument there has its own binding),
 and `draw`-bound variables that enumeration, a plan read or point inversion
 answers. Not floored yet: a random leading argument of a call
-(`IRCompiler.leadingArgBinding`, `g Normal 0.5`), which is admitted and
+(`IRCompiler.Binding.leadingArgBinding`, `g Normal 0.5`), which is admitted and
 refused (docs task `leading-argument-binding-not-floored`).
 
 ## A static refusal is an absent variant, never a compile-killing error

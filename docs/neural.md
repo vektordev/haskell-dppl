@@ -88,7 +88,7 @@ permanently.
   26209 at d = 64, the difference being the digits in the comments;
   `Internals."tensor Gaussian heads"`). The density sums per-element
   log-densities and, under the linear semiring, exponentiates (`BReduce` has
-  no product operator). A tensor has no CDF (`IRCompiler.compareValueExpr`'s
+  no product operator). A tensor has no CDF (`IRCompiler.Monad.compareValueExpr`'s
   `TTensor` case is a runtime error) and no writeLogits (`requiredNormalFns`
   names a normal function no compile generates).
 - **The plan-aware mock.** A shaped network whose output holds a tensor is
@@ -305,7 +305,7 @@ the data flow rather than for "encode"/"decode" — those words used to collide
   no new AST or IR node. Its modality rule (`ModalityInfer`, the static twin
   `collapseMomentable`) types it `PNormal`, so probability, integrate, the
   normal function and every Gaussian combinator read it from its `(mu,
-  sigma)`. `IRCompiler.momentsOf` computes those: a point, a Gaussian, an
+  sigma)`. `IRCompiler.Gaussian.momentsOf` computes those: a point, a Gaussian, an
   `if` mixture with a condition that has a probability, or sums, products
   and negations of independent such parts. Its generate draws from the
   Gaussian, not from the operand. The moments are taken over the operand's

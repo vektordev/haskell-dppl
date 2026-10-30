@@ -29,28 +29,28 @@ by an `ROpAdd` count of possible dim-0 terms rather than a max/min reduction,
 because the batched backend refuses `ROpMax`; that is sufficient only because
 a scalar's dim is 0 or 1. Its caller is the mixed enumerate-and-shift/scale
 rule (over the operand's values, or over its draws' cells via
-`IRCompiler.latentCellSum`, `docs/enumeration.md`), whose "continuous" operand is known only to be a `Float` -- it may be a
+`IRCompiler.Enumerate.latentCellSum`, `docs/enumeration.md`), whose "continuous" operand is known only to be a `Float` -- it may be a
 plan-answered discrete count or an atom/density mixture (task
 plan-sum-with-sunk-discrete-draw-reports-density; corpus
 `plan-enumeration/planSumWithSunkDiscreteDraw`,
 `arithmetic/plusEnumMixedAtomDensity`).
 
 `enumMinDimP` is the general form: terms of any dim up to a static bound
-`maxDim` (`IRCompiler.floatLeafBound` of the measured type, the number of
+`maxDim` (`IRCompiler.Enumerate.floatLeafBound` of the measured type, the number of
 `Float` leaves, the larger alternative of a sum type). The lowest possible dim
 is a ladder over `0 .. maxDim - 1`, one `ROpAdd` count of the possible terms
 per rung, so it also builds only from what batched emits. The enumerated sums
-over a `draw` (`IRCompiler.enumerateBinding`, `enumerateCurriedArgument`) use
+over a `draw` (`IRCompiler.Enumerate.enumerateBinding`, `enumerateCurriedArgument`) use
 it through `enumTerm`/`enumSumTerms` whenever the body's dim is not literally
 0 (a forward-and-compare indicator's always is, so those sums emit what they
 did before), and mark a zero-weight value's term impossible so that it cannot
 outvote a density (task enumerated-sum-over-density-body). A type with no
 bound (a list of reals) keeps `enumSumP`, and `dimAwareEnum` tells
-`IRCompiler.forwardOrInfer` that its delegated body still needs the run-time
+`IRCompiler.Enumerate.forwardOrInfer` that its delegated body still needs the run-time
 density guard (`docs/enumeration.md`).
 
 `rProb` is a newtype `P` that only `SPLL.Semiring` can construct, so
-`IRCompiler.hs` must route probabilities through a Semiring-aware
+`IRCompiler` and its engine modules must route probabilities through a Semiring-aware
 combinator or one of two escape hatches: `unsafeLinearP` (a deliberately
 linear-only subsystem — no call site uses it today) or `sealP` (bespoke
 `PResult`s assembled from already-trusted values). Grepping `unsafeLinearP`
@@ -113,7 +113,7 @@ semiring-aware too. Two consequences worth internalising before touching
   derivations joined by `srPlus`) is the complementary event's weight. It is
   for sum-product, not for max-product, where `1 - max` is not the best
   derivation on the other side. Under max-product a complement is sound only
-  on a single derivation's weight (`IRCompiler.singleDerivation`: a leaf CDF,
+  on a single derivation's weight (`IRCompiler.Inference.singleDerivation`: a leaf CDF,
   a Gaussian closed form, an InjF over one such operand). So an `if`
   condition's two weights come from `condWeights` (below), a leaf condition
   with several derivations is compiled at both polarities, and a `gt`/`lt`
@@ -356,7 +356,7 @@ p(0) on a 7-slot count took 34 s against 0.1 s topK-off (task
 A pruned result is a **lower bound** on the exact one, and lower bounds
 compose under products, sums and the lowest-dim-wins mixture — but not under a
 complement or a subtraction: `1 − lower` and `a − lower` are *upper* bounds.
-`IRCompiler.unpruned` (accumulated probability seeded with `∞`, which fails
+`IRCompiler.Monad.unpruned` (accumulated probability seeded with `∞`, which fails
 every "below cutoff" test in both semirings and crosses a call boundary as a
 plain argument) therefore compiles the operand of every such site with pruning
 off, and any new `srComplement`/`srMinus`/CDF-difference site must do the
@@ -379,7 +379,7 @@ same:
 - both bounds of a set-witness interval measure (`cdfAtBound`).
 
 A condition that is itself a Bool `if` (or a `not` of one) is not such a
-site. `IRCompiler.condWeights` compiles it once to its pair
+site. `IRCompiler.Inference.condWeights` compiles it once to its pair
 `(p(True), p(False))`, from its children's pairs:
 `pT = cT⊗aT ⊕ cF⊗bT`, `pF = cT⊗aF ⊕ cF⊗bF`. Each child is compiled once, so
 the compile stays linear in nesting depth (compiling the condition at each

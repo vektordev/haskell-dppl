@@ -1,6 +1,6 @@
 # Witness inversion engines for non-invertible observations
 
-Two engines in `IRCompiler.hs` handle `let`-bindings whose observation can't
+Two engines in `IRCompiler` (`IRCompiler/Worlds.hs`, `IRCompiler/Plan.hs`) handle `let`-bindings whose observation can't
 be point-inverted onto the bound variable via ordinary forward chaining.
 The probabilistic `Apply` arm tries them in the order below, with
 forward-chaining point inversion in between.
@@ -658,7 +658,7 @@ law: IRCompiler asks the same `Deterministic` test it asks of a condition,
 the modality's `pointWitnessCert` the value's inferred `pType` in the body.
 
 The condition enters the chain as a free variable (`ifConditionVars`: its
-chain name plus the invocation tag). `IRCompiler.bindIfConditions` binds it to
+chain name plus the invocation tag). `IRCompiler.Dispatch.bindIfConditions` binds it to
 the condition compiled where the body means what it means in the callee
 (`enterBindingScope`), so `t < 0.5` reads the call's argument for `t`. The
 engine declines when the body can't be entered, when the condition is not in
@@ -770,7 +770,7 @@ program reaches that fallback. Corpus: `crossLatentSideOperandJacobian`,
 
 A variable read more than once has one inverse chain per read, and
 `ForwardChaining.mergeExpr` combines them (the set-witness engine's
-`IRCompiler.mergeWitnessValue` does the same for its point witnesses). Two
+`IRCompiler.Worlds.mergeWitnessValue` does the same for its point witnesses). Two
 witnesses that are tuples or constructions with complementary wildcard fields
 merge field by field, with the product of their Jacobians; any other pair is
 taken as two routes to the same value, and one is kept (`mergeExpr2`: the
@@ -804,7 +804,7 @@ prev in e : gen (snd e)` at `[(0.0, ANY), ..]`, `gen` got the `ANY` as its
 state and every `prev == 0` test answered False (task
 `any-mark-passed-as-recursive-call-state`). In a condition it compared False
 or raised "Condition is not a boolean: VAny", and in a second output slot it
-matched anything. `IRCompiler.applyBinding`'s `pointInvert` sums such a leaf
+matched anything. `IRCompiler.Dispatch.applyBinding`'s `pointInvert` sums such a leaf
 over its finite domain: where it is `ANY` at run time (and its enclosing
 tuples are not), the binding's result is the mixture (`mixP`) over the
 domain of the same result at the witness with the leaf fixed. That is exact

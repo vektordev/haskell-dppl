@@ -45,7 +45,7 @@ terms at that dim summed; `docs/semiring-presult-internals.md`). `draw b =
 Uniform < 0.5 in if b then Normal else 3.0` is then the mass 0.5 at 3.0 and the
 density 0.5·φ(x) elsewhere (task `enumerated-sum-over-density-body`, corpus
 `let-bindings/enumLetGatesFresh{Density,MixedDim,TupleDims}`). That needs a
-static bound on the dims (`IRCompiler.floatLeafBound`); under a sum whose body
+static bound on the dims (`IRCompiler.Enumerate.floatLeafBound`); under a sum whose body
 type has none (a list of reals), `CompilerMetadata.dimAwareEnum` is off and the
 delegated probability keeps a run-time guard: a possible result with a non-zero
 dim raises "met a continuous density" rather than being summed as a mass. The
@@ -615,7 +615,7 @@ product-of-experts shape: the kept mass is `P_a(k)·P_b(k)` per class and
 enumeration, O(V²), evaluating the second expert's marginal V times per
 outer value. Correct, and unusable at the vocabulary scale it exists for.
 
-`IRCompiler.enumerateAgreement` rewrites the double sum into dense vector
+`IRCompiler.Enumerate.enumerateAgreement` rewrites the double sum into dense vector
 algebra over the shared domain. Writing `T`/`E` for the two arms' masses
 against the query and `Sb = Σ_k pb(k)`:
 

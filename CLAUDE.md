@@ -65,7 +65,7 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   -Wincomplete-record-updates -Wredundant-constraints -Werror`. Don't add
   `-Wno-*` flags to `package.yaml`. Fix the code. For a real false positive,
   use a module-scoped `OPTIONS_GHC` with a comment explaining why (today:
-  `test/ArbitrarySPLL.hs` `-Wno-orphans`, `IRCompiler` `-fmax-pmcheck-models`).
+  `test/ArbitrarySPLL.hs` `-Wno-orphans`, `IRCompiler.Generate` and `IRCompiler.Plan` `-fmax-pmcheck-models`).
 - **Test tiers.** Default `stack test` must be green after every step.
   `NEST_SLOW_TESTS=1` must be green before a merge or push. Impact analysis
   stays on for both; `NEST_FULL_TESTS=1` is not required (use it when a change
@@ -82,7 +82,7 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   for internal invariants only (`docs/modality-and-admission.md`).
 - **Never hand-write a linear identity on a probability.** Use the
   `Semiring` (`srComplement`, `srZero`, ...). Any new complement or
-  subtraction site must compile its operand unpruned (`IRCompiler.unpruned`)
+  subtraction site must compile its operand unpruned (`IRCompiler.Monad.unpruned`)
   (`docs/semiring-presult-internals.md`).
 - **Generated names go in `SPLL.ReservedNames`.** A new runtime function or
   Julia `Base` call goes in that backend's escaped-name list. The tests name
@@ -130,7 +130,17 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `DrawSinking` — moves enumerable `draw`s into the operand that reads them.
 - `ObservationMask`, `MaskVariants` — which `ANY` query shapes a function answers, plus their per-mask variants and runtime dispatcher.
 - `PerValue` — per-value queries: a signature's `Enumerated` slot answered as one vector over its domain.
-- `IRCompiler` — AST to IR for all three variants, holding all the inference engines.
+- `IRCompiler` — AST to IR for all three variants: the driver (`envToIR*`, refusal propagation, normal-function groups, `stripBranchCount`). The translators and engines live in `IRCompiler/*`:
+- `IRCompiler/Monad` — `CompilerMetadata`, the binder environment (`LawEnv`), the `Recur` record the engines call back through, shared helpers.
+- `IRCompiler/Inference` — the probability/integrate translator (`toIRInference`) and the knot that fills `Recur`.
+- `IRCompiler/Generate` — the generate translator (`toIRGenerate`).
+- `IRCompiler/Dispatch` — the engine dispatch (`dispatchEngines`, applicability tests, `applyBinding`).
+- `IRCompiler/Binding` — binding resolution (`resolveBinding`, entering a callee's scope, field reads).
+- `IRCompiler/Enumerate` — enumerated inference: enumerated bindings, draw stacks, constraint nets, agreement fusion, `toIREnumerate`.
+- `IRCompiler/Materialize` — materialized marginals: the dense budget gate, marginal tables, convolution, point queries.
+- `IRCompiler/Worlds` — the worlds algebra and set-witness inversion (`invertToWorlds`).
+- `IRCompiler/Plan` — plan-guided enumeration (`planInvert`, `planWitnessApply`).
+- `IRCompiler/Gaussian` — the Normal engines: `toIRNormal`, moments, affine forms, the joint affine Gaussian, log-normal parameters.
 - `IRCompiler/Affine` — the pure part of the affine/joint-Gaussian machinery: `AffineForm`, its collapse, tuple-field paths, the Cholesky density.
 - `Semiring` — `PResult` combinators over the linear/log/max-product semirings.
 - `AutoNeural` — generated readLogits/writeLogits functions and partition plans for neural declarations.
