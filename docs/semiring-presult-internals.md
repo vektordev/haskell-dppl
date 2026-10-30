@@ -108,6 +108,18 @@ semiring-aware too. Two consequences worth internalising before touching
   (the CDF is increasing), never on the difference. A sum of many
   alternatives outside `mixP` is `sumAllSR`, which let-binds operands and
   partial sums wherever `srPlus` reads its operands twice.
+- **A complement is the other side's weight only under sum-product.**
+  `srConserves` says whether `srComplement` of a *combined* weight (several
+  derivations joined by `srPlus`) is the complementary event's weight. It is
+  for sum-product, not for max-product, where `1 - max` is not the best
+  derivation on the other side. Under max-product a complement is sound only
+  on a single derivation's weight (`IRCompiler.singleDerivation`: a leaf CDF,
+  a Gaussian closed form, an InjF over one such operand). So an `if`
+  condition's two weights come from `condWeights` (below), a leaf condition
+  with several derivations is compiled at both polarities, and a `gt`/`lt`
+  against a bound whose operand has several derivations sums the operand's
+  enumerated domain instead of complementing its CDF, or is refused (task
+  `map-semiring-complement-and-cdf-wrong`).
 
 ## Dimension Counting
 
@@ -350,10 +362,11 @@ plain argument) therefore compiles the operand of every such site with pruning
 off, and any new `srComplement`/`srMinus`/CDF-difference site must do the
 same:
 
-- an `IfThenElse` *condition* (its False-weight is the complement of its
-  True-probability — `test/cases/topk-pruning/topKComplementCondition`, the minimized shape
-  of the fuzz counterexample this was found by: a condition that is itself an
-  `if` had its True-probability pruned to `0`, so its else-weight became `1`);
+- a *leaf* `IfThenElse` condition, whose False weight is the complement of
+  its True weight (`test/cases/topk-pruning/topKComplementCondition` is the
+  minimized fuzz counterexample from before the condition pair: a condition
+  that is itself an `if` had its True weight pruned to `0`, so its else-weight
+  became `1`);
 - the integral behind a `gt`/`lt` against a deterministic bound
   (`topKComplementBound`);
 - both operands of the `AnyExcept` subtraction `p(ANY) − p(v)`
@@ -365,9 +378,18 @@ same:
   `1/a` do not);
 - both bounds of a set-witness interval measure (`cdfAtBound`).
 
-The alternative — inferring a condition at both polarities, each pruned — was
-rejected: it is the O(2^d) double compile the `IfThenElse` case retreated from,
-and it would not have helped the subtraction sites anyway.
+A condition that is itself a Bool `if` (or a `not` of one) is not such a
+site. `IRCompiler.condWeights` compiles it once to its pair
+`(p(True), p(False))`, from its children's pairs:
+`pT = cT⊗aT ⊕ cF⊗bT`, `pF = cT⊗aF ⊕ cF⊗bF`. Each child is compiled once, so
+the compile stays linear in nesting depth (compiling the condition at each
+polarity separately is the O(2^d) of fuzz-qc-compiler-bugs item 3). Each arm's
+pair is bound once under the arm's guard (weight not zero, and under topK
+`acc ⊗ w` at or above the cutoff); a pruned arm contributes zero to both
+weights, so both are lower bounds and the pair nodes compile pruned
+(`topKPrunesInsideCondition`). Only the recursion's leaves complement, and
+they compile unpruned. The same pair is what gives max-product the best
+False derivation instead of `1 - max`.
 
 Separately, an `_integ` function takes no `acc_prob` parameter, so a
 cumulative-mode call into another definition passes only the sample and the

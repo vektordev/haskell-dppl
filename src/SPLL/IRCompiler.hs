@@ -202,13 +202,120 @@ semiringOf meta = mkSemiring (semiringFamily meta) (logSpace (compilerConfig met
 -- False, so such an arm is not pruned -- the same outcome the dead-arm
 -- short-circuit ('deadArm') already gives a zero-probability arm.
 --
--- The cost is that nothing under a complement is pruned. That is the intended
--- trade: inferring the operand twice (once at each polarity, both pruned) was
--- the shape the 'IfThenElse' case explicitly retreated from because it is
--- O(2^d) in nested Bool conditions (fuzz-qc-compiler-bugs item 3), and it
--- would not have helped the subtraction sites anyway.
+-- The cost is that nothing under a complement is pruned. An 'IfThenElse'
+-- condition is no longer such a site wherever 'condWeights' builds its two
+-- weights directly: a condition that is itself a Bool @if@ (or a @not@ of
+-- one) gets both weights from one pass over its children, each a pruned lower
+-- bound, so pruning reaches into it. Only the leaves of that recursion still
+-- complement, and they compile unpruned. The subtraction sites (AnyExcept,
+-- CDF differences, comparison flips) keep this wrapper.
 unpruned :: CompilerMetadata -> CompilerMetadata
 unpruned meta = meta { accProb = IRConst (VFloat (1 / 0)) }
+
+-- | Whether a condition weight is (approximately) the semiring zero, the test
+-- an 'IfThenElse' arm guard reads. Linear 0.0 is tested approximately;
+-- log-space uses exact equality against negative infinity, since
+-- @(-inf) - (-inf)@ is NaN and an approximate test would report two
+-- impossible operands "not equal", i.e. live -- the wrong direction for a
+-- guard whose job is to skip an arm that may hold a nonterminating call.
+deadWeightIR :: Semiring -> IRExpr -> IRExpr
+deadWeightIR sr c
+  | srLogSpace sr = IROp OpEq c (srZero sr)
+  | otherwise     = IROp OpApprox c (srZero sr)
+
+-- | The (True, False) weights of a Bool @if@ condition, compiled in one pass
+-- (task map-semiring-complement-and-cdf-wrong).
+--
+-- A condition that is itself a Bool @if c then a else b@ is built from its
+-- children's pairs, each child compiled once:
+--
+-- > pT = cT (x) aT (+) cF (x) bT
+-- > pF = cT (x) aF (+) cF (x) bF
+--
+-- so its False weight is the semiring's own combine over the False
+-- derivations. Deriving it as @1 - pT@ instead is a probability-conservation
+-- identity: right under sum-product, wrong under max-product, where it is
+-- @1 - max@ rather than the best False derivation. A @not@ swaps the pair.
+-- Compile cost stays linear in nesting depth -- compiling the condition at
+-- each polarity separately would double it per level, the O(2^d) blowup of
+-- fuzz-qc-compiler-bugs item 3.
+--
+-- Each arm's pair is bound once, under the arm guard the 'IfThenElse' case
+-- applies to its own arms: the arm's weight is not the semiring zero, and
+-- under topK the accumulated path probability through it reaches the cutoff.
+-- A pruned arm contributes the semiring zero to both weights, so both are
+-- lower bounds, which is what lets the condition be compiled pruned.
+--
+-- Any other condition is a leaf of this recursion. Under a semiring that
+-- conserves probability ('srConserves'), or when the leaf has a single
+-- derivation ('singleDerivation': a comparison of one distribution leaf
+-- against a bound, say), it is compiled at True, unpruned, and
+-- its False weight is the complement in the semiring's sense ('mixWith' of
+-- 'srComplement', so a True outcome that is a density leaves the whole unit
+-- mass at dim 0 on the False side; task
+-- sampling-matches-pdf-continuous-equality-density). Under one that does not,
+-- the leaf is compiled at each polarity: the complement of a combined weight
+-- (an @a || b@, a call) is not the other side's weight there. That doubles
+-- only the leaf's own compile, and only under max-product.
+condWeights :: CompilerMetadata -> Expr -> CompilerMonad (PResult, PResult)
+condWeights meta (Expr _ (InjF (Named "not") [c])) = (\(t, f) -> (f, t)) <$> condWeights meta c
+condWeights meta (Expr _ (IfThenElse c a b)) = do
+  let sr = semiringOf meta
+  (cT, cF) <- condWeights meta c
+  cTV <- shareWeight "condpairT" cT
+  cFV <- shareWeight "condpairF" cF
+  (aT, aF) <- armPair cTV a
+  (bT, bF) <- armPair cFV b
+  let bc x y = IROp OpPlus (IRIf (deadWeightIR sr (unP (rProb cTV))) const0 (rBranches x))
+                           (IRIf (deadWeightIR sr (unP (rProb cFV))) const0 (rBranches y))
+  t <- mixP sr (bc aT bT) (weigh cTV aT) (weigh cFV bT)
+  f <- mixP sr (bc aF bF) (weigh cTV aF) (weigh cFV bF)
+  return (t, f)
+  where
+    sr' = semiringOf meta
+    weigh w arm = onBranches (const (rBranches arm)) (prodP sr' w arm)
+    shareWeight tag r = do
+      v <- mkVariable tag
+      setVariables [(v, packResult r)]
+      return (unpackResult v)
+    armPair w arm = do
+      let accArm = srTimes sr' (accProb meta) (unP (rProb w))
+          pruneGuard = case topKThreshold (compilerConfig meta) of
+            Just _  -> [notIR (IROp OpLessThan accArm (IRVar topKCutoffParamName))]
+            Nothing -> []
+          guards = notIR (deadWeightIR sr' (unP (rProb w))) : pruneGuard
+      armO <- scoped ((\(t, f) -> [t, f]) <$> condWeights meta { accProb = accArm } arm)
+      -- Each weight is read once, by one of the two mixtures above.
+      closed <- closeResults sr' "condpair_arm" guards armO
+      case closed of
+        [t, f] -> return (t, f)
+        _ -> error "condWeights: closeResults returned other than two results"
+condWeights meta c
+  | srConserves sr || singleDerivation c = do
+      t <- toIRInference (unpruned meta) False c (IRConst (VBool True))
+      f <- mixWith (\_ p -> srComplement sr p) const0 (mass (srOne sr)) t
+      return (t, f)
+  | otherwise = (,) <$> toIRInference meta False c (IRConst (VBool True))
+                    <*> toIRInference meta False c (IRConst (VBool False))
+  where sr = semiringOf meta
+
+-- | Whether every value of a random expression has at most one derivation (one
+-- control-flow path producing it), so that 'srComplement' of its CDF is its
+-- upper tail under every semiring, max-product included: a distribution
+-- leaf, a Gaussian closed form, or an InjF that transforms one such operand
+-- with deterministic ones. Conservative: anything else (an @if@, an
+-- enumerated sum of two random operands, a call, a let) answers False.
+singleDerivation :: Expr -> Bool
+singleDerivation (Expr ti nd)
+  | pType ti `elem` [Deterministic, PNormal, PLogNormal] = True
+  | otherwise = case nd of
+      Var "Uniform" -> True
+      Var "Normal"  -> True
+      InjF _ ps -> case filter (\x -> pType (getTypeInfo x) /= Deterministic) ps of
+        [r] -> singleDerivation r
+        _   -> False
+      _ -> False
+
 
 -- | A call into another definition's compiled inference function. Under
 -- 'topKThreshold' a @_prob@ function takes the caller's accumulated path
@@ -3152,45 +3259,28 @@ toIRInference meta cumulative (Expr ti (IfThenElse (Expr _ (InjF (Named "not") [
 toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
-  -- 'cond' is TBool, so its mass is an exhaustive two-way partition:
-  -- p(cond=False) = 1 - p(cond=True). Deriving the complement this way
-  -- (the same identity already used for gt/lt against a deterministic bound
-  -- and for two-Normal comparisons, both below) avoids a second full
-  -- recursive compile of 'cond' -- which, when 'cond' is itself a nested
-  -- Bool IfThenElse, doubles the work at every nesting level and turned
-  -- compiling a depth-d chain of nested boolean conditions into an O(2^d)
-  -- blowup (fuzz-qc-compiler-bugs item 3: seconds at depth 4, unusable
-  -- past depth ~6). rDim is carried over unchanged (any TBool result is
-  -- structurally dim 0, same as condTrue's). rImposs is derived from the
-  -- value, the same discrete-mass exception 'opaqueMass' already relies on
-  -- ("only a discrete mass may derive the flag from its value" -- an exact
-  -- semiring zero here genuinely means the complementary event cannot occur).
-  --
-  -- The complement MUST go through 'srComplement', not a literal @1 - p@:
-  -- under 'logSpace' the operands are log-probabilities, where the complement
-  -- is @log(1 - exp x)@ and a linear @1 - x@ is simply a different number
-  -- (this is what 'LogSpaceMatchesLinear' catches).
+  -- 'cond' is TBool, so its weights are the two sides of a partition. Both
+  -- come from one pass over the condition ('condWeights'): a condition that is
+  -- itself a Bool if (or a not of one) is built from its children's own
+  -- pairs, so its False weight is the semiring's combine over its False
+  -- derivations, and a leaf condition derives its False weight as the
+  -- semiring complement of its True weight where that is sound. Compiling
+  -- the condition once per polarity instead doubled the work at every
+  -- nesting level (fuzz-qc-compiler-bugs item 3: an O(2^d) compile of a
+  -- depth-d chain of nested Bool conditions); deriving every False weight as
+  -- @1 - p(True)@ was linear but holds only under sum-product, and gave
+  -- max-product @1 - max@ for a nested condition (task
+  -- map-semiring-complement-and-cdf-wrong). rDim is carried over from each
+  -- weight. A leaf's False weight is "certain minus p(cond=True)" in the
+  -- semiring's sense ('mixWith' of 'srComplement'), not a bare 1 - p: when the
+  -- True outcome is itself a density -- a continuous @x == c@, a null event
+  -- reported at dim > 0 -- the False branch carries the whole unit mass at dim
+  -- 0 (task sampling-matches-pdf-continuous-equality-density). The pair
+  -- nodes' weights are lower bounds under topK, so the condition is compiled
+  -- pruned; only the complemented leaves compile 'unpruned'.
   let sr = semiringOf meta
-  -- The condition is compiled 'unpruned': its False-weight is the complement
-  -- of its True-probability, and the complement of a pruned (lower-bound)
-  -- value is an upper bound -- see 'unpruned'. The arms below keep pruning.
-  condTrue <- toIRInference (unpruned meta) False cond (IRConst (VBool True))
+  (condTrue, condFalseMix) <- condWeights meta cond
   let condTrueExpr  = unP (rProb condTrue)
-  -- The False weight is "certain minus p(cond=True)" in the semiring's sense
-  -- ('mixSubP'), not a bare 1 - p: when the True outcome is itself a density
-  -- -- a continuous @x == c@, a null event reported at dim > 0 -- a mass minus
-  -- a density is the mass, so the False branch carries the whole unit mass at
-  -- dim 0. A bare complement answered @1 - density@ at the density's dim there,
-  -- a number with no probabilistic meaning (task
-  -- sampling-matches-pdf-continuous-equality-density), and disagreed with the
-  -- set-witness engine's answer for the let-bound spelling of the same program.
-  -- For a dim-0 condition the two coincide: 'mixWith' only subtracts at equal
-  -- dims, which is 'srComplement' exactly. The combine is spelled
-  -- 'srComplement' of the subtrahend rather than 'srMinus' (the minuend is
-  -- always the semiring one, so the two agree): max-product defines a
-  -- complement but refuses 'srMinus' outright ('mapHasNoExcept'), and every
-  -- if-then-else would otherwise stop compiling under it.
-  condFalseMix <- mixWith (\_ p -> srComplement sr p) const0 (mass (srOne sr)) condTrue
   let condFalseExpr = unP (rProb condFalseMix)
   -- Every later read of a condition weight reads its binding: the raw
   -- 'condTrueExpr' is the condition's whole probability field, and the arm
@@ -3210,16 +3300,10 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
         onBranches (const (rBranches armRes))
           (prodP sr (mkPResult (sealP (IRVar v)) (rDim condRes) const0 (rImposs condRes)) armRes)
   -- Whether the condition's own probability is (approximately) the semiring
-  -- zero: linear 0.0, or log-space negative infinity. Comparing against the
-  -- literal 0.0 here would falsely treat every log-space arm as live (a log
-  -- probability is essentially never exactly 0.0). Log-space uses exact
-  -- equality against -infinity rather than OpApprox's subtraction-based test:
-  -- (-inf) - (-inf) is NaN, which would make an approx-equality test against
-  -- two structurally-impossible operands wrongly report "not equal" (i.e.
-  -- "live"), the wrong direction for a check whose job is to skip evaluating
-  -- an arm that may hold a nonterminating recursive call.
-  let deadArm c = if srLogSpace sr then IROp OpEq c (srZero sr)
-                                   else IROp OpApprox c (srZero sr)
+  -- zero ('deadWeightIR'). Comparing against the literal 0.0 here would
+  -- falsely treat every log-space arm as live (a log probability is
+  -- essentially never exactly 0.0).
+  let deadArm = deadWeightIR sr
   let liveArm = notIR . deadArm
   -- Each arm is zero-checked with the same IRIf short-circuit the probability
   -- fields use, so a dead arm's count -- and any recursive call inside it --
@@ -3345,6 +3429,47 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
           return (unpackResult prunedV)
         -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
         Nothing -> return addRes
+-- A comparison against a deterministic bound under a semiring that does not
+-- conserve probability ('srConserves', max-product): the fixed-bound
+-- equations below answer the upper tail as the complement of the operand's
+-- CDF, which is the upper tail's weight only when that CDF is a single
+-- derivation's ('singleDerivation'). An operand with several derivations
+-- (an enumerated sum, an @if@) has a CDF that is already their combine, and
+-- @1 - max@ is not the best derivation above the bound (task
+-- map-semiring-complement-and-cdf-wrong: @a + b > 0@ over two Bernoulli(0.5)
+-- indicators answered 0.75 for the best derivation's 0.25). Such an operand
+-- is summed over its enumerated domain instead, in the compile's semiring,
+--
+--   p(cmp = sample) = (+) over v in dom(X) of p(X = v) (x) [cmp(v, bound) = sample]
+--
+-- and refused when it has no domain within the materialization budget.
+toIRInference meta False (Expr _ (InjF (Named cmp) [left, right])) sample
+  | cmp `elem` ["gt", "lt"]
+  , not (srConserves (semiringOf meta))
+  , [randE] <- filter (\x -> pType (getTypeInfo x) /= Deterministic) [left, right]
+  , not (singleDerivation randE) = do
+    let sr = semiringOf meta
+        randLeft = pType (getTypeInfo right) == Deterministic
+        detE = if randLeft then right else left
+        rtgs = tags (getTypeInfo randE)
+    case enumerableDomain rtgs of
+      Just dom | enumerationWithinMaterializationBudget meta rtgs -> do
+        bnd <- mkVariable "cmp_bound"
+        d <- toIRGenerate meta detE
+        setVariables [(bnd, d)]
+        v <- mkVariable "cmp_value"
+        mTbl <- materializeOperandTable meta randE
+        let op = if cmp == "gt" then OpGreaterThan else OpLessThan
+            holds = if randLeft then IROp op (IRVar v) (IRVar bnd) else IROp op (IRVar bnd) (IRVar v)
+        summandO <- scoped $ do
+          pV <- operandProb meta mTbl randE (IRVar v)
+          return (IRIf (equalityGuard TBool holds sample) pV (srZero sr))
+        let (outerBinds, body') = hoistInvariantBindings v (closeExpr summandO id)
+        setVariables outerBinds
+        opaqueMass sr (enumSumNode sr v dom body') const0
+      _ -> refuse (chainName (getTypeInfo randE))
+             ("a comparison's upper tail under a semiring without complements (max-product) "
+              ++ "needs an operand with a single derivation or a finite enumerated domain")
 -- Both sides Gaussian: left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)), so the
 -- comparison is that difference's CDF evaluated at 0. Neither side is Deterministic,
 -- so the bound-based equations below do not apply. resolveCompCons types this Bool
@@ -3425,6 +3550,13 @@ toIRInference meta False (Expr _ (InjF (Named cmp) [left, right])) sample
     -- or the right operand of @>@; the True outcome is then its CDF, and
     -- the False outcome the complement (and the other way round otherwise).
     let cdfBelow = (cmp == "lt") /= enumLeft
+    -- The CDF side is complemented below: under max-product only a single
+    -- derivation's CDF has its complement as its upper tail (see the
+    -- non-conserving fixed-bound equation above).
+    when (not (srConserves sr) && not (singleDerivation cdfE)) $
+      refuse (chainName (getTypeInfo cdfE))
+        ("a comparison's upper tail under a semiring without complements (max-product) "
+         ++ "needs an operand with a single derivation")
     bnd <- mkVariable "enumerated_bound"
     mTbl <- materializeOperandTable meta enumE
     returnO <- scoped $ do

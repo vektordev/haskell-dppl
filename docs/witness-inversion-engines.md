@@ -457,7 +457,8 @@ complemented; anything else is refused. Corpus
 `setWitnessContinuousEquals*`, `setWitnessIntervalThenContinuousEquals`,
 `setWitnessNestedLetContinuousEquals`.
 
-The same rule decides the letfree `IfThenElse`: its False weight is
+The same rule decides the letfree `IfThenElse` at a leaf condition (one
+`condWeights` does not split into a pair): its False weight is
 "certain minus `p(cond = True)`" through `mixWith`, not a bare
 `srComplement`, so a condition whose True outcome is a density (a continuous
 `Normal == 0.5`) leaves its False branch the whole unit mass at dim 0, where
