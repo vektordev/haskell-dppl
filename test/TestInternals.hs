@@ -5631,7 +5631,7 @@ test_sharedFieldAcrossListIRNotExponential = testCase "sharedFieldAcrossListIRNo
               ++ show small ++ " -> " ++ show large ++ ")") (ratio < 4)
 
 -- | The same family at budget 0, where the plan engine answers it (task
--- plan-world-binds-dead-branch-sum-per-world). 'measurePlanWorlds' bound each
+-- plan-world-binds-dead-branch-sum-per-world). The plan world measure bound each
 -- factor-carrying world's whole result, including a branch count that 'mixP'
 -- discards and that held every world's guard chain: the -O0 IR grew ~57x from
 -- 0 to 1 answers in between, and the slow-tier plan-engine differential on

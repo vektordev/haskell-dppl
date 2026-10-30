@@ -530,8 +530,8 @@ constrains those leaves again. The gate used to be a syntactic reader count
 `g (o1 sc) + ... + g (oN sc)` over a product scene enumerated 3^N worlds and
 OOM-ed at N = 8) and too lax for a helper reading its parameter twice
 (`planHelperReadsPlanParamTwice`, a silent wrong number). Now a merged world
-records the leaves it baked (`pwBaked`); `intersectPlanW`/`addSpecCons` set
-`pwClash` when a baked leaf meets any other constraint or baked set;
+records the leaves it baked (`wBaked`); `intersectPlanW`/`addSpecCons` set
+`wClash` when a baked leaf meets any other constraint or baked set;
 `planWitnessApply` traverses with grouping on and, if a surviving world
 clashed, discards that attempt (bindings via `pass`, name supply rewound) and
 reruns with grouping off -- for a body the reader count already kept
@@ -568,9 +568,9 @@ at N = 5 for a per-slot recolour, and the 10-slot CLEVR scene ran out of 2 GB.
 two fields have several worlds. Constraints its worlds share stay live
 (`planCommonDiscreteCons`). The rest is measured once: as a `WMass` when every
 world is dim 0 and uncoupled, so an enclosing value DP can still merge it, and
-otherwise as a whole `measurePlanWorlds` `PResult` carried as a `WFactor`. By
+otherwise as a whole `measureWorlds` `PResult` carried as a `WFactor`. By
 distributivity, which the dimension-aware `mixP`/`prodP` pair also satisfies,
-the measure is unchanged. The collapsed leaves go into `pwBaked`, like a value
+the measure is unchanged. The collapsed leaves go into `wBaked`, like a value
 group's. `planWitnessApply` therefore tries three attempts in order:
 factoring and grouping, then grouping alone (only if something factored), then
 neither. A body whose fields read the same slot

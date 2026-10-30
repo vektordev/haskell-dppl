@@ -181,7 +181,9 @@ unmodified, so a recursive program's count is its traversed recursion
 depth. An arm whose condition has probability exactly zero contributes 0
 and — via `IRIf`, not a strict multiply — is never evaluated; that
 short-circuit is what makes a recursive program's branch count terminate.
-A pruned `topK` branch likewise contributes 0.
+A pruned `topK` branch likewise contributes 0. A world set (`measureWorlds`, both
+witness engines) is the sum of its worlds' counts, each world's factors
+included; a world whose guards fail counts 0.
 
 `bc` measures the compiled artifact's leaf-evaluation cost, not an
 invariant of the distribution: it is stable under respelling the same leaf
@@ -250,7 +252,7 @@ introduced by a fix that looked local. So (task
   no sub-result and so cannot compound, is copied inline into its readers,
   keeping its constants foldable).
 - World factors (`WFactor`) carry their block as an `Open PResult`;
-  `measureWorld` and `measurePlanWorlds` bind it under the world's guards.
+  `measureWorlds` binds it under the world's guards.
 
 ### Scopes are opaque: the rule by construction
 

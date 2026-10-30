@@ -138,7 +138,7 @@ source → Parser → Validator → PerValue (helper expansion) → CalleeNormal
 - `IRCompiler/Binding` — binding resolution (`resolveBinding`, entering a callee's scope, field reads).
 - `IRCompiler/Enumerate` — enumerated inference: enumerated bindings, draw stacks, constraint nets, agreement fusion, `toIREnumerate`.
 - `IRCompiler/Materialize` — materialized marginals: the dense budget gate, marginal tables, convolution, point queries.
-- `IRCompiler/Worlds` — the worlds algebra and set-witness inversion (`invertToWorlds`).
+- `IRCompiler/Worlds` — the one `World` type of both witness engines and its measure (`measureWorlds`), and set-witness inversion (`invertToWorlds`).
 - `IRCompiler/Plan` — plan-guided enumeration (`planInvert`, `planWitnessApply`).
 - `IRCompiler/Gaussian` — the Normal engines: `toIRNormal`, moments, affine forms, the joint affine Gaussian, log-normal parameters.
 - `IRCompiler/Affine` — the pure part of the affine/joint-Gaussian machinery: `AffineForm`, its collapse, tuple-field paths, the Cholesky density.

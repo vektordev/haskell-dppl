@@ -5,6 +5,36 @@ be point-inverted onto the bound variable via ordinary forward chaining.
 The probabilistic `Apply` arm tries them in the order below, with
 forward-chaining point inversion in between.
 
+## Worlds and their measure
+
+Both engines invert the observation into **worlds** that partition it, of one
+type (`Worlds.World`): guards, a conjunction of constraints, and independent
+factors. p(sample) is the mixture (`mixP`) of the worlds' measures, and
+`measureWorlds` is the one measure for both engines. A constraint is one of:
+
+| constraint | built by | measured as |
+|---|---|---|
+| `OnDraw s`: the bound draw lies in the set `s` (`WPoint`, `WInterval`, `WExcept`, `WChoice`, `WFull`, `WEmpty`) | set-valued witnesses (`DrawWorld`, one per world) | the reader's `lrDraw` (`measureSet` against the bound distribution): a density times the change of variables, a CDF difference, a set minus a point |
+| `OnLeaf c`: a plan leaf region is constrained (`PLeafCon` discrete slots, `PLeafEq`, `PLeafIvl`, `PLeafPt`) | plan-guided enumeration | read off the logit vectors (`lrRaws`): a slot sum, a Gaussian CDF difference, a density times the change of variables |
+| `Pair a b`: continuous leaf `a` exceeds leaf `b` | plan-guided enumeration | the difference Gaussian's CDF, in closed form |
+
+A world's factors (`WFactor`) are either a whole sub-inference (a set-witness
+residue or x-free subtree, a plan-free subtree of a plan body) or a
+pre-measured dim-0 mass (`WMass`, a plan value group collapsed into one
+world).
+
+The measure, per world: the constraints' measure times the factors
+(`prodP`), under the world's guards, so nothing a world binds is evaluated
+before its guards hold. A draw constraint is measured in the world's own
+scope. The plan leaf constraints of a world are one closed-form mass read off
+the logits (`planWorldMass`), which absorbs the guards; at dim 0 its
+impossibility is an exact zero (`opaqueMass`), and a density (one point
+constraint per dimension) is impossible exactly when a structural guard (the
+world's, or a point's membership or image guard) fails. When every world is closed form (plan leaves only, no
+point, no sub-inference factor: `closedFormWorld`) the masses, guards inside,
+sum directly in one `opaqueMass`. Every world counts its own branches for
+`-c`, its factors' included, and the mixture sums them.
+
 ## Plan-guided lazy enumeration
 
 `planWitnessApply` is tried *first*, ahead of point inversion, and fires when
@@ -31,8 +61,8 @@ tree (a shared `let`-bound draw is an `Apply` of a `Lambda`, which is
 plan-free as a whole and is caught at that node instead), so such a subtree
 shares no draw with the plan leaves. Under independence the joint factorizes,
 so the subtree is compiled by the *ordinary* probability compiler against the
-same target and multiplied into the world (`PlanWorld`'s `pwFactors`,
-combined with `prodP` in `measurePlanWorlds`: probabilities multiply, dims and
+same target and multiplied into the world (a `WFactor` of the world,
+combined with `prodP` in `measureWorlds`: probabilities multiply, dims and
 branch counts add). This is the plan analogue of the set-witness residue
 factor below, and it is what lets a plan-enumerated neural declaration coexist
 with fresh continuous randomness at all.
@@ -186,11 +216,11 @@ point-witness path's body-factor fold, applied per world. For a residue
 that is deterministic given the witness the factor is the missing
 consistency indicator (`(x, 1.0) == s` with `x := fst s`, dim 0); for one
 that draws fresh randomness it is the sibling's own density, and dims add,
-so `(s, Normal)` at `(-0.5, 0.3)` is `φ(-0.5)·φ(0.3)` at dim 2. `WWorld`
+so `(s, Normal)` at `(-0.5, 0.3)` is `φ(-0.5)·φ(0.3)` at dim 2. The world
 carries the factors as a list of `PResult`s; `intersectW` concatenates them,
 the nested-`let` case carries a y-world's factors over to its x-worlds
 unchanged (they read `y` at its observed value, a function of the sample
-alone), and `measureWorld` multiplies them in with `prodP` under the world's
+alone), and `measureWorlds` multiplies them in with `prodP` under the world's
 guards. No factor is emitted where no field constructor is crossed, since
 the inverse path consumed every sibling there and the indicator would be an
 always-true tautology on every transported subtree in the corpus; the
@@ -216,13 +246,13 @@ let x = Uniform in if x < 0.5 then Normal else x
 had no probability function although `Normal` alone is the simplest thing the
 compiler compiles (task `world-residual-factor-delegation`, design finding F8).
 `worldFactorFree` now measures it as the factor of one unconstrained world
-(`WWorld [] WFull [f]`), reusing `measureSet` with the subtree in the bound
+(`DrawWorld [] WFull [f]`), reusing `measureSet` with the subtree in the bound
 distribution's role: a point target is its density or mass there (times the
 target's change-of-variables factor, which matters when the target is a
 nested `let`'s transported y-point), an interval its CDF difference, a
 `WChoice` either side at runtime. The factor is compiled in its own writer
 scope into a self-contained block that is let-bound **once** (`WFactor` carries
-the binding), and `measureWorld` emits it under the world's guards through
+the binding), and `measureWorlds` emits it under the world's guards through
 `closeResult`. Folding the block into each of the four `PResult` fields instead
 (as `residueFactor` does) copied it four times per nesting level: a fuzz
 program with a fresh `draw` nested in an x-free field grew to 23MB of `-O0`
@@ -372,7 +402,7 @@ One traversal can hold **several neural reads** (`planOpenBinding`, task
 logit offset, so a nested `draw b = readX s2` met inside the body gets its own
 disjoint offset range (`psNextOff`) and its own raw-vector binding
 (`psRaws`, read through `planRawRead`); two independent reads' joint is the
-concatenated plan, and a comparison across them is the same `pwPairs`
+concatenated plan, and a comparison across them is the same `Pair`
 difference Gaussian as inside one read. That is the one-read-per-object CLEVR
 layout (`plan-enumeration/planPairwise*`). A single read is `[(0, nn_raw)]`
 and emits what it always did. Refused inside a specialized function (its

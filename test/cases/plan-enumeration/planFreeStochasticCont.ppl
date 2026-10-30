@@ -1,7 +1,7 @@
 -- Task plan-free-stochastic-subtree-not-factorized, dimension bookkeeping: the
 -- factored plan-free subtree is CONTINUOUS here, so its factor carries dim 1.
 -- 'planWorldDim' counts plan-leaf point constraints only; the factor's own dim
--- is added by 'prodP' in 'measurePlanWorlds', which is what keeps the mixture's
+-- is added by 'prodP' in 'measureWorlds', which is what keeps the mixture's
 -- dimension right (and lets the dim-0 arm win where it applies).
 --
 -- Plan (Bool, Float) = [0.6, 0.4, mu, sigma]; the continuous leaf is a free

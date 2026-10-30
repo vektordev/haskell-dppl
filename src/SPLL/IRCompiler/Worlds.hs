@@ -1,9 +1,25 @@
--- | The worlds algebra and set-witness inversion: guarded witness sets,
--- their intersection and measure ('measureWorld'), and inverting a body into
--- worlds ('invertToWorlds').
+{-# LANGUAGE PatternSynonyms, ViewPatterns #-}
+-- | The worlds algebra and set-witness inversion: one 'World' type for both
+-- witness engines and its measure ('measureWorlds'), guarded witness sets and
+-- their intersection, and inverting a body into worlds ('invertToWorlds').
 module SPLL.IRCompiler.Worlds (
   WBound(..),
   WFactor(..),
+  World(..),
+  Constraint(..),
+  PLeafCon(..),
+  PlanRaws,
+  LeafReader,
+  plcBase,
+  leafCons,
+  leafPairs,
+  planRawRead,
+  planRawReadAt,
+  intInRange,
+  planReader,
+  closedFormWorld,
+  measureWorlds,
+  planWorldMass,
   boundGuards,
   maxWBound,
   minWBound,
@@ -106,15 +122,137 @@ irRuntimeContainsAny (IRConstruct TgRight [a]) = irRuntimeContainsAny a
 irRuntimeContainsAny (IRLetIn n v b) = IRLetIn n v (irRuntimeContainsAny b)
 irRuntimeContainsAny e = IRUnaryOp OpIsAny e
 
--- | Guards are Bool-valued IR over the sample and deterministic scope; a world
+-- | A world: a guarded conjunction of constraints, times independent factors.
+-- p(sample) is the sum over a partition of the observation into worlds of
+-- (guards hold) * (measure of the constraints) * (product of the factors);
+-- 'measureWorlds' is the one measure. Both inversion engines build worlds:
+--
+-- * the set-valued witness engine ('invertToWorlds') constrains the bound
+--   scalar draw, one 'OnDraw' set per world ('DrawWorld');
+-- * plan-guided enumeration ('SPLL.IRCompiler.Plan') constrains leaf regions
+--   of a neural network's partition plan ('OnLeaf') and pairs of its
+--   continuous leaves ('Pair').
+--
+-- Guards are Bool-valued IR over the sample and deterministic scope; a world
 -- contributes only when all guards hold. The factors are independent
 -- probability results multiplied into the world's measure ('prodP': dims
 -- and branch counts add) -- each one the residue of a subtree that
 -- 'transportDirect' inverted through a field constructor, compiled with the
--- bound variable fixed at its witness (see 'residueFactor'), or an x-free
--- subtree drawing fresh randomness (see 'worldFactorFree'). They are
--- evaluated under the world's guards, never before them.
-data WWorld = WWorld [IRExpr] WSet [WFactor]
+-- bound variable fixed at its witness (see 'residueFactor'), an x-free
+-- subtree drawing fresh randomness (see 'worldFactorFree'), a plan-free
+-- subtree of a plan body, or a value group's collapsed mass ('WMass'). They
+-- are evaluated under the world's guards, never before them.
+--
+-- 'wBaked' and 'wClash' are the plan engine's bookkeeping, empty and False on
+-- every set-witness world. 'wBaked' (task plan-flat-sum-over-product-exponential)
+-- lists the leaf regions (by base offset) whose mass a value group has folded
+-- into a 'WMass': they are no longer visible as constraints, so the world must
+-- never meet another constraint on them -- that would count their mass twice.
+-- 'wClash' records that it did ('intersectPlanW', 'addSpecCons'); a clashing
+-- world's mass is wrong, and 'planWitnessApply' then redoes the traversal
+-- without grouping.
+data World = World { wGuards :: [IRExpr], wCons :: [Constraint], wFactors :: [WFactor], wBaked :: [Int], wClash :: Bool }
+
+-- | One constraint of a world. 'OnDraw': the bound draw lies in a set (the
+-- set-witness engine; measured by the reader's 'lrDraw'). 'OnLeaf': a plan
+-- leaf region is constrained ('PLeafCon', keyed by its base offset). 'Pair'
+-- @a b@: the continuous leaf at @a@ exceeds the one at @b@, measured in closed
+-- form via the difference Gaussian. The plan leaf constraints are read off the
+-- raw logit vectors ('lrRaws').
+data Constraint = OnDraw WSet
+                | OnLeaf PLeafCon
+                | Pair Int Int
+
+-- | A set-witness world: guards, the one constraint on the bound draw, and
+-- factors. The view is total on set-witness worlds, which hold exactly one
+-- 'OnDraw' ('intersectW' keeps it one); a plan constraint there is an
+-- invariant violation.
+pattern DrawWorld :: [IRExpr] -> WSet -> [WFactor] -> World
+pattern DrawWorld gs s fs <- (drawView -> (gs, s, fs))
+  where DrawWorld gs s fs = World gs [OnDraw s] fs [] False
+{-# COMPLETE DrawWorld #-}
+
+drawView :: World -> ([IRExpr], WSet, [WFactor])
+drawView w = case wCons w of
+  [OnDraw s] -> (wGuards w, s, wFactors w)
+  -- Invariant, not a refusal: set-witness worlds are built by 'DrawWorld'.
+  _ -> error "drawView: a set-witness world holds exactly one constraint on the draw"
+
+-- | A world's plan leaf constraints, in order.
+leafCons :: World -> [PLeafCon]
+leafCons w = [ c | OnLeaf c <- wCons w ]
+
+-- | A world's pairwise couplings of continuous plan leaves, in order.
+leafPairs :: World -> [(Int, Int)]
+leafPairs w = [ (a, b) | Pair a b <- wCons w ]
+
+-- | Constraint on one leaf REGION of the plan, identified by the flat offset
+-- of its first logit (regions are always constrained as a whole, so the base
+-- offset is a unique key). 'PLeafCon' constrains a discrete region (a
+-- Discretes region or an ADT constructor-flag region): allowed slots are
+-- (relative index, guard) pairs; a slot contributes its logit's mass only
+-- when its Bool-valued guard holds, and an empty slot list is an
+-- unsatisfiable constraint (the world measures 0). Milestone 3 adds
+-- constraints on Continuous leaves (mu = vec[base], sigma = vec[base+1]):
+-- 'PLeafIvl' confines the leaf to an interval, measured as a Gaussian CDF
+-- difference (mass, dim 0); 'PLeafPt' pins it to a point, measured as the
+-- leaf's density times the |change-of-variables| factor (dim 1), under
+-- membership guards accumulated from intersected intervals.
+--
+-- 'PLeafEq' (task per-value-neural-equality-unrolled-sum) is a 'PLeafCon' in
+-- disguise: a discrete region over the contiguous Int domain @[lo .. hi]@
+-- (slot @i@ holding value @lo + i@) constrained to equal (@True@) or differ
+-- from (@False@) the run-time value @x@, a variable or an accessor chain over
+-- one. Its last field is that same constraint spelled as per-slot guards,
+-- which is what it becomes the moment it meets another constraint on its
+-- region ('expandLeafEq'). Left alone it is measured as one indexed read
+-- @raw[x - lo]@ under a range guard (or that read's complement) instead of a
+-- V-term guarded sum: the difference between O(1) and O(V) per evaluation,
+-- and O(V) against O(V^2) for a per-value query over the domain.
+data PLeafCon = PLeafCon Int [(Int, IRExpr)]
+              | PLeafIvl Int WBound WBound
+              | PLeafPt  Int IRExpr IRExpr [IRExpr]
+              | PLeafEq  Int Int Int IRExpr Bool [(Int, IRExpr)]
+
+plcBase :: PLeafCon -> Int
+plcBase (PLeafCon b _)    = b
+plcBase (PLeafIvl b _ _)  = b
+plcBase (PLeafPt b _ _ _) = b
+plcBase (PLeafEq b _ _ _ _ _) = b
+
+
+-- | The raw logit vectors a traversal reads, as (first flat offset, variable)
+-- per neural read, ascending. Plan leaves are keyed by a flat offset
+-- ('plcBase'), so several independent reads share one offset space by giving
+-- each its own disjoint range; their joint is then the product of their
+-- leaves' masses, which is exactly what a world's product already computes.
+-- A single read is @[(0, nn_raw)]@, and reads exactly what it always did.
+type PlanRaws = [(Int, String)]
+
+-- | The logit at flat offset @k@: slot @k - start@ of the read whose range
+-- holds it.
+planRawRead :: PlanRaws -> Int -> IRExpr
+planRawRead raws k = case [ r | r@(start, _) <- raws, start <= k ] of
+  -- Invariant, not a refusal (task static-refusals-become-absent-variants): every plan offset lies in some opened read's range.
+  [] -> error ("planRawRead: offset " ++ show k ++ " precedes every neural read's range " ++ show raws)
+  rs -> let (start, v) = last rs in IRBuiltin BListIndex [IRVar v, IRConst (VInt (k - start))]
+
+-- | The logit for the Int value @x@ of a region starting at flat offset
+-- @base@ whose slot 0 holds the value @lo@: 'planRawRead' with a run-time
+-- index, @raw[x - lo]@ within the region.
+planRawReadAt :: PlanRaws -> Int -> Int -> IRExpr -> IRExpr
+planRawReadAt raws base lo x = case [ r | r@(start, _) <- raws, start <= base ] of
+  -- Invariant, as in 'planRawRead'.
+  [] -> error ("planRawReadAt: offset " ++ show base ++ " precedes every neural read's range " ++ show raws)
+  rs -> let (start, v) = last rs
+            off = base - start - lo
+        in IRBuiltin BListIndex [IRVar v, if off == 0 then x else IROp OpPlus x (IRConst (VInt off))]
+
+-- | Bool IR: does the Int @x@ lie in @[lo .. hi]@?
+intInRange :: Int -> Int -> IRExpr -> IRExpr
+intInRange lo hi x = IROp OpAnd (IROp OpLessThan (IRConst (VInt (lo - 1))) x)
+                              (IROp OpLessThan x (IRConst (VInt (hi + 1))))
+
 
 -- | A world factor: a result, plus bindings its fields read. A residue
 -- factor's block and an x-free factor's are each a whole sub-inference (the
@@ -122,8 +260,8 @@ data WWorld = WWorld [IRExpr] WSet [WFactor]
 -- fields project that variable ('unpackResult'): folding it into each of the
 -- four fields copied it four times per nesting level, which made a nested
 -- fresh draw's unoptimized IR grow 4^depth (23MB for a two-level fuzz program)
--- and its optimized compile 6x slower. 'measureWorld' and
--- 'measurePlanWorlds' emit the bindings under the world's guards.
+-- and its optimized compile 6x slower. 'measureWorlds' emits the bindings
+-- under the world's guards.
 --
 -- A factor carried by several worlds ('intersectW', 'intersectPlanW',
 -- 'planAddFactor') is still emitted once per world: binding it once above the
@@ -139,12 +277,12 @@ data WWorld = WWorld [IRExpr] WSet [WFactor]
 data WFactor = WFactor (Open PResult)
              | WMass IRExpr
 
-addGuard :: IRExpr -> WWorld -> WWorld
-addGuard g (WWorld gs s fs) = WWorld (g:gs) s fs
+addGuard :: IRExpr -> World -> World
+addGuard g w = w { wGuards = g : wGuards w }
 
-intersectW :: WWorld -> WWorld -> WWorld
-intersectW (WWorld g1 s1 f1) (WWorld g2 s2 f2) =
-  let (g3, s3) = intersectSet s1 s2 in WWorld (g1 ++ g2 ++ g3) s3 (f1 ++ f2)
+intersectW :: World -> World -> World
+intersectW (DrawWorld g1 s1 f1) (DrawWorld g2 s2 f2) =
+  let (g3, s3) = intersectSet s1 s2 in DrawWorld (g1 ++ g2 ++ g3) s3 (f1 ++ f2)
 
 -- Two constraints on the SAME draw. Point-point must agree: the compatibility
 -- guard is a single 'OpEq' on the whole, undecomposed values -- deliberately
@@ -424,13 +562,7 @@ setWitnessApply meta0 cumulative rt binding planDiag sample = do
       ++ " deterministic bound, an if-then-else case split, a tuple of such parts, nor"
       ++ " deterministic given scope (e.g. it draws fresh randomness).")
     Just worlds -> do
-      measured <- mapM (measureWorld meta v) worlds
-      -- The worlds partition the observation, so they mix; here (unlike the
-      -- IfThenElse mixture) each world really was traversed, so counts sum.
-      summed <- case measured of
-        -- no worlds can only mean an impossible observation
-        []     -> return (impossibleP sr)
-        (m:ms) -> foldM (\a b -> mixP sr (IROp OpPlus (rBranches a) (rBranches b)) a b) m ms
+      summed <- measureWorlds sr (drawReader meta v) worlds
       -- Full-ANY marginal short-circuit: guards and transported bounds are not
       -- ANY-aware, but the marginal of the whole observation is simply 1.
       if cumulative
@@ -438,28 +570,188 @@ setWitnessApply meta0 cumulative rt binding planDiag sample = do
         else return (zipResult (\anyVal e -> IRIf (IRUnaryOp OpIsAny sample) anyVal e)
                        (mass (srOne sr)) summed)
 
--- | Measure one world against the bound distribution. The measure is compiled
--- in its own scope and kept under the world's guards, so bindings whose
--- evaluation is only valid when the guards hold are not hoisted past them.
-measureWorld :: CompilerMetadata -> Expr -> WWorld -> CompilerMonad PResult
-measureWorld meta v (WWorld guards set factors) = do
-  let sr = semiringOf meta
-  setO <- scoped (measureSet meta v set)
-  -- The set's measure and the residue factors are independent: the product
-  -- rule, exactly as the point-witness path's body-factor fold applies it.
-  let factorOs = [o | WFactor o <- factors]
-  let world = foldl (prodP sr) <$> setO <*> sequenceA factorOs
-  -- A world whose guards fail is not part of the observation at all.
-  if all openIsEmpty factorOs
-    -- The set measure's own bindings, under the guards: inline in the one
-    -- field that reads them, else bound once ('guardedResult'). Re-wrapped
-    -- around every field, they were copied up to four times per world.
-    then guardedResult sr "world" guards world
-    -- Factor bindings are read by several fields, so the world's result is
-    -- packed and bound once, under the guards ('closeResult'), rather than
-    -- copying the bindings into each field. The set measure's own bindings
-    -- join them in that one block instead of being wrapped per field.
-    else closeResult sr "world" guards world
+-- | How a world's constraints are read. 'lrDraw' measures a set of the bound
+-- draw's values (the set-witness engine: 'measureSet' against the bound
+-- distribution); 'lrRaws' says where the plan leaves' logit vectors live (the
+-- plan engine).
+data LeafReader = LeafReader { lrDraw :: WSet -> CompilerMonad PResult, lrRaws :: PlanRaws }
+
+-- | The set-witness reader: sets of the bound draw are measured against its
+-- distribution @v@.
+drawReader :: CompilerMetadata -> Expr -> LeafReader
+drawReader meta v = LeafReader (measureSet meta v) []
+
+-- | The plan reader: leaves are read off the logit vectors at @raws@.
+planReader :: PlanRaws -> LeafReader
+-- Invariant, not a refusal: plan worlds are built from leaf constraints only.
+planReader = LeafReader (const (error "planReader: a plan world constrains no draw"))
+
+-- | Whether a world's measure is a closed-form mass: it constrains plan leaves
+-- only, none of them at a point (so it is dim 0), and carries no
+-- sub-inference factor. Its mass is then one expression ('planWorldMass'),
+-- guards included.
+closedFormWorld :: World -> Bool
+closedFormWorld w = all onLeaves (wCons w) && null [ () | WFactor _ <- wFactors w ] && planWorldDim w == 0
+  where onLeaves OnDraw{} = False
+        onLeaves _        = True
+
+-- | The measure of a set of worlds that partition the observation: the
+-- mixture ('mixP') of each world's measure, in the ambient semiring. No
+-- worlds is an impossible observation.
+--
+-- * A world's measure is its constraints' measure times its factors
+--   ('prodP'), under its guards: a world whose guards fail is not part of the
+--   observation at all, and nothing it binds is evaluated before they hold.
+-- * A constraint on the draw is measured by the reader ('lrDraw'), in the
+--   world's own scope. The plan leaf constraints of a world are together one
+--   closed-form mass ('planWorldMass'), read off the logit vectors, which
+--   absorbs the guards. At dim 0 its impossibility is an exact zero
+--   ('opaqueMass'); a density (one point constraint per dimension) may be
+--   arbitrarily small while possible, so it is impossible exactly when a
+--   structural guard fails (the world's own, or a point's membership and
+--   image guards: an observation outside a peeled step's image, @exp leaf ==
+--   -1.0@).
+-- * When every world is closed form ('closedFormWorld'), the masses sum
+--   directly in one 'opaqueMass', guards inside each mass: a dim-0 mass needs
+--   no mixture's dimension test, and an exact zero sum is an impossible event.
+-- * Branch counts (@-c@): every world counts its own, its factors' included,
+--   and the mixture sums them.
+measureWorlds :: Semiring -> LeafReader -> [World] -> CompilerMonad PResult
+measureWorlds sr _ [] = return (impossibleP sr)
+measureWorlds sr rd worlds
+  | all closedFormWorld worlds =
+      opaqueMass sr (sumAllSR sr (map (planWorldMass sr (lrRaws rd)) worlds))
+                 (foldr1 (IROp OpPlus) (map guardedOne worlds))
+  | otherwise = do
+      measured <- mapM measureWorld worlds
+      foldM (\a b -> mixP sr (IROp OpPlus (rBranches a) (rBranches b)) a b)
+            (head measured) (tail measured)
+  where
+    guardedOne w = foldr (\g acc -> IRIf g acc const0) const1 (wGuards w)
+    factorsOf w = [ o | WFactor o <- wFactors w ]
+    measureWorld w = case [ s | OnDraw s <- wCons w ] of
+      -- Plan leaves only: one closed-form mass, read off the logits. It
+      -- absorbs the world's guards (nothing in it needs to wait on them).
+      [] -> do
+        let m = planWorldMass sr (lrRaws rd) w
+            d = planWorldDim w
+            -- With factors, 'guardedResult' below guards the count.
+            bc = if null (factorsOf w) then guardedOne w else const1
+        base <- if d == 0 then opaqueMass sr m bc
+                  else return (mkPResult (sealP m) (IRConst (VInt d)) bc (guardsFail w))
+        -- A factor is a whole compiled block that must not be evaluated
+        -- when the guards fail, so the product is re-guarded (a no-op on the
+        -- numbers, which the mass has already zeroed) and the factors'
+        -- blocks are bound once, under those guards ('guardedResult').
+        if null (factorsOf w) then return base
+          else guardedResult sr "plan_world" (wGuards w) (foldl (prodP sr) base <$> sequenceA (factorsOf w))
+      draws
+        -- Invariant, not a refusal: the two engines build disjoint kinds.
+        | not (null (leafCons w) && null (leafPairs w)) ->
+            error "measureWorlds: a world constrains both the bound draw and plan leaves"
+        | otherwise -> do
+            -- The sets' measure is compiled in its own scope and kept under
+            -- the world's guards, so bindings whose evaluation is only valid
+            -- when the guards hold are not hoisted past them.
+            setO <- scoped (foldl1 (prodP sr) <$> mapM (lrDraw rd) draws)
+            let masses = [ m | WMass m <- wFactors w ]
+                world = foldl (prodP sr) <$> (onProb (\p -> foldl (srTimes sr) p masses) <$> setO)
+                                         <*> sequenceA (factorsOf w)
+            if all openIsEmpty (factorsOf w)
+              -- The set measure's own bindings, under the guards: inline in
+              -- the one field that reads them, else bound once
+              -- ('guardedResult'). Re-wrapped around every field, they were
+              -- copied up to four times per world.
+              then guardedResult sr "world" (wGuards w) world
+              -- Factor bindings are read by several fields, so the world's
+              -- result is packed and bound once, under the guards
+              -- ('closeResult'), rather than copying the bindings into each
+              -- field. The set measure's own bindings join them there.
+              else closeResult sr "world" (wGuards w) world
+    -- A density's flag: one of its structural guards fails.
+    guardsFail w = case wGuards w ++ concat [ gs | PLeafPt _ _ _ gs <- leafCons w ] of
+      [] -> constFalseIR
+      gs -> notIR (foldr1 andIR gs)
+
+-- | Dimensionality of a world's PLAN-LEAF mass: one per point constraint (a
+-- univariate density); discrete slots, CDF intervals, pairwise couplings and
+-- the carried scalar mass factor are all dim 0. Independent sub-inference
+-- factors are NOT counted here -- their dimension is a runtime
+-- 'IRExpr' and is added by 'prodP' in 'measureWorlds'.
+planWorldDim :: World -> Int
+planWorldDim w = length [ () | PLeafPt {} <- leafCons w ]
+
+-- | The mass a world contributes: (guards -> the carried factor times the
+-- product of constrained leaf masses), read from the raw logit vectors in
+-- @raws@ ('planRawRead'). A discrete leaf's mass is the sum of its allowed slots' logits (each
+-- under its own guard), an interval-constrained continuous leaf's is a Gaussian
+-- CDF difference over its (mu, sigma) slice, a pairwise coupling's is the
+-- closed-form difference Gaussian, and a point-constrained continuous leaf's is
+-- its density times |change-of-variables| (the only dim-1 measure). Shared
+-- between 'measureWorlds' and the milestone-4 value grouping so a collapsed
+-- group's factor measures exactly as the worlds it replaced.
+planWorldMass :: Semiring -> PlanRaws -> World -> IRExpr
+planWorldMass sr raws w =
+    foldr (\g acc -> IRIf g acc (srZero sr))
+          (withMasses [ m | WMass m <- wFactors w ] (prodMass (leafCons w) (leafPairs w)))
+          (wGuards w)
+  where
+    -- carried group masses first, left-nested, then the constraint product;
+    -- identities dropped
+    withMasses [] p = p
+    withMasses ms p = let f = foldl1 (srTimes sr) ms in if p == srOne sr then f else srTimes sr f p
+    prodMass []  []  = srOne sr
+    prodMass cs prs = foldr1 (srTimes sr) (map leafMass cs ++ map pairMass prs)
+    -- A slot's logit is a softmax probability, i.e. a linear quantity with no
+    -- native log form: summed linearly, then carried into the semiring.
+    leafMass (PLeafCon _ [])       = srZero sr
+    leafMass (PLeafCon base slots) = fromLinearSR sr (foldr1 (IROp OpPlus) (map (slotRead base) slots))
+    -- One indexed read in place of the guarded sum ('PLeafEq'). The region is
+    -- a softmax, so the mass of every slot but @x@'s is the complement of
+    -- @x@'s, as an unconstrained leaf's mass is the semiring one. The read is
+    -- a raw logit, not a compiled (possibly pruned) result, so the complement
+    -- has no lower bound to flip.
+    leafMass (PLeafEq base lo hi x pol _) =
+      let point = fromLinearSR sr (planRawReadAt raws base lo x)
+      in if pol then IRIf (intInRange lo hi x) point (srZero sr)
+                else IRIf (intInRange lo hi x) (srComplement sr point) (srOne sr)
+    leafMass (PLeafIvl base lo hi) = case (lo, hi) of
+      -- one-sided intervals cannot go negative; only a runtime-empty
+      -- two-sided intersection needs the clamp (mirrors measureSet). The log
+      -- difference is only defined for a non-empty interval, so there the
+      -- test reads the bounds themselves (the CDF is increasing).
+      (WFinite l, WFinite h)
+        | srLogSpace sr ->
+            IRIf (IROp OpGreaterThan h l) (measureDiffSR sr (cdfAt base hi) (cdfAt base lo)) (srZero sr)
+        | otherwise ->
+            let diff = measureDiffSR sr (cdfAt base hi) (cdfAt base lo)
+            in IRIf (IROp OpGreaterThan diff const0) diff const0
+      -- P(leaf > l) is Phi(-z): the upper tail read directly rather than as a
+      -- complement, which in log space would lose the tail to 1 - exp(x)
+      (WFinite l, WPosInf) | srLogSpace sr ->
+        distCumulative sr IRNormal (IROp OpSub const0 (zScore base l))
+      _ -> measureDiffSR sr (cdfAt base hi) (cdfAt base lo)
+    leafMass (PLeafPt base v cov gs) =
+      let dens = scaledNormalDensity sr (zScore base v) [vecRead (base + 1)]
+          scaled = if cov == const1 then dens else srTimes sr dens (fromLinearSR sr (IRUnaryOp OpAbs cov))
+      in foldr (\g acc -> IRIf g acc (srZero sr)) scaled gs
+    -- P(leaf@a > leaf@b) for independent Gaussians: Phi((mu_a - mu_b) / sqrt(s_a^2 + s_b^2))
+    pairMass (a, b) =
+      let num = IROp OpSub (vecRead a) (vecRead b)
+          sq x = IROp OpMult x x
+          var = IROp OpPlus (sq (vecRead (a + 1))) (sq (vecRead (b + 1)))
+          -- sqrt spelled as exp(log/2): the IR has no sqrt primitive
+          sd = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog var))
+      in distCumulative sr IRNormal (IROp OpDiv num sd)
+    cdfAt _ WNegInf = srZero sr
+    cdfAt _ WPosInf = srOne sr
+    cdfAt base (WFinite e) = distCumulative sr IRNormal (zScore base e)
+    zScore base e = IROp OpDiv (IROp OpSub e (vecRead base)) (vecRead (base + 1))
+    slotRead base (i, g)
+      | g == constTrueIR = vecRead (base + i)
+      | otherwise        = IRIf g (vecRead (base + i)) const0
+    vecRead = planRawRead raws
+
 
 measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 measureSet meta v (WPoint p cov) = do
@@ -540,7 +832,7 @@ measureSet meta v (WExcept s p) = do
   mixSubP (semiringOf meta) (rBranches sRes) sRes ptRes
 -- Each side is measured in its own scope and keeps its own bindings, so
 -- the untaken side's work sits under the selecting 'IRIf' rather than being
--- hoisted in front of it -- the same reason 'measureWorld' scopes a world's
+-- hoisted in front of it -- the same reason 'measureWorlds' scopes a world's
 -- measure under its guards. It matters here: the point side evaluates a
 -- density at the witness value, which is precisely the 'VAny' this choice
 -- exists to avoid touching.
@@ -644,13 +936,13 @@ measureIntInterval meta v lo hi = do
 --
 -- Every world it returns is closed under the null-set convention of a
 -- continuous variable ('closeNullExcept').
-invertToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+invertToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [World])
 invertToWorlds meta occs exprBody target = do
   ws <- invertToWorldsStep meta occs exprBody target
   return (case occurrenceType occs exprBody of
     Just TFloat -> map closeWorld <$> ws
     _           -> ws)
-  where closeWorld (WWorld gs s fs) = WWorld gs (closeNullExcept s) fs
+  where closeWorld (DrawWorld gs s fs) = DrawWorld gs (closeNullExcept s) fs
 
 -- | The type of the bound variable, read off one of its occurrences.
 occurrenceType :: [ChainName] -> Expr -> Maybe RType
@@ -714,7 +1006,7 @@ sameIntervalAs (WInterval lo1 hi1) (WInterval lo2 hi2) = sameBound lo1 lo2 && sa
         sameBound _ _ = False
 sameIntervalAs _ _ = False
 
-invertToWorldsStep :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+invertToWorldsStep :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [World])
 invertToWorldsStep meta occs exprBody target
   -- x-free subtree: deterministic given scope reduces to a membership test of
   -- its value against the target; anything else draws fresh randomness, which
@@ -724,7 +1016,7 @@ invertToWorldsStep meta occs exprBody target
       if pType (getTypeInfo exprBody) == Deterministic
         then do
           bIR <- toIRGenerate meta exprBody
-          return (Just [WWorld [memberGuard (rType (getTypeInfo exprBody)) bIR target] WFull []])
+          return (Just [DrawWorld [memberGuard (rType (getTypeInfo exprBody)) bIR target] WFull []])
         else worldFactorFree meta exprBody target
 -- A continuous or discrete @==@ whose bound-variable operand is not the bare
 -- occurrence itself (@exp x == 1.0@, @x + 1.0 == 1.0@) is split here, before
@@ -924,7 +1216,7 @@ structuralInjFs = ["eq", "lt", "gt", "not", "and", "or", "TCons"]
 -- @a@ onto x ('invertOntoValue'). Field constructors are not steps here: their
 -- inverse consults no sibling field, which a residue factor at a bare
 -- occurrence makes up for ('residueFactor'), not at an operand.
-invertThroughStep :: CompilerMetadata -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+invertThroughStep :: CompilerMetadata -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [World])
 invertThroughStep meta occs stepNode a target = do
   ws <- transportDirect meta [chainName (getTypeInfo a)] stepNode target
   maybe (return Nothing) (invertOntoValue meta occs a) ws
@@ -933,7 +1225,7 @@ invertThroughStep meta occs stepNode a target = do
 -- with x (@occs@) in @e@ only (task set-witness-nested-let-classifier): the
 -- observation is inverted onto y's occurrences @occsY@ in @b@, and each
 -- resulting y-set is the target for inverting @e@ onto x.
-invertThroughBinding :: CompilerMetadata -> [ChainName] -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+invertThroughBinding :: CompilerMetadata -> [ChainName] -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [World])
 invertThroughBinding meta occs occsY b e target = do
             -- Stage 1: invert the body onto y, using y's own occurrence list
             -- exactly as 'setWitnessApply' does for the outer variable. Every
@@ -948,7 +1240,7 @@ invertThroughBinding meta occs occsY b e target = do
 -- (the bound value of an inner binding, or the operand of an 'InjF' step,
 -- 'invertThroughStep') becomes the target for inverting @e@ onto x
 -- (@occs@).
-invertOntoValue :: CompilerMetadata -> [ChainName] -> Expr -> [WWorld] -> CompilerMonad (Maybe [WWorld])
+invertOntoValue :: CompilerMetadata -> [ChainName] -> Expr -> [World] -> CompilerMonad (Maybe [World])
 invertOntoValue meta occs e ys = do
                 -- Stage 2: each y-set is the target for inverting `e` onto x.
                 -- 'invertToWorlds' takes an arbitrary target set, so an
@@ -966,8 +1258,8 @@ invertOntoValue meta occs e ys = do
                 -- it: 'transportDirect' finds no seeded inverse through the
                 -- extra draw.
                 let through gY fY setY = case setY of
-                      WFull  -> return (Just [WWorld gY WFull fY])
-                      WEmpty -> return (Just [WWorld gY WEmpty fY])
+                      WFull  -> return (Just [DrawWorld gY WFull fY])
+                      WEmpty -> return (Just [DrawWorld gY WEmpty fY])
                       -- A runtime choice of y-set -- what every point
                       -- constraint meeting an interval constraint produces
                       -- ('pointInInterval'), i.e. the `if y > 0.0 then right
@@ -993,14 +1285,14 @@ invertOntoValue meta occs e ys = do
                       -- its shape (a point transport has no case for an
                       -- exclusion set, which an @==@ observed False makes).
                       _ | Expr eTI (Var _) <- e, chainName eTI `elem` occs ->
-                            return (Just [WWorld gY setY fY])
+                            return (Just [DrawWorld gY setY fY])
                       _ -> do
                         wsX <- invertToWorlds meta occs e setY
                         -- A y-world's residue factors read y at its observed
                         -- value, a function of the sample alone, so they
                         -- carry over to the x-worlds unchanged.
-                        return (map (\(WWorld gX setX fX) -> WWorld (gY ++ gX) setX (fY ++ fX)) <$> wsX)
-                xs <- forM ys $ \(WWorld gY setY fY) -> through gY fY setY
+                        return (map (\(DrawWorld gX setX fX) -> DrawWorld (gY ++ gX) setX (fY ++ fX)) <$> wsX)
+                xs <- forM ys $ \(DrawWorld gY setY fY) -> through gY fY setY
                 -- The y-worlds partition the observation and each one's
                 -- x-worlds partition that y-set's preimage, so the result is
                 -- their union with guards concatenated -- the same rule the
@@ -1089,7 +1381,7 @@ callBindingAt meta occs callNode
 -- is crossed, because there
 -- the inverse path already consumed every sibling and the indicator would
 -- be an always-true tautology on every transported subtree in the corpus.
-transportDirect :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+transportDirect :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [World])
 transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprBody) occs of
   [occ] -> case target of
     WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
@@ -1121,7 +1413,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
             wildValue rt v = maybe v (\r -> IRIf r (IRConst (anyOfType rt)) v) readsAny
         -- The inversion may pass through a deconstructing InjF (e.g.
         -- fromLeft/fromRight) only applicable on one arm; fold that as an
-        -- extra world guard so measureWorld zeroes this world instead of
+        -- extra world guard so measureWorlds zeroes this world instead of
         -- evaluating the (crashing on the wrong arm) point value -- see
         -- observe-partials-umbrella N1b.
         -- Substitute eagerly (rather than leaving an IRApply/IRLambda shell
@@ -1158,7 +1450,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
         case witnessSet value (IROp OpMult c0 (applyTo cov s)) of
           WPoint v _ | hasAnyExceptExpr v -> return Nothing
           _ | not (null factors), hasAnyExceptExpr value -> return Nothing
-          set -> return (Just [WWorld [unlessAny (applyTo guard s)] (wildcardSide set) factors])
+          set -> return (Just [DrawWorld [unlessAny (applyTo guard s)] (wildcardSide set) factors])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, dir) -> do
@@ -1174,7 +1466,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
               MonDec -> (flipInf (tr hi), flipInf (tr lo))
         -- No residue factor: the monotone table has no field-constructor
         -- step, so an interval never transports through one.
-        return (Just [WWorld [] (WInterval lo' hi') []])
+        return (Just [DrawWorld [] (WInterval lo' hi') []])
     _ -> return Nothing
   _ -> return Nothing
   where bodyCN = chainName (getTypeInfo exprBody)
@@ -1248,7 +1540,7 @@ isNamedCallNode _ = False
 -- is strict), and the result can be multiplied into a world's measure
 -- anywhere under the world's guards. The block is the factor's one binding
 -- and its fields project that variable, like 'worldFactorFree''s factor:
--- 'measureWorld' emits it once, under the world's guards. Unpacked inline, each
+-- 'measureWorlds' emits it once, under the world's guards. Unpacked inline, each
 -- of the four fields carried its own copy of the block, which compounds through
 -- a residue whose subtree holds another field constructor of a witnessed let
 -- (task presult-unbound-block-copied-per-field).
@@ -1266,7 +1558,7 @@ residueFactor meta subtree boundName boundRT value target = do
 -- mentions no occurrence of the bound variable, and every random draw in SPLL
 -- is a syntactic leaf, so it is independent of the bound draw: inside a world
 -- it contributes an independent factor, the product rule the point-witness
--- body-factor fold and 'residueFactor' already apply ('measureWorld' folds it
+-- body-factor fold and 'residueFactor' already apply ('measureWorlds' folds it
 -- in with 'prodP'; dims and branch counts add).
 --
 -- "Measure the subtree against the target set" is exactly what 'measureSet'
@@ -1287,14 +1579,14 @@ residueFactor meta subtree boundName boundRT value target = do
 --   eager @draw@ is ONE draw shared by every use, so the subtree would not be
 --   independent of the bound draw's other readers. The same local,
 --   conservative check the plan engine's factors make ('planFactorExternals').
-worldFactorFree :: CompilerMetadata -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+worldFactorFree :: CompilerMetadata -> Expr -> WSet -> CompilerMonad (Maybe [World])
 worldFactorFree meta sub target
   | not (null (planFactorExternals (typeEnv meta) (recoveredVars meta) sub)) = return Nothing
   | hasInterval target && not (isScalar (rType (getTypeInfo sub))) = return Nothing
   | otherwise = do
       block <- scoped (measureSet meta sub (wildcardTolerant target)) <&> generateLetInBlock meta
       fv <- mkVariable "xfree_factor"
-      return (Just [WWorld [] WFull [WFactor (openWith [(fv, block)] (unpackResult fv))]])
+      return (Just [DrawWorld [] WFull [WFactor (openWith [(fv, block)] (unpackResult fv))]])
   where
     hasInterval (WInterval _ _) = True
     hasInterval (WChoice _ a b) = hasInterval a || hasInterval b
@@ -1328,7 +1620,7 @@ worldFactorFree meta sub target
 -- side's worlds used to be kept behind a guard that is always False, and
 -- they were still compiled: every arm factor of an @if@ nested under a draw
 -- was built twice per level (task slow-fuzz-seed-findings-2026-10-06).
-boolWorlds :: WSet -> [WWorld] -> [WWorld] -> [WWorld]
+boolWorlds :: WSet -> [World] -> [World] -> [World]
 boolWorlds (WPoint (IRConst (VBool b)) _) ts fs = if b then ts else fs
 boolWorlds target ts fs =
      map (addGuard (memberGuard TBool constTrueIR target)) ts
@@ -1339,7 +1631,7 @@ boolWorlds target ts fs =
 -- 'invertToWorlds' itself at each canonical polarity target -- the same
 -- device the 'IfThenElse' case above already uses to invert its own
 -- condition.
-invertBoolToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> CompilerMonad (Maybe ([WWorld], [WWorld]))
+invertBoolToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> CompilerMonad (Maybe ([World], [World]))
 invertBoolToWorlds meta occs e = do
   wsT <- invertToWorlds meta occs e (WPoint constTrueIR const1)
   wsF <- invertToWorlds meta occs e (WPoint (IRConst (VBool False)) const1)
@@ -1348,7 +1640,7 @@ invertBoolToWorlds meta occs e = do
 -- | Worlds of a comparison node: the side carrying the bound variable is
 -- confined to a half-line whose direction depends on the observed boolean;
 -- the other side must be deterministic.
-comparisonWorlds :: CompilerMetadata -> [ChainName] -> Bool -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+comparisonWorlds :: CompilerMetadata -> [ChainName] -> Bool -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [World])
 comparisonWorlds meta occs isGT lop rop target
   | subtreeHasOcc occs lop && not (subtreeHasOcc occs rop) && pType (getTypeInfo rop) == Deterministic = do
       b <- toIRGenerate meta rop
@@ -1433,7 +1725,7 @@ witnessSet value cov = case anyExceptSampleShape value of
 -- factor or a split into several worlds would need the complement of a
 -- product or a union, which this does not attempt (answering Nothing, the
 -- engine's refusal, rather than a wrong number).
-equalityWorlds :: CompilerMetadata -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+equalityWorlds :: CompilerMetadata -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [World])
 equalityWorlds meta occs side other target = do
   b <- toIRGenerate meta other
   complementWorlds meta occs side b target
@@ -1443,18 +1735,18 @@ equalityWorlds meta occs side other target = do
 -- complement ('equalityWorlds', which states the rule). @b@ may hold field
 -- wildcards (a constructor test's @C ANY ..@), and the excepted mass is then
 -- the marginal mass of the pattern.
-complementWorlds :: CompilerMetadata -> [ChainName] -> Expr -> IRExpr -> WSet -> CompilerMonad (Maybe [WWorld])
+complementWorlds :: CompilerMetadata -> [ChainName] -> Expr -> IRExpr -> WSet -> CompilerMonad (Maybe [World])
 complementWorlds meta occs side b target = do
   wsT <- invertToWorlds meta occs side (WPoint b const1)
   return $ case wsT of
     -- A transport that may read a wildcard target ('transportDirect') wraps
     -- its point in that runtime choice; @b@ is a deterministic value, not a
     -- query's wildcard, so the point is what it constrains.
-    Just ts@[WWorld gs set []] | Just xb <- plainPoint set ->
+    Just ts@[DrawWorld gs set []] | Just xb <- plainPoint set ->
       -- nested 'IRIf', not 'OpAnd': a guard protects the ones after it
       let g = foldr (\gd acc -> IRIf gd acc constFalseIR) constTrueIR gs
-          fs = [ WWorld [g] (WExcept WFull xb) []
-               , WWorld [notIR g] WFull [] ]
+          fs = [ DrawWorld [g] (WExcept WFull xb) []
+               , DrawWorld [notIR g] WFull [] ]
       in Just (boolWorlds target ts fs)
     _ -> Nothing
   where
