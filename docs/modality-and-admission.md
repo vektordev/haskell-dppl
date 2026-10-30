@@ -161,6 +161,53 @@ the optimizer having folded `exp`'s applicability guard on the sentinel into
 witness, and the optimizer now picks an `IRIf` arm only on a Bool constant. A
 multi-use binding keeps the refusal.
 
+### The Gaussian catch-all reads the codegen law
+
+`toIRInference`'s `PNormal` catch-all (one Gaussian density from a node's
+`(mu, sigma)`) takes a node iff its law is a primitive leaf or an affine form
+(`IRCompiler.gaussianLeaf`), and builds the `(mu, sigma)` by that law: a leaf
+through the scalar extractor (`toIRNormalParams`), an affine form through the
+affine algebra (`affineFormOf`, collapsed), which follows calls, lambda
+redexes and the binder environment the extractor does not see through
+(`witness-inversion-engines.md`, "The compiler"). It replaced
+`hasOwnInferenceHandler`, a list of node shapes the extractor could not read,
+mirrored by hand in `isAffineOver` (task
+`gaussian-catch-all-dispatch-on-codegen-law`, design `law-carrying-modality`
+M7).
+
+The law read is the node's certificate **at codegen** (`codegenLaw`): its
+`lawTable` entry when no enclosing engine has recovered a variable, else the
+same inference `reinferRecovered` re-annotates the body with, asked for the
+node's law (`ModalityInfer.reinferLawGiven`), under every recovered variable.
+The table certifies the program as written; after a witness fold has fixed
+`x`, `draw y = x * 2.0 in y + Normal` is affine over the fresh Normal alone,
+and re-inferring under every recovered variable (not only the free ones)
+catches a `y` computed from `x`. The re-inference is on demand, per visit;
+over the corpus it costs about 1% of compile time.
+
+Three node kinds are never the catch-all's, whatever their law. A function
+value is answered by the callee's probability function. An application goes
+to the binding resolver whatever its head (`law-carrying-modality` §C), so the
+engines dispatch it in their measured order ("Why this order"); a catch-all
+taking a redex on its own affine law would run the Gaussian collapse ahead of
+them. And a variable's binder decided its treatment: one marginalised as an
+affine form (`BoundVar.bvForm`) is read through that form, any other local has
+its value in scope (the `Var` equation's leaf), and a declaration's name is a
+call of its probability function. Inside an affine node the builder does
+enter a call, a redex or a nullary declaration: there they are latents of the
+certified form, not bindings to dispatch.
+
+`projectedLaw` passes a projected field's leaf or affine law through, so
+`fst (Normal, Uniform)` and `snd (0, Normal + 1.0)` are certified as what
+they are. `fst (h z)` with `h z = (z, Normal)` is not: the call's law is its
+callee's argument-free part (`JReturns`), which drops the field that depends
+on `z`, and the node goes to the accessor equation, which answers it.
+
+The `PLogNormal` catch-all has no law to read, since no justification
+describes a lognormal (task `lognormal-log-affine-justification`). Its gate
+is structural and named as such: `logNormalExtractable`, the shapes
+`toIRLogNormalParams` has an equation for.
+
 ### Engine applicability, and the floor on a binding no engine handles
 
 Each engine of a probabilistic application answers whether it applies with a

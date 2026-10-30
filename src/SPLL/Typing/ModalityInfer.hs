@@ -67,6 +67,7 @@ module SPLL.Typing.ModalityInfer
   , ReinferCtx
   , reinferCtx
   , reinferGiven
+  , reinferLawGiven
   ) where
 
 import qualified Data.Map.Strict as Map
@@ -1048,12 +1049,17 @@ argumentFree j = case j of
 -- | The law of a tuple accessor whose operand's law is a pair constructor
 -- ('JStructured'), at modality @m0@: a projected field of known value is
 -- that point, whatever the other field is (@fst (0.0 * z, Normal)@ is the
--- point 0.0), and a projected pair keeps its fields' laws. Any other field
--- is left to the generic rules ('Nothing').
+-- point 0.0), and a projected pair, leaf or affine form keeps the field's
+-- law: the marginal of a pair's field is that field's own law, which is
+-- what the compiler's Gaussian catch-all reads off @fst (Normal, Uniform)@
+-- or @snd (0, Normal + 1.0)@ (task gaussian-catch-all-dispatch-on-codegen-law).
+-- Any other field is left to the generic rules ('Nothing').
 projectedLaw :: String -> [Law] -> IMod -> Maybe Law
 projectedLaw fname laws m0 = field >>= \l -> case l of
   _ | Just v <- lawValue l -> Just (Law (IG gExact) (JDirac (Just v)))
   Law _ j@(JStructured _ _) -> Just (Law m0 j)
+  Law _ j@(JLeaf _ _) -> Just (Law m0 j)
+  Law _ j@(JAffine _) -> Just (Law m0 j)
   _ -> Nothing
   where
     field = case (fname, laws) of
@@ -1946,7 +1952,20 @@ reinferCtx fcData prog@(Program decls _ adtDecls _ _) =
 -- position is looked up. A chain name found in no declaration leaves the
 -- non-pinned free variables at the law their existing annotation projects.
 reinferGiven :: ReinferCtx -> [String] -> Expr -> Expr
-reinferGiven rc pins target = e'
+reinferGiven rc pins = snd . reinferUnder rc pins
+
+-- | The law of @target@ itself under the pins, as 'reinferGiven' computes it
+-- for the re-annotation: the certificate the node has at codegen, where an
+-- enclosing engine has recovered variables the 'LawTable', issued over the
+-- program as written, does not know are fixed
+-- ('IRCompiler.codegenLaw'; task gaussian-catch-all-dispatch-on-codegen-law).
+reinferLawGiven :: ReinferCtx -> [String] -> Expr -> Law
+reinferLawGiven rc pins = fst . reinferUnder rc pins
+
+-- | 'reinferGiven' and 'reinferLawGiven': the re-inferred law and the
+-- re-annotated expression, from one run of 'inferE'.
+reinferUnder :: ReinferCtx -> [String] -> Expr -> (Law, Expr)
+reinferUnder rc pins target = (l, e')
   where
     pinSet = Set.fromList pins
     pinMap = Map.fromList [ (n, bareLaw (IG gExact)) | n <- pins ]
@@ -1955,7 +1974,7 @@ reinferGiven rc pins target = e'
     (ctx, env0) = case located of
       (b, env) : _ -> (declCtx b, env)
       [] -> (declCtx target, Map.union (annotatedFreeLaws target) (rcSummaries rc))
-    (_, e', _) = inferE ctx (Map.union pinMap env0) target
+    (l, e', _) = inferE ctx (Map.union pinMap env0) target
     declCtx b = mkICtx (rcADTs rc) (rcFC rc) (cnOf b) (rcProg rc)
 
 -- | The free variables of an expression at the law their current annotation

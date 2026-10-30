@@ -84,12 +84,14 @@ import End2EndTesting (programRuntimeFields)
 --   value; thetaParameterRenamedAcrossCurriedCall,
 --   thetaParameterRenamedDrawFedRecursion, thetaArgumentNotCallerNamesake).
 --   Those left belong to open tickets, so the family stays log-only until
---   they resolve:
---   gaussian-catch-all-dispatch-on-codegen-law (normalThroughFunctionParam,
---   paramPairHelperFst), and an ANY-mask variant refused after an alias in
+--   they resolve: an ANY-mask variant refused after an alias in
 --   aliasedChainStepMarginalTail and drawnArgumentChainInNamedCallee
 --   (not yet ticketed; see promote-alias-intro-rewrite-family-to-hard-
---   failure); alias-chain-of-structured-draw-any-marginal-refused
+--   failure); gaussian-catch-all-dispatch-on-codegen-law closed
+--   normalThroughFunctionParam (the catch-all builds an affine-certified
+--   call with the affine algebra, which enters the callee's draw; corpus
+--   normalThroughFunctionParamAliased), and paramPairHelperFst's alias row
+--   answered already at 831c3d6; alias-chain-of-structured-draw-any-marginal-refused
 --   and alias-before-helper-built-tuple-tail-approx-type-error are closed;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
 -- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates. Its

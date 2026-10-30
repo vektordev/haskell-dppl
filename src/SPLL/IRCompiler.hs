@@ -50,7 +50,7 @@ import SPLL.AutoNeural hiding (planReadOf, planProjectedReadOf)
 import qualified SPLL.AutoNeural as AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
-import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf, lawValue, Engine(..), engineOrder, engineLabel)
+import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven, reinferLawGiven, LawTable, Law, bareLawOfPType, bindingLawEnv, lambdaParamLaw, AffineCert(..), affineOf, lawValue, Engine(..), engineOrder, engineLabel)
 import Control.Applicative ((<|>))
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
 import SPLL.Typing.AlgebraicDataTypes
@@ -883,9 +883,11 @@ compileNormalWith extract meta expr = do
   o <- runCompilerMonad (extract meta expr)
   return (closeExpr o (\(mu, sigma) -> IRConstruct TgTuple [mu, sigma]))
 
--- | True when the expression (with lambdas stripped) has its own toIRInference
--- handler and cannot be processed by toIRNormalParams.  Mirrors the
--- hasOwnInferenceHandler predicate used by toIRInference.
+-- | Whether a declaration (with its parameter lambdas stripped) gets a normal
+-- function ('normalE', 'generateComponentNormalFunction'): a body
+-- 'toIRNormal' reads a (mu, sigma) off, which a @draw@, a call, a
+-- conditional or a constructor is not. A call of such a declaration is a
+-- pure callee of the caller's inference ('normalParamsViaCall').
 isNormalExtractable :: Expr -> Bool
 isNormalExtractable (Expr _ (Lambda _ lambdaBody))            = isNormalExtractable lambdaBody
 isNormalExtractable (Expr _ (Apply  _ _))               = False
@@ -2565,25 +2567,34 @@ momentsOf meta e@(Expr ti nd)
 mentionsAffineVar :: CompilerMetadata -> Expr -> Bool
 mentionsAffineVar meta e = not (Set.disjoint (freeVarsExpr e) (affineVars meta))
 
--- | The affine form of an expression 'isAffineOver' accepts. Subterms reading
--- no marginalised variable ('affineVars') are leaves: a Deterministic one is a constant, and a
--- Gaussian one is compiled by the ordinary scalar extractor and enters as one
--- fresh latent keyed by its own chain name. Only the four rules of design
--- affine-gaussian-forms §3 look inside a node.
+-- | The affine form of a node whose law is an affine form ('gaussianLeaf'),
+-- or that 'isAffineOver' accepts: the builder of the affine certificate
+-- (design affine-gaussian-forms §3, law-carrying-modality M4). The
+-- certificate's rules are the ones here: a constant (Deterministic, reading
+-- no marginalised variable, 'isAffineConstant'); a sum, a product with a
+-- constant, a negation; a projected tuple field (the field's own form, as
+-- 'ModalityInfer.projectedLaw' certifies it); a variable marginalised as a
+-- form ('affineFormOfVar'); and a leaf. The certificate sees a Gaussian no
+-- rule looks into as one fresh latent ('ModalityInfer.affineOf'), and the
+-- builder realises each such leaf: a call and a lambda redex (a @draw@, a
+-- @let@) are entered as the bindings they are ('affineCallForm'), so a
+-- latent drawn inside a callee is keyed by the call site and a parameter
+-- bound to an argument's form reads that form; a @collapse@ is a fresh
+-- leaf whatever its operand reads; and a primitive, a neural read or any
+-- other Gaussian reading no marginalised variable is answered by the scalar
+-- extractor ('toIRNormalParams') and enters as one latent keyed by its own
+-- chain name. A shape outside these is refused: the certificate was issued
+-- over the program as written and cannot promise what the builder meets
+-- inside a callee entered at a call site.
 affineFormOf :: CompilerMetadata -> Expr -> CompilerMonad AffineForm
 affineFormOf meta e@(Expr ti nd)
-  | pType ti /= Deterministic || mentionsAffineVar meta e
-  , Just (pas, calleeBody) <- affineCall meta e = affineCallForm meta (chainName ti) pas calleeBody
-  | not (mentionsAffineVar meta e) =
-      if pType ti == Deterministic
-        then do c <- toIRGenerate meta e
-                return (AffineForm c Map.empty)
-        else do (mu, s) <- toIRNormalParams meta e
-                return (AffineForm mu (Map.singleton (chainName ti) s))
-  | InjF (Named n) [_] <- nd, isCollapse n = do
-      (mu, s) <- toIRNormalParams meta e
-      return (AffineForm mu (Map.singleton (chainName ti) s))
+  | isAffineConstant meta e = do
+      c <- toIRGenerate meta e
+      return (AffineForm c Map.empty)
+  | Just (pas, calleeBody) <- affineCall meta e = affineCallForm meta (chainName ti) pas calleeBody
+  | Apply (Expr _ (Lambda p b)) a <- nd = affineCallForm meta (chainName ti) [(p, a)] b
   | Var n <- nd, Just form <- affineFormOfVar meta n = return form
+  | InjF (Named n) [_] <- nd, isCollapse n = leaf
   | InjF (Named "plus") [a, b] <- nd = do
       fa <- affineFormOf meta a
       fb <- affineFormOf meta b
@@ -2594,9 +2605,14 @@ affineFormOf meta e@(Expr ti nd)
   | InjF (Named "neg") [a] <- nd = do
       fa <- affineFormOf meta a
       return (AffineForm (IRUnaryOp OpNeg (afConst fa)) (Map.map (IRUnaryOp OpNeg) (afCoeffs fa)))
-  -- Invariant, not a refusal (task static-refusals-become-absent-variants): 'isAffineOver' gates every call.
-  | otherwise = error $ "affineFormOf: not an affine Gaussian form (guarded by isAffineOver): " ++ show e
+  | InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])] <- nd = affineFormOf meta a
+  | InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])] <- nd = affineFormOf meta b
+  | not (mentionsAffineVar meta e), pType ti == PNormal = leaf
+  | otherwise = refuse (chainName ti) ("affineFormOf: not an affine Gaussian form: " ++ show e)
   where
+    leaf = do
+      (mu, s) <- toIRNormalParams meta e
+      return (AffineForm mu (Map.singleton (chainName ti) s))
     scaleBy c f = do
       cIR <- toIRGenerate meta c
       ff <- affineFormOf meta f
@@ -2608,12 +2624,17 @@ isAffineConstant :: CompilerMetadata -> Expr -> Bool
 isAffineConstant meta e = pType (getTypeInfo e) == Deterministic && not (mentionsAffineVar meta e)
 
 -- | @isAffineOver meta names e@: 'affineFormOf' can build a form for @e@ once
--- every name in @names@ is marginalised ('affineVars'). The static twin of that function;
--- keep the two in step.
+-- every name in @names@ is marginalised ('affineVars'): the affine engines'
+-- applicability check ('affineMarginalisable', 'jointAffineApplicable'),
+-- the static twin of that function. A subterm reading none of the names is
+-- a constant or a Gaussian the catch-all would answer by its law
+-- ('gaussianLeaf'), or a call entered with every argument constant. The
+-- twin is conservative where the builder is not: it does not enter a lambda
+-- redex, which the engines leave to the binding resolver.
 isAffineOver :: CompilerMetadata -> Set.Set String -> Expr -> Bool
 isAffineOver meta names e@(Expr ti nd)
   | Set.null (freeVarsExpr e `Set.intersection` names) =
-      pType ti == Deterministic || (pType ti == PNormal && (not (hasOwnInferenceHandler meta e) || affineCallOver Set.empty))
+      pType ti == Deterministic || (pType ti == PNormal && (isJust (gaussianLeaf meta e) || affineCallOver Set.empty))
   | otherwise = case nd of
       Var n -> n `Set.member` names
       Apply _ _ -> affineCallOver names
@@ -2623,6 +2644,8 @@ isAffineOver meta names e@(Expr ti nd)
       InjF (Named "mult") [a, b] -> (constant a && isAffineOver meta names b)
                                  || (constant b && isAffineOver meta names a)
       InjF (Named "neg") [a] -> isAffineOver meta names a
+      InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])] -> isAffineOver meta names a
+      InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])] -> isAffineOver meta names b
       _ -> False
   where
     constant c = pType (getTypeInfo c) == Deterministic && Set.null (freeVarsExpr c `Set.intersection` names)
@@ -2652,11 +2675,15 @@ isRecursiveFunction prog f = go Set.empty (callees f)
 
 -- | A saturated call of a non-recursive top-level function, as the affine
 -- algebra enters it: the callee's parameters paired with their arguments, and
--- its body. Recursion is declined: the body would meet the call again.
+-- its body. A declaration without parameters is the call with no arguments
+-- (@g = draw x = Normal in x + x@, read as @g@). Recursion is declined: the
+-- body would meet the call again. So is a local variable shadowing a
+-- declaration's name, which is no call of it.
 affineCall :: CompilerMetadata -> Expr -> Maybe ([(String, Expr)], Expr)
 affineCall meta e
-  | (Expr _ (Var f), args@(_:_)) <- flattenApplySpine e
+  | (Expr _ (Var f), args) <- flattenApplySpine e
   , Just decl <- lookup f (functions (compilingProgram meta))
+  , not (isLocal f)
   , let ps = lambdaParams decl
   , length ps == length args
   , nub ps == ps
@@ -2664,6 +2691,9 @@ affineCall meta e
   = Just (zip ps args, stripLambdas decl)
   | otherwise = Nothing
   where
+    isLocal f = case lookup f (typeEnv meta) of
+      Just (_, False) -> True
+      _ -> False
     lambdaParams (Expr _ (Lambda p b)) = p : lambdaParams b
     lambdaParams _ = []
     stripLambdas (Expr _ (Lambda _ b)) = stripLambdas b
@@ -2999,67 +3029,84 @@ isTArrowType :: RType -> Bool
 isTArrowType (TArrow _ _) = True
 isTArrowType _            = False
 
---in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
--- | Expressions that have their own toIRInference handlers and must not be
--- intercepted by the PNormal/PLogNormal catch-alls below.
-hasOwnInferenceHandler :: CompilerMetadata -> Expr -> Bool
--- An arrow-typed expression is a function *value*, not a distribution: what
--- probability mode wants from it is the callee's own probability function (an
--- IRLambda), which the Var and Lambda handlers produce. toIRNormalParams has no
--- Lambda case at all, and its function-name lookup resolves a Var to that
--- unapplied Lambda, so letting the catch-all in here crashed every program that
--- factors a Normal-derived computation into a helper function
--- (task normal-shortcut-crashes-through-function-call).
-hasOwnInferenceHandler _    e | isTArrowType (rType (getTypeInfo e)) = True
-hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
--- A Var standing for a *local* binding -- a lambda parameter, or the variable a
--- `let` binds -- has no (mu, sigma) to read off: the Normal that earned it its
--- PNormal label was drawn at the binding site, not here, and toIRNormalParams'
--- Var equation only resolves top-level declarations. Its own equation compiles
--- it as the leaf it is (an indicator against the sample, with the value in
--- scope). Reached by a nested let whose outer variable an enclosing body-factor
--- fold has already recovered: in `let x = Normal in let y = x + 1.0 in y`, the
--- fold retypes `x + 1.0` Deterministic but leaves `y` labelled PNormal, and the
--- catch-all took the inner `Var y` (task modality-arrow-apply-crashes, bug A).
--- `Just (_, False)` is exactly the local-variable case the Var equation itself
--- dispatches on: a top-level function carries True, and Normal/Uniform are not
--- in the environment at all. (A local marginalised as an affine form is read
--- by the Gaussian catch-all through its certificate: 'readsMarginalised'.)
--- Likewise a top-level declaration whose body has no (mu, sigma) to read off
--- -- a @draw@, a call, a conditional ('isNormalExtractable') -- is answered by
--- its own probability function, which the Var equation calls: a helper with
--- no parameters, @h = draw x = Normal in x + x@, is a binding like any other
--- (task binding-resolver-one-application-rule).
-hasOwnInferenceHandler meta (Expr _ (Var n))
-  | Just (_, top) <- lookup n (typeEnv meta) =
-      not top || maybe False (not . isNormalExtractable) (lookup n (functions (compilingProgram meta)))
--- A conditional is a *mixture*, and a mixture of two Gaussians is not a
--- Gaussian -- there is no (mu, sigma) to extract even when both arms have one,
--- and toIRNormalParams has no equation for it at all, so the catch-all could
--- only ever reach its fallthrough error. The IfThenElse equation measures the
--- arms separately and mixes them, which is right whether the condition is
--- deterministic (one arm selected) or probabilistic (a genuine mixture).
-hasOwnInferenceHandler _    (Expr _ (IfThenElse _ _ _))     = True
--- Field constructors (Cons/TCons/user-ADT constructors) carry the PType of their
--- fields, which can be PNormal even though the container itself cannot be
--- inferred by toIRNormal. They have their own construction handler, so the
--- PNormal/PLogNormal catch-alls must not intercept them.
-hasOwnInferenceHandler meta (Expr _ (InjF (Named name) _)) = isFieldConstructor (adtDecls meta) name
-hasOwnInferenceHandler _    _                        = False
+-- | The Gaussian a @PNormal@ node's codegen law certifies it as, which the
+-- catch-all answers from its (mu, sigma): a leaf (a primitive, a neural
+-- read, a @collapse@), read by the scalar extractor, or an affine form,
+-- built by the affine algebra ('gaussianParams'). The catch-all takes a
+-- node iff this is 'Just' (design law-carrying-modality M6/M7; task
+-- gaussian-catch-all-dispatch-on-codegen-law). The law is the node's
+-- certificate re-inferred under the variables enclosing engines have
+-- recovered ('codegenLaw'), so a node compiled after a recovery is gated on
+-- what it is then, not on what the program as written said.
+--
+-- Three node kinds are never the catch-all's, whatever their law. A
+-- function value is answered by the callee's own probability function (the
+-- @Var@ and @Lambda@ equations). An application is the binding resolver's
+-- whatever its head (design law-carrying-modality §C): the engines
+-- dispatch it in their measured order ('ModalityInfer.engineOrder'), which
+-- a catch-all reading the application's own affine law would run the
+-- Gaussian collapse ahead of. And a variable's binder decided its
+-- treatment: one marginalised as an affine form ('BoundVar.bvForm') has no
+-- runtime value and is read through that form; any other local has its
+-- value in scope, the @Var@ equation's leaf; and a declaration's name is a
+-- call of its probability function.
+data GaussianLaw = GaussianLeaf | GaussianAffine
 
--- | A PNormal node the Gaussian catch-all answers from its (mu, sigma): one
--- reading a variable marginalised by its affine certificate, whose form
--- 'toIRNormalParams' collapses, or any node without a handler of its own.
-gaussianLeaf :: CompilerMetadata -> Expr -> Bool
-gaussianLeaf meta e = readsMarginalised meta e || not (hasOwnInferenceHandler meta e)
+gaussianLeaf :: CompilerMetadata -> Expr -> Maybe GaussianLaw
+gaussianLeaf meta e@(Expr ti nd)
+  | isTArrowType (rType ti) = Nothing
+  | otherwise = case nd of
+      Var n | Just bv <- Map.lookup n (lawEnv meta) -> GaussianAffine <$ bvForm bv
+            | Just _ <- lookup n (typeEnv meta) -> Nothing
+      Apply _ _ -> Nothing
+      _ -> case ModalityInfer.lawJust (codegenLaw meta e) of
+        ModalityInfer.JLeaf _ _ -> Just GaussianLeaf
+        ModalityInfer.JAffine _ -> Just GaussianAffine
+        _ -> Nothing
 
--- | Does this scalar expression read a binding marginalised as an affine form
--- ('affineVars'), with an affine form over it ('isAffineOver')?
-readsMarginalised :: CompilerMetadata -> Expr -> Bool
-readsMarginalised meta e =
-  not (isTArrowType (rType (getTypeInfo e)))
-    && mentionsAffineVar meta e
-    && isAffineOver meta (affineVars meta) e
+-- | The (mu, sigma) of a node the catch-all takes ('gaussianLeaf'): a leaf
+-- by the scalar extractor, an affine form collapsed from the form the
+-- affine algebra builds ('affineFormOf'), which follows calls, redexes and
+-- the binder environment the scalar extractor does not see through.
+gaussianParams :: CompilerMetadata -> GaussianLaw -> Expr -> CompilerMonad (IRExpr, IRExpr)
+gaussianParams meta GaussianLeaf e = toIRNormalParams meta e
+gaussianParams meta GaussianAffine e = collapseAffine <$> affineFormOf meta e
+
+-- | A node's certificate as it holds at codegen: its 'nodeLaw', re-inferred
+-- under the variables enclosing engines have recovered ('recoveredVars')
+-- where there are any. The 'LawTable' certifies the program as written;
+-- after a witness fold, an enumeration loop or a residue factor has fixed a
+-- variable, a node reading it, or reading a binding computed from it, has
+-- a different law (@draw y = x * 2.0 in y + Normal@ with @x@ recovered is
+-- affine over the fresh Normal alone). This is the same inference
+-- 'reinferRecovered' re-annotates the body with, asked for the node's law;
+-- on demand, with no threaded table (task
+-- gaussian-catch-all-dispatch-on-codegen-law).
+codegenLaw :: CompilerMetadata -> Expr -> Law
+codegenLaw meta e = case recoveredVars meta of
+  [] -> nodeLaw meta e
+  recovered -> reinferLawGiven (reinferContext meta) recovered e
+
+-- | A @PLogNormal@ node the lognormal catch-all answers from its
+-- (mu_log, sigma): the shapes 'toIRLogNormalParams' has an equation for,
+-- read off the syntax. No law justification describes a lognormal yet
+-- (task lognormal-log-affine-justification), so unlike the Gaussian
+-- catch-all ('gaussianLeaf') this is a structural predicate, the static
+-- twin of that extractor; keep the two in step. The node kinds the
+-- Gaussian catch-all never takes are not taken here either: an application
+-- is the binding resolver's, a local variable's value is in scope, a
+-- declaration's name is a call of its probability function, and a
+-- conditional is a mixture its own equation measures.
+logNormalExtractable :: CompilerMetadata -> Expr -> Bool
+logNormalExtractable meta (Expr ti nd)
+  | isTArrowType (rType ti) = False
+  | otherwise = case nd of
+      InjF (Named "exp") [a] -> pType (getTypeInfo a) == PNormal
+      InjF (Named "mult") [a, b] -> any ((== PLogNormal) . pType . getTypeInfo) [a, b]
+      InjF (Named n) [a] | n `elem` ["sqrt", "sq", "recip"] -> pType (getTypeInfo a) == PLogNormal
+      InjF (Named n) [Expr _ (InjF (Named "TCons") _)] | n `elem` ["fst", "snd"] -> True
+      InjF (Named n) [Expr _ (Var f)] | n `elem` ["fst", "snd"] -> isJust (lookup f (functions (compilingProgram meta)))
+      _ -> False
 
 -- | A Gaussian (or lognormal) leaf whose scale can be zero at run time is a
 -- point mass there, not a density: @z * Normal@ with @z = 0@ is the Dirac at
@@ -3193,15 +3240,19 @@ toIRInference meta cumulative e@(Expr TypeInfo {rType=rt} _) sample
 -- of the nested joint enumeration the stack would otherwise get.
 toIRInference meta False e sample
   | Just net <- constraintNet meta e = compileConstraintNet meta net sample
-toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, gaussianLeaf meta e = do
-  (mu, sigma0) <- toIRNormalParams meta e
+-- The Gaussian catch-all: a PNormal node whose codegen law is a leaf or an
+-- affine form ('gaussianLeaf') is one Gaussian density, from the (mu, sigma)
+-- its law's builder gives ('gaussianParams').
+toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, Just g <- gaussianLeaf meta e = do
+  (mu, sigma0) <- gaussianParams meta g e
   degenerateScaleGuard meta False TFloat mu sigma0 sample $ \sigma ->
     density (scaledNormalDensity (semiringOf meta) (IROp OpDiv (IROp OpSub sample mu) sigma) [sigma]) sample
-toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, gaussianLeaf meta e = do
-  (mu, sigma0) <- toIRNormalParams meta e
+toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, Just g <- gaussianLeaf meta e = do
+  (mu, sigma0) <- gaussianParams meta g e
   degenerateScaleGuard meta True TFloat mu sigma0 sample $ \sigma ->
     mass (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma))
-toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler meta e) = do
+-- The lognormal catch-all, gated structurally ('logNormalExtractable').
+toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, logNormalExtractable meta e = do
   (mu, sigma0) <- toIRLogNormalParams meta e
   let sr = semiringOf meta
   let positive = IROp OpGreaterThan sample const0
@@ -3215,7 +3266,7 @@ toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (ha
   -- merely unlikely. Support boundaries are the one way a *density* leaf can be
   -- a structural zero, and they are known statically here.
   return (impossibleWhen (notIR positive) (onProb negativeGuard r))
-toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler meta e) = do
+toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, logNormalExtractable meta e = do
   (mu, sigma0) <- toIRLogNormalParams meta e
   let sr = semiringOf meta
   let positive = IROp OpGreaterThan sample const0

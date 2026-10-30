@@ -1578,8 +1578,8 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
             noTorchProperty "BatchedPython value differential" ]
       Just (py, torch) ->
         [ testProperty "batched-vs-expected" (once (certifiedNote censuses (length eligible) valueRouted
-                                                     (cachedTorch manifest torch "batched-vs-expected" valueRouted (runBatchedPython py))))
-        , testProperty "gradients-nan-free" (once (cachedTorch manifest torch "gradients-nan-free" eligible (runBatchedGradients py)))
+                                                     (cachedTorch manifest torch "batched-vs-expected" valueRouted (const (runBatchedPython py)))))
+        , testProperty "gradients-nan-free" (once (cachedTorch manifest torch "gradients-nan-free" eligible (const (runBatchedGradients py))))
         , testProperty "generate-density-matches-expected"
             (once (cachedTorch manifest torch "generate-density-matches-expected" eligible (runBatchedGenerate py))) ]
 
@@ -1587,12 +1587,19 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
 -- is a batch: only the programs whose key changed are run, and an
 -- all-unchanged differential starts no python. An empty selection runs
 -- as it is, so the differential's own "nothing eligible" failure stands.
+-- The run is told whether it has the whole selection or an impact subset: a
+-- sanity check that holds of the whole does not hold of a subset. The
+-- generate check fails when no program was checked, every one being
+-- skip-shaped (a parameterised @main@, a stub generate); a subset of three
+-- such programs is a legitimate rerun that checks nothing (task
+-- gaussian-catch-all-dispatch-on-codegen-law).
 cachedTorch :: Manifest -> String -> String -> [(String, String, [BatchGroup], [NetMock])]
-            -> ([(String, String, [BatchGroup], [NetMock])] -> Property) -> Property
+            -> (Bool -> [(String, String, [BatchGroup], [NetMock])] -> Property) -> Property
 cachedTorch manifest torch name entries run
-  | null entries = run entries
+  | null entries = run True entries
   | otherwise = cachedBatch manifest ("BatchedPython." ++ name)
-                  [ (n, batchedKey manifest torch name x, x) | x@(n, _, _, _) <- entries ] run
+                  [ (n, batchedKey manifest torch name x, x) | x@(n, _, _, _) <- entries ]
+                  (\sel -> run (length sel == length entries) sel)
 
 -- | The topK-threshold half of the M5 differential ('topk-is-per-element',
 -- 'dense-inherits-topk'): each recompiles every batched-eligible program at
@@ -1644,8 +1651,8 @@ slowBatchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
           [ testProperty "torch-python-found" $ once $ ioProperty $
               noTorchProperty "BatchedPython (slow) dense and topK differentials" ]
         Just (py, torch) ->
-          [ testProperty "batched-vs-expected" (once (cachedTorch manifest torch "batched-vs-expected" slowValueRouted (runBatchedPython py)))
-          , testProperty "dense-matches-expected" (once (cachedTorch manifest torch "dense-matches-expected" denseDeclared (runBatchedDense False py)))
+          [ testProperty "batched-vs-expected" (once (cachedTorch manifest torch "batched-vs-expected" slowValueRouted (const (runBatchedPython py))))
+          , testProperty "dense-matches-expected" (once (cachedTorch manifest torch "dense-matches-expected" denseDeclared (const (runBatchedDense False py))))
           , testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
           , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
@@ -3782,9 +3789,9 @@ gradientDriver probes = unlines $
 -- skipped dynamically in the driver (arity-checked via
 -- @inspect.signature@), since Haskell-side arity bookkeeping would only
 -- duplicate what the emitted signature already says.
-runBatchedGenerate :: FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
-runBatchedGenerate _ [] = counterexample "BatchedPython generate: no eligible corpus programs found" False
-runBatchedGenerate py eligible
+runBatchedGenerate :: FilePath -> Bool -> [(String, String, [BatchGroup], [NetMock])] -> Property
+runBatchedGenerate _ _ [] = counterexample "BatchedPython generate: no eligible corpus programs found" False
+runBatchedGenerate py whole eligible
   | null nonNeuralProbes && null neuralProbes = ioProperty $ do
       hPutStrLn stderr "BatchedPython generate: no eligible programs with a compiled generate found (skipped)."
       return True
@@ -3793,7 +3800,7 @@ runBatchedGenerate py eligible
                         ++ show (length neuralProbes) ++ " neural programs, via " ++ py)
       cwd <- getCurrentDirectory
       let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n"
-                 ++ generateDriver nonNeuralProbes neuralProbes
+                 ++ generateDriver whole nonNeuralProbes neuralProbes
       (code, out, err) <- withSystemTempFile "batched_generate.py" $ \tmpPath tmpHandle -> do
         hPutStr tmpHandle script
         hClose tmpHandle
@@ -3841,10 +3848,10 @@ isScalarSample v = isNum v || isBoolV v
 -- fresh per-point batch (the point's own read-logits symbol, repeated) and test
 -- that point alone. Single-shot rather than retried -- the batch size is
 -- fixed large enough, and the seed is pinned, to keep this non-flaky.
-generateDriver :: [(String, String, [(String, Double, Int)])]
+generateDriver :: Bool -> [(String, String, [(String, Double, Int)])]
                -> [(String, String, [NetMock], [String], [(String, Double, Int, Int)])]
                -> String
-generateDriver nonNeuralProbes neuralProbes = unlines $
+generateDriver whole nonNeuralProbes neuralProbes = unlines $
   [ "import torch, sys, traceback, inspect"
   , "from pythonLibBatched import T"
   , "torch.manual_seed(1234)"
@@ -3853,8 +3860,12 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
   , "failures = []"
   , "checked = 0"
   , "skipped = 0"
+  -- Whether this is the whole selection ('cachedTorch'): only then is
+  -- "nothing checked" a broken harness rather than an impact subset of
+  -- skip-shaped programs.
+  , "WHOLE = " ++ (if whole then "True" else "False")
   ] ++ concatMap block nonNeuralProbes ++ concatMap neuralBlock neuralProbes ++
-  [ "if checked == 0:"
+  [ "if checked == 0 and WHOLE:"
   , "    failures.append('no program actually had its generate density checked (all skipped)')"
   , "if failures:"
   , "    print('BATCHED GENERATE FAILURES (' + str(len(failures)) + '):')"
