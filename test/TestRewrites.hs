@@ -102,7 +102,17 @@ import End2EndTesting (programRuntimeFields)
 --   classified in that task: mostly other milestones' classes (Gaussian
 --   rules reading syntax, M7; named callees; point inversion through a
 --   deterministic if behind a binding; recursion; ANY-mask runtime refusals;
---   interpreter type errors), so both stay log-only.
+--   interpreter type errors), so both stay log-only. Re-measured at dd88cb9
+--   with both promoted (flip kept as tag
+--   proto/promote-draw-intro-and-linear-inline-rewrite-families-to-hard-failure-flip-1):
+--   83 of 798 /Rewrite/ tests red, owned by draw-intro-of-gaussian-read-by-syntax-rules-refuses,
+--   draw-intro-of-constant-or-gaussian-binding-no-engine-applies,
+--   draw-intro-of-enumerable-in-enumerated-branch-generate-fallback,
+--   draw-intro-around-recursive-callee-argument-floored,
+--   draw-intro-wildcard-slot-interpreter-type-errors,
+--   admitted-binding-refused-by-engine-construction, arrow-lifted-mixture-for-function-values,
+--   drawn-isright-test-reads-fromright-of-left-at-o0, collapse-moments-through-calls
+--   and alias-before-any-marginal-draws-randomness-refused.
 refusalIsHard :: Family -> Bool
 refusalIsHard AliasIntro = False
 refusalIsHard HelperExtract = False
