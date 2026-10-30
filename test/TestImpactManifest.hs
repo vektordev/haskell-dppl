@@ -99,9 +99,13 @@ batchedCensusRouting = do
     (partialSplitLabel `elem` batchedUncertifiedConstructs indexed)
   assertBool "a module without one carries no partial-arm split label" (partialSplitLabel `notElem` plain)
   -- A prob path calling a recursive deterministic helper's evaluator, and
-  -- one reading a helper's Gaussian parameters: the callee's method body is
-  -- emitted code the fuzz arms (prob/integ bodies only) never ran.
-  forM_ ["recursiveHelperOnlyWhereGuarded", "normalThroughFunctionParam"] $ \n -> do
+  -- one reading a helper's lognormal parameters: the callee's method body is
+  -- emitted code the fuzz arms (prob/integ bodies only) never ran. (A
+  -- helper's Gaussian parameters are no longer called: the Gaussian
+  -- catch-all builds an affine-certified call from the callee's body, task
+  -- gaussian-catch-all-dispatch-on-codegen-law. The lognormal catch-all is
+  -- structural and still calls the helper's normal function.)
+  forM_ ["recursiveHelperOnlyWhereGuarded", "logNormalThroughFunction"] $ \n -> do
     c <- census <$> load n
     assertBool (n ++ " calls a pure callee, so it is not certified: " ++ show c)
       (pureCalleeLabel `elem` batchedUncertifiedConstructs c)

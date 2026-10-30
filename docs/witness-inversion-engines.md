@@ -495,12 +495,18 @@ is not a reason to floor.
 **The compiler.** The variable's entry in `CompilerMetadata.lawEnv` holds the IR
 of its form (`BoundVar.bvForm`, set by `marginaliseAs`), `c + sum a_i * eps_i` over independent standard normals, keyed the same
 way: by the chain name of the env-free Gaussian leaf that introduced each
-latent. `toIRNormalParams` collapses a form (`mu = c`, `sigma` the norm of the
-coefficient vector) **only** for expressions reading such a variable (`affineVars`),
-so everything else emits exactly what it did before. The Gaussian catch-all
-takes such an expression (`readsMarginalised`) whether or not it has a handler
-of its own. The rules are `plus`, `mult` by a deterministic operand, `neg` and
-the env lookup; `-` is `plus`/`neg` by the time IRCompiler sees it.
+latent. `affineFormOf` is the certificate's builder: a node whose codegen law
+is affine is built by it and collapsed (`mu = c`, `sigma` the norm of the
+coefficient vector) by the Gaussian catch-all (`modality-and-admission.md`,
+"The Gaussian catch-all reads the codegen law"). The rules are `plus`, `mult`
+by a deterministic operand, `neg`, `fst`/`snd` of a literal pair and the env
+lookup; `-` is `plus`/`neg` by the time IRCompiler sees it. A Gaussian the
+certificate sees as one fresh latent (a call, a `draw`, a neural read) the
+builder realises: a saturated call of a non-recursive declaration, with or
+without arguments, and a lambda redex are entered as bindings
+(`affineCallForm`), a `collapse` is a fresh leaf whatever it reads, and any
+other leaf reading no marginalised variable is the scalar extractor's
+(`toIRNormalParams`).
 
 `affineMarginalisable` decides applicability. It reads the argument's
 certificate (`affineOf` over its `lawTable` law), and keeps `isAffineOver` as
