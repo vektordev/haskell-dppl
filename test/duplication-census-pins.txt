@@ -132,6 +132,7 @@ nestedTupleAccessorCompilesFast main.integ=4 main.prob=4
 nestedTupleAnyUnderHeadOfIf main.prob=4
 nestedTupleAnyUnderSndHead main.prob=5
 neuralTrajectoryScalar main.prob=12 step.prob=18
+noisyIfChainOverDraw6 main.integ=12 main.prob=12
 noisyIfFoldOfReads toF.integ=3 toF.prob=3
 noisyProductOfReads toF.integ=3 toF.prob=3
 noisyReadPlusFreshCoin toF.integ=3 toF.prob=3
@@ -225,6 +226,8 @@ symbolSelectedByHelper nth.integ=3
 tensorDiffusionTrajectory main.prob=12 step.prob=13
 topKComplementAnyExcept main.prob=3
 topKComplementCdfFlip main.integ=4 main.prob=4
+topKComplementCondition main.integ=4 main.prob=4
+topKPrunesInsideCondition main.integ=4 main.prob=4
 trajectoryTailBoundAsTuple main.prob=5 main__m10.prob=5
 tupleCtorTestOfSharedDraw main__m01.prob=9
 tupleDiscreteDistrib main.integ=5 main.prob=5
