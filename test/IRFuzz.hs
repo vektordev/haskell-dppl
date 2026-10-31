@@ -1527,6 +1527,21 @@ lcNestedSameName x =
                      (lcTotal (IRBuiltin BMap [IRLambda "m" (IRVar "m"), IRLetIn "l2" x (lcTensor [IRVar "l2", lcLit 1])])))
                  , lcLetTensor "l" [IRVar "l", lcLit 2] ]
 
+-- | Batched probability bodies that themselves map a list ('BMapList') and
+-- zip two tensors with @*@ ('BZip' 'OpMult'), at points the interpreter
+-- answers (task batched-fuzz-arms-never-compare-list-map-or-zip-product).
+-- The generator's own draws reach both only in helper bodies or at points the
+-- interpreter does not answer, so the batched arm's census adds these:
+-- 'irGeneratorBatchedConstructs' counts them and a test compares them.
+batchedBodyCases :: [IRCase]
+batchedBodyCases =
+  [ batchedRepro (IRDestruct AcHead (IRBuiltin BMapList
+      [ IRLambda "m" (IROp OpMult (IRVar "m") (IRConst (VFloat 0.5)))
+      , IRConstruct TgCons [IRVar "a0", IRConst (VList EmptyList)] ])) (VFloat 0.25)
+  , batchedRepro (lcTotal (IRBuiltin (BZip OpMult)
+      [ lcTensor [IRVar "a0", lcLit 0.5], lcTensor [lcLit 0.125, IRVar "a0"] ])) (VFloat 0.25)
+  ]
+
 -- | A one-query probability case for a batched pin: @main a0@ answers the
 -- given probability, dimension 0, possible.
 batchedRepro :: IRExpr -> IRValue -> IRCase
@@ -2420,7 +2435,7 @@ irGeneratorConstructs = sort (nub (concatMap checkedIRConstructs fixedSample))
 -- @Slow.IRGeneratorCoverage@. Pure Haskell and the interpreter; no torch.
 irGeneratorBatchedConstructs :: IO [String]
 irGeneratorBatchedConstructs = do
-  prepared <- mapM prepareBatchedIRCase fixedSample
+  prepared <- mapM prepareBatchedIRCase (fixedSample ++ batchedBodyCases)
   return (sort (nub [ l | Right bc <- prepared, l <- irEnvConstructs inferenceBodies (bicEnv bc) ]))
 
 -- | Constructs of 'irConstructs'' inventory, or shapes of them, with no
@@ -2621,6 +2636,17 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
         Nothing -> noTorch "IR fuzz generator batched let in a comprehension iterable" >>= maybe (return ()) assertFailure
         Just py -> do
           bcs <- mapM prepareBatchedIRCase letInComprehensionIterableBatchedCases
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  , testCase "batched: a body mapping a list and zipping a product loads and agrees" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched list map and zipped product" >>= maybe (return ()) assertFailure
+        Just py -> do
+          bcs <- mapM prepareBatchedIRCase batchedBodyCases
           case sequence bcs of
             Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
             Right bs -> do
