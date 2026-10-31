@@ -177,6 +177,14 @@ data CompilerMetadata = CompilerMetadata {
   -- be a density needs its run-time guard only when some enclosing sum
   -- would report it as a mass.
   dimAwareEnum :: Bool,
+  -- | Whether this compile is a materialized-marginal leaf cell
+  -- ('SPLL.IRCompiler.Materialize.pointQueryTable'). Inside one,
+  -- 'SPLL.IRCompiler.Enumerate.nestedDrawTables' is off, as it is under
+  -- --batched: the cell's size decides whether the table is built at all
+  -- ('maxTabulatedLeafNodes'), and that decision must not depend on the
+  -- backend, or the backends answer through different engines and prune
+  -- differently under topK (task batched-topk-noisy-if-fold-of-reads-disagrees).
+  inTabulatedLeaf :: Bool,
   -- | The translators' recursive entry points ('Recur'), so an engine
   -- module calls back into them without importing the module that
   -- defines them. Always 'SPLL.IRCompiler.Inference.knot'.

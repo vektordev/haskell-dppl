@@ -443,7 +443,9 @@ pointQueryTable meta e dom@(v0 : vs) = do
             return (Just (zip dom cells))
           else return Nothing
   where
-    inferAt v = toIRInference meta False e (IRConst (valueToIR v))
+    -- 'inTabulatedLeaf': no nested draw tables in a cell, on any backend
+    -- (see 'SPLL.IRCompiler.Enumerate.nestedDrawTables').
+    inferAt v = toIRInference meta{inTabulatedLeaf = True} False e (IRConst (valueToIR v))
     compiledSize count o = count (unP (rProb (openValue o))) + openBlockSize count o
     foldedSize o = irLogicNodeCount (postProcess (optimizerConfig (compilerConfig meta)) (closeExpr o (unP . rProb)))
     bindCell p = do
