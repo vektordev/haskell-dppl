@@ -39,6 +39,7 @@ module SPLL.IRCompiler.Monad (
   materializeAnchors,
   nodeChainNames,
   compareValueExpr,
+  listSpine,
   symbolCdfMessage,
   equalityGuard,
   equalityGuardBody,
@@ -719,11 +720,21 @@ compareValueExpr sr (TEither lr rr) v sample =
     (IRIf (IRDestruct AcIsLeft sample) (compareValueExpr sr lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (srZero sr))
     (IRIf (IRDestruct AcIsRight sample) (compareValueExpr sr rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)) (srZero sr))
 compareValueExpr sr (TVarR _) v sample = anyBoundsNothing sr sample (IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr))
--- A deterministic list contributes an equality indicator: it is the semiring
--- one exactly when the sample matches (in particular the empty-list base of a
--- Cons chain yields the semiring one, the multiplicative identity, so a list
--- CDF reduces to the product of its element CDFs).
-compareValueExpr sr (ListOf _) v sample = maskSR sr (IROp OpEq sample v)
+-- A list is ordered componentwise, as the CDF of a random Cons chain is the
+-- product of its element CDFs ('toIRInference''s field-constructor case): a
+-- list is below the sample when the two have the same length and every
+-- element is below the sample's. A deterministic list whose spine is static
+-- ('listSpine': a literal, a Cons chain) is compared element by element, so a
+-- wildcard tail the sample carries bounds nothing -- @head@'s inverse asks
+-- @P(head xs <= x)@ as @xs <= x : ANY@, which the equality indicator answered
+-- as @head xs == x@ (task head-cdf-uses-equality). The empty list, and a list
+-- whose spine is only known at run time, keep the equality indicator.
+compareValueExpr sr rt@(ListOf et) v sample = case listSpine v of
+  Just (h, t) -> anyBoundsNothing sr sample
+    (IRIf (IROp OpEq sample (IRConst (VList EmptyList))) (srZero sr)
+      (srTimes sr (compareValueExpr sr et h (IRDestruct AcHead sample))
+                  (compareValueExpr sr rt t (IRDestruct AcTail sample))))
+  Nothing -> anyBoundsNothing sr sample (maskSR sr (IROp OpEq sample v))
 -- A literal @[]@ can keep its own 'NullList' annotation through typing:
 -- 'SPLL.Typing.RInfer.unifies' accepts @ListOf _ ~ NullList@ without binding
 -- anything, so whether the literal's type variable ends up 'ListOf' or
@@ -760,6 +771,17 @@ compareValueExpr sr (TTensor _ _) _ sample = anyBoundsNothing sr sample (IRError
 
 -- Invariant, not a refusal (task static-refusals-become-absent-variants): a CDF comparison is only built for first-order result types.
 compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
+
+-- | The head and tail of a deterministic non-empty list whose spine is
+-- static: a list literal, or a Cons chain, possibly under the lets a
+-- generated list literal binds its elements in (each is pushed into both
+-- halves; the value is deterministic, so evaluating a binding twice changes
+-- nothing). Nothing for the empty list and for a list only known at run time.
+listSpine :: IRExpr -> Maybe (IRExpr, IRExpr)
+listSpine (IRConst (VList (ListCont x rest))) = Just (IRConst x, IRConst (VList rest))
+listSpine (IRConstruct TgCons [h, t]) = Just (h, t)
+listSpine (IRLetIn n e b) = (\(h, t) -> (IRLetIn n e h, IRLetIn n e t)) <$> listSpine b
+listSpine _ = Nothing
 
 -- | The runtime diagnostic for a cdf() query that reaches a function-valued component.
 functionCdfMessage :: String

@@ -90,6 +90,8 @@ fuzzLetWitnessSetValuedFst main.prob=3
 gaussianTrajectory4 main__m1101.prob=3 main__m1110.prob=3
 gaussianTrajectory8 main.prob=20
 guardSelectOverTupleResult main.integ=5 main.prob=5
+headCdfComponentwise main.integ=4 main.prob=8
+headCdfComponentwiseMixture main.integ=4 main.prob=8
 headOfArmDependentListLength main.integ=3 main.prob=3
 headTail main.integ=8 main.prob=8
 helperParamNonzeroTimesUniform h.integ=3 h.prob=3

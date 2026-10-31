@@ -398,6 +398,11 @@ planUpToGuard rt val s = case rt of
     IRIf (IRDestruct AcIsLeft val)
       (IRIf (IRDestruct AcIsLeft s) (planUpToGuard lr (IRDestruct AcFromLeft val) (IRDestruct AcFromLeft s)) (IRConst (VBool False)))
       (IRIf (IRDestruct AcIsLeft s) (IRConst (VBool False)) (planUpToGuard rr (IRDestruct AcFromRight val) (IRDestruct AcFromRight s)))
+  -- componentwise, as 'compareValueExpr' orders a list
+  ListOf et | Just (h, t) <- listSpine val ->
+    IRIf (IRUnaryOp OpIsAny s) constTrueIR
+      (IRIf (IROp OpEq s (IRConst (VList EmptyList))) (IRConst (VBool False))
+        (IROp OpAnd (planUpToGuard et h (IRDestruct AcHead s)) (planUpToGuard rt t (IRDestruct AcTail s))))
   ListOf _    -> equalityGuardStatic rt s val
   NullList    -> equalityGuardStatic rt s val
   TADT n      -> IRError (adtCdfMessage n)
