@@ -422,6 +422,11 @@ def categorical_index(u, out, start, n):
   # integer index k of the smallest cumulative weight of out[..., start:start+n]
   # exceeding u times the row's total, clamped to n - 1. One cumsum over the
   # slice, instead of the n-arm torch.where cascade the if-chain lowered to.
+  if isinstance(out, (list, tuple, InferenceList)):
+    # Weights given as a list (a BTensor's list of [B] tensors and floats, or
+    # a cons list) stack into the [B, N] tensor (task
+    # batched-categorical-index-over-batched-weights-fails).
+    out = torch.stack(torch.broadcast_tensors(*[astensor(w) for w in out]), -1)
   seg = out[..., start:start + n]
   c = seg.cumsum(-1)
   target = astensor(u) * c[..., -1]
@@ -699,6 +704,11 @@ class InferenceList:
       curr = curr.next
 
   def __getitem__(self, index):
+    # The emitted constant-slot read is `xs[..., k]` (a logit tensor's last
+    # axis); on a cons list the leading Ellipsis is a no-op and k is the
+    # list index (task batched-blistindex-reads-a-cons-list-as-a-tensor).
+    if isinstance(index, tuple) and len(index) == 2 and index[0] is Ellipsis:
+      index = index[1]
     if isinstance(index, slice):
       # Tail lists only, as in pythonLib: sample[1:] is the tail.
       if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):

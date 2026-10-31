@@ -1689,12 +1689,6 @@ knownDisagreements =
   -- M4, the batched arm (PResult bodies through the select pass and the
   -- batched backend).
   --
-  -- The batched backend lowers a list index as a tensor slot read
-  -- (@xs[..., k]@), which a cons list does not take.
-  , KnownFamily "batched-blistindex-reads-a-cons-list-as-a-tensor" ["batched"]
-      (ByAnswer (\c _ a -> raisedWith "not supported between instances of 'tuple' and 'int'" a
-                         && not (null [ () | IRBuiltin BListIndex _ <- caseUniverse c ])))
-      (batchedRepro (IRBuiltin BListIndex [IRConstruct TgCons [IRConst (VFloat 0.5), IRConst (VList EmptyList)], IRConst (VInt 0)]) (VFloat 1))
   -- The batched @isclose@ scales its tolerance by the operands' magnitude, so
   -- an infinity is close to every number.
   , KnownFamily "batched-isclose-holds-at-an-infinity" ["batched"]
@@ -1756,18 +1750,6 @@ knownDisagreements =
                   (Interpreted v, Sampled toks) -> either (const False) (const True) (valueAgreesWith probAgrees v toks)
                   _ -> False))
       (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat (-0.0))]]) (VFloat 1))
-  -- The batched categorical index reads its weights as a tensor, so a list
-  -- of batched weights is indexed by a tuple. (A list of constant weights
-  -- too.) While it stands, BCategoricalIndex is in
-  -- CertifiedCensus.batchedReachedNotCompared; a fix moves it to
-  -- batchedCertifiedConstructs.
-  , KnownFamily "batched-categorical-index-over-batched-weights-fails" ["batched"]
-      (ByAnswer (\c _ a -> (raisedWith "list indices must be integers or slices, not tuple" a
-                            || raisedWith "not supported between instances of 'tuple' and 'int'" a)
-                         && not (null [ () | IRBuiltin (BCategoricalIndex _ _) _ <- caseUniverse c ])))
-      (batchedRepro (IRIf (IROp OpEq (IRBuiltin (BCategoricalIndex 0 2) [IRConst (VFloat 0.5), IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat 1)]])
-                                     (IRConst (VInt 0)))
-                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
   ]
   where
     isValue (Interpreted _) = True
@@ -2827,6 +2809,28 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
             Right b -> do
               (_, ds) <- runIRCasesBatched py [b]
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  -- Formerly two knownDisagreements families (batched-blistindex-reads-a-cons-list-as-a-tensor,
+  -- batched-categorical-index-over-batched-weights-fails): the batched runtime
+  -- read a cons list or a list of weights as a logit tensor.
+  , testCase "batched: a cons-list slot read and a categorical index over a weight list agree with the interpreter" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched list reads" >>= maybe (return ()) assertFailure
+        Just py -> do
+          let cons = IRConstruct TgCons [IRConst (VFloat 0.5), IRConst (VList EmptyList)]
+              cat w = IRIf (IROp OpEq (IRBuiltin (BCategoricalIndex 0 2) [IRConst (VFloat 0.5), w]) (IRConst (VInt 0)))
+                           (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))
+              cs = [ batchedRepro (IRBuiltin BListIndex [cons, IRConst (VInt 0)]) (VFloat 1)
+                   , batchedRepro (cat (IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat 1)])) (VFloat 1)
+                   , batchedRepro (cat (IRBuiltin (BTensor [EFixed 2]) [IRConst (VFloat 0.3), IRConst (VFloat 1)])) (VFloat 1)
+                   , batchedRepro (cat (IRConstruct TgCons [IRVar "a0", IRConstruct TgCons [IRConst (VFloat 1), IRConst (VList EmptyList)]])) (VFloat 1)
+                   ]
+          bcs <- mapM prepareBatchedIRCase cs
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
               assertEqual "batched disagreements" [] (map idWhy ds)
   , testCase "a fixed-seed sample of plans reaches every PResult combinator, in every semiring" $
       assertEqual "unreached (semiring, combinator)" []
