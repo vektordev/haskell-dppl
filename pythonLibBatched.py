@@ -39,12 +39,14 @@ DTYPE = torch.float64
 
 def density_uniform(x):
   # 1 on [0,1], 0 elsewhere.
+  x = astensor(x)
   return ((x >= 0.0) & (x <= 1.0)).to(_dtype(x))
 
 def cumulative_uniform(x):
   return torch.clamp(astensor(x), 0.0, 1.0)
 
 def density_normal(x):
+  x = astensor(x)
   return torch.exp(-(x * x) / 2.0) / math.sqrt(2.0 * math.pi)
 
 # erfc rather than 1 + erf: pythonLib.cumulative_normal says why.

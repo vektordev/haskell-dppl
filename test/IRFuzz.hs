@@ -1460,6 +1460,13 @@ approxInfinityBatchedCases =
   [ batchedRepro (IRIf (IROp OpApprox (IRVar "a0") (IRConst (VFloat k))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat a)
   | a <- [-1 / 0, 1 / 0], k <- [1, 1 / 0, -1 / 0] ]
 
+-- | batched-math-on-a-constant-operand-fails (formerly a knownDisagreements
+-- family): a density of a plain Python number, not a tensor.
+constantDensityBatchedCases :: [IRCase]
+constantDensityBatchedCases =
+  [ batchedRepro (IRDensity d Linear (IRConst (VFloat c))) (VFloat 1)
+  | d <- [IRUniform, IRNormal], c <- [-0.5, 0.5, 1.5, 1 / 0] ]
+
 lcLit :: Double -> IRExpr
 lcLit = IRConst . VFloat
 
@@ -1709,12 +1716,6 @@ knownDisagreements =
       (ByAnswer (\_ _ a -> raisedWith "not supported between instances of 'T' and 'T'" a))
       (batchedRepro (IRIf (IROp OpLessThan (IRConst (VTuple (VFloat 1) (VInt 1))) (IRConst (VTuple (VFloat 2) (VInt 0))))
                           (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
-  -- The batched runtime's densities take a tensor: of a plain Python number,
-  -- the uniform one is a bool (which has no @.to@) and the normal one calls
-  -- @torch.exp@ on a float.
-  , KnownFamily "batched-math-on-a-constant-operand-fails" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "'bool' object has no attribute 'to'" a || raisedWith "must be Tensor, not float" a))
-      (batchedRepro (IRDensity IRUniform Linear (IRConst (VFloat 0.5))) (VFloat 1))
   -- The batched backend divides by @safe_div@, a NaN at a zero divisor where
   -- the IR's division (and scalar Python's @safe_div@) answers an infinity,
   -- and takes logs by @safe_log@,
@@ -2671,6 +2672,17 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
         Nothing -> noTorch "IR fuzz generator batched type-tag check of a literal" >>= maybe (return ()) assertFailure
         Just py -> do
           bcs <- mapM prepareBatchedIRCase conformsLiteralBatchedCases
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  , testCase "batched: a density of a constant agrees with the interpreter" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched density of a constant" >>= maybe (return ()) assertFailure
+        Just py -> do
+          bcs <- mapM prepareBatchedIRCase constantDensityBatchedCases
           case sequence bcs of
             Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
             Right bs -> do
