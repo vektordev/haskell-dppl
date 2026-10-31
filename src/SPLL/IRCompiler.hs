@@ -922,7 +922,16 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
             outer && any isPackedTriple tails
         | otherwise ->
             holdsCalleeResult isCall outer (rebind n (holdsCalleeResult isCall outer env arg) env) irBody
-      IRApply _ _      -> isCall v
+      -- A call handed a closure that returns a packed result is read as one:
+      -- that closure's body is collapsed by the lambda arm (under @outer@), so
+      -- what the call returns -- the closure's result, which the compiler
+      -- unpacks as a 'PResult' -- is three fields wide. The callee may be a
+      -- generate function (@f_gen(\\x -> packed)@, a function-valued random
+      -- argument applied by a named higher-order function, whose call
+      -- @isCall@ excludes), so this is asked independently of @isCall@ (task
+      -- integ-of-called-function-value-main-integ-type-error,
+      -- higher-order/hoTopLevel, namedHofRandomFunctionArg).
+      IRApply _ _      -> isCall v || (outer && any returnsPackedResult (spineArgs v))
       IRVar x          -> x `Set.member` env
       IRLetIn n b irBody -> holdsCalleeResult isCall outer (rebind n (holdsCalleeResult isCall outer env b) env) irBody
       IRIf _ t f       -> holdsCalleeResult isCall outer env t || holdsCalleeResult isCall outer env f
@@ -943,6 +952,18 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       _ -> []
     isError (IRError _) = True
     isError _ = False
+
+    -- The arguments of an application spine, @f a b@ giving @[b, a]@.
+    spineArgs (IRApply f a) = a : spineArgs f
+    spineArgs _ = []
+
+    -- A closure (possibly curried, let-bound or selected by an 'IRIf') whose
+    -- body returns a packed result triple.
+    returnsPackedResult e = case e of
+      IRLambda _ irBody -> returnsPackedResult irBody || any isPackedTriple (returnedTuples irBody)
+      IRLetIn _ _ irBody -> returnsPackedResult irBody
+      IRIf _ t f -> returnsPackedResult t || returnsPackedResult f
+      _ -> False
     isPackedTriple (IRConstruct TgTuple [_, IRConstruct TgTuple [_, IRConstruct TgTuple [_, _]]]) = True
     isPackedTriple _ = False
 
