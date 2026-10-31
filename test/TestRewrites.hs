@@ -68,19 +68,31 @@ import End2EndTesting (programRuntimeFields)
 --
 -- * 'AliasIntro': was assigned to M1, reinfer-body-under-recovered-bindings,
 --   which cut its logged frontier from 75 to 50 but did not close it. At
---   8924628 promoting it fails 22 corpus programs and 1 sequence seed (20261015), all
---   refusals of the rewritten program that the original answers. They belong
---   to open tickets, so the family stays log-only until those resolve:
---   alias-between-curried-lambdas-refuses-enumerable-and-function-arguments
---   (leadingRandomArgumentCurried, namedHof*, observePredicateParameterLambda,
---   witnessThroughDetIfNamed(Last)), alias-of-recursive-helper-parameter-
---   refuses-with-random-argument (recursive*, decreasingRecursion*,
---   recursionDepthFromSample, leadingRandomStateMarkovChain,
---   listIndexFromSample), theta-anchor-through-callee-local-binding (the two
---   theta* rows), gaussian-catch-all-dispatch-on-codegen-law
---   (normalThroughFunctionParam, paramPairHelperFst,
---   correlatedGaussianLetSharesLatent), alias-before-helper-built-tuple-tail-
---   approx-type-error and alias-chain-of-structured-draw-any-marginal-refused;
+--   8924628 promoting it failed 22 corpus programs and 1 sequence seed
+--   (20261015). At 6f026cd it fails 21 of the Slow.RewriteInvarianceCorpus
+--   programs, and 9 after task alias-between-curried-lambdas-refuses-
+--   enumerable-and-function-arguments (an alias of a closure's parameter
+--   needs no engine; the set-witness walk enters an alias of a local in
+--   place), which also cleared leadingRandomStateMarkovChain,
+--   listIndexFromSample, recursionDepthFromSample and the
+--   decreasingRecursion* rows, and 7 after task alias-of-recursive-helper-
+--   parameter-refuses-with-random-argument (Analysis's unrolling of a
+--   recursion on constants substitutes a let-bound closed constant too:
+--   recursiveLengthOfRecursiveList, recursiveCountOfRecursiveBoolList),
+--   and 4 after task theta-anchor-through-callee-local-binding (a theta
+--   anchor in a callee reached through an alias resolves to the alias's
+--   value; thetaParameterRenamedAcrossCurriedCall,
+--   thetaParameterRenamedDrawFedRecursion, thetaArgumentNotCallerNamesake).
+--   Those left belong to open tickets, so the family stays log-only until
+--   they resolve: an ANY-mask variant refused after an alias in
+--   aliasedChainStepMarginalTail and drawnArgumentChainInNamedCallee
+--   (not yet ticketed; see promote-alias-intro-rewrite-family-to-hard-
+--   failure); gaussian-catch-all-dispatch-on-codegen-law closed
+--   normalThroughFunctionParam (the catch-all builds an affine-certified
+--   call with the affine algebra, which enters the callee's draw; corpus
+--   normalThroughFunctionParamAliased), and paramPairHelperFst's alias row
+--   answered already at 831c3d6; alias-chain-of-structured-draw-any-marginal-refused
+--   and alias-before-helper-built-tuple-tail-approx-type-error are closed;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
 -- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates. Its
 --   in-place engine (a binding read once, with no binder on the way, measured
@@ -90,7 +102,17 @@ import End2EndTesting (programRuntimeFields)
 --   classified in that task: mostly other milestones' classes (Gaussian
 --   rules reading syntax, M7; named callees; point inversion through a
 --   deterministic if behind a binding; recursion; ANY-mask runtime refusals;
---   interpreter type errors), so both stay log-only.
+--   interpreter type errors), so both stay log-only. Re-measured at dd88cb9
+--   with both promoted (flip kept as tag
+--   proto/promote-draw-intro-and-linear-inline-rewrite-families-to-hard-failure-flip-1):
+--   83 of 798 /Rewrite/ tests red, owned by draw-intro-of-gaussian-read-by-syntax-rules-refuses,
+--   draw-intro-of-constant-or-gaussian-binding-no-engine-applies,
+--   draw-intro-of-enumerable-in-enumerated-branch-generate-fallback,
+--   draw-intro-around-recursive-callee-argument-floored,
+--   draw-intro-wildcard-slot-interpreter-type-errors,
+--   admitted-binding-refused-by-engine-construction, arrow-lifted-mixture-for-function-values,
+--   drawn-isright-test-reads-fromright-of-left-at-o0, collapse-moments-through-calls
+--   and alias-before-any-marginal-draws-randomness-refused.
 refusalIsHard :: Family -> Bool
 refusalIsHard AliasIntro = False
 refusalIsHard HelperExtract = False
@@ -124,6 +146,8 @@ knownDivergences =
   -- projecting helper behind a second one (`g x = h x`).
   [ Known "drawDestructuredShared" DrawIntro "" structuredReread
   , Known "drawDestructuredShared" AliasIntro "" structuredReread
+  , Known "drawDestructuredShared" HelperExtract "extract (draw a" structuredReread
+  , Known "setWitnessTupleDisjointFields" HelperExtract "extract (TCons (fst e) (snd e))" structuredReread
   , Known "fstOfPairWrapperStructuredDraw" DrawIntro "" structuredReread
   , Known "fstOfPairWrapperStructuredDraw" AliasIntro "" structuredReread
   , Known "fstOfPairWrapperStructuredDraw" HelperExtract "extract (TCons" structuredReread
@@ -136,16 +160,27 @@ knownDivergences =
   , Known "structuredDrawHelperProjectsField" DrawIntro "" structuredReread
   , Known "structuredDrawHelperProjectsField" AliasIntro "" structuredReread
   , Known "structuredDrawHelperProjectsField" HelperExtract "" structuredReread
+  -- An ADT draw read by a constructor test and whole, through an alias or a
+  -- helper: 1.0 at every True first slot. Present at 831c3d6, where a crash
+  -- on the False row made these variants refusals; the crash's fix
+  -- (point-inversion-vanyexcept-witness-crashes) exposed the answers.
+  -- Pinned by known-issues/ctorTestOfAliasedAdtDrawDropsFields; its
+  -- pair-fst twin ctorTestBesideFstOfPairedDraw diverges the same way.
+  , Known "tupleCtorTestOfSharedDraw" DrawIntro "" structuredReread
+  , Known "tupleCtorTestOfSharedDraw" AliasIntro "" structuredReread
+  , Known "tupleCtorTestOfSharedDraw" HelperExtract "" structuredReread
+  , Known "ctorTestBesideFstOfPairedDraw" DrawIntro "" structuredReread
+  , Known "ctorTestBesideFstOfPairedDraw" AliasIntro "" structuredReread
+  , Known "ctorTestBesideFstOfPairedDraw" HelperExtract "" structuredReread
   -- The swapped wrapper re-read through a second binder: before per-mask
   -- variants the concrete query refused ("binding 'x' is unobserved"); f's
   -- variants now answer the split sub-queries, so p((0.7, 0.6)) is 1.0
   -- instead of impossible.
   , Known "maskSwappedWrapper" DrawIntro "" variantsSilenceReread
   , Known "maskSwappedWrapper" AliasIntro "" variantsSilenceReread
-  , Known "maskSwappedWrapper" HelperExtract "" variantsSilenceReread
+  -- (The helper-extract and pair-fst sites of maskSwappedWrapper no longer
+  -- diverge; the IgnoreSlow sweep showed their entries stale.)
   -- The M3 families (task transformation-differential-testing-m3-catalog-expansion).
-  -- The same impossible (0.7, 0.6) answered 1.0 as the other families above.
-  , Known "maskSwappedWrapper" TupleLaw "pair-fst" variantsSilenceReread
   -- `1.0 > NaN` answers p(True) = 1 (the mirrored `NaN < 1.0` is right).
   , Known "nanConstantMixture" CompareFlip "compare-swap" nanComparison
   -- The if-flip's `not` is swapped back into the arms, but a negation behind
@@ -154,12 +189,25 @@ knownDivergences =
   , Known "observeNegatedContinuousEqualsLetfree" DrawIntro "draw-intro (eq Normal 0.5)" hiddenNegation
   , Known "observeNegatedContinuousEqualsLetfree" HelperExtract "extract (not" hiddenNegation
   , Known "observeNegatedContinuousEqualsLetfree" TupleLaw "pair-fst (not" hiddenNegation
+  -- A finite leaf of the point witness whose domain 'fieldDomainOf' cannot
+  -- see once the rewrite moves it behind a binding or a pair: the query's
+  -- ANY reaches the body's other read of the leaf as a value (0.398942 for
+  -- 0.279260 and 0.119683). Present before the 2026-10-29 dispatch run.
+  , Known "anyLeafReadAgainThroughHelper" DrawIntro "" wildcardLeafNoDomain
+  , Known "anyLeafReadAgainThroughHelper" HelperExtract "" wildcardLeafNoDomain
+  , Known "anyLeafReadAgainThroughHelper" TupleLaw "pair-fst" wildcardLeafNoDomain
+  , Known "anyLeafReadAgainThroughAlias" TupleLaw "pair-fst" wildcardLeafNoDomain
+  , Known "aliasChainOfStructuredDrawAnyMarginal" TupleLaw "pair-fst" wildcardLeafNoDomain
+  -- `x < 0.5` rewritten to a negation inside an if condition over a
+  -- continuous arm: p(f x) 1/3 becomes 2/3 at the fifth row.
+  , Known "rewriteProbeHelperIfGate" CompareFlip "compare-negate" "compare-negate-in-if-condition-over-continuous-arm-doubles-density"
   ]
   where
     hiddenNegation = "if-complement-drops-hidden-negation-density"
     nanComparison = "nan-operand-comparison-measured-through-cdf"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
     variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
+    wildcardLeafNoDomain = "wildcard-leaf-without-domain-reaches-reads-as-value"
 
 -- | A divergence only a composition of rewrites reaches, for the sequence
 -- property: a sequence on the program whose steps include every family listed
@@ -174,17 +222,7 @@ knownSequenceDivergences =
   -- of the same list: p([0.3, 1.3]) is impossible. Pinned by
   -- known-issues/listHelperReadBesideAffineSibling; reached by seed 20261016
   -- once the null-set-negation corpus additions moved what it draws.
-  [ KnownSeq "witnessThroughDetIfNamed" [InjFIdentity, HelperExtract] "list-parameter-helper-read-beside-affine-sibling-impossible"
-  -- The parameter aliased, the noise drawn into a binding and `+ 0.0` added:
-  -- the (x, ANY) marginal loses the Uniform's dimension. Pinned by
-  -- known-issues/aliasedParameterPlusZeroMarginalDim; reached by seed
-  -- 20261017 after the same corpus additions.
-  , KnownSeq "rewriteProbeHelperScaledNoise" [DrawIntro, InjFIdentity, AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim"
-  -- The same marginal with the parameter aliased twice and no `+ 0.0`.
-  -- Pinned by known-issues/aliasedParameterTwiceMarginalDim; reached by seed
-  -- 20261015 once the set-witness-walk-stops-at-identity-injf-wrapper corpus
-  -- additions moved what it draws.
-  , KnownSeq "rewriteProbeHelperScaledNoise" [AliasIntro] "aliased-parameter-plus-zero-marginal-loses-dim" ]
+  [ KnownSeq "witnessThroughDetIfNamed" [InjFIdentity, HelperExtract] "list-parameter-helper-read-beside-affine-sibling-impossible" ]
 
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =
@@ -797,18 +835,30 @@ rewriteTests = testGroup "RewriteInvariance" [unitTests, probeTests]
 -- when 'rewriteKey' differs from the one recorded at the program's last pass
 -- ('ImpactManifest').
 rewriteCorpusTests :: Corpus -> Manifest -> IO TestTree
-rewriteCorpusTests corpus manifest = corpusSweep corpus SweepSpec
-  { sweepName = "Slow.RewriteInvarianceCorpus", sweepTier = Slow, sweepSlow = SkipSlow
+rewriteCorpusTests corpus manifest = corpusSweepAll corpus SweepSpec
+  { sweepName = "Slow.RewriteInvarianceCorpus", sweepTier = Slow, sweepSlow = IgnoreSlow
   , sweepSelect = rewritePool
-  , sweepNote = "every rewrite family at every site agrees with the original at its p() rows" } $ \e ->
+  , sweepNote = "every rewrite family at every site agrees with the original at its p() rows" }
+  (\es -> return (testGroup "RewriteInvarianceCorpus"
+             (knownDivergencesSwept (map ceName es) : map perProgram es)))
+  where
+   perProgram e =
     testCaseInfo (ceName e) $ do
       let n = ceName e; p = ceProgram e; qs = queries e
       (orig, vs) <- compileSweep p
       r <- cachedAction manifest "Slow.RewriteInvarianceCorpus" n (rewriteKey manifest p qs orig vs)
              (sweepCompiled n p qs orig vs >>= report n)
       return (either ("skipped: unchanged since " ++) id r)
-  where
-    queries = corpusQueries
+   queries = corpusQueries
+
+-- | Every 'knownDivergences' entry names a program this sweep runs. An entry
+-- on a program outside the pool is never checked for staleness.
+knownDivergencesSwept :: [String] -> TestTree
+knownDivergencesSwept swept = testCase "knownDivergences programs are swept" $
+  case [kProg k | k <- knownDivergences, kProg k `notElem` swept] of
+    [] -> return ()
+    missing -> assertFailure ("knownDivergences names programs the sweep does not run: "
+                              ++ unwords (nub missing))
 
 -- | The programs the rewrite sweeps take: interpreter-routed, not neural,
 -- with at least one probability row.
@@ -816,7 +866,13 @@ rewritePool :: CorpusEntry -> Bool
 rewritePool e = Interpreter `elem` ceBackends e && null (neurals (ceProgram e)) && not (null (corpusQueries e))
 
 corpusQueries :: CorpusEntry -> [Query]
-corpusQueries e = [(s, params) | ProbTestCase _ s params _ <- ceCases e]
+corpusQueries e = [(s, params) | ProbTestCase _ s params _ _ <- ceCases e]
+
+-- | The 'corpusQueries' rows that are not marked @no-sample@, in order: the
+-- rows the sampler check may compare (a support edge or a jump makes its
+-- window estimate meaningless).
+sampledFlags :: CorpusEntry -> [Bool]
+sampledFlags e = [not ns | ProbTestCase _ _ _ _ ns <- ceCases e]
 
 -- ---------------------------------------------------------------------------
 -- Rewrite sequences (M4)
@@ -1014,12 +1070,12 @@ rewriteIntegrationTests corpus = corpusSweep corpus SweepSpec
   , sweepSelect = rewritePool
   , sweepNote = "agreeing rewritten variants keep agreeing under -O0, topK 0 and branch counting, sample as they measure, and keep main's PType" } $ \e ->
     testCaseInfo (ceName e) $ do
-      let n = ceName e; p = ceProgram e; qs = corpusQueries e
+      let n = ceName e; p = ceProgram e; qs = corpusQueries e; sf = sampledFlags e
       (orig, vs) <- compileSweep p
       origOut <- runCompiled p orig qs
       origBC <- compileTimedWith branchCountConfig p >>= \c -> branchCounts p c qs
       let origPT = mainPTypeOf p
-      checked <- concurrently [ integrate n origOut origBC origPT qs v c | (v, c) <- vs ]
+      checked <- concurrently [ integrate n origOut origBC origPT qs sf v c | (v, c) <- vs ]
       let hard = concat [ h | (h, _, _, _) <- checked ]
           logs = concat [ l | (_, l, _, _) <- checked ]
           matched = concat [ k | (_, _, k, _) <- checked ]
@@ -1035,9 +1091,9 @@ rewriteIntegrationTests corpus = corpusSweep corpus SweepSpec
 
 -- | Cross one variant: (hard failures, log lines, the known config
 -- divergences it matched, whether it was crossed at all).
-integrate :: String -> Outcome -> Maybe [Double] -> Maybe PType -> [Query] -> Variant -> Either String IREnv
+integrate :: String -> Outcome -> Maybe [Double] -> Maybe PType -> [Query] -> [Bool] -> Variant -> Either String IREnv
           -> IO ([String], [String], [KnownConfig], Bool)
-integrate prog origOut origBC origPT qs v c = do
+integrate prog origOut origBC origPT qs sf v c = do
   out <- runCompiled rp c qs
   case (origOut, out, c) of
     (Answered as, Answered bs, Right env) | and (zipWith agrees as bs), isNothing (knownDivergence prog fam site) -> do
@@ -1050,7 +1106,7 @@ integrate prog origOut origBC origPT qs v c = do
                           | otherwise -> Just (tag ++ " under " ++ lbl ++ ": " ++ show bs ++ " vs " ++ show cs)
               Refused why -> Just (tag ++ " refuses under " ++ lbl ++ ": " ++ why)
         return (lbl, problem, bc)
-      sampled <- samplingCheck rp env (zip qs bs)
+      sampled <- samplingCheck rp env [ r | (r, True) <- zip (zip qs bs) sf ]
       let vBC = case [ bc | (lbl, _, bc) <- cfgs, lbl == branchCountLabel ] of
             (bc : _) -> bc
             [] -> Nothing
@@ -1145,7 +1201,7 @@ rewriteKey m p qs orig vs
 -- that runs out of time is logged.
 ofToggleCorpusTests :: Corpus -> IO TestTree
 ofToggleCorpusTests corpus = corpusSweep corpus SweepSpec
-  { sweepName = "Slow.OfToggleCompilesIdentically", sweepTier = Slow, sweepSlow = SkipSlow
+  { sweepName = "Slow.OfToggleCompilesIdentically", sweepTier = Slow, sweepSlow = IgnoreSlow
   , sweepSelect = \e -> not (null (ofToggles (ceProgram e)))
   , sweepNote = "removing or writing out a round-tripping of clause compiles to the same IREnv" } $ \e ->
     testCaseInfo (ceName e) $ do

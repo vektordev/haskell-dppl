@@ -1,0 +1,3 @@
+data Color = Red | Green | Blue
+data Obj = Obj col :: Color
+main = draw scene = [if Uniform < 0.2 then Obj Red else (if Uniform < 0.5 then Obj Green else Obj Blue)] in isGreen (col (head scene))

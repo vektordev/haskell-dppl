@@ -70,14 +70,33 @@ def safe_log(x):
     return math.log(x)
   return -math.inf if x == 0 else math.nan
 
+# IEEE float division: the IR's OpDiv (the interpreter, Julia) answers a signed
+# infinity at a zero divisor, and NaN for 0/0 or NaN/0, where Python's `/`
+# raises ZeroDivisionError on python numbers (task
+# python-float-division-by-zero-raises). A tensor operand never raises, so it
+# takes the plain operator and keeps its graph.
+def safe_div(a, b):
+  try:
+    return a / b
+  except ZeroDivisionError:
+    if a != a or a == 0:
+      return math.nan
+    return math.copysign(math.inf, a) * math.copysign(1.0, b)
+
+# Floats, never the ints 1/0: an int is not a TFloat (IRConformsTo) and has
+# no signed zero. A NaN falls through both CDF tests to answer itself, as in
+# the interpreter and Julia (task python-uniform-density-and-cdf-answer-ints).
 def density_uniform(x):
-  return 1 if 0 <= x <= 1 else 0
+  return 1.0 if 0 <= x <= 1 else 0.0
 
 def cumulative_uniform(x):
-  return 0 if x < 0 else x if x <= 1 else 1
+  return 0.0 if x < 0 else 1.0 if x > 1 else x
 
+# x * x, not x**2: a float ** raises OverflowError past ~1.3e154 where the
+# product saturates to inf, so the density is 0.0 and its log -inf there
+# (task python-normal-density-overflows-past-1e154).
 def density_normal(x):
-  return 1 / sqrt(2 * pi) * e**(-(x**2)/2)
+  return 1 / sqrt(2 * pi) * e**(-(x * x)/2)
 
 # Phi(x) = erfc(-x / sqrt 2) / 2, not (1 + erf(x / sqrt 2)) / 2: the latter
 # cancels in the lower tail (Phi(-8) came out 6.1e-16 for 6.2e-16), and the
@@ -103,7 +122,7 @@ def log_cumulative_uniform(x):
   return _log_cdf(cumulative_uniform(x))
 
 def log_density_normal(x):
-  return -(x**2) / 2 - 0.5 * math.log(2 * pi)
+  return -(x * x) / 2 - 0.5 * math.log(2 * pi)
 
 def log_cumulative_normal(x):
   return _log_cdf(cumulative_normal(x))
@@ -201,6 +220,12 @@ def isclose(a, b):
 def throw(e):
   raise Exception(e)
 
+# The base of every emitted ADT constructor class, which the query-type guard
+# tests an ADT slot against (an instance of any ADT conforms, as in the
+# interpreter).
+class ADTValue:
+  pass
+
 # Tuple
 class T:
   def __init__(self, t1, t2):
@@ -262,9 +287,11 @@ class InferenceList:
     return NotImplemented
 
   def __len__(self):
+    # Counts the Cons cells only: the EmptyInferenceList terminator is not an
+    # element (task python-empty-list-head-and-tail-answer-none).
     curr = self
     cnt = 0
-    while curr is not None:
+    while isinstance(curr, ConsInferenceList):
       cnt += 1
       curr = curr.next
     return cnt
@@ -279,10 +306,14 @@ class InferenceList:
     if isinstance(index, slice):
       # Tail lists
       if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):
+        # Walking past the end of the list raises, as the interpreter's
+        # "tail of an empty list" does. An ANY list stays a wildcard here.
         current = self
-        for _ in range(index.start - 1):
+        for _ in range(index.start):
+          if isinstance(current, EmptyInferenceList) or current is None:
+            raise IndexError("tail of an empty list")
           current = current.next
-        return current.next
+        return current
       else:
         raise IndexError("Slices may only be used for tail lists")
     if index < 0:
@@ -293,9 +324,12 @@ class InferenceList:
         raise IndexError("LinkedList index out of range")
     current = self
     for _ in range(index):
-      current = current.next
-      if current is None:
+      if isinstance(current, EmptyInferenceList) or current is None:
         raise IndexError("LinkedList index out of range")
+      current = current.next
+    # The terminator holds no element: head of an empty list raises.
+    if isinstance(current, EmptyInferenceList) or current is None:
+      raise IndexError("head of an empty list" if index == 0 else "LinkedList index out of range")
     return current.value
   
   def __eq__(self, other):
@@ -385,7 +419,9 @@ def listProd(lst):
   if isinstance(lst, AnyInferenceList):
     raise ValueError("Element not found in list")
   elif isinstance(lst, EmptyInferenceList):
-    return 1
+    # A float, as the standard library's 1.0: a type-tag check tells an int 1
+    # apart (task julia-listprod-of-an-empty-list-raises).
+    return 1.0
   elif isinstance(lst, ConsInferenceList):
     return lst.value * listProd(lst.next)
     
@@ -405,8 +441,8 @@ def isPossible(multiVal, expr):
     return True
   elif multiVal[0] == "D":
     return expr in multiVal[1]
-  elif multiVal[0] == "T" and isinstance(expr, tuple):
-    return isPossible(multiVal[1][0], expr[0]) and isPossible(multiVal[1][1], expr[1])
+  elif multiVal[0] == "T" and isinstance(expr, T):
+    return isPossible(multiVal[1][0], expr.t1) and isPossible(multiVal[1][1], expr.t2)
   elif multiVal[0] == "E" and isinstance(expr, Left):
     return isPossible(multiVal[1][0], fromLeft(expr))
   elif multiVal[0] == "E" and isinstance(expr, Right):
@@ -422,6 +458,10 @@ def isPossible(multiVal, expr):
           if not isPossible(mf, ef):
             return False
     return foundConstr
+  # A shape the domain does not describe (a tuple domain over a non-tuple,
+  # an Either domain over neither arm) is not possible; never fall off the
+  # end and answer None.
+  return False
   
 # NOTE (task retire-irenumsum): `multiValueToValueList` stood here, deriving a
 # MultiValue's enumerated support at run time (with a memo cache, because a

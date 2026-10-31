@@ -84,7 +84,7 @@ showed it: an unwitnessed Gaussian argument still gives a Gaussian.
 Once an engine fixes a variable's value -- the point-witness fold recovering it
 from the observation, an enumeration loop binding it, a residue factor fixing
 it at its witness -- the rest of the compile must see it as `Deterministic`.
-`IRCompiler.reinferRecovered` does that by re-running the modality engine
+`IRCompiler.Binding.reinferRecovered` does that by re-running the modality engine
 (`ModalityInfer.reinferGiven`) on the body, with the recovered names bound
 `Exact` (task `reinfer-body-under-recovered-bindings`, design
 `law-carrying-modality` M1). It replaced `retypeDetGiven`, a syntactic
@@ -129,7 +129,7 @@ form or a plan read names nodes of the callee's body, which every call would
 share), and `n` the arguments still to apply. `h z = 0.0 * z` returns the
 point 0.0, and `h z = (0.0 * z, Normal)` a pair whose `fst` is that point. The
 compiler measures any non-literal node of known point from that value
-(`IRCompiler.lawPoint`).
+(`IRCompiler.Monad.lawPoint`).
 
 `lawEnv` holds a binding's law as the modality engine issued it. A variable an
 engine then recovers or enumerates is pinned through `recoveredVars` and
@@ -161,6 +161,53 @@ the optimizer having folded `exp`'s applicability guard on the sentinel into
 witness, and the optimizer now picks an `IRIf` arm only on a Bool constant. A
 multi-use binding keeps the refusal.
 
+### The Gaussian catch-all reads the codegen law
+
+`toIRInference`'s `PNormal` catch-all (one Gaussian density from a node's
+`(mu, sigma)`) takes a node iff its law is a primitive leaf or an affine form
+(`IRCompiler.Gaussian.gaussianLeaf`), and builds the `(mu, sigma)` by that law: a leaf
+through the scalar extractor (`toIRNormalParams`), an affine form through the
+affine algebra (`affineFormOf`, collapsed), which follows calls, lambda
+redexes and the binder environment the extractor does not see through
+(`witness-inversion-engines.md`, "The compiler"). It replaced
+`hasOwnInferenceHandler`, a list of node shapes the extractor could not read,
+mirrored by hand in `isAffineOver` (task
+`gaussian-catch-all-dispatch-on-codegen-law`, design `law-carrying-modality`
+M7).
+
+The law read is the node's certificate **at codegen** (`codegenLaw`): its
+`lawTable` entry when no enclosing engine has recovered a variable, else the
+same inference `reinferRecovered` re-annotates the body with, asked for the
+node's law (`ModalityInfer.reinferLawGiven`), under every recovered variable.
+The table certifies the program as written; after a witness fold has fixed
+`x`, `draw y = x * 2.0 in y + Normal` is affine over the fresh Normal alone,
+and re-inferring under every recovered variable (not only the free ones)
+catches a `y` computed from `x`. The re-inference is on demand, per visit;
+over the corpus it costs about 1% of compile time.
+
+Three node kinds are never the catch-all's, whatever their law. A function
+value is answered by the callee's probability function. An application goes
+to the binding resolver whatever its head (`law-carrying-modality` §C), so the
+engines dispatch it in their measured order ("Why this order"); a catch-all
+taking a redex on its own affine law would run the Gaussian collapse ahead of
+them. And a variable's binder decided its treatment: one marginalised as an
+affine form (`BoundVar.bvForm`) is read through that form, any other local has
+its value in scope (the `Var` equation's leaf), and a declaration's name is a
+call of its probability function. Inside an affine node the builder does
+enter a call, a redex or a nullary declaration: there they are latents of the
+certified form, not bindings to dispatch.
+
+`projectedLaw` passes a projected field's leaf or affine law through, so
+`fst (Normal, Uniform)` and `snd (0, Normal + 1.0)` are certified as what
+they are. `fst (h z)` with `h z = (z, Normal)` is not: the call's law is its
+callee's argument-free part (`JReturns`), which drops the field that depends
+on `z`, and the node goes to the accessor equation, which answers it.
+
+The `PLogNormal` catch-all has no law to read, since no justification
+describes a lognormal (task `lognormal-log-affine-justification`). Its gate
+is structural and named as such: `logNormalExtractable`, the shapes
+`toIRLogNormalParams` has an equation for.
+
 ### Engine applicability, and the floor on a binding no engine handles
 
 Each engine of a probabilistic application answers whether it applies with a
@@ -173,14 +220,16 @@ order:
 |---|---|---|
 | enumeration | `Analysis.enumerableApplication` (a conditional head, `isConditional`, over a random enumerable argument) | the domain |
 | plan-guided enumeration | `AutoNeural.planReadOf` (a neural read whose declaration yields a plan) | the network |
-| point inversion | `ForwardChaining.pointWitnessCert` (`toInvExprMaybe`, seeded at the lambda's body) | the inverse, and the root-seeded witness verdict |
 | joint affine marginalisation | `ModalityInfer.jointAffineBindingCert` (an affine form with latents, read by a spine of affine bindings ending in a tuple of at most 3 affine fields) | the form |
 | affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |
+| point inversion | `ForwardChaining.pointWitnessCert` (`toInvExprMaybe`, seeded at the lambda's body) | the inverse, and the root-seeded witness verdict |
 | set-valued witnesses | `ForwardChaining.worldsShape`, `invertToWorlds`' shape walk without its IR | the shape |
 | in place | `Lang.readOnceInPlace` (the body reads the variable once, under no lambda and in no nested `let`'s body) | none: the argument is measured at the read |
 
 For a `draw` (a lambda in place) whose argument is random, not a function of
-witnessed variables alone (`determinedByWitnesses`), and read by the body,
+witnessed variables alone (`determinedByWitnesses`) or of variables the
+compiler holds at a point there (`pointHere`: the parameters of the closure
+being evaluated, whose random argument the call binds), and read by the body,
 `letBinding` lists the certificates on the applied lambda (`JBinding`, shown
 by `-d`, and per binding by `-v`). Where the list is empty it binds the
 variable sample-only and re-infers the body, so the function is `Bottom`: no
@@ -203,13 +252,16 @@ not a source rewrite: a binding any other engine measures keeps that engine's
 code. The set-witness walk uses the same predicate to enter an inner binding
 whose body holds x (`draw c = x < 0.5 in if c ..`, `draw z = 0.5 in x < z`):
 it walks the body with the value in place, in `worldsShape` and
-`invertToWorldsStep` alike. Corpus `let-bindings/drawSingleReadInPlace*`,
-`set-witness/setWitness*InPlace`. Two reads (`draw x = Normal in x + x`) are
+`invertToWorldsStep` alike. The walk also enters an alias of a local
+variable (`draw g = f in ..`, `f` naming no declaration), wherever and however
+often its body reads it (`Lang.entersInPlace`): every read is that one value.
+Corpus `let-bindings/drawSingleReadInPlace*`,
+`set-witness/setWitness*InPlace`, `higher-order/aliasedFunctionParameterBetweenLambdas`. Two reads (`draw x = Normal in x + x`) are
 never in place; the affine engine owns that.
 
 **Why this order** (acceptance 6 of `dispatch-on-law-certificates`, measured at
-`1a09132` plus the in-place engine, in the order before the size-only flip
-below: affine ahead of joint affine). For each pair of engines whose
+`1a09132` plus the in-place engine, in the order before the size-only flips
+below: point inversion, affine, joint affine). For each pair of engines whose
 certificates both appear on some binding of a corpus program, the corpus
 programs where they do were compiled to Python with the second engine moved
 just ahead of the first, and their `.tst` rows run (End2End, interpreter,
@@ -238,22 +290,41 @@ applicable wins", so the swap only matters where both apply:
 
 Every seam the order wins on answers or capability is kept for that reason.
 Four made no difference to answers or refusals, only to code size, and there
-the alternative was smaller. They were taken one at a time, largest gain
-first, each re-measured against the order as it stood (task
-`engine-order-flip-size-only-seams`, at `76152ac`: every corpus program
-compiled to Python in each of the six orders of point inversion, affine and
-joint affine, the code compared, the -O0 duplication census taken, and the
-default suite run in the order kept). A flip also had to leave every
-duplication-census pin where it was or lower:
+the alternative was smaller. Three of them (point inversion < affine, point
+inversion < joint affine, affine < joint affine) order the same three engines,
+so they were settled together (tasks `engine-order-flip-size-only-seams` and
+`engine-order-point-inversion-behind-joint-affine-census-rise`, at `76152ac`:
+every corpus program compiled to Python in each of the six orders of point
+inversion (PI), affine (A) and joint affine (JA), the code compared, the -O0
+duplication census taken, and the default suite run in the order kept):
 
-| size-only seam | outcome | re-measured |
-|---|---|---|
-| point inversion < joint affine | kept. No total order puts joint affine ahead of point inversion without also crossing affine. Every such order is smaller (by 197.9 to 200.0 KB over 34 to 39 programs, answers unchanged), but each raises `higher-order/arrowApplyIfSelected`'s census from 4 to 8 (`main.prob`) and from at most 2 to 8 (`main.integ`): the affine engine's result is an `if` mixture whose condition probability, 31 nodes, the -O0 IR copies 8 times. The -O0 IR halves, and M stays 8 with 3 or 4 arms | moving point inversion behind joint affine from the order below: 32 programs, -158.5 KB |
-| point inversion < affine | kept: moving affine ahead of point inversion raises the same census, and alone (before the flip below) `let-bindings/aliasedChainStepMarginalTail`'s from 25 to 48 | 19 programs, -10.5 KB |
-| affine < joint affine | **flipped**: joint affine is tried before affine | 13 programs, -39.3 KB (3 grow, by at most 622 B); no variant, refusal or `.tst` row changed; census pins only fall |
-| affine < in place | kept: it cannot hold in a total order. In place must follow set-valued witnesses (that seam trades variants) and affine must precede them (that seam loses one), so affine precedes in place. The compiler also tries in place after the set-witness fallback (`IRCompiler.applyBinding`) | not measured |
+| order | programs changed vs PI, A, JA | Python size | census |
+|---|---|---|---|
+| PI, JA, A | 13 | -39.3 KB | 6 programs' pins fall, none rise |
+| JA, PI, A | 39 | -197.9 KB | `arrowApplyIfSelected` 4 -> 8 |
+| A, PI, JA | 19 | -10.5 KB | `aliasedChainStepMarginalTail` 25 -> 48, `arrowApplyIfSelected` 4 -> 8 |
+| A, JA, PI | 34 | -200.0 KB | `arrowApplyIfSelected` 4 -> 8 |
+| **JA, A, PI** (kept) | 39 | -198.3 KB | `arrowApplyIfSelected` 4 -> 8 |
 
-So the order is enumeration, plan, point inversion, joint affine, affine,
+No order changes a variant, a refusal, an exit code or a default-suite `.tst`
+row. Re-measured at `579c687` from PI, JA, A: JA, A, PI changes 34 programs,
+-164.7 KB, none growing, and of the census pins only `arrowApplyIfSelected`'s
+rises; A, JA, PI is 1.8 KB smaller still, but grows two programs and also
+raises `let-bindings/affineChainEndpoint` from 3 to 5 (`main.prob`), undoing
+part of what joint affine ahead of affine lowered. So JA, A, PI is kept. Its
+one census rise is accepted (a reviewed pin,
+`arrowApplyIfSelected main.integ=8 main.prob=8`): with the affine engine
+answering each arm of `(if 0.1 < 0.5 then (\x -> x + 1.0) else (\x -> x *
+2.0)) Normal`, the `if` mixture's condition probability, 31 nodes, is copied
+8 times in the -O0 IR (task `if-mixture-binds-condition-probability-once`
+would bind it once). The -O0 IR still halves, and M stays 8 with 3 or 4 arms.
+The fourth size-only seam, affine < in place, cannot hold in a total order:
+in place must follow set-valued witnesses (that seam trades variants) and
+affine must precede them (that seam loses one), so affine precedes in place.
+The compiler also tries in place after the set-witness fallback
+(`IRCompiler.Dispatch.applyBinding`).
+
+So the order is enumeration, plan, joint affine, affine, point inversion,
 set-valued witnesses, in place. Set-valued witnesses < in place trades one
 variant for three and stays. The enumeration rows are approximate: the
 measurement build moved enumeration into the binding list, where the
@@ -273,7 +344,7 @@ any declaration containing a `ReadNN` used to qualify.
 **A named callee's binding** (task `named-callee-binding-not-floored`). A
 call whose head is not a literal lambda (`g u Normal`, a recursive `genS
 thetas (RP : ..)`) binds the parameter of the lambda forward chaining
-resolves the head to (`IRCompiler.resolveBinding`), and the `Apply` rule asks
+resolves the head to (`IRCompiler.Binding.resolveBinding`), and the `Apply` rule asks
 the engines of that binding at the call (`calleeBindingCerts`). The callee's
 body is the one written, not re-inferred (a recursive callee would re-enter
 itself), so each predicate is read permissively: enumeration is an argument
@@ -294,7 +365,7 @@ where the call is compiled (`icPoint`): the parameters of the closure being
 evaluated (a caller passing a random argument there has its own binding),
 and `draw`-bound variables that enumeration, a plan read or point inversion
 answers. Not floored yet: a random leading argument of a call
-(`IRCompiler.leadingArgBinding`, `g Normal 0.5`), which is admitted and
+(`IRCompiler.Binding.leadingArgBinding`, `g Normal 0.5`), which is admitted and
 refused (docs task `leading-argument-binding-not-floored`).
 
 ## A static refusal is an absent variant, never a compile-killing error

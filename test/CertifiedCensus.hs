@@ -221,8 +221,8 @@ batchedCertifiedConstructs =
   -- batched-int-mult-inverse-no-intdiv).
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcTail",
-    "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BReduce ROpAdd",
-    "Builtin:BReduce ROpLogSumExp", "Builtin:BTensor",
+    "Builtin:BCategoricalIndex", "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap",
+    "Builtin:BReduce ROpAdd", "Builtin:BReduce ROpLogSumExp", "Builtin:BTensor",
     "ConTag:TgCons", "ConTag:TgLeft", "ConTag:TgRight", "ConTag:TgTuple",
     "Const:VList ListCont",
     "Cumulative:IRNormal Linear", "Cumulative:IRNormal Log", "Cumulative:IRUniform Linear",
@@ -253,7 +253,7 @@ batchedReachedNotCompared =
   -- call a helper's normal_params (dcd0ecd): the index is that call's
   -- argument. Its weights are a constant list, which the batched
   -- categorical_index reads as a tensor and raises on, at every point.
-  [ ("Builtin:BCategoricalIndex", "batched-categorical-index-over-batched-weights-fails") ]
+  []
 
 -- | A program's batched census: the constructs of the probability and
 -- integrate bodies of its batched compile (after the select pass), which is

@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export safe_log, categorical_index, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, listConcat, T, Either, Left, Right, fromLeft, fromRight,==
+export safe_log, categorical_index, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, listConcat, T, Either, Left, Right, fromLeft, fromRight, ADTValue,==
 
 
 function isAny(x)
@@ -207,6 +207,11 @@ function isPossible(multiVal, expr)
     end
 end
 
+# The supertype of every emitted ADT constructor struct, which the query-type
+# guard tests an ADT slot against (an instance of any ADT conforms, as in the
+# interpreter).
+abstract type ADTValue end
+
 struct T
     t1
     t2
@@ -396,9 +401,14 @@ function indexOf(sample, lst::InferenceList)
     end
 end
 
-function listProd(lst::InferenceList)
-    prod(lst)
-end
+# The standard library's recursion (StandardLibrary.stdListProd): the empty
+# product is 1.0, and the factors multiply right to left. `prod` over an
+# InferenceList cannot see the element type, so it raised on an empty list,
+# and it multiplies left to right, which differs where an underflow meets an
+# infinity (task julia-listprod-of-an-empty-list-raises).
+listProd(lst::EmptyInferenceList) = 1.0
+listProd(lst::ConsInferenceList) = head(lst) * listProd(tail(lst))
+listProd(lst::AnyInferenceList) = throw(ArgumentError("Element not found in list"))
 
 listConcat(lst1::EmptyInferenceList, lst2::InferenceList) = lst2
 listConcat(lst1::ConsInferenceList, lst2::InferenceList) =

@@ -1,0 +1,4 @@
+-- head of a mixture of two constant lists with different heads and lengths
+-- (task head-cdf-uses-equality): head is 1 or 3 with mass 0.5 each, so the
+-- cdf steps at both. With list equality the cdf was the point mass.
+main = head (if Uniform < 0.5 then [1, 0] else [3])

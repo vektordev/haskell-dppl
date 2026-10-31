@@ -78,14 +78,16 @@ samplingPrimitiveTests = testGroup "SamplingPrimitives (scalar-sampling-primitiv
         hClose h
         readProcessWithExitCode "python3" [path] ""
       assertEqual ("getitem script: " ++ err) ExitSuccess code
-      assertEqual "node visits for xs[0], xs[3], xs[3000] and the out-of-range errors"
-        "0 3 3000 ok" (concatMap (\c -> if c == '\n' then "" else [c]) out)
+      assertEqual "node visits for xs[0], xs[3], xs[2999] and the out-of-range errors"
+        "0 3 2999 ok" (concatMap (\c -> if c == '\n' then "" else [c]) out)
       return ""
   ]
 
 -- | Counts reads of @.next@ on a 3000-element list. Prints visits for xs[0],
--- xs[3], xs[3000] (the terminal Empty node, as before), then @ok@ when
--- xs[3001] and xs[-3002] raise IndexError.
+-- xs[3] and xs[2999] (the last element), then @ok@ when xs[3000] (the Empty
+-- terminator, which holds no element: task
+-- python-empty-list-head-and-tail-answer-none) and xs[-3001] raise IndexError
+-- and xs[-3000] is the first element.
 getitemScript :: FilePath -> String
 getitemScript cwd = unlines
   [ "import sys"
@@ -103,12 +105,12 @@ getitemScript cwd = unlines
   , "for i in reversed(range(3000)): l = Counted(i, l)"
   , "def cost(f):"
   , "  visits[0] = 0; f(); return visits[0]"
-  , "res = [cost(lambda: l[0]), cost(lambda: l[3]), cost(lambda: l[3000])]"
+  , "res = [cost(lambda: l[0]), cost(lambda: l[3]), cost(lambda: l[2999])]"
   , "def raises(f):"
   , "  try: f()"
   , "  except IndexError: return True"
   , "  return False"
-  , "ok = raises(lambda: l[3001]) and raises(lambda: l[-3002])"
+  , "ok = raises(lambda: l[3000]) and raises(lambda: l[-3001]) and l[-3000] == 0 and l[-1] == 2999"
   , "print(res[0], res[1], res[2], 'ok' if ok else 'BAD')"
   ]
 

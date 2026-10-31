@@ -1,0 +1,1 @@
+main = (draw y = Normal in y * 2.0) + Normal

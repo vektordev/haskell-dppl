@@ -28,6 +28,7 @@ module SPLL.Typing.ForwardChaining
   , WorldsShape(..)
   , WorldsCtx(..)
   , worldsShape
+  , valueVar
   , hasRandomLeaf
   , permissiveDet
   , findEquivalentExpression
@@ -51,6 +52,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Maybe
+import Control.Monad (mfilter)
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
 import Data.Char (isUpper)
@@ -59,6 +61,7 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType (PType(Deterministic))
 import SPLL.ReservedNames (uniformName, normalName)
 import Control.Applicative ((<|>))
+import SPLL.IRUtil (pruneDeadLetIns)
 
 
 
@@ -388,8 +391,9 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
         | op == "TCons", tgt == WTPoint -> WSTuple <$> walk os a WTPoint <*> walk os b WTPoint
       Expr _ (InjF (Named "not") [a]) -> WSConnective . (: []) <$> walk os a WTPoint
       -- An inner binding read once with no binder on the way is its value
-      -- at that read ('readOnceInPlace', the in-place engine's predicate), so
-      -- the body can be walked with the value in place ('enterInPlace'). That
+      -- at that read ('readOnceInPlace', the in-place engine's predicate), and
+      -- so is an alias of a local at every read ('entersInPlace'), so the
+      -- body can be walked with the value in place ('enterInPlace'). That
       -- is the walk where the body reads x too, or reads an x-free value it
       -- compares x against; where x is in the value alone, it is the
       -- fallback when the two-stage walk through the binding fails, as for a
@@ -399,14 +403,14 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
             through os (fromMaybe [] (Map.lookup (chainName lamTI) (lambdaVarOccurrences fc))) b v tgt
               <|> inPlace
         | otherwise -> inPlace
-        where inPlace = if readOnceInPlace y b then walk os (enterInPlace e) tgt else Nothing
+        where inPlace = if entersInPlace (valueVar wc) y v b then walk os (enterInPlace (valueVar wc) e) tgt else Nothing
       Expr _ (Apply _ _) -> call os e tgt
       -- A projection of a literal pair is that field, also where an inner
       -- binding read in place holds the pair ('enterInPlace').
       Expr _ (InjF (Named "fst") [p])
-        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace p -> walk os a tgt
+        | Expr _ (InjF (Named "TCons") [a, _]) <- enterInPlace (valueVar wc) p -> walk os a tgt
       Expr _ (InjF (Named "snd") [p])
-        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace p -> walk os b tgt
+        | Expr _ (InjF (Named "TCons") [_, b]) <- enterInPlace (valueVar wc) p -> walk os b tgt
       -- One invertible step over the one operand the variable reaches, which
       -- does not transport as a whole: the step transported onto the
       -- operand, then the operand walked at the same kind of target.
@@ -470,6 +474,13 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
           | g `Set.member` seen = go seen gs
           | otherwise = go (Set.insert g seen) (callees g ++ gs)
         callees g = maybe [] (filter (`elem` map fst (wcDecls wc)) . Set.toList . freeVarsExpr) (lookup g (wcDecls wc))
+
+-- | Does a variable name a value, one the set-witness walk may substitute at
+-- every read ('SPLL.Lang.Lang.entersInPlace'): not a declaration (whose
+-- every read is a call, a fresh draw for a nullary one) and not a primitive
+-- distribution.
+valueVar :: WorldsCtx -> String -> Bool
+valueVar wc v = isNothing (lookup v (wcDecls wc)) && v /= normalName && v /= uniformName
 
 -- | The chain names of every node of an expression.
 subtreeCNs :: Expr -> [ChainName]
@@ -558,11 +569,19 @@ toInvExprMaybe = toInvExprMaybeWith (const True) (const True)
 -- of the value of a @let@ the split is reached through: the binding is
 -- stepped into only where its value is known, which is where a condition
 -- reading its variable is.
+--
+-- A chain through an '==' or a constructor test recovers, on the False
+-- polarity, the set "any value but this one" ('VAnyExcept'), not a point,
+-- and every caller measures this witness as a point: the interpreter died on
+-- a type error or answered the sentinel as a point (@h == 0@ at False answered
+-- 0), and no text backend can render it. Such a chain is no point inverse;
+-- the set-witness engine turns that polarity into an exclusion set and
+-- answers both (task point-inversion-vanyexcept-witness-crashes).
 toInvExprMaybeWith :: (ChainName -> Bool) -> (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
-toInvExprMaybeWith condKnown valueKnown fcData adtsDecls lambdaCN = do
+toInvExprMaybeWith condKnown valueKnown fcData adtsDecls lambdaCN = mfilter (not . hasAnyExceptExpr . invValue) $ do
   (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
   let seeded occs seed =
-        case informative (mapMaybe (toPointValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
+        case informative (mapMaybe (toValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
           []  -> throughIf occs seed
           ves -> Just (mergeExpr toInvVarName lambdaCN occs ves)
       throughIf occs seed = splitIf occs seed <|> throughLet occs seed
@@ -661,36 +680,9 @@ toSeededInvExpr fcData adtsDecls seedCN occCN =
 -- result afterward): the value expression itself crashes on out-of-domain input
 -- (observe-partials-umbrella N1b).
 toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
-toValueExpr = toValueExprWith (const id)
-
--- | 'toValueExpr' for the lambda-witness point inversion ('toInvExprMaybe'),
--- whose caller measures the recovered value as a point. An '==' step
--- observed False recovers the set "any value but this one" ('VAnyExcept')
--- instead, and every reader of it there -- a density, an enumerated
--- comparison, the body factor's own '==' -- died on it in the interpreter with
--- a type error, while no text backend could render it at all, so
--- 'anyExceptCodegenRefusal' refused the whole module, every other query
--- included (task fuzz-unconsumed-vanyexcept-reaches-codegen, second seed).
--- That arm is a runtime refusal here instead, the same in every engine; the
--- True arm is untouched. The cumulative value keeps the sentinel, which
--- IRCompiler refuses statically (no bound crosses an '=='), and so does a
--- constructor test's: the interpreter answers some of those through it
--- (task point-inversion-vanyexcept-witness-crashes).
-toPointValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
-toPointValueExpr = toValueExprWith refuseEqSet
-  where
-    refuseEqSet (ExprHornClause _ _ (InjFInfo "eq") inv) | inv > 0 = irMap $ \e -> case e of
-      IRConst (VAnyExcept _) -> IRError
-        ("cannot compute marginal: an == observed False recovers its operand only as the set"
-         ++ " 'any value but one', which this engine cannot measure as a point"
-         ++ " (task point-inversion-vanyexcept-witness-crashes)")
-      _ -> e
-    refuseEqSet _ = id
-
-toValueExprWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
 -- Partially applied up to the ADTs, it solves the clause set once and is
 -- shared by every start it is then asked about ('toValuePath').
-toValueExprWith pointStep clauses paramClauses adtsDecls = let pathTo = toValuePath clauses paramClauses in \startCN -> do
+toValueExpr clauses paramClauses adtsDecls = let pathTo = toValuePath clauses paramClauses in \startCN -> do
   relevantSortedClauses <- pathTo startCN
   -- The change of variables is the derivative along the spine alone: a
   -- side computation recovering another latent (the divisor of a @mult@
@@ -703,15 +695,24 @@ toValueExprWith pointStep clauses paramClauses adtsDecls = let pathTo = toValueP
   -- ('injectedWildcards').
   let wild = injectedWildcards adtsDecls relevantSortedClauses
   let passWild = passInjectedWildcard adtsDecls wild
-  let pointWild c = passWild c . pointStep c
   -- Generate code
   Just InvChain
-    { invValue    = toLetInBlockWith pointWild clauses adtsDecls relevantSortedClauses
-    , invCoV    = wrapInLetInBlockWith pointWild clauses adtsDecls relevantSortedClauses deriv
-    , invGuard    = guardChain pointStep wild clauses adtsDecls relevantSortedClauses
+    { invValue    = toLetInBlockWith passWild clauses adtsDecls relevantSortedClauses
+    , invCoV    = wrapInLetInBlockWith passWild clauses adtsDecls relevantSortedClauses deriv
+    , invGuard    = guardChain wild clauses adtsDecls relevantSortedClauses
+    -- Over the needed steps only, as 'computesOnCertainWildcard' is: the
+    -- path may hold steps toward other occurrences ('neededClauses'), which
+    -- the caller prunes from the inverse ('pruneDeadLetIns'), and a wildcard
+    -- one of them reads says nothing about the witness. Counted, it sent a
+    -- witness observed at a concrete slot down the unevaluable-witness route,
+    -- whose open body drops the binding's own density: @f s1 = (s1, draw s2 =
+    -- s1 + Normal in (s2, s2 + Normal)); main = draw s1 = Normal in f s1@ at
+    -- @(0.0, (0.5, ANY))@ answered phi(0.5) at dim 1 (tasks
+    -- aliased-parameter-plus-zero-marginal-loses-dim,
+    -- named-callee-binding-not-floored).
     , invReadsAny = if any (computesOnCertainWildcard adtsDecls wild) (neededClauses relevantSortedClauses)
                       then IRConst (VBool True)
-                      else readsAnyChain clauses adtsDecls relevantSortedClauses
+                      else readsAnyChain clauses adtsDecls (neededClauses relevantSortedClauses)
     , invCumValue = toLetInBlockWith (\c e -> passWild c (maybe e fst (cumStep c))) clauses adtsDecls relevantSortedClauses
     , invCumGuard = guardChainWith cumStep wild clauses adtsDecls relevantSortedClauses
     }
@@ -967,10 +968,8 @@ cumulativeStep adtsDecls path jac c = do
 --
 -- A step reading a chain-introduced wildcard is within its domain
 -- ('passWildApp').
--- A hook rewrites each step's value first ('toPointValueExpr').
-guardChain :: (HornClause -> IRExpr -> IRExpr) -> [(ChainName, Bool)] -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
-guardChain post wild clauses adtsDecls =
-  guardChainWith (\c -> Just (post c (hornClauseToIRExpr clauses adtsDecls c), clauseApplicability adtsDecls c)) wild clauses adtsDecls
+guardChain :: [(ChainName, Bool)] -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+guardChain = guardChainWith (const Nothing)
 
 -- | 'guardChain' with some steps' value and applicability replaced (Just), as
 -- 'cumulativeStep' replaces the rounded ones.
@@ -1429,9 +1428,16 @@ mergeExpr2 bindings (InvChain e1 cov1 g1 ra1 _ _) (InvChain e2 cov2 g2 ra2 _ _)
 -- @isFace@ of the sentinel crashing at a False first slot. Taking the whole
 -- value loses nothing: the consistency of every slot with the witness is
 -- checked for the query as a whole.
+--
+-- The path not taken leaves its let prefix in @bindings@, dead, so it is
+-- pruned: a constructor test's prefix binds its 'VAnyExcept' sentinel, and
+-- 'toInvExprMaybeWith' declines every chain whose value holds one. With the
+-- prefix kept, @(isFace h, fst (h, h))@ lost its point inverse to an engine
+-- that answered 1.0 at every True first slot where @(isFace h, h)@ answers
+-- the fields' product.
 mergeExpr2 bindings c1 c2
-  | holdsWildcard (invValue c1), not (holdsWildcard (invValue c2)) = c2{invValue = bindings (invValue c2)}
-  | otherwise = c1{invValue = bindings (invValue c1)}
+  | holdsWildcard (invValue c1), not (holdsWildcard (invValue c2)) = c2{invValue = pruneDeadLetIns (bindings (invValue c2))}
+  | otherwise = c1{invValue = pruneDeadLetIns (bindings (invValue c1))}
   where
     holdsWildcard e = any isWildcard (universeIR e)
     isWildcard (IRConst VAny) = True

@@ -176,7 +176,7 @@ assertTstMatches cases p = case compile defaultCompilerConfig p of
   Right env -> forM_ cases (checkCase p env)
 
 checkCase :: Program -> IREnv -> TestCase -> IO ()
-checkCase p env (ProbTestCase name sample params expct) =
+checkCase p env (ProbTestCase name sample params expct _) =
   checkQuery "probability" name (runProbC p env params sample) (expectationProb expct)
 checkCase p env (CumulTestCase name sample params expct) =
   checkQuery "cumulative" name (runIntegC p env params sample) (expectationProb expct)

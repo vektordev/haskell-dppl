@@ -1,0 +1,3 @@
+rwh0 ts = theta ts @ 0
+inner thetas x = draw t2 = thetas in (x + rwh0 t2)
+main t2 thetas = (inner thetas) Uniform

@@ -1,0 +1,3 @@
+g = draw x = Normal in x + x
+
+main = g * 2.0 + 1.0
