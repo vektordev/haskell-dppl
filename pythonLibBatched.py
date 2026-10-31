@@ -66,14 +66,16 @@ def log_density_uniform(x):
                      torch.full_like(x, -math.inf, dtype=_dtype(x)))
 
 def log_cumulative_uniform(x):
-  return torch.log(cumulative_uniform(x))
+  # + 0.0: log of 1.0 is +0.0 as in the IR; never a negative zero.
+  return torch.log(cumulative_uniform(x)) + 0.0
 
 def log_density_normal(x):
   x = astensor(x)
   return -(x * x) / 2.0 - 0.5 * math.log(2.0 * math.pi)
 
 def log_cumulative_normal(x):
-  return torch.special.log_ndtr(astensor(x))
+  # log_ndtr is -0.0 far in the upper tail; the IR's log of 1.0 is +0.0.
+  return torch.special.log_ndtr(astensor(x)) + 0.0
 
 def sign(x):
   return torch.sign(astensor(x))
