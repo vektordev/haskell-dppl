@@ -41,6 +41,7 @@ clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
 collapseGivenParam main.prob=3
 collapseMixture main.integ=3 main.prob=4
 countFoldRelateDigitEncoded hit.integ=4 hit.prob=4 main.integ=10 main.prob=10
+ctorTestBesideFstOfPairedDraw main__m01.prob=9
 ctorTestFalseBesideValue main.prob=5 main__m01.prob=4
 ctorTestFalseThroughAccessors main.prob=4
 ctorTestOverTransformedDraw main.integ=18 main.prob=18
