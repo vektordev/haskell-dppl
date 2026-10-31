@@ -1766,14 +1766,6 @@ knownDisagreements =
       (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
                          || raisedWith "float() argument must be a string or a real number, not '" a))
       (batchedIntKeyRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRVar "a0"])))
-  -- The batched sum of one element is that element, where the IR's sum
-  -- adds it to 0.0, which turns a negative zero into 0.0. Recognised by the
-  -- answer agreeing once zeros are compared without their sign.
-  , KnownFamily "batched-sum-of-one-element-keeps-a-negative-zero" ["batched"]
-      (ByAnswer (\_ o a -> case (o, a) of
-                  (Interpreted v, Sampled toks) -> either (const False) (const True) (valueAgreesWith probAgrees v toks)
-                  _ -> False))
-      (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat (-0.0))]]) (VFloat 1))
   -- The batched categorical index reads its weights as a tensor, so a list
   -- of batched weights is indexed by a tuple. (A list of constant weights
   -- too.) While it stands, BCategoricalIndex is in
@@ -2787,6 +2779,20 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
           let c = batchedRepro (IRDestruct AcSnd (IRSelect (IROp OpLessThan (IRVar "a0") (IRConst (VFloat 0.5)))
                                   (IRConst (VTuple (VFloat 0.1) (VFloat 0.2))) (IRConst (VTuple (VFloat 0.3) (VFloat 0.4)))))
                                 (VFloat 1)
+          bc <- prepareBatchedIRCase c
+          case bc of
+            Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+            Right b -> do
+              (_, ds) <- runIRCasesBatched py [b]
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  -- Formerly a knownDisagreements family: tensor_sum of one element returned
+  -- it as is, keeping a negative zero the IR's sum (0.0 + x) turns into 0.0.
+  , testCase "batched: a sum of one negative zero is 0.0 (batched-sum-of-one-element-keeps-a-negative-zero)" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched one-element sum" >>= maybe (return ()) assertFailure
+        Just py -> do
+          let c = batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat (-0.0))]]) (VFloat 1)
           bc <- prepareBatchedIRCase c
           case bc of
             Left why -> assertFailure ("the batched backend does not take the case: " ++ why)

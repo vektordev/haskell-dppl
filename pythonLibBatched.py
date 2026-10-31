@@ -508,7 +508,8 @@ def tensor_sum(xs):
   if not xs:
     return torch.tensor(0.0, dtype=DTYPE)
   if len(xs) == 1:
-    return xs[0]
+    # 0.0 + x, as the IR's sum is: a negative zero becomes 0.0.
+    return xs[0] + 0.0
   # Python values in the axis (a term a constant guard zeroed, task
   # grid-constraint-network-enumerated-jointly) are added as one Python sum
   # rather than each broadcast to a [B] row and stacked; an axis of Python
