@@ -5576,6 +5576,41 @@ test_agreementPointQueryIndexes = testCase "agreementPointQueryIndexes" $ do
     mentionsQuery (IRVar n) = n == queryParamName
     mentionsQuery e = any mentionsQuery (getIRSubExprs e)
 
+-- | Task scalar-backend-tensor-ops-lower-to-torch: the scalar Python lowering
+-- of the fused agreement body. The IR is the elementwise product
+-- 'test_agreementFusesToElementwiseProduct' pins; this pins what the scalar
+-- backend makes of it. Each marginal is one slice of the network's output
+-- vector (the reader's probability branch inlined at the map, where the
+-- domain is known to lie inside the reader's), not a call per domain value;
+-- the zips and reduces are runtime calls that run as torch ops on a tensor
+-- and as the former comprehensions on a list; and the domain literal is no
+-- longer rebuilt on every call, since nothing reads it once the readouts are
+-- slices. Structural, like its sibling: the timings are in the task document
+-- and in @benchmarks/stressAgreementProduct.ppl@.
+test_agreementScalarPythonLowersTensorOps :: TestTree
+test_agreementScalarPythonLowersTensorOps = testCase "agreementScalarPythonLowersTensorOps" $ do
+  prog <- loadCorpusProgram "categoricalProductFusion"
+  case compile defaultCompilerConfig prog of
+    Left err -> assertFailure ("Compile error: " ++ show err)
+    Right env -> do
+      let py = lines (unlines (SPLL.CodeGenPyTorch.generateFunctions True env))
+          -- main's probability method: the cumulative one keeps its scan over
+          -- the domain, which is what 'test_agreementPointQueryIndexes' pins.
+          forward = drop 1 (dropWhile (not . isInfixOf "def forward(") (dropWhile (not . isPrefixOf "class Main") py))
+          mainLines = takeWhile (\l -> not ("    def " `isPrefixOf` l || "# Example" `isPrefixOf` l)) forward
+          has s = any (s `isInfixOf`) mainLines
+      assertBool "main's probability method should be emitted" (not (null mainLines))
+      assertBool "a marginal should not call the network reader once per domain value" $
+        not (any (\l -> "_auto.forward(" `isInfixOf` l && " for " `isInfixOf` l) mainLines)
+      assertBool "each marginal should be a slice of the network output" $
+        has "vec_slice("
+      assertBool "the elementwise product should be a runtime call, not a zip comprehension" $
+        not (has "zip(") && has "vec_zip_mul("
+      assertBool "the reductions should be runtime calls" $
+        has "vec_sum(" && not (has "sum([")
+      assertBool "the domain literal should not be rebuilt on every call" $
+        not (has "= [0, 1, 2]")
+
 -- | The most loop-body evaluations one chain of nested enumerations costs: the
 -- largest product of domain sizes along any path of 'BMap's inside one
 -- another's bodies. A joint enumeration over @k@ stacked draws of a @V@-valued
@@ -6871,6 +6906,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
       , test_networkShareScoping
       , test_agreementFusesToElementwiseProduct
       , test_agreementPointQueryIndexes
+      , test_agreementScalarPythonLowersTensorOps
       , test_nestedEnumerationHonoursBudget
       , test_sharedLatentFactorizesPerSlot
       , test_drawProductReadFactorizesPerField

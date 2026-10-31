@@ -158,6 +158,91 @@ def logsumexp(xs):
     return -math.inf
   return m + math.log(sum(math.exp(x - m) for x in xs))
 
+# --- rank-1 tensor builtins (BReduce, BZip, the gathered BMap) --------------
+#
+# A scalar-mode tensor is a Python list, or whatever vector a network returned
+# (a torch tensor, a numpy array) when a builtin reads that vector directly
+# (task scalar-backend-tensor-ops-lower-to-torch). On a list each helper is
+# the comprehension or builtin the codegen used to emit inline, so a list
+# answers exactly as before, bit for bit. On a torch tensor it is one torch
+# op: at vocabulary scale that is one kernel instead of tens of thousands of
+# boxed floats, and it keeps the autograd graph without a list of 0-d tensors.
+# torch is looked up through `_torch_for`, as above, so the runtime stays
+# torch-free for a caller that never passes a tensor. A list operand meeting a
+# tensor one is lifted to the tensor's dtype (its elements may be 0-d tensors
+# carrying a graph, so they are stacked, not copied as numbers).
+
+def _vec_torch(*xs):
+  for x in xs:
+    if type(x) is not list:
+      t = _torch_for(x)
+      if t is not None:
+        return t
+  return None
+
+def _vec_lift(t, x, like):
+  if t.is_tensor(x):
+    return x
+  return t.stack([e if t.is_tensor(e) else t.tensor(float(e), dtype=like.dtype) for e in x]) \
+    if len(x) else t.zeros(0, dtype=like.dtype)
+
+def _vec_pair(a, b):
+  t = _vec_torch(a, b)
+  if t is None:
+    return None, a, b
+  like = a if t.is_tensor(a) else b
+  return t, _vec_lift(t, a, like), _vec_lift(t, b, like)
+
+def vec_is_torch(x):
+  return _vec_torch(x) is not None
+
+def vec_sum(t):
+  if _vec_torch(t) is not None:
+    return t.sum()
+  return sum(t, 0.0)
+
+def vec_max(t):
+  if _vec_torch(t) is not None:
+    return t.max() if t.numel() else -math.inf
+  return max(t, default=-math.inf)
+
+def vec_logsumexp(t):
+  tt = _vec_torch(t)
+  if tt is not None:
+    return tt.logsumexp(t, 0) if t.numel() else -math.inf
+  return logsumexp(t)
+
+def vec_zip_add(a, b):
+  t, a, b = _vec_pair(a, b)
+  return a + b if t is not None else [x + y for x, y in zip(a, b)]
+
+def vec_zip_sub(a, b):
+  t, a, b = _vec_pair(a, b)
+  return a - b if t is not None else [x - y for x, y in zip(a, b)]
+
+def vec_zip_mul(a, b):
+  t, a, b = _vec_pair(a, b)
+  return a * b if t is not None else [x * y for x, y in zip(a, b)]
+
+def vec_zip_div(a, b):
+  t, a, b = _vec_pair(a, b)
+  return a / b if t is not None else [safe_div(x, y) for x, y in zip(a, b)]
+
+# x[lo:hi] as a tensor: the BMap `\v -> x[v + c]` over a contiguous Int domain.
+# Every position must exist, as the per-element read it replaces required: a
+# slice past the end would silently come back short.
+def vec_slice(x, lo, hi):
+  if isinstance(x, InferenceList):
+    seg = list(itertools.islice(x, lo, hi))
+    if len(seg) != hi - lo:
+      raise IndexError("vec_slice: vector of length " + str(lo + len(seg)) + " read at " + str(hi - 1))
+    return seg
+  n = len(x)
+  if lo < 0 or hi > n:
+    raise IndexError("vec_slice: vector of length " + str(n) + " read at [" + str(lo) + ", " + str(hi) + ")")
+  seg = x[lo:hi]
+  return list(seg) if type(seg) is tuple else seg
+
 def rand():
   return random()
 
