@@ -1,0 +1,6 @@
+main = fst (if Uniform < 0.15 then (2, (False, 3)) else (0, (False, 1)))
+-- cdf() of `fst` of a tuple whose dropped component is itself a tuple: fst's
+-- inverse puts ANY in that slot as a whole, and compareValueExpr's Tuple case
+-- used to destructure it before testing for the wildcard (task
+-- cdf-fst-of-nested-tuple-indexes-any). Found by the batched arm of
+-- prop_Fuzz_BackendsAgree.

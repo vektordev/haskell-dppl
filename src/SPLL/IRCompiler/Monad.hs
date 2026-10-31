@@ -717,8 +717,11 @@ compareValueExpr sr TFloat v sample = anyBoundsNothing sr sample (IRIf (IROp OpL
 compareValueExpr sr TInt v sample = anyBoundsNothing sr sample (IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr))
 compareValueExpr sr TBool v sample = anyBoundsNothing sr sample (IRIf (IROp OpAnd (IRUnaryOp OpNot sample) v) (srZero sr) (srOne sr))
 compareValueExpr sr TUnit _ _ = srOne sr
-compareValueExpr sr (Tuple ft st) v sample = srTimes sr (compareValueExpr sr ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (compareValueExpr sr st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
-compareValueExpr sr (TEither lr rr) v sample =
+-- A compound slot can be the wildcard as a whole (@fst@'s inverse discards a
+-- tuple- or Either-valued second component as one ANY), so it is tested before
+-- the comparison destructures it (task cdf-fst-of-nested-tuple-indexes-any).
+compareValueExpr sr (Tuple ft st) v sample = anyBoundsNothing sr sample $ srTimes sr (compareValueExpr sr ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (compareValueExpr sr st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
+compareValueExpr sr (TEither lr rr) v sample = anyBoundsNothing sr sample $
   IRIf (IRDestruct AcIsLeft v)
     (IRIf (IRDestruct AcIsLeft sample) (compareValueExpr sr lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (srZero sr))
     (IRIf (IRDestruct AcIsRight sample) (compareValueExpr sr rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)) (srZero sr))

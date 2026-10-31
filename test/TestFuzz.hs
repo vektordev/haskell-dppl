@@ -2212,9 +2212,7 @@ argGen adtDecls depth rt = case rt of
 -- a raise) is never listed here: it fails the property. Remove an entry when
 -- its ticket is fixed.
 knownBatchedFamilies :: [(String, String)]
-knownBatchedFamilies =
-  [ ("'<' not supported between instances of 'str' and", "cdf-fst-of-nested-tuple-indexes-any")
-  ]
+knownBatchedFamilies = []
 
 knownBatchedFamily :: Disagreement -> Maybe String
 knownBatchedFamily d = case dBackendA d of
