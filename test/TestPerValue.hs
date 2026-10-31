@@ -455,8 +455,10 @@ structureTests = testGroup "compiled structure"
       env <- compileOrFail defaultCompilerConfig { noIntegrate = True } p
       body <- probBody env "posterior"
       assertBool "a reduction in the per-value body" (not (irAny isReduce body))
-      assertBool "calls the prior" (callsVar "posterior__prior_prob" body)
-      assertBool "calls the given part" (callsVar "posterior__given_prob" body)
+      -- Inlined, not called (task per-value-fast-path-calls-network-per-domain-value),
+      -- so the optimizer can lift a network read of a parameter out of the loop.
+      assertBool "the prior is inlined" (not (callsVar "posterior__prior_prob" body))
+      assertBool "the given part is inlined" (not (callsVar "posterior__given_prob" body))
       assertBool "no point-query fallback" (not (callsVar "posterior__point_prob" body))
       -- The slot is a parameter of the given part, so nothing enumerates it there either.
       given <- probBody env "posterior__given"
@@ -548,6 +550,7 @@ backendTests = testGroup "the text backends agree with their own point queries"
       julia [ (p, env, "posterior", "main", [SigFst], guessWhoBackendArgs, [ VTuple VAny h | h <- guessWhoHeard ])
             , (p2, env2, "pv", "pv__point", [SigFst], [], sharedDrawQueries) ]
   , testCase "BatchedPython: Guess-Who over a list board, every ANY mask in one call" batchedGuessWho
+  , testCase "Python: the fast path calls each network once per query, not once per value" networkCallsPerQuery
   ]
   where
     sharedDraw = do
@@ -611,6 +614,50 @@ batchedGuessWho = do
         hClose h
         readProcessWithExitCode py [path] ""
       when (code /= ExitSuccess) $ assertFailure ("batched per-value check failed:\n" ++ out ++ err)
+
+-- | Task per-value-fast-path-calls-network-per-domain-value: the fast path's
+-- element is the prior and the given part at one value, and both read a
+-- network whose argument does not depend on the value. Each network is a
+-- counting function returning a fixed vector; one per-value query must call
+-- each once (as the point query does), not once per domain value, and the
+-- vector must still be @pa[v] * pb[v]@.
+networkCallsPerQuery :: Assertion
+networkCallsPerQuery = do
+  let n = 10 :: Int
+      domain = "[" ++ intercalate ", " (map show [0 .. n - 1]) ++ "]"
+      progSrc = unlines
+        [ "neural lmA :: (Symbol -> Int) of " ++ domain
+        , "neural lmB :: (Symbol -> Int) of " ++ domain
+        , "main ctxA ctxB ="
+        , "  draw a = lmA ctxA in"
+        , "  draw b = lmB ctxB in"
+        , "  (a, a == b)"
+        , ""
+        , "posterior :: Symbol -> Symbol -> (Enumerated Int, Bool)"
+        , "posterior = main" ]
+  p <- parseOrFail progSrc
+  env <- compileOrFail defaultCompilerConfig { noIntegrate = True } p
+  projectDir <- getCurrentDirectory
+  let src = unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
+                     (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))))
+      script = unlines
+        [ "import sys", "sys.path.insert(0, " ++ show projectDir ++ ")"
+        , "_calls = {'A': 0, 'B': 0}"
+        , "def lmA(s):"
+        , "    _calls['A'] += 1"
+        , "    return s"
+        , "def lmB(s):"
+        , "    _calls['B'] += 1"
+        , "    return s" ] ++ src ++ "\n" ++ unlines
+        [ "_pa = [float(i + 1) / 55.0 for i in range(" ++ show n ++ ")]"
+        , "_pb = [float(" ++ show n ++ " - i) / 55.0 for i in range(" ++ show n ++ ")]"
+        , "_r = posterior.forward(T('ANY', True), _pa, _pb)"
+        , "if _calls != {'A': 1, 'B': 1}:"
+        , "    raise ValueError('network calls per per-value query: ' + str(_calls))"
+        , "for _v in range(" ++ show n ++ "):"
+        , "    if abs(_r[0][_v] - _pa[_v] * _pb[_v]) > 1e-15:"
+        , "        raise ValueError('element ' + str(_v) + ': ' + str(_r[0][_v]) + ' vs ' + str(_pa[_v] * _pb[_v]))" ]
+  runScript "python3" [] ".py" script
 
 -- | Run one per-value function's checks in one python3 process: every element
 -- against the point query at that value, and the sum against the ANY query.

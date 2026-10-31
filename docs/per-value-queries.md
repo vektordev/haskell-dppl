@@ -91,6 +91,16 @@ tuples reaches exactly `s`, the body splits into `f__prior = E` and `f__given
 query with the slot set to `v`, with `s = v` (`srTimes`, so log space works).
 The slot is never enumerated, so no `BReduce` ranges over it.
 
+Both helpers' probability bodies are inlined into the loop over the domain
+(their parameters renamed to the loop's variables, their own query-type
+guards dropped), not called. Behind a call, a network read of a parameter
+(`lmA(ctxA)`) ran once per domain value; inlined, the optimizer's network
+sharing (`docs/neural.md`, "One network call per argument per query", `-O2`)
+lifts it above the loop, so a per-value query calls each network once, as the
+point query does. Pinned by `PerValue`'s "the fast path calls each network
+once per query" (Python, counting mocks). Where the renaming is not safe (a
+parameter rebound inside the body), the element calls the helper instead.
+
 A side effect worth knowing: `f__given` sees `s` as a deterministic parameter.
 A network whose input depends on `s` (`see (nth s board)`) is therefore
 answered here, although the point query of the same program is intractable
