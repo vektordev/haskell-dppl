@@ -20,15 +20,15 @@ adtNeuralCountingAccum addTerm.prob=3
 adtNeuralCountingFlat countRed.prob=4
 affineChainEndpoint main.prob=3
 affineChainPartial main__m10.prob=3
-aliasChainOfStructuredDrawAnyMarginal main__m01.prob=3 main__m10.prob=9 main__m11.prob=4
-aliasReadTwice main__m10.prob=6 main__m11.prob=4
+aliasChainOfStructuredDrawAnyMarginal main__m01.prob=3 main__m10.prob=9
+aliasReadTwice main__m10.prob=6
 aliasedDrawThroughScalingHelper main.integ=6 main.prob=6
 aliasedParameterPlusZeroMarginalDim main.integ=5 main.prob=6
 aliasedParameterTwiceMarginalDim main.integ=5 main.prob=6
 anyLeafReadAgainAsCondition main__m10.prob=4
 anyLeafReadAgainInCondition main__m10.prob=9
 anyLeafReadAgainInOutput main__m01.prob=5 main__m10.prob=3
-anyLeafReadAgainThroughAlias main__m10.prob=9 main__m11.prob=4
+anyLeafReadAgainThroughAlias main__m10.prob=9
 anyMarkPassedAsRecursiveState ev.integ=4 ev.prob=4 gen.prob=3
 applyEnumComparison selF.prob=3
 applyEnumForwardOnly notB.prob=3
@@ -55,17 +55,16 @@ decreasingRecursionEnumeratedArgumentDensity loop.prob=5 main.prob=5
 defineDestructured main.integ=8 main.prob=10
 diffusionToy1D main.prob=9 step.prob=18
 discreteFloatStrictAtAtomLetFree main.integ=8 main.prob=8
-doubleAliasedDrawParameterScaledSibling main.prob=5 main__m01.prob=3 main__m11.prob=4
+doubleAliasedDrawParameterScaledSibling main.prob=5 main__m01.prob=3
 drawBoundIntChainMixedSignsCdf main.integ=32 main.prob=8
 drawBoundIntPlusThenNegativeCdf main.integ=20 main.prob=8
 drawBoundIntTimesNegative main.integ=20 main.prob=8
 drawBoundIntTimesPositiveCdf main.integ=20 main.prob=8
 drawBoundListElementGuardsEmptyTail main.prob=3
-drawBoundMixtureOverSharedContinuousCondition main__m10.prob=6 main__m11.prob=4
-drawBoundScaledWitness main__m11.prob=4
+drawBoundMixtureOverSharedContinuousCondition main__m10.prob=6
 drawBoundSceneIntermediate main.integ=3 main.prob=3 main.writeLogits=10
 drawDestructuredAgreementHelperArm pair.integ=8 pair.prob=8
-drawDestructuredShared main.prob=7
+drawDestructuredShared main.prob=7 main__m01.prob=3 main__m10.prob=3
 drawProductReadPerField main.integ=3 main.prob=3
 drawProductReadPerField20 main.integ=5 main.prob=5
 drawProductReadPerField4 main.integ=3 main.prob=3
@@ -112,15 +111,12 @@ intMultKnownFactor main.integ=48 main.prob=4
 intTimesNegativeInlineCdf main.integ=48 main.prob=4
 isNullFalse main.prob=4
 isNullTrue main.prob=4
-letAliasRandomBinding main__m11.prob=4
 letBoundEitherDestructure main.prob=15
 letInProbChainedMults main.integ=11 main.prob=8
 letThreadEnumerable contrib.prob=3
-letTwoUniformIndirect main.prob=20 main__m01.prob=6
-letWitnessedChain main.prob=3 main__m011.prob=4 main__m111.prob=4
+letTwoUniformIndirect main.prob=20 main__m01.prob=4
+letWitnessedChain main.prob=3 main__m011.prob=4
 letWitnessedEitherFpUlp main.prob=12 main__m001.prob=11 main__m010.prob=7 main__m100.prob=4
-letWitnessedSharedLatent main__m11.prob=4
-letWitnessedSharedLatentMult main__m11.prob=4
 letWitnessedTupleFpUlp main.prob=6 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
 listOfFieldReads main.integ=17 main.prob=4
 listSignatureEmptyArmFirst main.integ=4 main.prob=4
@@ -128,9 +124,9 @@ map main.prob=3
 mapEither main.integ=17 main.prob=18
 mapMultList main.prob=3
 maskComplementSlot main__m10.prob=4
-maskShiftedWitness main.integ=8 main.prob=7 main__m1.prob=4
+maskShiftedWitness main.integ=8 main.prob=7
 maskSummedSlot main.prob=6 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
-maskSwappedWrapper f__m10.prob=4 main.prob=7
+maskSwappedWrapper f__m10.prob=4 main.prob=7 main__m01.prob=3 main__m10.prob=3
 maybeFromLeftNested main.integ=5 main.prob=10
 maybeFromLeftNormalization main.integ=5 main.prob=5
 maybeFromRightNormalization main.integ=5 main.prob=5
@@ -161,7 +157,7 @@ ofRealLeafCountingReadsPosition match.integ=4 match.prob=4
 ofRealLeafCountingSharedPredicate match.integ=4 match.prob=4
 orWithDeterministicOperand main.integ=8 main.prob=16
 ouChainRecursive main.prob=9 step.prob=12
-ouChainUnrolled main.prob=38 main__m001.prob=9 main__m010.prob=28 main__m100.prob=28 main__m101.prob=6 main__m110.prob=20
+ouChainUnrolled main.prob=38 main__m001.prob=11 main__m010.prob=28 main__m100.prob=28 main__m101.prob=7 main__m110.prob=20
 overDeterminedSharedLatent main.prob=18 main__m001.prob=15 main__m010.prob=15 main__m011.prob=4
 ownDrawSlotsSelfContained main.integ=3 main.prob=3
 partialInjFMapPlus main.prob=3
@@ -208,7 +204,7 @@ sceneCountConditionalEdit main.writeLogits=8
 setWitnessEqFalseInTupleArmApplied main.prob=4
 setWitnessEqualityThroughExpOffImage main.integ=11 main.prob=11
 setWitnessExceptInteriorPoint main.prob=4
-setWitnessInnerTupleInPlace main__m01.prob=3 main__m11.prob=4
+setWitnessInnerTupleInPlace main__m01.prob=3
 setWitnessNegatedComparisonBoundary main.prob=4
 setWitnessNestedLetObserve main.prob=3
 setWitnessSiblingBoolAny main.prob=3
