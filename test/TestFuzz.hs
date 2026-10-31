@@ -2674,6 +2674,18 @@ arrowGeneratorTests = testGroup "Arrow generator"
                     (injF "neg" [letIn "v0" (var "helper") (apply (var "v0") (constF 1.0))])
       assertEqual "" (Just TyFloat)
         (typedMainCoreTy (Program [("helper", helper), ("main", mainE)] [] [] [] []))
+  , testCase "a helper whose let binds a lambda with a polymorphic body is recoverable" $ do
+      -- Task helper-recovery-flake-polymorphic-injf-free-param: the helper's
+      -- body is a 'genFunctionLet' draw, @(\\h1 -> h1 Uniform) (\\h2 -> ...)@,
+      -- and @neg h2@ over a free @h2@ matches both neg's Float and Int rows.
+      -- Red before 72c3aea, whose 'tyOfArgument' types @h2@ at @h1@'s call
+      -- site (@Uniform@); this pins that shape inside a helper.
+      let helper = "h0" #-># letIn "h1"
+                     ("h2" #-># (injF "neg" [var "h2"] #+# injF "neg" [injF "max" [normal, var "h2"]]))
+                     (apply (var "h1") uniform)
+          mainE = apply (var "helper") (constB True)
+      assertEqual "" (Just TyFloat)
+        (typedMainCoreTy (Program [("helper", helper), ("main", mainE)] [] [] [] []))
   , testProperty "a helper draw's main type is recoverable" $
       forAll (resize fuzzSize genHelperProgram) $ \p ->
         counterexample (show p) (property (isJust (typedMainCoreTy p)))
