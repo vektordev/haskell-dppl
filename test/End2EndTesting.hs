@@ -1583,6 +1583,40 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
         , testProperty "generate-density-matches-expected"
             (once (cachedTorch manifest torch "generate-density-matches-expected" eligible (runBatchedGenerate py))) ]
 
+-- | @--batched --logSpace@ against the corpus (task
+-- batched-log-space-density-and-cdf-leaves): a fixed handful of continuous
+-- programs, between them reaching the normal and uniform density and CDF
+-- leaves, compiled batched in log space; every p()/cdf() row is run through
+-- the emitted code and its exponentiated answer compared with the .tst
+-- expectation the interpreter is held to. The programs must be batched-
+-- eligible in log space: a refusal fails the check rather than shrinking it.
+batchedLogSpacePrograms :: [String]
+batchedLogSpacePrograms =
+  [ "negativeScaledLogNormal", "normalThroughFunctionParamAliased", "comparisonSiblingJacobian"
+  , "uniformLog", "collapseMixture", "mapMultList" ]
+
+batchedLogSpaceTests :: Corpus -> Manifest -> IO TestTree
+batchedLogSpaceTests corpus manifest = corpusSweepAll corpus SweepSpec
+  { sweepName = "BatchedLogSpace", sweepTier = Default, sweepSlow = SkipSlow
+  , sweepSelect = (`elem` batchedLogSpacePrograms) . ceName
+  , sweepNote = "a few continuous programs' rows under --batched --logSpace, exponentiated, against the .tst" } $ \entries -> do
+  verdicts <- mapM (\e -> (,) (ceName e) <$> batchedEligibilityCensusWith defaultCompilerConfig{batched = True, logSpace = True}
+                                         (ceProgram e) (map (literalSymbolEnvelopes (ceProgram e)) (shapedCases e))) entries
+  mpy <- findTorchPython
+  mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
+  let eligible = [ (n, src, gs, nets) | (n, Right ((src, gs, nets), _)) <- verdicts ]
+      refused = [ (n, err) | (n, Left err) <- verdicts ]
+      missing = [ n | n <- batchedLogSpacePrograms, n `notElem` map ceName entries ]
+  return $ testGroup "BatchedLogSpace" $
+    [ testProperty "all-selected-and-eligible" $ once $
+        counterexample ("not in the default corpus slice: " ++ show missing ++ "; refused in batched log space: " ++ show refused)
+          (null missing && null refused) ]
+    ++ case mtorch of
+      Nothing -> [ testProperty "torch-python-found" $ once $ ioProperty $ noTorchProperty "BatchedLogSpace value differential" ]
+      Just (py, torch) ->
+        [ testProperty "batched-log-space-vs-expected"
+            (once (cachedTorch manifest torch "batched-log-space-vs-expected" eligible (const (runBatchedPythonWith True py)))) ]
+
 -- | Each value differential runs every program in one torch process, so it
 -- is a batch: only the programs whose key changed are run, and an
 -- all-unchanged differential starts no python. An empty selection runs
@@ -1680,7 +1714,12 @@ batchedEligibility p tcs = fmap fst <$> batchedEligibilityCensus p tcs
 -- | 'batchedEligibility', with the constructs of the batched compile the
 -- batched fuzz arm does not certify ('batchedUncertifiedConstructs').
 batchedEligibilityCensus :: Program -> [TestCase] -> IO (Either String ((String, [BatchGroup], [NetMock]), [String]))
-batchedEligibilityCensus p tcs = do
+batchedEligibilityCensus = batchedEligibilityCensusWith defaultCompilerConfig{batched = True}
+
+-- | 'batchedEligibilityCensus' under a given (batched) compiler configuration,
+-- e.g. with @logSpace@ set ('batchedLogSpaceTests').
+batchedEligibilityCensusWith :: CompilerConfig -> Program -> [TestCase] -> IO (Either String ((String, [BatchGroup], [NetMock]), [String]))
+batchedEligibilityCensusWith conf p tcs = do
   r <- try (evaluate (force (go p tcs))) :: IO (Either SomeException (Either String ((String, [BatchGroup], [NetMock]), [String])))
   return $ either (\e -> Left ("crashed while compiling for batched mode: " ++ show e)) id r
   where
@@ -1693,7 +1732,7 @@ batchedEligibilityCensus p tcs = do
       if null qtcs
         then Left "the .tst file declares no p()/cdf() query points to batch"
         else Right ()
-      env <- compile defaultCompilerConfig{batched = True} prog
+      env <- compile conf prog
       srcLines <- generateFunctionsBatched True env
       groups <- maybe (Left "query samples are not structure-of-arrays batchable") Right
                       (batchGroups (collapsedEnumCtors (adts prog) (intercalate "\n" srcLines)) (not (null netNames)) qtcs)
@@ -2541,9 +2580,9 @@ normalTailPrecisionTests = testGroup "normal upper-tail precision (cumulative-no
         Nothing -> do
           hPutStrLn stderr "normal tail precision: batched case skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
           return (property True)
-        -- Linear variants only: the tensor fragment admits no log-space CDF
-        -- leaf ('SPLL.CodeGenPyTorchBatched' refuses @IRCumulative _ Log@).
-        Just py -> backendCheck "batched" (Just py) not batchedScript
+        -- Both spaces: the log-space variants reach pythonLibBatched's
+        -- log_cumulative_normal (task batched-log-space-density-and-cdf-leaves).
+        Just py -> backendCheck "batched" (Just py) (const True) batchedScript
   , testProperty "Julia" $ once $ ioProperty $ do
       mj <- findExecutable "julia"
       case mj of
@@ -3258,8 +3297,13 @@ noTorchProperty what = maybe (property True) (`counterexample` False) <$> noTorc
 -- | Run every eligible program's batched code in one shared torch process and
 -- assert every batched query point matches its expected value.
 runBatchedPython :: FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
-runBatchedPython _ [] = counterexample "BatchedPython: no eligible corpus programs found" False
-runBatchedPython py eligible = ioProperty $ do
+runBatchedPython = runBatchedPythonWith False
+
+-- | 'runBatchedPython' on programs compiled in log space when the flag is set
+-- ('batchedDriverWith').
+runBatchedPythonWith :: Bool -> FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
+runBatchedPythonWith _ _ [] = counterexample "BatchedPython: no eligible corpus programs found" False
+runBatchedPythonWith logArg py eligible = ioProperty $ do
   hPutStrLn stderr ("BatchedPython: " ++ show (length eligible) ++ " eligible corpus programs, "
                     ++ show (sum [sum (map (length . bgSamples) gs) | (_, _, gs, _) <- eligible])
                     ++ " query points, via " ++ py)
@@ -3268,7 +3312,7 @@ runBatchedPython py eligible = ioProperty $ do
   -- temp file puts its own directory (not cwd) on sys.path, so prepend the
   -- project root explicitly so `pythonLibBatched` resolves.
   cwd <- getCurrentDirectory
-  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ batchedDriver False eligible
+  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ batchedDriverWith logArg False eligible
   (code, out, err) <- withSystemTempFile "batched_diff.py" $ \tmpPath tmpHandle -> do
     hPutStr tmpHandle script
     hClose tmpHandle
@@ -3282,12 +3326,19 @@ runBatchedPython py eligible = ioProperty $ do
 -- element whose prob (or dim, where prob is non-zero) disagrees with the corpus
 -- expectation beyond 'probTolerance'.
 batchedDriver :: Bool -> [(String, String, [BatchGroup], [NetMock])] -> String
-batchedDriver accArg eligible = unlines $
-  [ "import torch, sys, traceback"
+batchedDriver = batchedDriverWith False
+
+-- | 'batchedDriver', where @logArg@ says the programs were compiled in log
+-- space: each answer is exponentiated before it is compared with the linear
+-- corpus expectation.
+batchedDriverWith :: Bool -> Bool -> [(String, String, [BatchGroup], [NetMock])] -> String
+batchedDriverWith logArg accArg eligible = unlines $
+  [ "import torch, sys, traceback, math"
   -- T for structure-of-arrays tuple sample batches; the list constructors and
   -- the bucketing wrapper for heterogeneous (list-shaped) samples.
   , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, AnyInferenceList, Left, Right, bucketed, bucket_count"
   , "TOL = " ++ show probTolerance
+  , "LOGSPACE = " ++ (if logArg then "True" else "False")
   , "failures = []"
   , "def _bucket_count(name, samples, expected):"
   , "    got = bucket_count(samples)"
@@ -3299,6 +3350,7 @@ batchedDriver accArg eligible = unlines $
   , "    p = r[0]; d = r[1][0]"
   , "    for i in range(len(exp_p)):"
   , "        pv = _leaf(p, i)"
+  , "        if LOGSPACE: pv = math.exp(pv)"
   , "        if abs(pv - exp_p[i]) > TOL:"
   , "            failures.append(name + '.' + method + ' pt ' + str(i) + ': prob ' + str(pv) + ' != ' + str(exp_p[i]))"
   , "        if pv != 0.0:"

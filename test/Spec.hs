@@ -32,7 +32,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, batchedPerElementEvaluatorTests, branchCountBackendTests, topKRuntimeCutoffTests, topKWriteLogitsTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, batchedLogSpaceTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, batchedPerElementEvaluatorTests, branchCountBackendTests, topKRuntimeCutoffTests, topKWriteLogitsTests)
 import TestKnownIssues (knownIssuesTests, performancePinHarnessTests, batchedCompileBudgetTests)
 import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rewriteIntegrationTests, ofToggleCorpusTests)
@@ -557,6 +557,7 @@ main = do
   planLog <- planEngineLogSpaceTests corpus manifest
   neuralLog <- neuralLogSpaceTests corpus manifest
   batchedPy <- batchedPythonTests corpus manifest
+  batchedLogSpace <- batchedLogSpaceTests corpus manifest
   branchCountBackends <- branchCountBackendTests
   detTests <- determinismTests corpus
   showcase <- showcaseTests
@@ -664,6 +665,7 @@ main = do
     , planLog
     , neuralLog
     , batchedPy
+    , batchedLogSpace
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests
     , topKRuntimeCutoffTests

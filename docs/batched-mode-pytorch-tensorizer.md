@@ -16,6 +16,13 @@ calls the kernel once per bucket). `OpLog`/`OpDiv` route through
 select; a refused `IRError` arm emits as a NaN `poison()` constant the
 select masks away.
 
+`--batched --logSpace` is supported: a log-space density or CDF leaf lowers
+to `pythonLibBatched`'s `log_density_*`/`log_cumulative_*`, the native
+log-pdf/log-cdf (the normal CDF through `torch.special.log_ndtr`, stable in
+the lower tail), and a log-space enumerated sum to `tensor_logsumexp`. The
+`BatchedLogSpace` sweep runs a few continuous corpus programs' rows under it,
+and `normal upper-tail precision` checks the batched log-space tail.
+
 After the optimizer, `SPLL.IRGatherPass` rewrites a one-hot point read --
 a `+`-tree of `if k == s then raw[k + c] else 0.0` over a contiguous key
 range, e.g. a per-mask variant's `P(a = sample[0])` over a neural Int

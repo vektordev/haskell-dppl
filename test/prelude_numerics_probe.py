@@ -206,6 +206,10 @@ def batched_dtype():
     "poison()": lambda: B.poison(),
     "rand(3)": lambda: B.rand(3),
     "randn(3)": lambda: B.randn(3),
+    "log_density_uniform(x)": lambda: B.log_density_uniform(x),
+    "log_cumulative_uniform(x)": lambda: B.log_cumulative_uniform(x),
+    "log_density_normal(x)": lambda: B.log_density_normal(x),
+    "log_cumulative_normal(x)": lambda: B.log_cumulative_normal(x),
   }
   for what, mk in checks.items():
     try:
