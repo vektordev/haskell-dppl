@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 -- | The @Corpus@ tasty group: metamorphic properties driven by the whole
 -- @test/cases/**/*.ppl@+@.tst@ corpus (validation, sampling-vs-PDF, topK, branch
 -- counting, P(ANY)=1, log-space vs linear, -O0 vs the default -O2, and operand
@@ -139,10 +140,37 @@ expectedProb e other = error ("malformed probability expectation in .tst corpus 
 -- | The sweeps keyed by impact analysis record their passes in @manifest@
 -- (today 'Corpus.LogSpaceMatchesLinear', see 'logSpaceKey').
 corpusTests :: Corpus -> Manifest -> IO TestTree
-corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGroup "Corpus") $ sequence
+corpusTests corpus manifest = do
+  ordinary <- corpusGroup ordinaryVariant corpus manifest
+  slowTwin <- corpusGroup slowVariant corpus manifest
+  return (testGroup "Tests" [ordinary, testGroup "Slow" [slowTwin]])
+
+-- | Which programs a copy of the sweeps runs over, and under which tier.
+data Variant = Variant
+  { vPath   :: String       -- ^ the sweeps' path prefix
+  , vGroup  :: String       -- ^ the tasty group holding them
+  , vTier   :: Tier         -- ^ the tier of the sweeps that are 'Default' for ordinary programs
+  , vHeader :: SlowHeader
+  , vSelect :: CorpusEntry -> Bool
+  }
+
+ordinaryVariant :: Variant
+ordinaryVariant = Variant "Corpus" "Corpus" Default SkipSlow corpusPoolEntry
+
+-- | The same sweeps over the @slow@-headered programs (task
+-- corpus-sweeps-slow-twin), the way End2End has a @(slow)@ twin. Every sweep
+-- has one. No sweep leaves out 'slowForCompileCost': measured with those
+-- programs excluded and included, the twin ran the same 405 programs in the
+-- same time (about 62 s of tests), so the pool already drops them.
+slowVariant :: Variant
+slowVariant = Variant "Slow.Corpus (slow)" "Corpus (slow)" Slow OnlySlow
+  corpusPoolEntry
+
+corpusGroup :: Variant -> Corpus -> Manifest -> IO TestTree
+corpusGroup Variant{vPath, vGroup, vTier, vHeader, vSelect} corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGroup vGroup) $ sequence
   [ corpusProperty SweepSpec
-      { sweepName = "Corpus.ValidPrograms", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "every program the interpreter runs passes validateProgram" } $ \probPool _ ->
+      { sweepName = vPath ++ ".ValidPrograms", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "every program the interpreter runs passes validateProgram" } $ \probPool _ ->
       testProperty "ValidPrograms" (forAllNamedIn probPool (\_ tc -> checkValidPrograms tc))
   -- dim 0 means the expectation refers to an atom, not a density: match drawn
   -- samples against it with a near-exact window (wide enough for float noise like
@@ -154,36 +182,36 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
   -- so reliable multivariate estimates need prohibitively many samples; those
   -- cases are value-checked exactly by End2End.Interpreter instead.
   , corpusSweepAll corpus SweepSpec
-      { sweepName = "Corpus.SamplingMatchesPDF", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "the empirical frequency of forward samples estimates the .tst density (rows marked no-sample excepted)" } $ \es -> return $ let probPool = sampledProbCasesOf es in
+      { sweepName = vPath ++ ".SamplingMatchesPDF", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "the empirical frequency of forward samples estimates the .tst density (rows marked no-sample excepted)" } $ \es -> return $ let probPool = sampledProbCasesOf es in
       testProperty "SamplingMatchesPDF" $ once $ conjoin
       [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool
       , sampleable inp, outDim == 0 || outDim == 1
       , densityLivesOnSamples inp outDim ]
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.TopKInterprets", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "a topK 0.05 compile still answers every p() row" } $ \probPool _ ->
+      { sweepName = vPath ++ ".TopKInterprets", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "a topK 0.05 compile still answers every p() row" } $ \probPool _ ->
       testProperty "TopKInterprets" (forAllNamedIn probPool (checkTopKInterprets topK005Envs))
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.ProbWithBranchCounting", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "branch counting leaves (prob, dim) unchanged" } $ \probPool _ ->
+      { sweepName = vPath ++ ".ProbWithBranchCounting", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "branch counting leaves (prob, dim) unchanged" } $ \probPool _ ->
       testProperty "ProbWithBranchCounting" (forAllNamedIn probPool (checkProbTestCasesWithBC bcEnvs))
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.MarginalAnyIsOne", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "P(ANY) = 1" } $ \probPool _ ->
+      { sweepName = vPath ++ ".MarginalAnyIsOne", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "P(ANY) = 1" } $ \probPool _ ->
       testProperty "MarginalAnyIsOne" (forAllNamedIn probPool (checkProbAny defaultEnvs))
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.TopKZeroThreshMatchesExact", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "topK at threshold 0 is exact inference" } $ \probPool _ ->
+      { sweepName = vPath ++ ".TopKZeroThreshMatchesExact", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "topK at threshold 0 is exact inference" } $ \probPool _ ->
       testProperty "TopKZeroThreshMatchesExact" (forAllNamedIn probPool (checkTopKZeroMatchesExact topK0Envs defaultEnvs))
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.TopKNeverInflates", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "topK pruning never raises a p() row" } $ \probPool _ ->
+      { sweepName = vPath ++ ".TopKNeverInflates", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "topK pruning never raises a p() row" } $ \probPool _ ->
       testProperty "TopKNeverInflates" (forAllNamedIn probPool (checkTopKNeverInflates topK01Envs defaultEnvs))
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.TopKNeverInflatesCdf", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "topK pruning never raises a cdf() row" } $ \_ cdfPool ->
+      { sweepName = vPath ++ ".TopKNeverInflatesCdf", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "topK pruning never raises a cdf() row" } $ \_ cdfPool ->
       testProperty "TopKNeverInflatesCdf" (forAllNamedIn cdfPool (checkTopKNeverInflatesCdf topK01Envs defaultEnvs))
   -- task log-space-probability-computation: compiling with logSpace=True makes
   -- p()/cdf() return a log-probability instead of a linear one, so exp(actual)
@@ -199,10 +227,10 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
   -- log-space compile and rows are unchanged since it last passed is skipped
   -- (docs-repo task impact-analysis-remaining-sweeps).
   , corpusSweepAll corpus SweepSpec
-      { sweepName = "Corpus.LogSpaceMatchesLinear", sweepTier = Default, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "exp of the log-space answer is the .tst expectation" } $ \es ->
+      { sweepName = vPath ++ ".LogSpaceMatchesLinear", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "exp of the log-space answer is the .tst expectation" } $ \es ->
       return $ testGroup "LogSpaceMatchesLinear"
-        [ testProperty n $ once $ cachedProperty manifest "Corpus.LogSpaceMatchesLinear" n
+        [ testProperty n $ once $ cachedProperty manifest (vPath ++ ".LogSpaceMatchesLinear") n
             (logSpaceKey manifest p (lookupCompiled logEnvs n) rows)
             (conjoin [ counterexample ("corpus case: " ++ n) (checkLogSpaceMatchesLinear logEnvs n tc) | tc <- rows ])
         | e <- es
@@ -220,8 +248,8 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
   -- Slow: the cutoff's log conversion is covered in the default suite by the
   -- "topK runtime cutoff" group; this is its corpus-wide version.
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.TopKLogSpaceMatchesLinear", sweepTier = Slow, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "log-space topK agrees with linear topK" } $ \probPool _ ->
+      { sweepName = vPath ++ ".TopKLogSpaceMatchesLinear", sweepTier = Slow, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "log-space topK agrees with linear topK" } $ \probPool _ ->
       testProperty "TopKLogSpaceMatchesLinear"
       (forAllNamedIn probPool (checkTopKLogSpaceMatchesLinear topK005LogEnvs topK005Envs))
   -- task multi-path-recovery-unmaterialized-crash: the IROptimizer must not be
@@ -236,8 +264,8 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
   -- approximate. Slow: the -O0 corpus compile is a whole extra corpus compile
   -- spent on the optimizer alone.
   , corpusProperty SweepSpec
-      { sweepName = "Corpus.UnoptimizedMatchesOptimized", sweepTier = Slow, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "-O0 answers exactly what -O2 answers" } $ \probPool _ ->
+      { sweepName = vPath ++ ".UnoptimizedMatchesOptimized", sweepTier = Slow, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "-O0 answers exactly what -O2 answers" } $ \probPool _ ->
       testProperty "UnoptimizedMatchesOptimized"
       (forAllNamedIn probPool (checkUnoptimizedMatchesOptimized unoptEnvs defaultEnvs))
   -- task transformation-differential-testing-m1-config-differencing: does
@@ -253,8 +281,8 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
   -- are logged, not failed -- 'TASTY_HIDE_SUCCESSES=false' shows them. Slow:
   -- one extra compile per site.
   , corpusSweepAll corpus SweepSpec
-      { sweepName = "Corpus.TopKOperandOrder", sweepTier = Slow, sweepSlow = SkipSlow
-      , sweepSelect = corpusPoolEntry, sweepNote = "swapping a commutative call's operands changes nothing at threshold 0; logs what it changes at 0.1" } $ \es ->
+      { sweepName = vPath ++ ".TopKOperandOrder", sweepTier = Slow, sweepSlow = vHeader
+      , sweepSelect = vSelect, sweepNote = "swapping a commutative call's operands changes nothing at threshold 0; logs what it changes at 0.1" } $ \es ->
       return $ testGroup "TopKOperandOrder"
         [ testCaseInfo n (checkTopKOperandOrder (lookup n knownOperandOrderDependent) (lookupCompiled topK005Envs n) p rows)
         | e <- es
@@ -270,7 +298,7 @@ corpusTests corpus manifest = fmap (localOption (QuickCheckMaxRatio 20) . testGr
     corpusProperty spec prop = corpusSweepAll corpus spec $ \es ->
       return (prop (probCasesOf es) (cdfCasesOf es))
     -- The slice the sweeps above select ('SkipSlow', 'corpusPoolEntry').
-    poolEntries = [ e | e <- corpusEntries corpus, not (ceSlow e), corpusPoolEntry e ]
+    poolEntries = [ e | e <- corpusEntries corpus, ceSlow e == (vHeader == OnlySlow), vSelect e ]
     -- Compile each corpus program once per config, shared by every invariant and
     -- every .tst line drawn from that program (compile depends only on the pair,
     -- never on the queried sample/params).

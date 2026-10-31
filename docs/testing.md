@@ -659,6 +659,10 @@ programs (`planHelperOnFoldResult*`, `planFoldDisjunction*`, ~10 s per compile)
 and `planEnumRecJointState` are `slow`; their correctness is pinned at small
 depth by the default suite's polynomial-growth tests.
 
+The `Corpus` binary's sweeps have a `Slow` twin over the `slow` programs
+(`Slow.Corpus (slow).*`, built by `corpusGroup` with `slowVariant`; every sweep,
+none left out). It adds about 1 minute of wall time to a `Slow` run.
+
 Most of the corpus is `slow` too: 527 programs whose every HPC tick the
 default tier also executes were demoted (docs-repo task
 `demote-tick-redundant-corpus-programs-to-slow`, from the report of
