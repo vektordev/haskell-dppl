@@ -129,6 +129,7 @@ multExp main.integ=10 main.prob=7
 namedHelperReturnsSelectedLambda main.prob=7
 nanConstantMixture main.integ=3 main.prob=4
 negDiscreteAtomCdf main.integ=4 main.prob=4
+negativeScaledLogNormalParam h.integ=3 h.prob=3
 nestedTupleAccessorCompilesFast main.integ=4 main.prob=4
 nestedTupleAnyUnderHeadOfIf main.prob=4
 nestedTupleAnyUnderSndHead main.prob=5

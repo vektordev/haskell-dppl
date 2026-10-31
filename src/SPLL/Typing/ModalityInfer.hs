@@ -757,7 +757,7 @@ inferE ctx env expr = case expr of
         affine = case affineInjF fname (zipWith (affineOf . cnOf) args laws) of
                    Just c | not (Map.null (acLatents c)) -> Just c
                    _ -> Nothing
-        m0   = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname (isJust affine) (map lawMod laws)))
+        m0   = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname (isJust affine) (map lawMod laws) (map lawValue laws)))
         l | Just z <- zeroFactor                  = Law (IG gExact) (JDirac (Just z))
           | isFieldConstructor (icADTs ctx) fname = structuredLaw fname laws m0
           | Just c <- affine                      = Law m0 (JAffine c)
@@ -1723,9 +1723,9 @@ compareGround plan enumA enumB indep a b
 -- which also covers the same-latent shape without a ledger identity). Any
 -- fresh latent beyond one in the combination floors the result — that is what
 -- keeps the two-residual guard at 'Bottom'.
-injFMod :: [ADTDecl] -> String -> Bool -> [IMod] -> IMod
-injFMod adtsDecl name gaussian mods =
-  case (if gaussian then Just PNormal else tryNormalClosure name (map projectI mods)) of
+injFMod :: [ADTDecl] -> String -> Bool -> [IMod] -> [Maybe Value] -> IMod
+injFMod adtsDecl name gaussian mods vals =
+  case (if gaussian then Just PNormal else tryNormalClosure name (zip (map projectI mods) (vals ++ repeat Nothing))) of
     Just pt -> witWrap (IG (fromClosurePType pt))
     Nothing
       | isFieldConstructor adtsDecl name, (m0:rest) <- mods -> foldl IProd m0 rest
@@ -1811,14 +1811,28 @@ injFMod adtsDecl name gaussian mods =
 -- an affine node is 'PNormal' exactly when its affine form can be built
 -- ('affineInjF'; law-carrying-modality M4), which is also what the compiler
 -- collapses.
-tryNormalClosure :: String -> [PType] -> Maybe PType
-tryNormalClosure "neg"  [Deterministic]          = Just Deterministic
-tryNormalClosure "exp"  [PNormal]                = Just PLogNormal
-tryNormalClosure "log"  [PLogNormal]             = Just PNormal
-tryNormalClosure "mult" [PLogNormal, PLogNormal]    = Just PLogNormal
-tryNormalClosure "mult" [PLogNormal, Deterministic] = Just PLogNormal
-tryNormalClosure "mult" [Deterministic, PLogNormal] = Just PLogNormal
+tryNormalClosure :: String -> [(PType, Maybe Value)] -> Maybe PType
+tryNormalClosure "neg"  [(Deterministic, _)]     = Just Deterministic
+tryNormalClosure "exp"  [(PNormal, _)]           = Just PLogNormal
+tryNormalClosure "log"  [(PLogNormal, _)]        = Just PNormal
+tryNormalClosure "mult" [(PLogNormal, _), (PLogNormal, _)] = Just PLogNormal
+-- A log-normal scaled by a constant is log-normal only for a positive scale:
+-- 'IRCompiler.toIRLogNormalParams' shifts mu by @log scale@, and a negative
+-- scale moves the support onto the negatives, where the family's density and
+-- cdf answer 0 (task lognormal-family-kept-through-nonpositive-scale-mult).
+-- Only a scale statically known positive keeps the family; any other (a
+-- negative or unknown one, e.g. a function parameter) falls to the generic
+-- floor, which drops the family and leaves the node to the inversion through
+-- @mult@. A zero scale never gets here: its law is the Dirac at 0.
+tryNormalClosure "mult" [(PLogNormal, _), (Deterministic, v)] | positiveScale v = Just PLogNormal
+tryNormalClosure "mult" [(Deterministic, v), (PLogNormal, _)] | positiveScale v = Just PLogNormal
 tryNormalClosure _      _                           = Nothing
+
+-- | A scale statically known to be strictly positive.
+positiveScale :: Maybe Value -> Bool
+positiveScale (Just (VFloat x)) = x > 0
+positiveScale (Just (VInt n))   = n > 0
+positiveScale _                 = False
 
 -- ---------------------------------------------------------------------------
 -- The vector fixpoint over top-level declarations
