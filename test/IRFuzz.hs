@@ -1718,11 +1718,6 @@ knownDisagreements =
   , KnownFamily "batched-isclose-holds-at-an-infinity" ["batched"]
       (AsIf (const (irMap batchedApprox)))
       (batchedRepro (IRIf (IROp OpApprox (IRVar "a0") (IRConst (VFloat 1))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat (-1 / 0)))
-  -- The batched runtime's tuple has no order.
-  , KnownFamily "batched-tuple-comparison-has-no-order" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "not supported between instances of 'T' and 'T'" a))
-      (batchedRepro (IRIf (IROp OpLessThan (IRConst (VTuple (VFloat 1) (VInt 1))) (IRConst (VTuple (VFloat 2) (VInt 0))))
-                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
   -- The batched runtime's densities take a tensor: of a plain Python number,
   -- the uniform one is a bool (which has no @.to@) and the normal one calls
   -- @torch.exp@ on a float.
@@ -2799,6 +2794,22 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             Right b -> do
               (_, ds) <- runIRCasesBatched py [b]
               assertEqual "batched disagreements" [] (map idWhy ds)
+  -- Formerly a knownDisagreements family: the batched runtime's tuple had no
+  -- order, so a tuple comparison raised a TypeError.
+  , testCase "batched: tuples compare lexicographically (batched-tuple-comparison-has-no-order)" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched tuple order" >>= maybe (return ()) assertFailure
+        Just py ->
+          mapM_ (\op -> do
+            let c = batchedRepro (IRIf (IROp op (IRConst (VTuple (VFloat 1) (VInt 1))) (IRConst (VTuple (VFloat 2) (VInt 0))))
+                                    (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1)
+            bc <- prepareBatchedIRCase c
+            case bc of
+              Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+              Right b -> do
+                (_, ds) <- runIRCasesBatched py [b]
+                assertEqual ("batched disagreements on " ++ show op) [] (map idWhy ds)) [OpLessThan, OpGreaterThan]
   , testCase "a fixed-seed sample of plans reaches every PResult combinator, in every semiring" $
       assertEqual "unreached (semiring, combinator)" []
         [ (c, l) | c <- [minBound .. maxBound], let reached = nub (concatMap planNodes (fixedPlans c))

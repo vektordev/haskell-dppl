@@ -664,6 +664,18 @@ class T:
       return NotImplemented
     return eq(self.t1, other.t1) & eq(self.t2, other.t2)
 
+  # Lexicographic order, as the IR's OpLessThan/OpGreaterThan define it on
+  # tuples: elementwise over the batch, nested tuples recurse through these.
+  def __lt__(self, other):
+    if not isinstance(other, T):
+      return NotImplemented
+    return (self.t1 < other.t1) | (eq(self.t1, other.t1) & (self.t2 < other.t2))
+
+  def __gt__(self, other):
+    if not isinstance(other, T):
+      return NotImplemented
+    return (self.t1 > other.t1) | (eq(self.t1, other.t1) & (self.t2 > other.t2))
+
   def __getitem__(self, index):
     if index == 0:
       return self.t1
