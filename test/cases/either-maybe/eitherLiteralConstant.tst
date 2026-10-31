@@ -1,0 +1,5 @@
+p(Left True)=(0.5, 0.0)
+p(Right False)=(0.5, 0.0)
+p(Left False)=(0.0, 0.0)
+p(Right True)=(0.0, 0.0)
+p(Left ANY)=(0.5, 0.0)

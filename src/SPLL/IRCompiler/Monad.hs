@@ -717,8 +717,11 @@ compareValueExpr sr TFloat v sample = anyBoundsNothing sr sample (IRIf (IROp OpL
 compareValueExpr sr TInt v sample = anyBoundsNothing sr sample (IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr))
 compareValueExpr sr TBool v sample = anyBoundsNothing sr sample (IRIf (IROp OpAnd (IRUnaryOp OpNot sample) v) (srZero sr) (srOne sr))
 compareValueExpr sr TUnit _ _ = srOne sr
-compareValueExpr sr (Tuple ft st) v sample = srTimes sr (compareValueExpr sr ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (compareValueExpr sr st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
-compareValueExpr sr (TEither lr rr) v sample =
+-- A compound slot can be the wildcard as a whole (@fst@'s inverse discards a
+-- tuple- or Either-valued second component as one ANY), so it is tested before
+-- the comparison destructures it (task cdf-fst-of-nested-tuple-indexes-any).
+compareValueExpr sr (Tuple ft st) v sample = anyBoundsNothing sr sample $ srTimes sr (compareValueExpr sr ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (compareValueExpr sr st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
+compareValueExpr sr (TEither lr rr) v sample = anyBoundsNothing sr sample $
   IRIf (IRDestruct AcIsLeft v)
     (IRIf (IRDestruct AcIsLeft sample) (compareValueExpr sr lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (srZero sr))
     (IRIf (IRDestruct AcIsRight sample) (compareValueExpr sr rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)) (srZero sr))
@@ -738,12 +741,10 @@ compareValueExpr sr rt@(ListOf et) v sample = case listSpine v of
       (srTimes sr (compareValueExpr sr et h (IRDestruct AcHead sample))
                   (compareValueExpr sr rt t (IRDestruct AcTail sample))))
   Nothing -> anyBoundsNothing sr sample (maskSR sr (IROp OpEq sample v))
--- A literal @[]@ can keep its own 'NullList' annotation through typing:
--- 'SPLL.Typing.RInfer.unifies' accepts @ListOf _ ~ NullList@ without binding
--- anything, so whether the literal's type variable ends up 'ListOf' or
--- 'NullList' depends on constraint order (a @[]@ in a nested-if branch of a
--- recursive list), and a bare @main = []@ has no element type to learn at
--- all. Either way the only inhabitant is the empty list, so it takes the same
+-- RInfer types a literal @[]@ as @[a]@ with a fresh @a@
+-- ('SPLL.Typing.RInfer.freshenNullLists'), so 'NullList' should no longer
+-- survive typing; an annotation built from 'getRType' outside RInfer can still
+-- carry it. Its only inhabitant is the empty list, so it takes the same
 -- equality indicator as 'ListOf' (task comparevalueexpr-nulllist-cdf-gap).
 compareValueExpr sr NullList v sample = maskSR sr (IROp OpEq sample v)
 -- An ADT carries no order, so there is nothing for a CDF to integrate along.

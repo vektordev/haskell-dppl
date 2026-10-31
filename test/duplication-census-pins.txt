@@ -35,6 +35,8 @@ applyEnumForwardOnly notB.prob=3
 applyEnumOperandPair sel.prob=3
 arrowApplyIfSelected main.integ=8 main.prob=8
 call distr.integ=3 distr.prob=3
+cdfFstOfNestedTuple main.integ=4 main.prob=8
+cdfFstOfTupleWithEither main.integ=4 main.prob=8
 clevrEqualLargeMetalSphere level2.prob=4 level3.prob=4
 clevrEqualLargeMetalSphereNatural main.integ=4 main.prob=4 total.prob=4
 clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
@@ -71,11 +73,12 @@ drawProductReadUnderBinding main.integ=8 main.prob=4
 drawSingleReadInPlaceMap main.prob=3
 eitherIfDeconstructObserve main.prob=3
 eitherIntegral main.integ=8 main.prob=8
-either_arith_inv main.integ=15 main.prob=22
+eitherLiteralConstant main.integ=4 main.prob=8
+either_arith_inv main.integ=17 main.prob=22
 either_both_cont main.integ=4 main.prob=4
 either_branch_disc main.integ=4 main.prob=8
 either_isleft main.integ=6 main.prob=8
-either_map_any main.integ=15 main.prob=26
+either_map_any main.integ=17 main.prob=26
 either_mixed_arms main.integ=4 main.prob=8
 either_param main.integ=3 main.prob=3
 enumDeadLetFreshDrawTuple main.integ=3 main.prob=7
@@ -120,8 +123,9 @@ letWitnessedSharedLatent main__m11.prob=4
 letWitnessedSharedLatentMult main__m11.prob=4
 letWitnessedTupleFpUlp main.prob=6 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
 listOfFieldReads main.integ=17 main.prob=4
+listSignatureEmptyArmFirst main.integ=4 main.prob=4
 map main.prob=3
-mapEither main.integ=15 main.prob=18
+mapEither main.integ=17 main.prob=18
 mapMultList main.prob=3
 maskComplementSlot main__m10.prob=4
 maskShiftedWitness main.integ=8 main.prob=7 main__m1.prob=4

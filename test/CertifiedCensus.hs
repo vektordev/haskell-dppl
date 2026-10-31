@@ -218,11 +218,13 @@ batchedCertifiedConstructs =
   -- batched-refuses-list-constants-with-data). "Operand:OpIntDiv" and
   -- "Operand:OpMod" since 2026-10-22, when the batched backend got their
   -- elementwise forms and the arms' multI inverses stopped crashing it (task
-  -- batched-int-mult-inverse-no-intdiv).
+  -- batched-int-mult-inverse-no-intdiv). "Builtin:BMapList" and
+  -- "Builtin:BZip OpMult" since 2026-10-31, from IRFuzz.batchedBodyCases (task
+  -- batched-fuzz-arms-never-compare-list-map-or-zip-product).
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcTail",
-    "Builtin:BCategoricalIndex", "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap",
-    "Builtin:BReduce ROpAdd", "Builtin:BReduce ROpLogSumExp", "Builtin:BTensor",
+    "Builtin:BCategoricalIndex", "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BMapList",
+    "Builtin:BReduce ROpAdd", "Builtin:BReduce ROpLogSumExp", "Builtin:BTensor", "Builtin:BZip OpMult",
     "ConTag:TgCons", "ConTag:TgLeft", "ConTag:TgRight", "ConTag:TgTuple",
     "Const:VList ListCont",
     "Cumulative:IRNormal Linear", "Cumulative:IRNormal Log", "Cumulative:IRUniform Linear",

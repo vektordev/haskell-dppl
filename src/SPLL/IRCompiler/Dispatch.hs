@@ -53,7 +53,7 @@ holdsProbabilisticLet e = case e of
 -- mis-routed: an extra-semiring group deliberately has no @integFun@ at all
 -- (a CDF has no settled meaning under max-product -- see 'extraFunGroups'), so
 -- there is no @n ++ "_map_integ"@ to call. Failing loudly here is the same
--- choice 'mapHasNoExcept' already makes for AnyExcept under MAP; the
+-- choice 'mixSubP' makes (refusing the variant) for AnyExcept under MAP; the
 -- alternative is emitting a reference to a function that was never generated.
 calleeInferenceName :: CompilerMetadata -> Bool -> String -> CompilerMonad String
 calleeInferenceName meta cumulative n = case semiringFamily meta of
