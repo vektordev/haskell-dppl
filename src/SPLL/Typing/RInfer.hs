@@ -652,10 +652,14 @@ fresh = do
 -- stayed 'NullList' and never learnt the element type a later constraint
 -- supplied (an @if@ whose then-arm is @[]@ and whose else-arm is a nested
 -- @if@ over @[Float]@ was typed @[]@; task
--- list-signature-rejected-when-empty-arm-first).
+-- list-signature-rejected-when-empty-arm-first). Likewise a 'NotSetYet' the
+-- value cannot speak to (the absent side of an Either literal @Left True@, the
+-- element of an 'AnyList') is a fresh variable: as a concrete type it unified
+-- with nothing, not even itself (task either-literal-constant-untyped-side).
 freshenNullLists :: RType -> Infer RType
 freshenNullLists t = case t of
   NullList -> ListOf <$> fresh
+  NotSetYet -> fresh
   ListOf a -> ListOf <$> freshenNullLists a
   Tuple a b -> Tuple <$> freshenNullLists a <*> freshenNullLists b
   TEither a b -> TEither <$> freshenNullLists a <*> freshenNullLists b

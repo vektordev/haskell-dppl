@@ -71,6 +71,7 @@ drawProductReadUnderBinding main.integ=8 main.prob=4
 drawSingleReadInPlaceMap main.prob=3
 eitherIfDeconstructObserve main.prob=3
 eitherIntegral main.integ=8 main.prob=8
+eitherLiteralConstant main.integ=4 main.prob=8
 either_arith_inv main.integ=15 main.prob=22
 either_both_cont main.integ=4 main.prob=4
 either_branch_disc main.integ=4 main.prob=8
