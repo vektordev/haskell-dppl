@@ -53,6 +53,28 @@ def density_normal(x):
 def cumulative_normal(x):
   return torch.special.erfc(-astensor(x) / math.sqrt(2.0)) / 2.0
 
+# Log-space twins (task batched-log-space-density-and-cdf-leaves), computed
+# from the formula, never as log(density_...(x)): that underflows to log(0) in
+# a deep tail. The normal CDF uses torch's log_ndtr, which is stable in the
+# lower tail where every small normal probability lands (pythonLib.
+# cumulative_normal says why); below about -38 it stays finite where the
+# scalar runtime's log(erfc(..)/2) has already reached -inf.
+def log_density_uniform(x):
+  x = astensor(x)
+  inside = (x >= 0.0) & (x <= 1.0)
+  return torch.where(inside, torch.zeros_like(x, dtype=_dtype(x)),
+                     torch.full_like(x, -math.inf, dtype=_dtype(x)))
+
+def log_cumulative_uniform(x):
+  return torch.log(cumulative_uniform(x))
+
+def log_density_normal(x):
+  x = astensor(x)
+  return -(x * x) / 2.0 - 0.5 * math.log(2.0 * math.pi)
+
+def log_cumulative_normal(x):
+  return torch.special.log_ndtr(astensor(x))
+
 def sign(x):
   return torch.sign(astensor(x))
 

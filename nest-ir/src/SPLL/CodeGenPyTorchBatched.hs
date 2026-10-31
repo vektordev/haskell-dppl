@@ -1999,12 +1999,10 @@ emittable e = case e of
   -- (task batched-refuses-list-map: a list map's integrate keeps its let-bound
   -- derivative lambdas). Rendered by 'batchedExpr' as @(lambda a, b: ...)@.
   IRLambda{}     -> True
-  -- Linear only: batched mode has never had a log-space density/cumulative
-  -- lowering (the former 'IRLogDensity'/'IRLogCumulative' had no arm here
-  -- either, and fell to the catch-all 'False' below); preserved exactly by
-  -- matching the 'LogSpace' field rather than admitting both with a wildcard.
-  IRDensity _ Linear _    -> True
-  IRCumulative _ Linear _ -> True
+  -- Both spaces: the log-space leaves lower to pythonLibBatched's
+  -- log_density_*/log_cumulative_* (task batched-log-space-density-and-cdf-leaves).
+  IRDensity{}    -> True
+  IRCumulative{} -> True
   IRApply{}      -> True   -- network call / cross-function read-logits call (M2b)
   IRBuiltin BListIndex _ -> True   -- logit-vector slice or per-element gather (M2b)
   -- List map (design ir-reengineering, slice S2 -- formerly IRMap). Within a
@@ -2023,8 +2021,8 @@ emittable e = case e of
   -- refuses each composite one for the same reason 'scalarDiscreteMulti' did.
   -- The log-space refusal genuinely is gone: @BReduce ROpLogSumExp@ is
   -- admitted here and 'tensor_logsumexp' in @pythonLibBatched.py@ implements
-  -- it, so @--batched --logSpace@ compiles and answers correctly (a capability
-  -- the lowering gained; still uncovered by any @.tst@).
+  -- it, so @--batched --logSpace@ compiles and answers correctly (checked on
+  -- the corpus by the @BatchedLogSpace@ sweep).
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
   -- The tensor builtins (design ir-tensor-values). All four are emittable: a
   -- tensor is a Python list of [B] tensors, uniform across a bucket, and its
@@ -2498,11 +2496,11 @@ batchedExpr env (IRIf c t f)
 -- evaluation.
 batchedExpr _env (IRSample IRNormal)  = "randn(" ++ batchNVar ++ ")"
 batchedExpr _env (IRSample IRUniform) = "rand(" ++ batchNVar ++ ")"
--- Batched mode has never had a log-space density/cumulative lowering (no arm
--- existed for the former 'IRLogDensity'/'IRLogCumulative' either); a 'Log'
--- node still falls through to the catch-all below, unchanged in behaviour.
-batchedExpr env (IRDensity d Linear e)    = "density_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
-batchedExpr env (IRCumulative d Linear e) = "cumulative_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
+-- A density/cumulative leaf in either space: the log-space one is the native
+-- log-pdf/log-cdf ('log_density_*'/'log_cumulative_*' in pythonLibBatched.py),
+-- never the log of the linear one, which would underflow in a deep tail.
+batchedExpr env (IRDensity d sp e)    = spacePrefix sp ++ "density_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRCumulative d sp e) = spacePrefix sp ++ "cumulative_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
 -- A call chain: the raw network invocation @net(sym)@ (returning a @[B, n]@
 -- logit tensor) or a cross-function read-logits call @readLogits.forward(logits, sample)@
 -- (the function name already rewritten to @class.method@ form by the LUT).
@@ -2744,6 +2742,10 @@ batchedOp OpDiv         = "/"
 batchedOp OpSub         = "-"
 batchedOp OpEq          = "=="
 batchedOp op            = error ("batched PyTorch codegen: no infix form for " ++ show op)
+
+spacePrefix :: LogSpace -> String
+spacePrefix Linear = ""
+spacePrefix Log    = "log_"
 
 batchedDist :: Distribution -> String
 batchedDist IRNormal  = "normal"

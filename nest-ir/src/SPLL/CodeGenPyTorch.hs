@@ -22,6 +22,7 @@ module SPLL.CodeGenPyTorch (
 import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, pythonNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
+import SPLL.IRReadoutGather (gatherReadoutsEnv, gatherSlice)
 import SPLL.PythonNesting (tooDeepForPython, spillDeep, adtCallees, renameFree, pythonMaxIndent, blockIndent, bindIterable, hasAssignmentExpr)
 import SPLL.IR.Value
 import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
@@ -266,7 +267,7 @@ generateFunctionsWith memo genBoil env0 =
     -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
     -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
     -- M1, strategy B).
-    let env@(IREnv funcs adtsEnv consts) = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (desugarSelectEnv (retireUnrenderableVariants "Python" env0)))
+    let env@(IREnv funcs adtsEnv consts) = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (gatherReadoutsEnv (desugarSelectEnv (retireUnrenderableVariants "Python" env0))))
         clsName = groupClassName env
         lut = envToLUT env ++ stdLib
         -- A nullary function is referenced in the IR by a bare 'IRVar' (there is
@@ -806,9 +807,34 @@ axisUnsupported what ax =
 -- empty iterable raises in real Python, so the call site passes
 -- @default=-inf@, the interpreter's 'reduceIdentity'.
 pyReduceOp :: ReduceOp -> String
-pyReduceOp ROpAdd = "sum"
-pyReduceOp ROpLogSumExp = "logsumexp"
-pyReduceOp ROpMax = "max"
+pyReduceOp ROpAdd = "vec_sum"
+pyReduceOp ROpLogSumExp = "vec_logsumexp"
+pyReduceOp ROpMax = "vec_max"
+
+-- | The runtime helper for a 'BZip' operator, where there is one: a torch op
+-- on tensors, the former comprehension on lists.
+pyZipOp :: Operand -> Maybe String
+pyZipOp OpPlus = Just "vec_zip_add"
+pyZipOp OpSub  = Just "vec_zip_sub"
+pyZipOp OpMult = Just "vec_zip_mul"
+pyZipOp OpDiv  = Just "vec_zip_div"
+pyZipOp _      = Nothing
+
+-- | A 'BMap' body that is elementwise in its variable: built only from the
+-- variable, names and number literals, and operators that broadcast over a
+-- torch tensor exactly as they act on one element. Applied to the whole
+-- tensor it computes the map.
+elementwise :: String -> IRExpr -> Bool
+elementwise v body = readsVar body && go body
+  where
+    readsVar (IRVar x) = x == v
+    readsVar e = any readsVar (getIRSubExprs e)
+    go (IRVar _) = True
+    go (IRConst (VFloat _)) = True
+    go (IRConst (VInt _)) = True
+    go (IROp op a b) = op `elem` [OpPlus, OpSub, OpMult, OpDiv] && go a && go b
+    go (IRUnaryOp op a) = op `elem` [OpNeg, OpExp, OpLog] && go a
+    go _ = False
 
 str :: String -> ShowS
 str = showString
@@ -907,6 +933,7 @@ liftedLine e = do
 --
 -- Anything else is an ordinary let-binding.
 generateSpillStatement :: String -> IRExpr -> GlobalVariableSupply [String]
+generateSpillStatement name e | isJust (gatherSlice e) = generateLetInStatement name e
 generateSpillStatement name (IRBuiltin BMap [IRLambda v body, t]) = do
   (tStmts, tt) <- liftedLine t
   n <- lift demandUniqueNumber
@@ -1060,6 +1087,19 @@ generateExpression (IRBuiltin (BTensor sh) elems)
 generateExpression (IRBuiltin (BIota sh) [])
   | shapeRank sh == 1 = return ("list(range(" ++ show (shapeNumel sh) ++ "))")
   | otherwise = error (rankUnsupported "BIota" (shapeRank sh))
+-- A readout gather ('SPLL.IRReadoutGather'): @x[v + c]@ over a contiguous Int
+-- domain is one slice of @x@ (task scalar-backend-tensor-ops-lower-to-torch).
+generateExpression e@(IRBuiltin BMap _) | Just (x, lo, hi) <- gatherSlice e =
+  return ("vec_slice(" ++ x ++ ", " ++ show lo ++ ", " ++ show hi ++ ")")
+-- An elementwise body over a named tensor (@\c -> Sb - c@, the agreement's
+-- off-diagonal complement) is applied to the whole tensor at once when it is a
+-- torch tensor -- the body's operators broadcast -- and is the comprehension on
+-- a list, which answers exactly as before.
+generateExpression (IRBuiltin BMap [IRLambda v body, IRVar src])
+  | elementwise v body = do
+      b <- generateExpression body
+      bt <- generateExpression (renameFree v src body)
+      return ("(" ++ bt ++ " if vec_is_torch(" ++ src ++ ") else [" ++ b ++ " for " ++ v ++ " in " ++ src ++ "])")
 generateExpression (IRBuiltin BMap [IRLambda v body, t]) = do
   b <- generateExpression body
   tt <- generateExpression t
@@ -1071,17 +1111,14 @@ generateExpression (IRBuiltin BMap [f, t]) = do
 generateExpression (IRBuiltin (BReduce op ax) [t])
   | ax == 0 = do
       tt <- generateExpression t
-      -- max of an empty tensor is the identity -inf (interpreter, Julia's
-      -- init=-Inf), not Python's ValueError.
-      -- sum's start is the float 0.0, the IR's identity: the builtin's int
-      -- start made an empty sum the int 0, which has no negative zero, so
-      -- -(sum []) was 0 where the IR answers -0.0 (task
+      -- One runtime call ('vec_sum', 'vec_max', 'vec_logsumexp'): a torch op
+      -- on a tensor, and on a list the builtin this used to emit inline. max
+      -- of an empty tensor is the identity -inf (interpreter, Julia's
+      -- init=-Inf), not Python's ValueError; sum's start is the float 0.0,
+      -- the IR's identity, since the builtin's int start made an empty sum
+      -- the int 0, which has no negative zero (task
       -- python-empty-sum-answers-an-int).
-      let dflt = case op of
-            ROpMax -> ", default=" ++ pyDouble (-1 / 0)
-            ROpAdd -> ", 0.0"
-            ROpLogSumExp -> ""
-      return (pyReduceOp op ++ "(" ++ tt ++ dflt ++ ")")
+      return (pyReduceOp op ++ "(" ++ tt ++ ")")
   | otherwise = error (axisUnsupported "BReduce" ax)
 generateExpression (IRBuiltin (BIndex ax) [t, k])
   | ax == 0 = do
@@ -1096,6 +1133,10 @@ generateExpression (IRBuiltin (BIndex ax) [t, k])
 --
 -- The names are generated rather than fixed so a nested BZip (the agreement
 -- fusion emits `(ta * tb) * tT`) cannot shadow the outer one's bindings.
+generateExpression (IRBuiltin (BZip op) [a, b]) | Just helper <- pyZipOp op = do
+  aa <- generateExpression a
+  bb <- generateExpression b
+  return (helper ++ "(" ++ aa ++ ", " ++ bb ++ ")")
 generateExpression (IRBuiltin (BZip op) [a, b]) = do
   aa <- generateExpression a
   bb <- generateExpression b

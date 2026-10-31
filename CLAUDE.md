@@ -182,6 +182,7 @@ the frontend is a sign something belongs IR-side: put the vocabulary in
 - `IRLeafTablePass` — batched only: a neural leaf decode a nested enumeration loop reads per world → one table bound ahead of the outer loop.
 - `IRUtil` — pure helpers over `IRExpr`: free variables, let-chain surgery, renaming, substitution, node counts.
 - `IROptimizer` — constant folding, CSE and let-in optimization.
+- `IRReadoutGather` — scalar Python only: a reader's per-value readout over a contiguous domain → one slice of the network output (`docs/backends.md`).
 - `CodeGenPyTorch`, `CodeGenPyTorchBatched`, `CodeGenJulia` — the backends.
 - `PythonNesting` — CPython's per-line bracket and indentation limits, and the deep-line spill both Python backends share.
 - `ReservedNames` — the single registry of compiler-claimed and target-language names.

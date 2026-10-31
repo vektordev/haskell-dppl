@@ -40,6 +40,33 @@ one means deciding whether a tensor can reach it. All but that classification
 check need a torch-enabled python and fail without one, like `BatchedPython`
 (`NEST_SKIP_TORCH=1` skips them).
 
+## Scalar-mode tensors: a list, or the network's own vector
+
+In scalar Python a rank-1 tensor is a Python list, or the vector a network
+returned when a builtin reads it directly (task
+`scalar-backend-tensor-ops-lower-to-torch`). The tensor builtins are runtime
+calls that accept either: `BReduce` is `vec_sum`/`vec_max`/`vec_logsumexp`,
+`BZip` over `+ - * /` is `vec_zip_add`/`_sub`/`_mul`/`_div`, and a `BMap` whose
+body is elementwise arithmetic in its variable over a named tensor is applied
+to the whole tensor when `vec_is_torch` says it is one. On a list each is the
+comprehension or builtin the codegen used to inline, so list callers answer
+bit for bit as before and the runtime stays torch-free; on a torch tensor each
+is one torch op (`.sum()` is pairwise, so a sum differs from the list's in the
+last bits), and the autograd graph is kept.
+
+What makes the network's vector reach those ops is the **readout gather**
+(`SPLL.IRReadoutGather`, applied at the scalar backend's entry only). A map of
+a reader's probability function over a domain,
+`map (\v -> AcFst (camNN_auto_prob(raw)(v))) over [lo..hi]`, is inlined with
+the map's own facts (`v` is not ANY; every domain value is in the reader's
+`of` domain, so its membership guard holds) and optimized. When that reduces
+to exactly `raw[v + c]` over a contiguous domain, the map becomes
+`vec_slice(raw, lo + c, hi + c + 1)`, which raises rather than come back short
+on a too-short vector, and an unread domain literal let is dropped. Anything
+else (a log-space reader, a Gaussian slot, a non-contiguous domain) keeps the
+call per value. For the agreement fusion at V = 10^4 this is ~40 µs per query
+on tensors, from ~175 ms (`benchmarks/stressAgreementProduct.ppl`).
+
 ## Gradients with respect to the sample, export, and Julia AD
 
 Three more gaps blocked gradient or export use of an emitted module without

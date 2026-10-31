@@ -66,6 +66,12 @@ LIST_FLOAT_PATH = {"logsumexp"}
 # separately below.
 BINARY_FLOAT_PATH = {"safe_div"}
 
+# The rank-1 tensor builtins (task scalar-backend-tensor-ops-lower-to-torch):
+# a list or a torch tensor in, the same values out, and a tensor argument's
+# graph kept. Probed separately below.
+VECTOR_PATH = {"vec_sum", "vec_max", "vec_logsumexp", "vec_zip_add", "vec_zip_sub",
+               "vec_zip_mul", "vec_zip_div", "vec_slice"}
+
 # Everything else: structure, control flow and sampling, not on the float
 # path -- a tensor never flows through these as a differentiable quantity
 # (listProd multiplies whatever its elements are, and is tensor-transparent).
@@ -75,7 +81,7 @@ NOT_FLOAT_PATH = {
   "rand", "randn", "categorical_index", "isAny", "isFloat", "eq", "isclose", "throw",
   "fromLeft", "fromRight", "toList", "mapList", "indexOf", "listProd",
   "listConcat",
-  "isPossible", "nest_memo", "nest_memo_scope",
+  "isPossible", "nest_memo", "nest_memo_scope", "vec_is_torch",
 }
 
 def public_functions(mod):
@@ -97,7 +103,7 @@ def same_value(a, b, rel=1e-12):
 def scalar_coverage():
   import pythonLib
   have = public_functions(pythonLib)
-  known = set(FLOAT_PATH) | LIST_FLOAT_PATH | BINARY_FLOAT_PATH | NOT_FLOAT_PATH
+  known = set(FLOAT_PATH) | LIST_FLOAT_PATH | BINARY_FLOAT_PATH | VECTOR_PATH | NOT_FLOAT_PATH
   for n in sorted(have - known):
     fail("pythonLib." + n + " is not classified in prelude_numerics_probe.py: "
          "decide whether a tensor can reach it on the float path, and if so "
@@ -142,6 +148,48 @@ def scalar_autograd():
       want = central_difference(f, x)
       if math.isfinite(want) and not same_value(g, want, rel=1e-5):
         fail(where + ": gradient " + repr(as_float(g)) + " != finite difference " + repr(want))
+
+  # The vector helpers: the tensor arm answers the list arm's values (within
+  # the reordering of a pairwise sum), and the gradient reaches the input.
+  a, b = [0.5, 0.3, 0.2, 0.0], [0.1, 0.6, 0.3, 0.25]
+  cases = {
+    "vec_sum": (lambda x, y: pythonLib.vec_sum(x), lambda x, y: [sum(x)]),
+    "vec_max": (lambda x, y: pythonLib.vec_max(x), lambda x, y: [max(x)]),
+    "vec_logsumexp": (lambda x, y: pythonLib.vec_logsumexp(x),
+                      lambda x, y: [math.log(sum(math.exp(e) for e in x))]),
+    "vec_zip_add": (pythonLib.vec_zip_add, lambda x, y: [p + q for p, q in zip(x, y)]),
+    "vec_zip_sub": (pythonLib.vec_zip_sub, lambda x, y: [p - q for p, q in zip(x, y)]),
+    "vec_zip_mul": (pythonLib.vec_zip_mul, lambda x, y: [p * q for p, q in zip(x, y)]),
+    "vec_zip_div": (pythonLib.vec_zip_div, lambda x, y: [p / q for p, q in zip(x, y)]),
+    "vec_slice": (lambda x, y: pythonLib.vec_slice(x, 1, 3), lambda x, y: x[1:3]),
+  }
+  for name, (f, want) in cases.items():
+    w = want(a, b)
+    lst = f(a, b)
+    lst = lst if isinstance(lst, list) else [lst]
+    if len(lst) != len(w) or not all(same_value(p, q) for p, q in zip(lst, w)):
+      fail("pythonLib." + name + " on lists = " + repr(lst) + ", want " + repr(w))
+    at = torch.tensor(a, dtype=torch.float64, requires_grad=True)
+    for second in (torch.tensor(b, dtype=torch.float64), b):  # tensor/tensor, tensor/list
+      r = f(at, second)
+      if not torch.is_tensor(r):
+        fail("pythonLib." + name + " returned " + type(r).__name__ + " for a tensor argument")
+        continue
+      got = r.reshape(-1).tolist()
+      if len(got) != len(w) or not all(same_value(p, q) for p, q in zip(got, w)):
+        fail("pythonLib." + name + " on tensors = " + repr(got) + ", want " + repr(w))
+      if not r.requires_grad:
+        fail("pythonLib." + name + ": autograd graph severed")
+  for empty, want in ((pythonLib.vec_sum, 0.0), (pythonLib.vec_max, -math.inf),
+                      (pythonLib.vec_logsumexp, -math.inf)):
+    for e in ([], torch.zeros(0, dtype=torch.float64)):
+      if not same_value(empty(e), want):
+        fail("pythonLib." + empty.__name__ + "(empty) = " + repr(empty(e)))
+  try:
+    pythonLib.vec_slice([1.0, 2.0], 0, 3)
+    fail("pythonLib.vec_slice read past the end without raising")
+  except IndexError:
+    pass
 
   # logsumexp: the log-space enumerated sum. The gradient w.r.t. each element
   # is its softmax weight; a severed inner log/exp leaves only the max
@@ -206,6 +254,10 @@ def batched_dtype():
     "poison()": lambda: B.poison(),
     "rand(3)": lambda: B.rand(3),
     "randn(3)": lambda: B.randn(3),
+    "log_density_uniform(x)": lambda: B.log_density_uniform(x),
+    "log_cumulative_uniform(x)": lambda: B.log_cumulative_uniform(x),
+    "log_density_normal(x)": lambda: B.log_density_normal(x),
+    "log_cumulative_normal(x)": lambda: B.log_cumulative_normal(x),
   }
   for what, mk in checks.items():
     try:

@@ -220,7 +220,10 @@ batchedCertifiedConstructs =
   -- elementwise forms and the arms' multI inverses stopped crashing it (task
   -- batched-int-mult-inverse-no-intdiv). "Builtin:BMapList" and
   -- "Builtin:BZip OpMult" since 2026-10-31, from IRFuzz.batchedBodyCases (task
-  -- batched-fuzz-arms-never-compare-list-map-or-zip-product).
+  -- batched-fuzz-arms-never-compare-list-map-or-zip-product). "Cumulative:IRUniform
+  -- Log", "Density:IRNormal Log" and "Density:IRUniform Log" since 2026-10-31,
+  -- when batched mode got its log-space density and CDF leaves (task
+  -- batched-log-space-density-and-cdf-leaves).
   [ "Accessor:AcFromLeft", "Accessor:AcFromRight", "Accessor:AcFst", "Accessor:AcHead",
     "Accessor:AcIsLeft", "Accessor:AcIsRight", "Accessor:AcSnd", "Accessor:AcTail",
     "Builtin:BCategoricalIndex", "Builtin:BIndex", "Builtin:BListIndex", "Builtin:BMap", "Builtin:BMapList",
@@ -228,7 +231,9 @@ batchedCertifiedConstructs =
     "ConTag:TgCons", "ConTag:TgLeft", "ConTag:TgRight", "ConTag:TgTuple",
     "Const:VList ListCont",
     "Cumulative:IRNormal Linear", "Cumulative:IRNormal Log", "Cumulative:IRUniform Linear",
-    "Density:IRNormal Linear", "Density:IRUniform Linear",
+    "Cumulative:IRUniform Log",
+    "Density:IRNormal Linear", "Density:IRNormal Log", "Density:IRUniform Linear",
+    "Density:IRUniform Log",
     "IRExpr:IRApply", "IRExpr:IRBuiltin", "IRExpr:IRConformsTo", "IRExpr:IRConst",
     "IRExpr:IRConstruct", "IRExpr:IRCumulative", "IRExpr:IRDensity", "IRExpr:IRDestruct",
     "IRExpr:IRError", "IRExpr:IRIf", "IRExpr:IRIsPossible", "IRExpr:IRLambda",
