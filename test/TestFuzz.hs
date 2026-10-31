@@ -52,14 +52,16 @@ import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup, localOption)
 import Test.Tasty.QuickCheck (testProperties, testProperty, QuickCheckMaxRatio(..))
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
-import Control.Exception (try, evaluate, throwIO, fromException, SomeException, SomeAsyncException(..))
+import Control.Exception (try, evaluate, throwIO, fromException, bracket_, SomeException, SomeAsyncException(..))
 import Control.Monad (replicateM, unless, void, forM_)
 import Control.Monad.Random (evalRandIO)
 import System.Timeout (timeout)
 import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
-import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import Control.Concurrent (threadDelay, ThreadId, myThreadId)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, takeMVar, putMVar)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Text.Read (readMaybe)
@@ -610,6 +612,80 @@ noteExhaustion name budget = do
               ++ fuzzScaleEnvVar ++ ".")
     else return ()
 
+-- ---------------------------------------------------------------------------
+-- The per-case budget is wall-clock, so load can spend it (docs-repo task
+-- fuzz-per-case-budget-load-sensitive).
+--
+-- 'System.Timeout.timeout' measures elapsed time, not the time the case was
+-- actually scheduled. On a shared machine (several workers, another suite's
+-- run) a draw that takes ~1s alone can overrun 5s, and the property then
+-- *fails* with a "did not terminate" counterexample that passes when
+-- replayed alone. Measured: replay 920900 of
+-- 'prop_Fuzz_NeuralMaterializedTwinAgrees' passes in 8s alone and failed
+-- with 8 busy loops sharing its core.
+--
+-- CPU-time accounting would be the precise fix, but GHC offers no per-Haskell-
+-- thread CPU clock: 'getCPUTime' is the whole process (every parallel test
+-- thread), and a thread's OS thread changes under @-N@. So an overrun is
+-- *retried once*, at 'hangCeilingFactor' times the budget, before it is
+-- reported. A slow draw that a load spike pushed over the line finishes on
+-- the retry; a real hang overruns the ceiling as well and is reported as
+-- before, only later. The retry re-runs the same action, and since GHC
+-- suspends rather than discards a thunk interrupted by the timeout, work the
+-- first attempt shared with the retry is resumed, not redone.
+--
+-- Retries take 'retrySlot', so at most one retried case runs at a time across
+-- the fuzz properties (which tasty runs in parallel): when load is what made
+-- several cases overrun together, their retries do not compete with each
+-- other as well. Waiting for the slot is outside the retry's timeout. The slot
+-- is reentrant, because some properties nest a guarded check inside a guarded
+-- case ('prop_Fuzz_AdmissionTotality'): the inner retry of a thread that
+-- already holds the slot runs at once rather than deadlocking on it.
+
+-- | How far past the per-case budget a retried case may run before it is
+-- reported as a hang. Ten covers the repro above (eight busy loops on one
+-- core); a hang costs 11 budgets instead of one, which the property budget
+-- still bounds.
+hangCeilingFactor :: Int
+hangCeilingFactor = 10
+
+{-# NOINLINE retrySlot #-}
+retrySlot :: MVar ()
+retrySlot = unsafePerformIO (newMVar ())
+
+{-# NOINLINE retrySlotHolder #-}
+retrySlotHolder :: IORef (Maybe ThreadId)
+retrySlotHolder = unsafePerformIO (newIORef Nothing)
+
+withRetrySlot :: IO a -> IO a
+withRetrySlot act = do
+  me <- myThreadId
+  holder <- readIORef retrySlotHolder
+  if holder == Just me
+    then act
+    else bracket_ (takeMVar retrySlot >> writeIORef retrySlotHolder (Just me))
+                  (writeIORef retrySlotHolder Nothing >> putMVar retrySlot ())
+                  act
+
+-- | @timeoutRetrying factor budget act@: run @act@ within @budget@
+-- microseconds, and on an overrun run it once more, alone among retries,
+-- within @factor * budget@. 'Nothing' only if both attempts overran.
+timeoutRetrying :: Int -> Int -> IO a -> IO (Maybe a)
+timeoutRetrying factor budget act = do
+  first <- timeout budget act
+  case first of
+    Just r  -> return (Just r)
+    Nothing -> withRetrySlot (timeout (factor * budget) act)
+
+-- | 'timeoutRetrying' at 'hangCeilingFactor', and the message a double
+-- overrun reports.
+perCaseTimeout :: Int -> IO a -> IO (Maybe a)
+perCaseTimeout = timeoutRetrying hangCeilingFactor
+
+hangMessage :: Int -> String
+hangMessage budget = "did not terminate within " ++ show budget ++ "us, nor within "
+  ++ show (hangCeilingFactor * budget) ++ "us on a retry"
+
 withinBudget :: String -> IO Property -> IO Property
 withinBudget name = withinBudgetScaled name 1
 
@@ -625,10 +701,10 @@ withinBudgetScaled name factor act = do
     then noteExhaustion name propertyBudgetMicros >> return discardVacuous
     else do
       let budget = factor * perCaseBudgetMicros
-      result <- timeout budget act
+      result <- perCaseTimeout budget act
       return $ case result of
         Just prop -> prop
-        Nothing -> counterexample ("did not terminate within " ++ show budget ++ "us") False
+        Nothing -> counterexample (hangMessage budget) False
 
 -- ---------------------------------------------------------------------------
 -- Crash-freedom: the compiler must never throw a Haskell exception, only
@@ -809,7 +885,7 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
   forAllShrink typedDraw shrinkDraw $ \d@(p, _) -> ioProperty $ withinBudgetScaled "prop_Fuzz_AdmissionTotality" (argsBudget 4 (fuzzArgSets d)) $ do
     -- Forced inside the timeout so the whole check runs under the budget (see
     -- 'forcedProbAt' for why an unforced result would escape it).
-    checked <- timeout (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros) $ do
+    checked <- perCaseTimeout (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros) $ do
       r <- admissionCheckAt defaultCompilerConfig p (fuzzArgSets d)
       _ <- evaluate (length (show r))
       return r
@@ -823,8 +899,8 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
         compiles <- timeout perCaseBudgetMicros (trySync (evaluate (forceShow (compile defaultCompilerConfig p))))
         return $ case compiles of
           Nothing -> label "compile did not terminate (structured-accessor-compile-blowup)" True
-          Just _  -> counterexample ("admission check did not terminate within " ++ show (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros)
-                                     ++ "us, though the program compiles in time\nPROGRAM:\n" ++ pPrintProg p) False
+          Just _  -> counterexample ("admission check " ++ hangMessage (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros)
+                                     ++ ", though the program compiles in time\nPROGRAM:\n" ++ pPrintProg p) False
   where
    judge p report =
     let (known, new) = partitionKnownAdmission (violations report)
@@ -1149,7 +1225,7 @@ runInvariantCase name factor invs d@(p, _) = do
     else do
       let argSets = fuzzArgSets d
           budget = argsBudget factor argSets * perCaseBudgetMicros
-      result <- timeout budget $ do
+      result <- perCaseTimeout budget $ do
         let cfgs = [ c | c <- [minBound .. maxBound], any ((c `elem`) . invConfigs) invs ]
         compiled <- mapM (\k -> (,) k <$> compileSafe (fuzzConfig k) p) (nub (map compileKey cfgs))
         let envOf c = rethreshold c <$> (lookup (compileKey c) compiled >>= id)
@@ -1228,7 +1304,7 @@ reportFailure target o (q, seed) =
   counterexample ("PROGRAM (argument seed " ++ show seed ++ "):\n" ++ pPrintDraw q) False
   where
     describe Hangs = case o of
-      TimedOut b -> "hang: did not terminate within " ++ show b ++ "us"
+      TimedOut b -> "hang: " ++ hangMessage b
       _          -> "hang"
     describe (Breaks n) = "invariant " ++ n ++ " broken: "
       ++ case o of
@@ -3025,6 +3101,15 @@ fuzzScalingTests = testGroup "Fuzz scaling"
   , testProperty "the property budget never scales down either" $
       forAll (choose (0.001, 50)) $ \sc ->
         scaleFuzz (max 1 sc) defaultPropertyBudgetMicros >= defaultPropertyBudgetMicros
+  , testCase "a case that overruns its budget once under load is retried, not failed" $ do
+      -- Simulates a draw slowed past its per-case budget by machine load
+      -- (docs-repo task fuzz-per-case-budget-load-sensitive): the action
+      -- needs 3x the budget, which the escalated retry covers.
+      r <- timeoutRetrying 10 20000 (threadDelay 60000 >> return ())
+      assertEqual "finishes on the retry" (Just ()) r
+  , testCase "a real hang is still reported, at the hard ceiling" $ do
+      r <- timeoutRetrying 10 2000 (threadDelay (10 * 1000 * 1000) >> return ())
+      assertEqual "times out" Nothing r
   , testProperty "a property's first case always runs" $
       -- Even at a zero budget. A property that gave up having executed
       -- nothing would report as a give-up indistinguishable from a picky
@@ -3469,10 +3554,10 @@ withinSuperSlowBudget name act = do
   if not hasBudget
     then noteExhaustion name superSlowPropertyBudgetMicros >> return discardVacuous
     else do
-      result <- timeout perCaseSuperSlowBudgetMicros act
+      result <- perCaseTimeout perCaseSuperSlowBudgetMicros act
       return $ case result of
         Just prop -> prop
-        Nothing -> counterexample ("did not terminate within " ++ show perCaseSuperSlowBudgetMicros ++ "us") False
+        Nothing -> counterexample (hangMessage perCaseSuperSlowBudgetMicros) False
 
 -- ---------------------------------------------------------------------------
 -- Statistics: classify an empirical hit rate against the compiler's claimed
