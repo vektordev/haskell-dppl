@@ -418,7 +418,8 @@ pythonRuntimeValueNames =
   , "split_branch", "split_retry", "split_uniform"
   , "sqrt", "sumprod", "sys", "table_select", "tan", "tanh", "tau", "tensor_index"
   , "tensor_logsumexp", "tensor_sum", "throw", "toList", "torch", "trunc"
-  , "ulp", "where_anchored"
+  , "ulp", "vec_is_torch", "vec_logsumexp", "vec_max", "vec_slice", "vec_sum"
+  , "vec_zip_add", "vec_zip_div", "vec_zip_mul", "vec_zip_sub", "where_anchored"
   ]
 
 -- | Python's builtins (@dir(builtins)@ without the dunders), union over the
