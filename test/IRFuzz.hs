@@ -1403,6 +1403,43 @@ conformsLiteralCases =
   ]
   where chk t x = repro [] ITBool (IRConformsTo t x) []
 
+-- | Type-tag checks of a unit, theta-tree or ADT slot (task
+-- ir-conformsto-lowering-gaps-in-text-backends): both text backends answered
+-- True for any value there, where the interpreter checks the slot. Each slot
+-- against a value of another shape and against its own, at top level and
+-- under a tuple and a list. An ADT slot takes any ADT's value, as in the
+-- interpreter.
+conformsSlotCases :: [IRCase]
+conformsSlotCases =
+  [ chk ITUnit (IRConst (VBool True))
+  , chk ITUnit (IRConst VUnit)
+  , chk ITThetaTree (IRConst (VFloat 1))
+  , chk ITThetaTree (IRConst (VThetaTree (ThetaTree [0.5] [ThetaTree [] []])))
+  , chk (ITADT "Qt") (IRConst (VBool True))
+  , chk (ITADT "Qt") (IRConst (VADT "Qa" []))
+  , chk (ITADT "Qt") (IRConst (VADT "Ra" [VFloat 1]))
+  , chk (ITTuple ITUnit ITInt) (IRConst (VTuple (VInt 1) (VInt 2)))
+  , chk (ITTuple ITUnit ITInt) (IRConst (VTuple VUnit (VInt 2)))
+  , chk (ITList (ITADT "Rt")) (IRConst (VList (ListCont (VADT "Ra" [VFloat 1]) (ListCont (VInt 0) EmptyList))))
+  ]
+  where chk t x = (repro [] ITBool (IRConformsTo t x) [])
+                    { icADTs = [IRADTDecl "Qt" [("Qa", [])], IRADTDecl "Rt" [("Ra", [("rf", ITFloat)])]] }
+
+-- | Type-tag checks of an operand that draws, as generate bodies (task
+-- text-backends-conformsto-reevaluates-its-operand): both text backends
+-- spliced the operand into every test, so it drew once per use. The draw
+-- count is compared too.
+conformsDrawnOperandCases :: [IRCase]
+conformsDrawnOperandCases =
+  [ chk ITFloat (IRSample IRUniform)
+  , chk ITInt (IRSample IRNormal)
+  , chk (ITTuple ITFloat ITFloat) (IRConstruct TgTuple [IRSample IRUniform, IRSample IRNormal])
+  , chk (ITEither ITInt ITFloat) (IRConstruct TgRight [IRSample IRUniform])
+  , chk (ITList ITFloat) (IRConstruct TgCons [IRSample IRUniform, IRConst (VList EmptyList)])
+  , chk ITFloat (IRLetIn "l0" (IRSample IRUniform) (IRVar "l0"))
+  ]
+  where chk t x = genRepro [] ITBool (IRConformsTo t x)
+
 -- | The batched twin (task batched-conformsto-of-a-literal-fails-to-parse):
 -- the batched float check calls a method on its operand
 -- (@0.is_floating_point()@), so a negative or positive Int or Float literal
@@ -1588,12 +1625,6 @@ knownDisagreements =
          (IRLetIn "s" (IRUnaryOp OpSign (IRVar "a0"))
             (IRConformsTo ITFloat (IRIf (IROp OpApprox (IRVar "s") (IRConst (VFloat 1))) (IRVar "s") (IRConst (VFloat 0)))))
          [VFloat 2])
-  , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
-      (AsIf (const (irMap conformsUnitUnchecked)))
-      (repro [] ITBool (IRConformsTo ITUnit (IRConst (VBool True))) [])
-  , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
-      (AsIf (const (irMap conformsUnitUnchecked)))
-      ((repro [] ITBool (IRConformsTo (ITADT "Qt") (IRConst (VBool True))) []) { icADTs = [IRADTDecl "Qt" [("Qa", [])]] })
   -- M3 (builtins, tensors and function groups).
   , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
       (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
@@ -1646,14 +1677,6 @@ knownDisagreements =
          [[VFloat 800.0, VFloat (-2.5)]] [] [] ([], []))
   -- M4 (generate bodies, judged by replaying the backend's draws).
   --
-  -- Both text backends lower a type-tag check by repeating its operand
-  -- (@isAny(x) or isFloat(x)@), so an operand that draws draws
-  -- again. Recognised by the construct: a generate body whose check has an
-  -- operand with an effect ('isPure'), answering a sample.
-  , KnownFamily "text-backends-conformsto-reevaluates-its-operand" ["python", "julia"]
-      (ByAnswer (\c o a -> icKind c == GenBody && isValue o && isSampled a
-                           && not (null [ () | IRConformsTo _ x <- caseUniverse c, not (isPure x) ])))
-      (genRepro [] ITBool (IRConformsTo ITFloat (IRSample IRUniform)))
   -- The interpreter evaluates a cons's tail before its head; both text
   -- backends evaluate the head first. Only the order of the draws differs.
   , KnownFamily "interpreter-cons-evaluates-its-tail-before-its-head" ["python", "julia"]
@@ -1945,23 +1968,6 @@ consHeadFirst :: IRExpr -> IRExpr
 consHeadFirst e = case e of
   IRConstruct TgCons [hd, tl] | not (isPure hd) -> IRLetIn "cons_hd" hd (IRConstruct TgCons [IRVar "cons_hd", tl])
   _ -> e
-
--- | 'IRConformsTo' as both text backends lower it: a unit, theta-tree or
--- ADT slot is not checked (any value conforms), where the interpreter checks
--- it.
-conformsUnitUnchecked :: IRExpr -> IRExpr
-conformsUnitUnchecked e = case e of
-  IRConformsTo t a -> IRConformsTo (loosen t) a
-  _ -> e
-  where
-    loosen t = case t of
-      ITUnit -> ITVar 0
-      ITThetaTree -> ITVar 0
-      ITADT _ -> ITVar 0
-      ITList a -> ITList (loosen a)
-      ITTuple a b -> ITTuple (loosen a) (loosen b)
-      ITEither a b -> ITEither (loosen a) (loosen b)
-      _ -> t
 
 gtE, ltE :: IRExpr -> IRExpr -> IRExpr
 gtE a b = IROp OpGreaterThan a b
@@ -2656,6 +2662,17 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
       julia <- findExecutable "julia"
       cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c)))
                     conformsLiteralCases
+      (_, pyD) <- runIRCasesPython cases
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- ir-conformsto-lowering-gaps-in-text-backends (unit, theta-tree and ADT
+  -- slots) and text-backends-conformsto-reevaluates-its-operand (a drawn
+  -- operand), both formerly knownDisagreements families.
+  , testCase "a type-tag check of a unit, theta-tree or ADT slot, or of a drawn operand, agrees on scalar Python and Julia" $ do
+      julia <- findExecutable "julia"
+      cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c)))
+                    (conformsSlotCases ++ conformsDrawnOperandCases)
       (_, pyD) <- runIRCasesPython cases
       assertEqual "python disagreements" [] (map idWhy pyD)
       jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia

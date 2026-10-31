@@ -377,7 +377,7 @@ pythonRuntimeClassNames :: [String]
 pythonRuntimeClassNames =
   [ "Module", "Iterable", "T", "Left", "Right", "InferenceList"
   , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "EnumBatch"
-  , "MixedSplit", "MixedAnyUnsupported" ]
+  , "MixedSplit", "MixedAnyUnsupported", "ADTValue" ]
 
 -- | The non-class values the emitted Python module has in scope before any of
 -- its own definitions: everything @from pythonLib import *@ and
@@ -537,7 +537,7 @@ juliaRuntimeNames =
   , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "length"
   , "getindex", "head", "tail", "prepend", "mapList", "eq", "isPossible"
   , "isclose", "indexOf", "listProd", "listConcat", "T", "Either", "Left", "Right"
-  , "fromLeft", "fromRight"
+  , "fromLeft", "fromRight", "ADTValue"
   ]
 
 -- | The names from Julia's @Base@ (and @Core@) that emitted code refers to:

@@ -220,6 +220,12 @@ def isclose(a, b):
 def throw(e):
   raise Exception(e)
 
+# The base of every emitted ADT constructor class, which the query-type guard
+# tests an ADT slot against (an instance of any ADT conforms, as in the
+# interpreter).
+class ADTValue:
+  pass
+
 # Tuple
 class T:
   def __init__(self, t1, t2):

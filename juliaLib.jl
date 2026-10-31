@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export safe_log, categorical_index, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, listConcat, T, Either, Left, Right, fromLeft, fromRight,==
+export safe_log, categorical_index, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, listConcat, T, Either, Left, Right, fromLeft, fromRight, ADTValue,==
 
 
 function isAny(x)
@@ -206,6 +206,11 @@ function isPossible(multiVal, expr)
         error("Unknown multiVal tag: " * string(multiVal))
     end
 end
+
+# The supertype of every emitted ADT constructor struct, which the query-type
+# guard tests an ADT slot against (an instance of any ADT conforms, as in the
+# interpreter).
+abstract type ADTValue end
 
 struct T
     t1

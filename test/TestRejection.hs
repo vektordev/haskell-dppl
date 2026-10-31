@@ -455,9 +455,9 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
           Right env -> do
             let src = unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
             assertBool "Python identifier for constructor None was not mangled"
-                       ("class None_:" `isInfixOf` src)
-            assertBool "a bare `class None:` survived; the emitted file cannot parse"
-                       (not ("class None:" `isInfixOf` src))
+                       ("class None_(ADTValue):" `isInfixOf` src)
+            assertBool "a bare `class None(...)` survived; the emitted file cannot parse"
+                       (not ("class None(" `isInfixOf` src))
             -- The refusal must still quote the source name, or Python says
             -- isNone_ where the interpreter says isNone.
             assertBool "the ANY refusal names the mangled identifier instead of the source constructor"

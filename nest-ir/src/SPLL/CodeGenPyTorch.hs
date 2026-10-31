@@ -27,7 +27,7 @@ import SPLL.IR.Value
 import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
 import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd, nub)
-import Data.Char (toUpper, isDigit)
+import Data.Char (toUpper, isDigit, isAlphaNum)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -343,7 +343,7 @@ generateADTClasses decls =
 generateADTClass :: IRADTConstructorDecl -> [String]
 generateADTClass (name, fields) =
   -- Class declaration
-  ["class " ++ cls ++ ":"]++
+  ["class " ++ cls ++ "(ADTValue):"]++
   indentOnce (
     -- Constructor
     ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
@@ -1099,12 +1099,20 @@ generateExpression (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
   return ("categorical_index(" ++ uu ++ ", " ++ ww ++ ", " ++ show start ++ ", " ++ show n ++ ")")
 generateExpression (IRError e) =
   return ("throw(\"" ++ escapeStr e ++ "\")")
--- The check splices its operand textually, and a list or tensor check splices
--- it into a comprehension's iterable, so there an operand carrying a let is
--- bound once first (see 'bindIterable').
+-- The check reads its operand several times (the wildcard test, the tag
+-- test, each component), so an operand that is not a bare name or number
+-- literal is bound once to a fresh temporary first: an operand that draws
+-- draws once, as in the interpreter, and a compound one is evaluated once
+-- (task text-backends-conformsto-reevaluates-its-operand). The binding also
+-- keeps a let's walrus out of the list check's comprehension iterable.
 generateExpression (IRConformsTo t x) = do
   sx <- generateExpression x
-  if checksElements t then boundIterable sx (pyConforms t) else return (pyConforms t sx)
+  if isAtomicOperand sx
+    then return (pyConforms t sx)
+    else do
+      n <- lift demandUniqueNumber
+      let tmp = "_ct" ++ show n
+      return ("((" ++ tmp ++ " := " ++ sx ++ "), " ++ pyConforms t tmp ++ ")[1]")
 generateExpression x =
   error ("Unknown expression in PyTorch codegen: " ++ show x)
 
@@ -1120,8 +1128,8 @@ escapeStr = concatMap esc
 -- | A runtime type-tag check for the query-type guard (see IRConformsTo). Full-depth
 -- structural check mirroring the interpreter's 'valueConformsTo': recurses into tuple
 -- components, either arms, and every list element; precise for float/bool/int and
--- permissive ("True") only for types with no cheap runtime tag (so it never falsely
--- rejects). The marginal-query wildcard (isAny) is accepted at every level, matching
+-- permissive ("True") only for types the interpreter does not check either
+-- (type variables, arrows). The marginal-query wildcard (isAny) is accepted at every level, matching
 -- VAny, and short-circuits before any component accessor is evaluated. The Int arg is
 -- a nesting depth used to name list-comprehension binders uniquely.
 pyConforms :: IRType -> String -> String
@@ -1146,6 +1154,13 @@ pyConformsShape d (ITTensor sh t) e
       let v = "_ce" ++ show d
       in "(isinstance(" ++ e ++ ", list) and len(" ++ e ++ ") == " ++ show (shapeNumel sh)
          ++ " and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
+-- Unit is None and a theta tree a (values, subtrees) tuple, both cheap to
+-- tell. An ADT slot accepts an instance of any ADT constructor (every emitted
+-- constructor class derives the runtime's ADTValue), as the interpreter's
+-- 'valueConformsTo' accepts any 'VADT' whatever its type name.
+pyConformsShape _ ITUnit e = "(" ++ e ++ " is None)"
+pyConformsShape _ ITThetaTree e = "isinstance(" ++ e ++ ", tuple)"
+pyConformsShape _ (ITADT _) e = "isinstance(" ++ e ++ ", ADTValue)"
 pyConformsShape _ _ _ = "True"
 
 -- | An operand as the base of an attribute access (@e.t1@): a number
@@ -1157,13 +1172,16 @@ pyAttrBase :: String -> String
 pyAttrBase e@(c : _) | c == '-' || isDigit c = "(" ++ e ++ ")"
 pyAttrBase e = e
 
--- | Whether 'pyConforms' iterates over (a component of) its operand.
-checksElements :: IRType -> Bool
-checksElements (ITList _) = True
-checksElements (ITTensor _ _) = True
-checksElements (ITTuple a b) = checksElements a || checksElements b
-checksElements (ITEither a b) = checksElements a || checksElements b
-checksElements _ = False
+-- | Whether a rendered operand can be repeated without being bound first: a
+-- name (possibly dotted) or a number literal, which reads no state and has no
+-- effect. A call, a let's walrus or any operator is bound.
+isAtomicOperand :: String -> Bool
+isAtomicOperand s = case s of
+  '-' : r@(c : _) | isDigit c -> all numChar r
+  c : _ | isDigit c -> all numChar s
+  _ : _ -> all (\ch -> isAlphaNum ch || ch == '_' || ch == '.') s
+  [] -> False
+  where numChar ch = isAlphaNum ch || ch == '.' || ch == '+' || ch == '-'
 
 
 -- | 'bindIterable' with a fresh temporary, drawn only when the iterable needs

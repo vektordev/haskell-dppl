@@ -217,7 +217,9 @@ pipeline). Docs-repo task `python-nested-conditionals-exceed-indentation-limit`.
 
 Both Python backends lower an expression-position `IRLetIn` to an assignment
 expression, `((v := e), body)[1]`, and `BMap`, `BZip` and a list or tensor
-`IRConformsTo` check to comprehensions. CPython refuses `:=` anywhere inside
+`IRConformsTo` check to comprehensions (a check whose operand is not a bare
+name or number literal binds it to `_ctN` first, see below, so its
+comprehension iterates over a name). CPython refuses `:=` anywhere inside
 a comprehension's iterable, even under a lambda or a nested comprehension
 there, and the optimizer's CSE does put lets there (a cumulative's
 materialized cell list, `[T(((l := ...), ...)[1]), ...]`), so such a module
@@ -293,3 +295,19 @@ the path to a call, and by the Julia backend. The CLI warns in both cases.
 Without the flag, and for a program without recursion, the emitted code is
 byte-identical. Tests: `test/TestMemoRecursion.hs` (call counts and exactness
 through the binary) and the `End2End.Python MemoRecursion` corpus sweep.
+
+## A type-tag check reads its operand once
+
+`IRConformsTo t x` tests `x` several times (the wildcard, the tag, each
+component), so both text backends bind an operand that is not a bare name or
+number literal once before the tests: Python `((_ctN := x), check(_ctN))[1]`,
+Julia `(let _ctN = x; check(_ctN) end)`. An operand that draws then draws
+once, as in the interpreter. The check tests what the interpreter's
+`valueConformsTo` does: unit is `None`/`nothing`, a theta tree a tuple, and an
+ADT slot takes an instance of any ADT constructor, which derives the runtime's
+`ADTValue` (Python class, Julia abstract type). Unchecked are type variables
+and arrows, as in the interpreter, and symbols, which have no text-backend
+value. Pinned by the IR fuzz group's "type-tag check of a unit, theta-tree or
+ADT slot, or of a drawn operand" case. Docs-repo tasks
+`text-backends-conformsto-reevaluates-its-operand` and
+`ir-conformsto-lowering-gaps-in-text-backends`.
