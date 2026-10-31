@@ -277,7 +277,8 @@ pProbTestCase name = do
     _  -> return $ ProbTestCase name (head params) (tail params) expct noSample
 
 -- | The optional @no-sample@ row suffix: the row's density is checked exactly
--- on every backend, but the empirical sampler checks skip it. A window
+-- on every backend, but the three empirical sampler checks (Corpus.SamplingMatchesPDF,
+-- the batched-generate differential, Slow.RewriteIntegration) skip it. A window
 -- estimate straddles a support edge or a jump and reports the average of the
 -- two one-sided densities, so a row at such a point opts out. Only density
 -- (@p(...)@) rows take it.

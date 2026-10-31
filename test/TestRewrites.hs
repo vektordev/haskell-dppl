@@ -868,6 +868,12 @@ rewritePool e = Interpreter `elem` ceBackends e && null (neurals (ceProgram e)) 
 corpusQueries :: CorpusEntry -> [Query]
 corpusQueries e = [(s, params) | ProbTestCase _ s params _ _ <- ceCases e]
 
+-- | The 'corpusQueries' rows that are not marked @no-sample@, in order: the
+-- rows the sampler check may compare (a support edge or a jump makes its
+-- window estimate meaningless).
+sampledFlags :: CorpusEntry -> [Bool]
+sampledFlags e = [not ns | ProbTestCase _ _ _ _ ns <- ceCases e]
+
 -- ---------------------------------------------------------------------------
 -- Rewrite sequences (M4)
 -- ---------------------------------------------------------------------------
@@ -1064,12 +1070,12 @@ rewriteIntegrationTests corpus = corpusSweep corpus SweepSpec
   , sweepSelect = rewritePool
   , sweepNote = "agreeing rewritten variants keep agreeing under -O0, topK 0 and branch counting, sample as they measure, and keep main's PType" } $ \e ->
     testCaseInfo (ceName e) $ do
-      let n = ceName e; p = ceProgram e; qs = corpusQueries e
+      let n = ceName e; p = ceProgram e; qs = corpusQueries e; sf = sampledFlags e
       (orig, vs) <- compileSweep p
       origOut <- runCompiled p orig qs
       origBC <- compileTimedWith branchCountConfig p >>= \c -> branchCounts p c qs
       let origPT = mainPTypeOf p
-      checked <- concurrently [ integrate n origOut origBC origPT qs v c | (v, c) <- vs ]
+      checked <- concurrently [ integrate n origOut origBC origPT qs sf v c | (v, c) <- vs ]
       let hard = concat [ h | (h, _, _, _) <- checked ]
           logs = concat [ l | (_, l, _, _) <- checked ]
           matched = concat [ k | (_, _, k, _) <- checked ]
@@ -1085,9 +1091,9 @@ rewriteIntegrationTests corpus = corpusSweep corpus SweepSpec
 
 -- | Cross one variant: (hard failures, log lines, the known config
 -- divergences it matched, whether it was crossed at all).
-integrate :: String -> Outcome -> Maybe [Double] -> Maybe PType -> [Query] -> Variant -> Either String IREnv
+integrate :: String -> Outcome -> Maybe [Double] -> Maybe PType -> [Query] -> [Bool] -> Variant -> Either String IREnv
           -> IO ([String], [String], [KnownConfig], Bool)
-integrate prog origOut origBC origPT qs v c = do
+integrate prog origOut origBC origPT qs sf v c = do
   out <- runCompiled rp c qs
   case (origOut, out, c) of
     (Answered as, Answered bs, Right env) | and (zipWith agrees as bs), isNothing (knownDivergence prog fam site) -> do
@@ -1100,7 +1106,7 @@ integrate prog origOut origBC origPT qs v c = do
                           | otherwise -> Just (tag ++ " under " ++ lbl ++ ": " ++ show bs ++ " vs " ++ show cs)
               Refused why -> Just (tag ++ " refuses under " ++ lbl ++ ": " ++ why)
         return (lbl, problem, bc)
-      sampled <- samplingCheck rp env (zip qs bs)
+      sampled <- samplingCheck rp env [ r | (r, True) <- zip (zip qs bs) sf ]
       let vBC = case [ bc | (lbl, _, bc) <- cfgs, lbl == branchCountLabel ] of
             (bc : _) -> bc
             [] -> Nothing

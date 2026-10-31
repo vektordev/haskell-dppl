@@ -208,13 +208,13 @@ cdf(1.5, False, [0.2])=(0.75, 0.0)
 False and [0.2] would be passed as parameters to the main function in both cases.
 
 #### Rows at a support edge or a jump: `no-sample`
-Every `p(...)` row is also compared with an empirical estimate: the sampler checks (`Corpus.SamplingMatchesPDF` and the batched-generate differential) draw forward samples and count those inside a symmetric window around the point. At a support edge or a jump in the density the window straddles both sides and estimates the average of the two one-sided densities, which is half the pointwise value at the edge of a `Uniform`. A row at such a point carries the suffix `no-sample`:
+Every `p(...)` row is also compared with an empirical estimate: the sampler checks (`Corpus.SamplingMatchesPDF`, the batched-generate differential and `Slow.RewriteIntegration`'s sampling check) draw forward samples and count those inside a symmetric window around the point. At a support edge or a jump in the density the window straddles both sides and estimates the average of the two one-sided densities, which is half the pointwise value at the edge of a `Uniform`. A row at such a point carries the suffix `no-sample`:
 
 ```
 p(3.0)=(1.0, 1.0, False) no-sample
 ```
 
-The row is still checked exactly on every backend and in every other sweep; only the two sampler checks skip it. Use it for rows that pin the density *at* a boundary (the convention, e.g. that `Uniform` is closed at both ends), and say why in a comment. Only `p(...)` rows take the suffix.
+The row is still checked exactly on every backend and in every other sweep; only the three sampler checks skip it. Use it for rows that pin the density *at* a boundary (the convention, e.g. that `Uniform` is closed at both ends), and say why in a comment. Only `p(...)` rows take the suffix.
 
 #### Argmax_p assertions
 Especially when dealing with neural networks, testing for exact probability densities becomes infeasible. The argmax_p assertion allows to specify which output should be the most likely. This is done using a MockNN in the interpreter that behaves like a well-trained NN.
