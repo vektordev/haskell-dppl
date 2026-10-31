@@ -36,7 +36,7 @@ import SPLL.Typing.RType
 import PredefinedFunctions
 import SPLL.Typing.PType
 import Data.Maybe
-import Data.List (nub)
+import Data.List (nub, sort)
 import Data.Functor ((<&>))
 import SPLL.Typing.ForwardChaining
 import SPLL.Semiring
@@ -762,7 +762,12 @@ measureSet meta v (WPoint p cov) = do
 -- continuous variable that is @CDF(hi) - CDF(lo)@, below. An Int variable has
 -- an atom at @lo@ that belongs to the set: 'measureIntInterval'.
 measureSet meta v (WInterval lo hi)
-  | rType (getTypeInfo v) == TInt = measureIntInterval meta v lo hi
+  | rType (getTypeInfo v) == TInt = measureIntInterval meta v (\e -> return (IROp OpSub e (IRConst (VInt 1)))) lo hi
+-- A Float variable whose 'DiscreteValues' tag is a finite set of atoms has an
+-- atom at @lo@ just as an Int has: the mass below @lo@ is the CDF at the
+-- largest atom under it ('atomBelow'), not at @lo@ (task
+-- set-witness-discrete-float-strict-comparison-at-atom).
+  | Just ds <- discreteFloatAtoms v = measureIntInterval meta v (atomBelow ds) lo hi
 measureSet meta v (WInterval lo hi) = do
   let sr = semiringOf meta
   (cdfHi, bcHi) <- cdfAtBound meta v hi
@@ -903,10 +908,14 @@ cdfAtBound meta v (WFinite e) = do
 -- an infinite end on the wrong side, by a bounds test when both ends are
 -- finite (the CDFs are evaluated only under it, so log space never takes the
 -- log of a negative difference), and when the measure comes out a zero mass.
-measureIntInterval :: CompilerMetadata -> Expr -> WBound -> WBound -> CompilerMonad PResult
-measureIntInterval meta _ WPosInf _ = return (impossibleP (semiringOf meta))
-measureIntInterval meta _ _ WNegInf = return (impossibleP (semiringOf meta))
-measureIntInterval meta v lo hi = do
+--
+-- @below@ maps the lower end to a point whose CDF is the mass strictly below
+-- it: @lo - 1@ for an Int, the next atom down for a discrete Float
+-- ('atomBelow').
+measureIntInterval :: CompilerMetadata -> Expr -> (IRExpr -> CompilerMonad IRExpr) -> WBound -> WBound -> CompilerMonad PResult
+measureIntInterval meta _ _ WPosInf _ = return (impossibleP (semiringOf meta))
+measureIntInterval meta _ _ _ WNegInf = return (impossibleP (semiringOf meta))
+measureIntInterval meta v below lo hi = do
   let sr = semiringOf meta
   let cdfAt e = toIRInference (unpruned meta) True v e
   o <- scoped $ do
@@ -914,7 +923,7 @@ measureIntInterval meta v lo hi = do
       WFinite e -> cdfAt e
       _         -> return (mass (srOne sr))
     loRes <- case lo of
-      WFinite e -> cdfAt (IROp OpSub e (IRConst (VInt 1)))
+      WFinite e -> below e >>= cdfAt
       _         -> return (impossibleP sr)
     let bc = case (hi, lo) of
           (WFinite _, _) -> rBranches hiRes
@@ -930,6 +939,48 @@ measureIntInterval meta v lo hi = do
     return (impossibleWhen zeroMass diff { rProb = sealP (IRVar pVar), rDim = IRVar dVar })
   let nonEmpty = [notIR (IROp OpGreaterThan l h) | WFinite l <- [lo], WFinite h <- [hi]]
   closeResult sr "int_ivl" nonEmpty o
+
+-- | The atoms of a Float-valued node whose 'DiscreteValues' tag is a finite
+-- set of Float constants, ascending; Nothing for an Int, a continuous or
+-- mixed node, or an untagged one. The tag may over-approximate the support,
+-- which is harmless to 'atomBelow'/'atomAbove': a value with no mass between
+-- two atoms changes no CDF.
+discreteFloatAtoms :: Expr -> Maybe [Double]
+discreteFloatAtoms e
+  | rType ti == TFloat
+  , [MultiDiscretes vs@(_:_)] <- [mv | DiscreteValues mv <- tags ti]
+  , Just ds <- mapM asFloat vs
+  = Just (sort (nub ds))
+  | otherwise = Nothing
+  where ti = getTypeInfo e
+        asFloat (VFloat d) = Just d
+        asFloat _ = Nothing
+
+-- | IR for the largest atom strictly below @e@, or a value below every atom
+-- when there is none: the point whose CDF is the mass strictly below @e@.
+atomBelow :: [Double] -> IRExpr -> CompilerMonad IRExpr
+atomBelow [] e = return e
+atomBelow ds@(d0:_) e = shareBound e $ \x ->
+  foldl (\acc d -> IRIf (IROp OpLessThan (atom d) x) (atom d) acc) (atom (d0 - 1)) ds
+
+-- | IR for the smallest atom strictly above @e@, or a value above every atom
+-- when there is none.
+atomAbove :: [Double] -> IRExpr -> CompilerMonad IRExpr
+atomAbove [] e = return e
+atomAbove ds e = shareBound e $ \x ->
+  foldr (\d acc -> IRIf (IROp OpGreaterThan (atom d) x) (atom d) acc) (atom (last ds + 1)) ds
+
+atom :: Double -> IRExpr
+atom = IRConst . VFloat
+
+-- | Reads a bound several times without copying it: a variable or constant
+-- inline, anything else let-bound around the reading expression.
+shareBound :: IRExpr -> (IRExpr -> IRExpr) -> CompilerMonad IRExpr
+shareBound e@(IRVar _) k = return (k e)
+shareBound e@(IRConst _) k = return (k e)
+shareBound e k = do
+  n <- mkVariable "atom_bound"
+  return (IRLetIn n e (k (IRVar n)))
 
 -- | Invert the observation @body ∈ target@ into constraint worlds on the bound
 -- variable (occurrences @occs@). Nothing when some node on the way is not
@@ -1664,13 +1715,21 @@ comparisonWorlds meta occs isGT lop rop target
     -- keeps @b@ on both halves: the boundary point has measure zero, and the
     -- non-strict guards answer a boundary query with the density (task
     -- set-witness-int-comparison-boundary-non-strict).
+    --
+    -- A Float side with a finite set of atoms ('discreteFloatAtoms') steps
+    -- the same way, to the neighbouring atom: @side < b@ True is @[-inf,
+    -- atomBelow b]@ and @side > b@ True @[atomAbove b, inf]@. Keeping @b@
+    -- there counted an atom at @b@ on both halves (task
+    -- set-witness-discrete-float-strict-comparison-at-atom).
     splitOn side b flipped = do
-      let discrete = rType (getTypeInfo side) == TInt
-          step op = if discrete then IROp op b (IRConst (VInt 1)) else b
-          -- (side below b, side at or above b) and (side at or below b, side above b)
-          ltT = WInterval WNegInf (WFinite (step OpSub))
+      (below, above) <- case rType (getTypeInfo side) of
+            TInt -> return (IROp OpSub b (IRConst (VInt 1)), IROp OpPlus b (IRConst (VInt 1)))
+            _ | Just ds <- discreteFloatAtoms side -> (,) <$> atomBelow ds b <*> atomAbove ds b
+            _ -> return (b, b)
+      let -- (side below b, side at or above b) and (side at or below b, side above b)
+          ltT = WInterval WNegInf (WFinite below)
           ltF = WInterval (WFinite b) WPosInf
-          gtT = WInterval (WFinite (step OpPlus)) WPosInf
+          gtT = WInterval (WFinite above) WPosInf
           gtF = WInterval WNegInf (WFinite b)
       let (setT, setF) = if isGT /= flipped then (gtT, gtF) else (ltT, ltF)
       wsT <- invertToWorlds meta occs side setT

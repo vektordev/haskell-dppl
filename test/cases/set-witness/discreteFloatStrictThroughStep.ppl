@@ -1,0 +1,7 @@
+-- Strict comparisons of a three-atom Float draw (2.0: 0.25, 1.0: 0.375,
+-- 3.0: 0.375), one through an affine step (v + 1.0 < 3.0 is v < 2.0) and one
+-- in > direction, each at an atom (task
+-- set-witness-discrete-float-strict-comparison-at-atom). The set-witness
+-- engine steps a strict bound to the neighbouring atom of the compared side
+-- and measures a closed interval's lower atom.
+main = draw v = (if Uniform < 0.25 then 2.0 else (if Uniform < 0.5 then 1.0 else 3.0)) in if v + 1.0 < 3.0 then 1 else (if v > 2.0 then 2 else (if not (v > 2.0) then 0 else 3))
