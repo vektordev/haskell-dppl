@@ -5211,8 +5211,7 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       -- because a CDF has no settled meaning under max-product), so there is no
       -- "h_map_integ" for a cumulative call to reach. Routing it to the
       -- sum-product "h_integ" would be the same silent-wrong-answer bug; the
-      -- compiler refuses by name instead, as 'mapHasNoExcept' already does for
-      -- AnyExcept under MAP.
+      -- compiler refuses by name instead.
       --
       -- Since task map-semiring-complement-and-cdf-wrong the comparison
       -- refuses first: under max-product a comparison complements its
@@ -5220,6 +5219,9 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       -- call is not known to (an enumerable callee is summed point by point
       -- instead, with no CDF call at all). Either refusal keeps the
       -- sum-product h_integ out of the MAP group.
+      --
+      -- AnyExcept under MAP is refused the same way, as an absent variant
+      -- (next test).
       prog <- parseOrFail (unlines
         [ "h = Uniform"
         , "main = if h > 0.5 then 1.0 else 2.0"
@@ -5230,6 +5232,26 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       expectVariantRefused "main_map" "prob" "needs an operand with a single derivation" compiled
       assertBool "the sum-product main still has its probability function"
         (either (const False) (isJust . probFun . lookupIREnv "main") compiled)
+  , testCase "a marginal-except query is refused as an absent variant, not a crash" $
+      -- Task map-semiring-marginal-except-errors-instead-of-refusing. A query
+      -- of a == v (or its negation) compiles P(a /= v) as the marginal minus
+      -- one branch, which max-product has no operator for. srMinus of the
+      -- MAP semirings was a bare 'error', so the whole compile died, the
+      -- sum-product variants included; now main_map.prob alone is refused.
+      forM_ [ ("== 1", "main = (if Uniform < 0.3 then 1 else 2) == 1", 0.3)
+            , ("not (== 1)", "main = not ((if Uniform < 0.3 then 1 else 2) == 1)", 0.7) ] $ \(what, src, eTrue) ->
+        forM_ [False, True] $ \ls -> do
+          prog <- parseOrFail src
+          let cfg = defaultCompilerConfig { extraSemirings = [SRMaxProduct], logSpace = ls }
+              compiled = compile cfg prog
+              tag = what ++ (if ls then " (log space)" else "")
+          expectVariantRefused "main_map" "prob" "marginal-except" compiled
+          assertBool (tag ++ ": the sum-product main still has its probability function")
+            (either (const False) (isJust . probFun . lookupIREnv "main") compiled)
+          sp <- probUnder cfg prog [] (VBool True)
+          let lin = if ls then exp sp else sp
+          assertBool (tag ++ ": sum-product p(True) = " ++ show eTrue ++ ", got " ++ show lin)
+            (abs (lin - eTrue) < 1e-9)
   -- Task map-semiring-complement-and-cdf-wrong. An if condition's False weight
   -- was 1 - (its True weight), a sum-product identity: under max-product that
   -- is 1 - max, not the best False derivation. The condition below has three
