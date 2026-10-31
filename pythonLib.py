@@ -405,8 +405,8 @@ def isPossible(multiVal, expr):
     return True
   elif multiVal[0] == "D":
     return expr in multiVal[1]
-  elif multiVal[0] == "T" and isinstance(expr, tuple):
-    return isPossible(multiVal[1][0], expr[0]) and isPossible(multiVal[1][1], expr[1])
+  elif multiVal[0] == "T" and isinstance(expr, T):
+    return isPossible(multiVal[1][0], expr.t1) and isPossible(multiVal[1][1], expr.t2)
   elif multiVal[0] == "E" and isinstance(expr, Left):
     return isPossible(multiVal[1][0], fromLeft(expr))
   elif multiVal[0] == "E" and isinstance(expr, Right):
@@ -422,6 +422,10 @@ def isPossible(multiVal, expr):
           if not isPossible(mf, ef):
             return False
     return foundConstr
+  # A shape the domain does not describe (a tuple domain over a non-tuple,
+  # an Either domain over neither arm) is not possible; never fall off the
+  # end and answer None.
+  return False
   
 # NOTE (task retire-irenumsum): `multiValueToValueList` stood here, deriving a
 # MultiValue's enumerated support at run time (with a memo cache, because a

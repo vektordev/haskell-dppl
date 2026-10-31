@@ -1611,9 +1611,6 @@ knownDisagreements =
                   (InterpRaise m, Sampled _) -> m `elem` ["head of an empty list", "tail of an empty list"]
                   _ -> False))
       (repro [] ITBool (IRUnaryOp OpIsAny (IRDestruct AcHead (IRConst (VList (EmptyList :: GenericList IRValue))))) [])
-  , KnownFamily "python-ispossible-on-a-tuple-domain-answers-none" ["python"]
-      (ByAnswer (\c _ _ -> any tupleDomain [ d | IRIsPossible d _ <- caseUniverse c ]))
-      (repro [] ITBool (IRIsPossible (MultiTuple MultiContinuous MultiContinuous) (IRConst (VTuple (VFloat 1) (VFloat 2)))) [])
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (AsIf (const (irMap conformsUnitUnchecked)))
       (repro [] ITBool (IRConformsTo ITUnit (IRConst (VBool True))) [])
@@ -1793,10 +1790,6 @@ knownDisagreements =
     raisedWith needle (Raised m) = needle `isInfixOf` m
     raisedWith _ _ = False
     hasNormalDensity e = not (null [ () | IRDensity IRNormal _ _ <- universe e ])
-    tupleDomain d = case d of
-      MultiTuple _ _ -> True
-      MultiEither l r -> tupleDomain l || tupleDomain r
-      _ -> False
     -- The draw counts agree (the first token after the tuple's).
     -- What Python floats out of an expression to statements before it: a
     -- let-spine or a conditional under a node that is not itself a statement
@@ -2750,6 +2743,20 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             Right bs -> do
               (_, ds) <- runIRCasesBatched py bs
               assertEqual "batched disagreements" [] (map idWhy ds)
+  -- python-ispossible-on-a-tuple-domain-answers-none (formerly a
+  -- knownDisagreements family): pythonLib.isPossible tested a tuple domain
+  -- with isinstance(expr, tuple), but runtime tuples are T objects, so it
+  -- fell off its end and answered None.
+  , testCase "isPossible over a tuple domain agrees on scalar Python and Julia" $ do
+      let dom = MultiTuple MultiContinuous (MultiDiscretes [VFloat 2])
+          cs = [ repro [] ITBool (IRIsPossible dom (IRConst (VTuple (VFloat 1) (VFloat y)))) [] | y <- [2, 3] ]
+      cases <- mapM (\c -> (\o -> (c, [([], o)])) <$> interpretIRCase c []) cs
+      assertEqual "interpreter answers" (map show [Interpreted (VBool True), Interpreted (VBool False)]) [ show o | (_, [(_, o)]) <- cases ]
+      (_, pyD) <- runIRCasesPython cases
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      julia <- findExecutable "julia"
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
   -- python-max-of-empty-tensor-in-recursive-helper: max over a zero-extent
   -- tensor is the identity -inf on every engine (Python raised ValueError).
   , testCase "max of an empty tensor is -inf on scalar Python and Julia, as in the interpreter" $ do
