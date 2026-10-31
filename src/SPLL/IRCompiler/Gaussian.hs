@@ -11,7 +11,7 @@ module SPLL.IRCompiler.Gaussian (
   affineMarginalisable,
   jointAffineApplicable,
   jointAffineApply,
-  normalDiffCdfAtZero,
+  normalDiffComparison,
   toIRLogNormalParams,
   gaussianLeaf,
   gaussianParams,
@@ -633,17 +633,43 @@ normalParamsViaCall meta wanted expr = do
     stripDeclLambdas (Expr _ (Lambda _ sub)) = stripDeclLambdas sub
     stripDeclLambdas e                       = e
 
--- | Standard-normal CDF at 0 of the difference of two PNormal expressions.
--- left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)); returns Phi((0 - mu) / sigma),
--- which is p(left < right). Used to give P-mode a closed form for Gaussian-vs-Gaussian
+-- | P(left < right) (@strictLess@) or P(left > right) of two PNormal
+-- expressions, queried at the Bool @sample@. left - right ~ Normal(muL - muR,
+-- sqrt(sL^2 + sR^2)), so p(left < right) = Phi((0 - mu) / sigma) and the
+-- upper tail is its complement ('complementWhen', which keeps a normal upper
+-- tail's precision). Gives P-mode a closed form for Gaussian-vs-Gaussian
 -- comparisons, where neither side is a deterministic bound.
-normalDiffCdfAtZero :: CompilerMetadata -> Expr -> Expr -> CompilerMonad IRExpr
-normalDiffCdfAtZero meta left right = do
+--
+-- The difference's scale vanishes when both sides' scales do (a runtime zero
+-- factor, as in @h z = (z * Normal) < (z * Normal)@ at @z = 0@). The
+-- difference is then the point mass at @mu@, and the strict comparison holds
+-- exactly when @mu < 0@ (resp. @mu > 0@): at @mu = 0@ neither does, which no
+-- complement of a CDF can express. As in 'degenerateScaleGuard', the scale is
+-- let-bound and the point-mass answer selected at run time; the ordinary leaf
+-- reads a safe scale. A scale that is nonzero by construction (either side a
+-- literal-scaled Normal) emits no guard.
+normalDiffComparison :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
+normalDiffComparison meta strictLess left right sample = do
   (muL, sL) <- toIRNormalParams meta left
   (muR, sR) <- toIRNormalParams meta right
   sigma <- irHypot sL sR
-  let mu = IROp OpSub muL muR
-  return (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub (IRConst (VFloat 0)) mu) sigma))
+  let sr = semiringOf meta
+      -- the queried Bool selects the complement: P(diff < 0) is the CDF
+      complementOn = if strictLess then notIR sample else sample
+      cdfAt0 mu s = complementWhen sr complementOn
+        (distCumulative sr IRNormal (IROp OpDiv (IROp OpSub (IRConst (VFloat 0)) mu) s))
+  if not (scaleMayVanish sigma)
+    then mass <$> cdfAt0 (IROp OpSub muL muR) sigma
+    else do
+      vMu <- mkVariable "mu"
+      vSigma <- mkVariable "sigma"
+      setVariables [(vMu, IROp OpSub muL muR), (vSigma, sigma)]
+      let isZero = IROp OpEq (IRVar vSigma) (IRConst (VFloat 0))
+          safeScale = IRIf isZero (IRConst (VFloat 1)) (IRVar vSigma)
+          holds = IROp (if strictLess then OpLessThan else OpGreaterThan) (IRVar vMu) (IRConst (VFloat 0))
+          dirac = maskSR sr (equalityGuard TBool holds sample)
+      leaf <- cdfAt0 (IRVar vMu) safeScale
+      return (mass (IRIf isZero dirac leaf))
 
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
 toIRLogNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)

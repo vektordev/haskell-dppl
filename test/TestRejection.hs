@@ -1241,7 +1241,7 @@ injectedWildcardArithmeticTests = testGroup "InjectedWildcardArithmetic" $
 intractableComparisonSrc :: String
 intractableComparisonSrc = "main = Uniform > exp(Uniform)\n"
 
--- The Gaussian-difference case, which *is* closed-form ('normalDiffCdfAtZero').
+-- The Gaussian-difference case, which *is* closed-form ('normalDiffComparison').
 -- The positive control: it guards the narrowing against over-refusing, which
 -- would be just as wrong and much quieter.
 gaussianComparisonSrc :: String

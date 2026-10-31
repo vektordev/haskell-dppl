@@ -581,15 +581,10 @@ toIRInference meta False (Expr _ (InjF (Named cmp) [left, right])) sample
 -- as Integrate (a closed-form discrete probability), matching the dim-0 result here.
 toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
-    cdfAt0 <- normalDiffCdfAtZero meta left right
-    -- p(left > right) = p(diff > 0) = 1 - cdf(0), spelled through
-    -- 'complementWhen' so the upper tail keeps its precision
-    mass <$> complementWhen (semiringOf meta) sample cdfAt0
+    normalDiffComparison meta False left right sample
 toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
-    cdfAt0 <- normalDiffCdfAtZero meta left right
-    -- p(left < right) = p(diff < 0) = cdf(0)
-    mass <$> complementWhen (semiringOf meta) (notIR sample) cdfAt0
+    normalDiffComparison meta True left right sample
 toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const > var)
     var <- mkVariable "fixed_bound"

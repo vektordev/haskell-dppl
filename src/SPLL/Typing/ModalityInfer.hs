@@ -1646,7 +1646,7 @@ independentOperands env a b = not (any randomLocal (Set.toList shared))
 --   * __one side 'Exact'__ — the random side's own CDF evaluated at the fixed
 --     bound (@fixed_bound@\/@rhs_integral@\/@lhs_integral@).
 --   * __both sides Gaussian__ — the difference is Gaussian, so the answer is its
---     CDF at zero (@normalDiffCdfAtZero@). 'FamNormal' specifically, not merely
+--     CDF at zero (@normalDiffComparison@). 'FamNormal' specifically, not merely
 --     equal families: two 'FamLogNormal' operands enjoy no such closure and
 --     IRCompiler has no equation for them.
 --   * __both sides enumerable__ — the forward-only @|L|x|R|@ grid, which reads
