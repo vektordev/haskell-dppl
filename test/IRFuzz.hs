@@ -2869,6 +2869,22 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             Right b -> do
               (_, ds) <- runIRCasesBatched py [b]
               assertEqual "batched disagreements" [] (map idWhy ds)
+  -- The log-space cdf leaves far in the upper tail: torch's log_ndtr returns a
+  -- negative zero where the interpreter's log of 1.0 is 0.0.
+  , testCase "batched: log cdf leaves answer +0.0 in the upper tail (batched-log-cumulative-normal-negative-zero)" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched log cdf" >>= maybe (return ()) assertFailure
+        Just py ->
+          mapM_ (\(d, x) -> do
+            let c = batchedRepro (IRCumulative d Log (IRConst (VFloat x))) (VFloat 1)
+            bc <- prepareBatchedIRCase c
+            case bc of
+              Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+              Right b -> do
+                (_, ds) <- runIRCasesBatched py [b]
+                assertEqual "batched disagreements" [] (map idWhy ds))
+            [(IRNormal, 800), (IRUniform, 2)]
   -- Formerly a knownDisagreements family: a rank-1 tensor of booleans read at a
   -- batched key was a float tensor (no condition for torch.where), and one of
   -- tuples raised.
