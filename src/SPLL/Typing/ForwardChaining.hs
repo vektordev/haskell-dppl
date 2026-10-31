@@ -61,6 +61,7 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType (PType(Deterministic))
 import SPLL.ReservedNames (uniformName, normalName)
 import Control.Applicative ((<|>))
+import SPLL.IRUtil (pruneDeadLetIns)
 
 
 
@@ -1427,9 +1428,16 @@ mergeExpr2 bindings (InvChain e1 cov1 g1 ra1 _ _) (InvChain e2 cov2 g2 ra2 _ _)
 -- @isFace@ of the sentinel crashing at a False first slot. Taking the whole
 -- value loses nothing: the consistency of every slot with the witness is
 -- checked for the query as a whole.
+--
+-- The path not taken leaves its let prefix in @bindings@, dead, so it is
+-- pruned: a constructor test's prefix binds its 'VAnyExcept' sentinel, and
+-- 'toInvExprMaybeWith' declines every chain whose value holds one. With the
+-- prefix kept, @(isFace h, fst (h, h))@ lost its point inverse to an engine
+-- that answered 1.0 at every True first slot where @(isFace h, h)@ answers
+-- the fields' product.
 mergeExpr2 bindings c1 c2
-  | holdsWildcard (invValue c1), not (holdsWildcard (invValue c2)) = c2{invValue = bindings (invValue c2)}
-  | otherwise = c1{invValue = bindings (invValue c1)}
+  | holdsWildcard (invValue c1), not (holdsWildcard (invValue c2)) = c2{invValue = pruneDeadLetIns (bindings (invValue c2))}
+  | otherwise = c1{invValue = pruneDeadLetIns (bindings (invValue c1))}
   where
     holdsWildcard e = any isWildcard (universeIR e)
     isWildcard (IRConst VAny) = True

@@ -160,6 +160,18 @@ knownDivergences =
   , Known "structuredDrawHelperProjectsField" DrawIntro "" structuredReread
   , Known "structuredDrawHelperProjectsField" AliasIntro "" structuredReread
   , Known "structuredDrawHelperProjectsField" HelperExtract "" structuredReread
+  -- An ADT draw read by a constructor test and whole, through an alias or a
+  -- helper: 1.0 at every True first slot. Present at 831c3d6, where a crash
+  -- on the False row made these variants refusals; the crash's fix
+  -- (point-inversion-vanyexcept-witness-crashes) exposed the answers.
+  -- Pinned by known-issues/ctorTestOfAliasedAdtDrawDropsFields; its
+  -- pair-fst twin ctorTestBesideFstOfPairedDraw diverges the same way.
+  , Known "tupleCtorTestOfSharedDraw" DrawIntro "" structuredReread
+  , Known "tupleCtorTestOfSharedDraw" AliasIntro "" structuredReread
+  , Known "tupleCtorTestOfSharedDraw" HelperExtract "" structuredReread
+  , Known "ctorTestBesideFstOfPairedDraw" DrawIntro "" structuredReread
+  , Known "ctorTestBesideFstOfPairedDraw" AliasIntro "" structuredReread
+  , Known "ctorTestBesideFstOfPairedDraw" HelperExtract "" structuredReread
   -- The swapped wrapper re-read through a second binder: before per-mask
   -- variants the concrete query refused ("binding 'x' is unobserved"); f's
   -- variants now answer the split sub-queries, so p((0.7, 0.6)) is 1.0
