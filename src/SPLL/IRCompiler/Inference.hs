@@ -585,7 +585,8 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const > var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
-    setVariables [(var, strictBelowBound right l)]
+    bound <- strictBelowBound right l
+    setVariables [(var, bound)]
     integ <- toIRInference (unpruned meta) True right (IRVar var)  -- complemented below, see 'unpruned'
     -- 'complementWhen' rather than a let-bound CDF and its complement, so a
     -- normal upper tail keeps its precision ('upperTailComplement')
@@ -616,7 +617,8 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
   | pType (getTypeInfo right) == Deterministic = do --p(x | var < const)
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
-    setVariables [(var, strictBelowBound left r)]
+    bound <- strictBelowBound left r
+    setVariables [(var, bound)]
     integ <- toIRInference (unpruned meta) True left (IRVar var)  -- complemented below, see 'unpruned'
     -- 'complementWhen' rather than a let-bound CDF and its complement, so a
     -- normal upper tail keeps its precision ('upperTailComplement')
@@ -657,7 +659,7 @@ toIRInference meta False (Expr _ (InjF (Named cmp) [left, right])) sample
     mTbl <- materializeOperandTable meta enumE
     returnO <- scoped $ do
       pE <- operandProb meta mTbl enumE (IRVar bnd)
-      let cdfAt = if cdfBelow then strictBelowBound cdfE (IRVar bnd) else IRVar bnd
+      cdfAt <- if cdfBelow then strictBelowBound cdfE (IRVar bnd) else return (IRVar bnd)
       integ <- toIRInference (unpruned meta) True cdfE cdfAt  -- complemented below, see 'unpruned'
       pCmp <- complementWhen sr (if cdfBelow then notIR sample else sample) (unP (rProb integ))
       return (srTimes sr pE pCmp)

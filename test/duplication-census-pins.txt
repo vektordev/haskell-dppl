@@ -40,6 +40,7 @@ clevrEqualLargeMetalSphereNatural main.integ=4 main.prob=4 total.prob=4
 clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
 collapseGivenParam main.prob=3
 collapseMixture main.integ=3 main.prob=4
+constantListCdfComponentwise main.integ=4 main.prob=8
 countFoldRelateDigitEncoded hit.integ=4 hit.prob=4 main.integ=10 main.prob=10
 ctorTestBesideFstOfPairedDraw main__m01.prob=5
 ctorTestFalseBesideValue main.prob=5 main__m01.prob=4
@@ -51,6 +52,7 @@ curriedHelperEnumArg match.integ=3 match.prob=3
 decreasingRecursionEnumeratedArgumentDensity loop.prob=5 main.prob=5
 defineDestructured main.integ=8 main.prob=10
 diffusionToy1D main.prob=9 step.prob=18
+discreteFloatStrictAtAtomLetFree main.integ=8 main.prob=8
 doubleAliasedDrawParameterScaledSibling main.prob=5 main__m01.prob=3 main__m11.prob=4
 drawBoundIntChainMixedSignsCdf main.integ=32 main.prob=8
 drawBoundIntPlusThenNegativeCdf main.integ=20 main.prob=8

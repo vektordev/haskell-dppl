@@ -36,7 +36,7 @@ import SPLL.Typing.RType
 import PredefinedFunctions
 import SPLL.Typing.PType
 import Data.Maybe
-import Data.List (nub, sort)
+import Data.List (nub)
 import Data.Functor ((<&>))
 import SPLL.Typing.ForwardChaining
 import SPLL.Semiring
@@ -939,48 +939,6 @@ measureIntInterval meta v below lo hi = do
     return (impossibleWhen zeroMass diff { rProb = sealP (IRVar pVar), rDim = IRVar dVar })
   let nonEmpty = [notIR (IROp OpGreaterThan l h) | WFinite l <- [lo], WFinite h <- [hi]]
   closeResult sr "int_ivl" nonEmpty o
-
--- | The atoms of a Float-valued node whose 'DiscreteValues' tag is a finite
--- set of Float constants, ascending; Nothing for an Int, a continuous or
--- mixed node, or an untagged one. The tag may over-approximate the support,
--- which is harmless to 'atomBelow'/'atomAbove': a value with no mass between
--- two atoms changes no CDF.
-discreteFloatAtoms :: Expr -> Maybe [Double]
-discreteFloatAtoms e
-  | rType ti == TFloat
-  , [MultiDiscretes vs@(_:_)] <- [mv | DiscreteValues mv <- tags ti]
-  , Just ds <- mapM asFloat vs
-  = Just (sort (nub ds))
-  | otherwise = Nothing
-  where ti = getTypeInfo e
-        asFloat (VFloat d) = Just d
-        asFloat _ = Nothing
-
--- | IR for the largest atom strictly below @e@, or a value below every atom
--- when there is none: the point whose CDF is the mass strictly below @e@.
-atomBelow :: [Double] -> IRExpr -> CompilerMonad IRExpr
-atomBelow [] e = return e
-atomBelow ds@(d0:_) e = shareBound e $ \x ->
-  foldl (\acc d -> IRIf (IROp OpLessThan (atom d) x) (atom d) acc) (atom (d0 - 1)) ds
-
--- | IR for the smallest atom strictly above @e@, or a value above every atom
--- when there is none.
-atomAbove :: [Double] -> IRExpr -> CompilerMonad IRExpr
-atomAbove [] e = return e
-atomAbove ds e = shareBound e $ \x ->
-  foldr (\d acc -> IRIf (IROp OpGreaterThan (atom d) x) (atom d) acc) (atom (last ds + 1)) ds
-
-atom :: Double -> IRExpr
-atom = IRConst . VFloat
-
--- | Reads a bound several times without copying it: a variable or constant
--- inline, anything else let-bound around the reading expression.
-shareBound :: IRExpr -> (IRExpr -> IRExpr) -> CompilerMonad IRExpr
-shareBound e@(IRVar _) k = return (k e)
-shareBound e@(IRConst _) k = return (k e)
-shareBound e k = do
-  n <- mkVariable "atom_bound"
-  return (IRLetIn n e (k (IRVar n)))
 
 -- | Invert the observation @body ∈ target@ into constraint worlds on the bound
 -- variable (occurrences @occs@). Nothing when some node on the way is not

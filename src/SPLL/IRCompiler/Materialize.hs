@@ -52,10 +52,15 @@ import SPLL.IRCompiler.Monad
 -- @P(x <= y)@ once @y@ was enumerated by a sibling operand (task
 -- strict-int-less-than-non-strict-when-operand-shared); 'comparisonWorlds'
 -- makes the same step on its interval endpoints.
-strictBelowBound :: Expr -> IRExpr -> IRExpr
+--
+-- A Float side whose 'DiscreteValues' tag is a finite set of atoms steps to
+-- the next atom down ('atomBelow'), as 'comparisonWorlds' does (task
+-- set-witness-discrete-float-strict-comparison-at-atom).
+strictBelowBound :: Expr -> IRExpr -> CompilerMonad IRExpr
 strictBelowBound side b
-  | rType (getTypeInfo side) == TInt = IROp OpSub b (IRConst (VInt 1))
-  | otherwise = b
+  | rType (getTypeInfo side) == TInt = return (IROp OpSub b (IRConst (VInt 1)))
+  | Just ds <- discreteFloatAtoms side = atomBelow ds b
+  | otherwise = return b
 
 enumeratedBoundShape :: CompilerMetadata -> Expr -> Expr -> Maybe (Bool, Expr, Expr)
 enumeratedBoundShape meta l r

@@ -40,6 +40,9 @@ module SPLL.IRCompiler.Monad (
   nodeChainNames,
   compareValueExpr,
   listSpine,
+  discreteFloatAtoms,
+  atomBelow,
+  atomAbove,
   symbolCdfMessage,
   equalityGuard,
   equalityGuardBody,
@@ -58,7 +61,7 @@ import SPLL.Typing.RType
 import SPLL.Analysis (LatentBinder(..))
 import SPLL.Typing.PType
 import Data.Maybe
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, nub, sort)
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.ModalityInfer (ReinferCtx, LawTable, Law, bareLawOfPType, bindingLawEnv, lawValue)
 import qualified SPLL.Typing.ModalityInfer as ModalityInfer
@@ -772,15 +775,62 @@ compareValueExpr sr (TTensor _ _) _ sample = anyBoundsNothing sr sample (IRError
 -- Invariant, not a refusal (task static-refusals-become-absent-variants): a CDF comparison is only built for first-order result types.
 compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
 
+-- | The atoms of a Float-valued node whose 'DiscreteValues' tag is a finite
+-- set of finite Float constants, ascending; Nothing for an Int, a continuous
+-- or mixed node, an untagged one, or one with an infinite or NaN atom. The tag may over-approximate the support,
+-- which is harmless to 'atomBelow'/'atomAbove': a value with no mass between
+-- two atoms changes no CDF.
+discreteFloatAtoms :: Expr -> Maybe [Double]
+discreteFloatAtoms e
+  | rType ti == TFloat
+  , [MultiDiscretes vs@(_:_)] <- [mv | DiscreteValues mv <- tags ti]
+  , Just ds <- mapM asFloat vs
+  = Just (sort (nub ds))
+  | otherwise = Nothing
+  where ti = getTypeInfo e
+        -- Finite atoms only: an infinite one has no neighbour beyond it to
+        -- stand for "below every atom", and a NaN constant compares unequal
+        -- to itself, so the optimizer's fixpoint over IR equality never
+        -- settles on it (it hung on known-issues/nanOperandComparisonThroughCdf).
+        asFloat (VFloat d) | not (isNaN d || isInfinite d) = Just d
+        asFloat _ = Nothing
+
+-- | IR for the largest atom strictly below @e@, or a value below every atom
+-- when there is none: the point whose CDF is the mass strictly below @e@.
+atomBelow :: [Double] -> IRExpr -> CompilerMonad IRExpr
+atomBelow [] e = return e
+atomBelow ds@(d0:_) e = shareBound e $ \x ->
+  foldl (\acc d -> IRIf (IROp OpLessThan (floatAtom d) x) (floatAtom d) acc) (floatAtom (d0 - 1)) ds
+
+-- | IR for the smallest atom strictly above @e@, or a value above every atom
+-- when there is none.
+atomAbove :: [Double] -> IRExpr -> CompilerMonad IRExpr
+atomAbove [] e = return e
+atomAbove ds e = shareBound e $ \x ->
+  foldr (\d acc -> IRIf (IROp OpGreaterThan (floatAtom d) x) (floatAtom d) acc) (floatAtom (last ds + 1)) ds
+
+floatAtom :: Double -> IRExpr
+floatAtom = IRConst . VFloat
+
+-- | Reads a bound several times without copying it: a variable or constant
+-- inline, anything else let-bound around the reading expression.
+shareBound :: IRExpr -> (IRExpr -> IRExpr) -> CompilerMonad IRExpr
+shareBound e@(IRVar _) k = return (k e)
+shareBound e@(IRConst _) k = return (k e)
+shareBound e k = do
+  n <- mkVariable "atom_bound"
+  return (IRLetIn n e (k (IRVar n)))
+
 -- | The head and tail of a deterministic non-empty list whose spine is
 -- static: a list literal, or a Cons chain, possibly under the lets a
--- generated list literal binds its elements in (each is pushed into both
--- halves; the value is deterministic, so evaluating a binding twice changes
--- nothing). Nothing for the empty list and for a list only known at run time.
+-- generated list literal binds its elements and its tail in (substituted:
+-- the value is deterministic, so where a binding is read twice, evaluating
+-- it twice changes nothing). Nothing for the empty list and for a list only
+-- known at run time.
 listSpine :: IRExpr -> Maybe (IRExpr, IRExpr)
 listSpine (IRConst (VList (ListCont x rest))) = Just (IRConst x, IRConst (VList rest))
 listSpine (IRConstruct TgCons [h, t]) = Just (h, t)
-listSpine (IRLetIn n e b) = (\(h, t) -> (IRLetIn n e h, IRLetIn n e t)) <$> listSpine b
+listSpine (IRLetIn n e b) = listSpine (substIRVar n e b)
 listSpine _ = Nothing
 
 -- | The runtime diagnostic for a cdf() query that reaches a function-valued component.

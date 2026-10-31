@@ -1,0 +1,5 @@
+-- A list's cdf over constant list arms is componentwise: the same length and
+-- every element <= the sample's, as for a random Cons chain (task
+-- head-cdf-uses-equality). The equality indicator answered 0 at [5, 5] and
+-- [3, 3]. A sample of another length bounds no arm.
+main = if Uniform < 0.5 then [1, 0] else [3, 4]
