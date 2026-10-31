@@ -254,7 +254,12 @@ def isclose(a, b):
   eps = max(torch.finfo(at.dtype).eps, torch.finfo(bt.dtype).eps)
   scale = torch.maximum(torch.abs(at), torch.abs(bt)).clamp(min=eps)
   tol = _ISCLOSE_ULPS * eps * scale
-  return torch.abs(at - bt) <= tol
+  # An infinite operand makes the scaled tolerance infinite, which would hold
+  # isclose(-inf, 1.0). The scalar runtimes answer False at any infinity
+  # (inf - inf is NaN, inf - 1 exceeds a finite tolerance), so an infinite
+  # operand is never close (task batched-isclose-holds-at-an-infinity).
+  inf = torch.isinf(at) | torch.isinf(bt)
+  return (torch.abs(at - bt) <= tol) & ~inf
 
 # --- helpers -----------------------------------------------------------------
 # astensor has no leading underscore so `from pythonLibBatched import *` exports

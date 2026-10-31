@@ -1453,6 +1453,13 @@ conformsLiteralBatchedCases =
   ]
   where guarded x = batchedRepro (IRIf (IRConformsTo ITFloat x) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1)
 
+-- | Task batched-isclose-holds-at-an-infinity: 'OpApprox' at an infinite
+-- operand is false against a finite number and true against itself.
+approxInfinityBatchedCases :: [IRCase]
+approxInfinityBatchedCases =
+  [ batchedRepro (IRIf (IROp OpApprox (IRVar "a0") (IRConst (VFloat k))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat a)
+  | a <- [-1 / 0, 1 / 0], k <- [1, 1 / 0, -1 / 0] ]
+
 lcLit :: Double -> IRExpr
 lcLit = IRConst . VFloat
 
@@ -1697,11 +1704,6 @@ knownDisagreements =
   -- M4, the batched arm (PResult bodies through the select pass and the
   -- batched backend).
   --
-  -- The batched @isclose@ scales its tolerance by the operands' magnitude, so
-  -- an infinity is close to every number.
-  , KnownFamily "batched-isclose-holds-at-an-infinity" ["batched"]
-      (AsIf (const (irMap batchedApprox)))
-      (batchedRepro (IRIf (IROp OpApprox (IRVar "a0") (IRConst (VFloat 1))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat (-1 / 0)))
   -- The batched runtime's tuple has no order.
   , KnownFamily "batched-tuple-comparison-has-no-order" ["batched"]
       (ByAnswer (\_ _ a -> raisedWith "not supported between instances of 'T' and 'T'" a))
@@ -1902,20 +1904,6 @@ functionOperandFirst e = case e of
   where
     isLambda' (IRLambda _ _) = True
     isLambda' _ = False
-
--- | 'OpApprox' as the batched backend's @isclose@ answers it: also true when
--- either operand is infinite and neither is a NaN.
-batchedApprox :: IRExpr -> IRExpr
-batchedApprox e = case e of
-  IROp OpApprox a b ->
-    IRLetIn "ap_a" a (IRLetIn "ap_b" b
-      (IROp OpOr (IROp OpApprox x y)
-         (IROp OpAnd (IROp OpOr (isInf x) (isInf y)) (IROp OpAnd (IROp OpEq x x) (IROp OpEq y y)))))
-  _ -> e
-  where
-    x = IRVar "ap_a"
-    y = IRVar "ap_b"
-    isInf v = IROp OpOr (IROp OpEq v (floatE (1 / 0))) (IROp OpEq v (floatE (-1 / 0)))
 
 -- | Whether an expression holds a partial destructor or index: one that
 -- raises outside its domain.
@@ -2683,6 +2671,17 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
         Nothing -> noTorch "IR fuzz generator batched type-tag check of a literal" >>= maybe (return ()) assertFailure
         Just py -> do
           bcs <- mapM prepareBatchedIRCase conformsLiteralBatchedCases
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  , testCase "batched: OpApprox at an infinity agrees with the interpreter" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched approx at an infinity" >>= maybe (return ()) assertFailure
+        Just py -> do
+          bcs <- mapM prepareBatchedIRCase approxInfinityBatchedCases
           case sequence bcs of
             Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
             Right bs -> do
