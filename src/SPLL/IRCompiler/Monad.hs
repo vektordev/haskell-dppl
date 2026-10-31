@@ -29,6 +29,8 @@ module SPLL.IRCompiler.Monad (
   lawPoint,
   nodeLaw,
   anyMarginal,
+  exceptMeasure,
+  wholeSoleConstructor,
   guardedSubInference,
   inlineIfJust,
   anyExceptSampleShape,
@@ -506,6 +508,39 @@ nodeLaw meta e = fromMaybe (bareLawOfPType (pType ti)) (Map.lookup (chainName ti
 anyMarginal :: CompilerMetadata -> Bool -> Expr -> CompilerMonad PResult
 anyMarginal meta cumulative e@(Expr _ (Lambda _ _)) = toIRInferenceSave meta cumulative e (IRConst VAny)
 anyMarginal meta _ _ = return (detP (srOne (semiringOf meta)))
+
+-- | The measure of "any value but @ex@" (the 'VAnyExcept' sentinel an @==@ or
+-- constructor-test inverse yields on its False polarity): the marginal minus
+-- the excepted value's measure ('mixSubP'), both supplied as actions and run
+-- in that order. Every marginal-minus-point split goes through here, so the
+-- one exception below holds for all of them: when @ex@ is @C ANY ..@ and @C@
+-- is its type's only constructor, the pattern covers the whole type and the
+-- complement is empty, which is impossible -- not the merely-zero mass the
+-- subtraction would compute (task single-ctor-test-false-witness-crashes).
+exceptMeasure :: CompilerMetadata -> IRExpr -> CompilerMonad PResult -> CompilerMonad PResult -> CompilerMonad PResult
+exceptMeasure meta ex anyM exceptM
+  | wholeSoleConstructor (adtDecls meta) ex = return (impossibleP (semiringOf meta))
+  | otherwise = do
+      anyRes    <- anyM
+      exceptRes <- exceptM
+      mixSubP (semiringOf meta) (rBranches exceptRes) anyRes exceptRes
+
+-- | Whether a pattern is @C ANY ..@ (every field the wildcard, under any
+-- let-bindings a transport wrapped around it) with @C@ the only constructor
+-- of its ADT: the pattern then covers every value of the type.
+wholeSoleConstructor :: [ADTDecl] -> IRExpr -> Bool
+wholeSoleConstructor decls = go []
+  where
+    go args (IRApply f a) = go (a : args) f
+    go [] (IRLetIn _ _ inner) = go [] inner
+    go args (IRVar c) =
+      all isWild args
+        && any (\d -> case constructors d of
+                        [(c', fields)] -> c' == c && length fields == length args
+                        _ -> False) decls
+    go _ _ = False
+    isWild (IRConst VAny) = True
+    isWild _ = False
 
 -- | Isolate a sub-inference's own let-in bindings into a fresh scope
 -- and re-embed them gated on @guards@ -- baking the guard into the bound

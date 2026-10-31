@@ -818,11 +818,12 @@ measureSet meta _ WEmpty = return (impossibleP (semiringOf meta))
 -- marginal-minus-point split). A proper subset minus a point subtracts the
 -- point's measure from the set's, both in the ambient semiring like every
 -- other world measure.
+--
+-- The split is 'exceptMeasure''s, which also knows the one complement that is
+-- empty (a one-constructor pattern).
 measureSet meta v (WExcept WFull p) = do
   let metaSub = unpruned meta
-  anyRes    <- anyMarginal metaSub False v
-  exceptRes <- toIRInferenceSave metaSub False v p
-  mixSubP (semiringOf meta) (rBranches exceptRes) anyRes exceptRes
+  exceptMeasure meta p (anyMarginal metaSub False v) (toIRInferenceSave metaSub False v p)
 measureSet meta v (WExcept s p) = do
   let metaSub = unpruned meta
   sRes <- scopedMeasureSet metaSub v s

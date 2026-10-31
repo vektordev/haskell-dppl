@@ -41,12 +41,12 @@ clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
 collapseGivenParam main.prob=3
 collapseMixture main.integ=3 main.prob=4
 countFoldRelateDigitEncoded hit.integ=4 hit.prob=4 main.integ=10 main.prob=10
-ctorTestBesideFstOfPairedDraw main__m01.prob=9
+ctorTestBesideFstOfPairedDraw main__m01.prob=5
 ctorTestFalseBesideValue main.prob=5 main__m01.prob=4
 ctorTestFalseOfCtorApplication main.integ=7 main.prob=7
 ctorTestFalseThroughAccessors main.prob=4
-ctorTestOverTransformedDraw main.integ=18 main.prob=18
-ctorTestOverTransformedField main.integ=16 main.prob=16
+ctorTestOverTransformedDraw main.integ=9 main.prob=9
+ctorTestOverTransformedField main.integ=8 main.prob=8
 curriedHelperEnumArg match.integ=3 match.prob=3
 decreasingRecursionEnumeratedArgumentDensity loop.prob=5 main.prob=5
 defineDestructured main.integ=8 main.prob=10
@@ -223,6 +223,8 @@ showcase_either_marginal_continuous main.integ=4 main.prob=8
 showcase_either_marginal_injf main.integ=4 main.prob=4
 showcase_observe_inequality main.prob=3
 showcase_poe_with_prior prior.integ=4 prior.prob=4
+singleCtorTestFalseLetFree main.integ=5 main.prob=5
+singleCtorTestFalseWitness main.prob=5
 sndOfPairWrapperStructuredDraw main.prob=10 main__m10.prob=8
 structuredDrawHelperProjectsField main.prob=10
 symbolSelectedByHelper nth.integ=3
@@ -232,7 +234,7 @@ topKComplementCdfFlip main.integ=4 main.prob=4
 topKComplementCondition main.integ=4 main.prob=4
 topKPrunesInsideCondition main.integ=4 main.prob=4
 trajectoryTailBoundAsTuple main.prob=5 main__m10.prob=5
-tupleCtorTestOfSharedDraw main__m01.prob=9
+tupleCtorTestOfSharedDraw main__m01.prob=5
 tupleDiscreteDistrib main.integ=5 main.prob=5
 tupleOfEithersAny main.integ=5 main.prob=10
 tupleRoundtrip main.prob=25 main__m01.prob=4 main__m10.prob=4

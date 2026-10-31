@@ -243,7 +243,6 @@ toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PRe
 toIRInference meta _ (Expr _ (Constant VAny)) _ = return (detP (srOne (semiringOf meta)))
 toIRInference meta cumulative e sample
   | Just (binds, shape) <- anyExceptSampleShape sample = do
-  let sr = semiringOf meta
   -- 'binds' are 'sample's own leading let-bindings (e.g. 'transportDirect's
   -- materialised anchors), stripped off to see the shape beneath. Registering
   -- them via 'setVariables' -- the same mechanism the InjF 'hasAnyExcept'
@@ -257,17 +256,14 @@ toIRInference meta cumulative e sample
   -- drive it negative.
   let metaSub = unpruned meta
   case shape of
-    Left ex -> do
-      anyRes    <- anyMarginal metaSub cumulative e
-      exceptRes <- toIRInferenceSave metaSub cumulative e ex
-      mixSubP sr (rBranches exceptRes) anyRes exceptRes
+    Left ex ->
+      exceptMeasure meta ex (anyMarginal metaSub cumulative e) (toIRInferenceSave metaSub cumulative e ex)
     Right (cond, isPosAny, nonAnyExpr, exceptExpr) -> do
       let subGuard = if isPosAny then cond else notIR cond
       let nonGuard = notIR subGuard
       nonAnyRes <- guardedSubInference meta [nonGuard] (toIRInference meta cumulative e nonAnyExpr)
-      anyRes    <- anyMarginal metaSub cumulative e
-      exceptRes <- guardedSubInference metaSub [subGuard] (toIRInference metaSub cumulative e exceptExpr)
-      subRes <- mixSubP sr (rBranches exceptRes) anyRes exceptRes
+      subRes <- exceptMeasure meta exceptExpr (anyMarginal metaSub cumulative e)
+                  (guardedSubInference metaSub [subGuard] (toIRInference metaSub cumulative e exceptExpr))
       let ifSample a na = if isPosAny then IRIf cond a na else IRIf cond na a
       return (zipResult ifSample subRes nonAnyRes)
 -- CDFs on Booleans make little sense. We define that False < True. Therefor cdf(True) = 1 and cdf(False) = pdf(False)
@@ -1223,12 +1219,12 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, chainName=cnAE} (InjF (Nam
   let metaNon = covOperandMeta cumulative invDeriv meta
   let metaSub = unpruned meta
   nonAnyRes <- guardedSubInference metaNon [nonAnyGuard] (probF metaNon cumulative (params !! probIdx) nonAnyExpr)
-  anyRes    <- anyMarginal metaSub cumulative (params !! probIdx)
-  exceptRes <- guardedSubInference metaSub [subResGuard] (probF metaSub cumulative (params !! probIdx) exceptExpr)
   let ifSample a na = if isPosAny then IRIf (IRVar v1) a na else IRIf (IRVar v1) na a
   -- The ANY arm is the marginal minus the excepted value's mass; its branch count
   -- is the excepted value's, not a sum (this is a select between the two arms).
-  subRes <- mixSubP (semiringOf meta) (rBranches exceptRes) anyRes exceptRes
+  -- A one-constructor pattern leaves an empty, impossible complement ('exceptMeasure').
+  subRes <- exceptMeasure meta exceptExpr (anyMarginal metaSub cumulative (params !! probIdx))
+              (guardedSubInference metaSub [subResGuard] (probF metaSub cumulative (params !! probIdx) exceptExpr))
   let ifRes = zipResult ifSample subRes nonAnyRes
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
   return (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDeriv ifRes))
