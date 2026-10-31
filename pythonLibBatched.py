@@ -480,6 +480,8 @@ def _tensor_stack(xs):
     return torch.stack(xs)
   ts = [x for x in xs if torch.is_tensor(x)]
   if not ts:
+    if all(isinstance(x, bool) for x in xs):
+      return torch.tensor(xs)
     return torch.stack([astensor(x) for x in xs])
   ref = ts[0]
   dt = ref.dtype
@@ -571,6 +573,11 @@ def tensor_index(xs, idx):
     x = xs[min(max(int(idx), 0), len(xs) - 1)]
     if not isinstance(x, torch.Tensor) or _uniform_tensors(xs):
       return x
+  if isinstance(xs[0], T):
+    # An axis of tuples is read leaf by leaf (structure of arrays): each
+    # component axis is an axis of its own, and the read tuple is rebuilt.
+    return T(tensor_index([x.t1 for x in xs], idx),
+             tensor_index([x.t2 for x in xs], idx))
   stacked = _tensor_stack(xs)
   idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
   idx_t = idx_t.clamp(0, stacked.shape[0] - 1)
