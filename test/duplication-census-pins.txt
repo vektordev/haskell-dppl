@@ -120,6 +120,7 @@ letWitnessedSharedLatent main__m11.prob=4
 letWitnessedSharedLatentMult main__m11.prob=4
 letWitnessedTupleFpUlp main.prob=6 main__m001.prob=6 main__m010.prob=8 main__m100.prob=7
 listOfFieldReads main.integ=17 main.prob=4
+listSignatureEmptyArmFirst main.integ=4 main.prob=4
 map main.prob=3
 mapEither main.integ=15 main.prob=18
 mapMultList main.prob=3
