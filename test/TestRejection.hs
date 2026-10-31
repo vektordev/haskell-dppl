@@ -1707,6 +1707,19 @@ typeErrorDiagnosticTests = testGroup "TypeErrorDiagnostic"
       assertBool ("the message is still enormous (" ++ show (length (lines msg)) ++ " lines)")
         (length (lines msg) <= 10)
 
+  , testCase "names the source of both sides, not just the failing constraint's" $ do
+      -- Task type-error-blames-one-side-only: 'Scene' comes from the neural
+      -- read at 5:28, '[Object]' from the cons pattern at 5:20. The pattern's
+      -- constraints do not fail themselves; they bind the variable the read's
+      -- constraint later meets, so the second site is the binder's origin.
+      msg <- typeErrorFor consPatternOnADTSrc
+      assertBool ("expected the neural read's position 5:28 in: " ++ msg)
+        ("prog.spll:5:28" `isInfixOf` msg)
+      assertBool ("expected the cons pattern's position 5:20 in: " ++ msg)
+        ("prog.spll:5:20" `isInfixOf` msg)
+      assertBool ("expected the cons pattern to be named in: " ++ msg)
+        ("h : t" `isInfixOf` msg)
+
   , testCase "the mechanism is general, not keyed to the cons-pattern shape" $ do
       -- An unrelated ill-typed program must gain the same context chain.
       msg <- typeErrorFor "g x = x + 1.0\nmain = g True"
