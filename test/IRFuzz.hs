@@ -1746,21 +1746,6 @@ knownDisagreements =
   , KnownFamily "logsumexp-reduction-nan-and-infinity-differ-across-engines" ["batched"]
       (AsIf (const (irMap batchedLogSumExp)))
       (batchedRepro (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRDensity IRNormal Linear (IRVar "a0")]]) (VFloat (1 / 0)))
-  -- A rank-1 tensor's elements are read as floats at a batched key: a tensor
-  -- of booleans is stacked as a float tensor (so an element read out of it is
-  -- no condition for @torch.where@), and one of tuples fails. At a Python-int
-  -- key the element itself is read, so the key here is the batched argument
-  -- (narrowed by task grid-constraint-network-enumerated-jointly, whose
-  -- @tensor_index@ change fixed the constant-key repros).
-  , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
-                         || raisedWith "float() argument must be a string or a real number, not '" a))
-      (batchedIntKeyRepro (IRIf (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VBool False)], IRVar "a0"])
-                                (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))))
-  , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
-                         || raisedWith "float() argument must be a string or a real number, not '" a))
-      (batchedIntKeyRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRVar "a0"])))
   -- The batched categorical index reads its weights as a tensor, so a list
   -- of batched weights is indexed by a tuple. (A list of constant weights
   -- too.) While it stands, BCategoricalIndex is in
@@ -2794,6 +2779,25 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             Right b -> do
               (_, ds) <- runIRCasesBatched py [b]
               assertEqual "batched disagreements" [] (map idWhy ds)
+  -- Formerly a knownDisagreements family: a rank-1 tensor of booleans read at a
+  -- batched key was a float tensor (no condition for torch.where), and one of
+  -- tuples raised.
+  , testCase "batched: tensor elements keep their type at a batched key (batched-tensor-elements-are-read-as-floats)" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched tensor elements" >>= maybe (return ()) assertFailure
+        Just py ->
+          mapM_ (\body -> do
+            bc <- prepareBatchedIRCase (batchedIntKeyRepro body)
+            case bc of
+              Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+              Right b -> do
+                (_, ds) <- runIRCasesBatched py [b]
+                assertEqual "batched disagreements" [] (map idWhy ds))
+            [ IRIf (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VBool False)], IRVar "a0"])
+                   (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))
+            , IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRVar "a0"])
+            ]
   -- Formerly a knownDisagreements family: the batched runtime's tuple had no
   -- order, so a tuple comparison raised a TypeError.
   , testCase "batched: tuples compare lexicographically (batched-tuple-comparison-has-no-order)" $ do
