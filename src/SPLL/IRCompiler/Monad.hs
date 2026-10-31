@@ -738,12 +738,10 @@ compareValueExpr sr rt@(ListOf et) v sample = case listSpine v of
       (srTimes sr (compareValueExpr sr et h (IRDestruct AcHead sample))
                   (compareValueExpr sr rt t (IRDestruct AcTail sample))))
   Nothing -> anyBoundsNothing sr sample (maskSR sr (IROp OpEq sample v))
--- A literal @[]@ can keep its own 'NullList' annotation through typing:
--- 'SPLL.Typing.RInfer.unifies' accepts @ListOf _ ~ NullList@ without binding
--- anything, so whether the literal's type variable ends up 'ListOf' or
--- 'NullList' depends on constraint order (a @[]@ in a nested-if branch of a
--- recursive list), and a bare @main = []@ has no element type to learn at
--- all. Either way the only inhabitant is the empty list, so it takes the same
+-- RInfer types a literal @[]@ as @[a]@ with a fresh @a@
+-- ('SPLL.Typing.RInfer.freshenNullLists'), so 'NullList' should no longer
+-- survive typing; an annotation built from 'getRType' outside RInfer can still
+-- carry it. Its only inhabitant is the empty list, so it takes the same
 -- equality indicator as 'ListOf' (task comparevalueexpr-nulllist-cdf-gap).
 compareValueExpr sr NullList v sample = maskSR sr (IROp OpEq sample v)
 -- An ADT carries no order, so there is nothing for a CDF to integrate along.

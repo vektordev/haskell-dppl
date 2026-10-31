@@ -32,16 +32,18 @@ import SPLL.IRCompiler.Dispatch
 import SPLL.IRCompiler.Enumerate
 import qualified SPLL.IRCompiler.Generate as Generate (toIRGenerate)
 
--- | Whether a condition weight is (approximately) the semiring zero, the test
--- an 'IfThenElse' arm guard reads. Linear 0.0 is tested approximately;
--- log-space uses exact equality against negative infinity, since
--- @(-inf) - (-inf)@ is NaN and an approximate test would report two
--- impossible operands "not equal", i.e. live -- the wrong direction for a
--- guard whose job is to skip an arm that may hold a nonterminating call.
+-- | Whether a condition weight is exactly the semiring zero, the test an
+-- 'IfThenElse' arm guard reads. Both semirings compare exactly (linear 0.0,
+-- log-space negative infinity), as 'addP' does: a condition probability below
+-- 'floatApproxEqThresh' (1e-10 in the interpreter, 1e-9 in pythonLib's
+-- isclose) is a possible arm, not a dead one, so an approximate test dropped
+-- its mass as impossible (task if-condition-approx-zero-drops-tiny-branch-mass).
+-- In log space an approximate test would also be wrong the other way:
+-- @(-inf) - (-inf)@ is NaN, so two impossible operands compare "not equal",
+-- i.e. live -- the wrong direction for a guard whose job is to skip an arm
+-- that may hold a nonterminating call.
 deadWeightIR :: Semiring -> IRExpr -> IRExpr
-deadWeightIR sr c
-  | srLogSpace sr = IROp OpEq c (srZero sr)
-  | otherwise     = IROp OpApprox c (srZero sr)
+deadWeightIR sr c = IROp OpEq c (srZero sr)
 
 -- | The (True, False) weights of a Bool @if@ condition, compiled in one pass
 -- (task map-semiring-complement-and-cdf-wrong).
@@ -400,8 +402,8 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   let weighByCond v condRes armRes =
         onBranches (const (rBranches armRes))
           (prodP sr (mkPResult (sealP (IRVar v)) (rDim condRes) const0 (rImposs condRes)) armRes)
-  -- Whether the condition's own probability is (approximately) the semiring
-  -- zero ('deadWeightIR'). Comparing against the literal 0.0 here would
+  -- Whether the condition's own probability is exactly the semiring zero
+  -- ('deadWeightIR'). Comparing against the literal 0.0 here would
   -- falsely treat every log-space arm as live (a log probability is
   -- essentially never exactly 0.0).
   let deadArm = deadWeightIR sr

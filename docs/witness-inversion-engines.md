@@ -405,10 +405,13 @@ disjoint offset range (`psNextOff`) and its own raw-vector binding
 concatenated plan, and a comparison across them is the same `Pair`
 difference Gaussian as inside one read. That is the one-read-per-object CLEVR
 layout (`plan-enumeration/planPairwise*`). A single read is `[(0, nn_raw)]`
-and emits what it always did. Refused inside a specialized function (its
-memoized specializations would share one range between two calls, merging
-independent reads) and for a symbol argument that is not plan-free and
-deterministic; pinned in `known-issues/planPairwise*`, together with the
+and emits what it always did. Inside a specialized function the read opens
+the same way, its symbol free to read the helper's deterministic parameters: a
+specialization whose traversal opened a read is never memoized (two calls are
+two independent reads, `planReadInsideHelperTwoCalls`), and re-entering a body
+on the stack after a read was opened below it is declined, since fresh offsets
+do not bound a recursion. Refused for a symbol argument that is not plan-free
+and deterministic; pinned in `known-issues/planPairwise*`, together with the
 helper shapes ModalityInfer types `Bottom` first.
 
 A call argument that *is* plan-dependent but not an accessor chain -- a fold's

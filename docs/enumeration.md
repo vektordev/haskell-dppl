@@ -672,7 +672,7 @@ exactly as before:
   "branch counting doesn't change the probability" property into a
   differential test of fused against unfused, which is how the fusion is
   covered at every corpus query point rather than only where a `.tst` says so.
-- **the max-product semiring**, whose `srMinus` is `mapHasNoExcept` for the
+- **the max-product semiring**, which has no `srMinus` (`Nothing`) for the
   same reason the algebra above is sum-product-only.
 - **an arm that reads the inner variable**, where the off-diagonal sum does
   not factor and no O(V) form exists.

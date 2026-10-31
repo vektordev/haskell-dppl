@@ -798,7 +798,7 @@ packedStaticDim e = case flattenLetIns e of
 --     result would silently ignore the cutoff.
 --   * __the max-product semiring__. The algebra above distributes a product
 --     over a /sum/ and takes a complement; neither is valid for max, whose
---     'srMinus' is 'mapHasNoExcept' for the same reason.
+--     'srMinus' is 'Nothing' for the same reason.
 --   * __an arm that reads the inner variable__. Then @E@ is @E(j,k)@, the
 --     off-diagonal sum does not factor, and there is no O(V) form at all.
 --   * __unequal domains__, which would make the elementwise product a
@@ -1003,7 +1003,10 @@ enumerateAgreement meta cumulative ag sample = do
       product' = zipSR (IRVar paV) (IRVar pbV)
       -- (Sb - pb(j)) per element. A BMap rather than a second BZip because
       -- 'srMinus' is 'logSubExpIR' under log space, which is not an Operand.
-      complement = IRBuiltin BMap [IRLambda cV (srMinus sr (IRVar sbV) (IRVar cV)), IRVar pbV]
+      -- Agreement fusion is never chosen under max-product (see above), so
+      -- 'srMinus' is always present here.
+      minus = fromMaybe (error "agreement fusion under a semiring without srMinus") (srMinus sr)
+      complement = IRBuiltin BMap [IRLambda cV (minus (IRVar sbV) (IRVar cV)), IRVar pbV]
   diagonal    <- armSum product' thenIR thenBody
   offDiagonal <- armSum (zipSR (IRVar paV) complement) elseIR elseBody
   opaqueMass sr (srPlus sr diagonal offDiagonal) const0

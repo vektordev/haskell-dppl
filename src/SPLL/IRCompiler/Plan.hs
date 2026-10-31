@@ -245,10 +245,13 @@ type PlanSpecKey = (ChainName, [Int], [String])
 data PlanState = PlanState
   { psBoolMemo :: Map.Map PlanSpecKey ([PlanWorld], [PlanWorld])
   , psEnumMemo :: Map.Map PlanSpecKey [(IRExpr, PlanWorld)]
-    -- | (callee body CN, sum of plan-argument offsets) per active
-    -- specialization: re-entering a body already on the stack without
-    -- strictly descending the plan cannot terminate and is declined.
-  , psStack    :: [(ChainName, Int)]
+    -- | (callee body CN, sum of plan-argument offsets, 'psNextOff' at entry)
+    -- per active specialization: re-entering a body already on the stack
+    -- without strictly descending the plan cannot terminate and is declined,
+    -- as is re-entering it after a neural read was opened since its entry
+    -- (the opened read extends the offset space, so offsets no longer bound
+    -- the recursion).
+  , psStack    :: [(ChainName, Int, Int)]
     -- | Where the raw logit vectors live in the traversal's flat offset space
     -- ('PlanRaws'): the plan-bound read first, then one entry per nested
     -- neural read the traversal opened ('planOpenBinding'). The value grouping
@@ -314,8 +317,7 @@ andGuard a b | a == constTrueIR = b
 -- slots allowed by both, conjoining their guards. Continuous leaves follow
 -- the scalar 'intersectSet' conventions: interval-interval tightens the
 -- bounds, a point absorbs an interval as membership guards, and point-point
--- keeps the first (both compute the same value from the same observation --
--- the mergeExpr convention). A region cannot be discrete in one constraint
+-- keeps the first under a guard that the second agrees with it. A region cannot be discrete in one constraint
 -- and continuous in another (the plan fixes each region's kind).
 intersectLeafCon :: PLeafCon -> PLeafCon -> PLeafCon
 intersectLeafCon c@(PLeafEq _ _ _ x p _) (PLeafEq _ _ _ x' p' _)
@@ -330,7 +332,15 @@ intersectLeafCon (PLeafPt b v cov gs) (PLeafIvl _ lo hi) =
   PLeafPt b v cov (gs ++ boundGuards v lo hi)
 intersectLeafCon (PLeafIvl _ lo hi) (PLeafPt b v cov gs) =
   PLeafPt b v cov (gs ++ boundGuards v lo hi)
-intersectLeafCon p@(PLeafPt {}) (PLeafPt {}) = p
+-- Two points: keep the first, guarded on the second agreeing with it. Both
+-- come from one observation, but not necessarily from the same component of
+-- it -- @Scene (f (o1 sc)) (f (o1 sc))@ pins o1's leaf to the query's px of
+-- each field -- so a query whose two points differ is impossible (task
+-- plan-point-point-intersection-ignores-mismatch). The agreement is the float
+-- equality of every point target ('leafEqIR', 'OpApprox'); a syntactically
+-- identical point needs none. The second point's own image guards are kept.
+intersectLeafCon (PLeafPt b v cov gs) (PLeafPt _ v' _ gs') =
+  PLeafPt b v cov (gs ++ gs' ++ [leafEqIR TFloat v v' | v /= v'])
 -- Invariant, not a refusal (task static-refusals-become-absent-variants): a leaf region is either discrete or continuous.
 intersectLeafCon c c' = error ("plan leaf region at offset " ++ show (plcBase c)
   ++ " is constrained as both discrete and continuous (plan invariant violation): "
@@ -1596,26 +1606,28 @@ planBetaReduce meta env x b a
 -- visits of the same syntax (two arms of an @if@, two values of a split) are
 -- alternatives, whose worlds are summed and never intersected.
 --
--- Refused, with a diagnostic, and so falling back exactly as before:
+-- Inside a specialized function this holds too (task
+-- plan-neural-read-inside-specialized-function): two calls of one helper are
+-- two traversals of its body, so each opens its own range, provided neither
+-- reuses the other's memoized worlds. 'planSpecializeBool' and
+-- 'planSpecializeEnum' therefore never memoize a specialization whose
+-- traversal opened a read, and 'planEnterSpec' declines to re-enter a body on
+-- the stack once a read was opened below it (the fresh offsets would let a
+-- recursion that reads at every level "descend" forever). The symbol argument
+-- may read the helper's deterministic parameters: they are bound to
+-- call-site values ahead of every world.
 --
--- * inside a specialized function (a non-empty 'psStack'): specializations
---   are memoized by plan offsets and deterministic arguments, so two calls of
---   one helper would share one range and their reads be counted as one draw;
--- * a symbol argument that is not plan-free and deterministic, since the read
---   is bound once, ahead of every world.
+-- Refused, with a diagnostic, and so falling back exactly as before: a symbol
+-- argument that is not plan-free and deterministic, since the read is bound
+-- once, ahead of every world.
 planOpenBinding :: CompilerMetadata -> PlanEnv -> Expr -> String -> Expr -> Expr -> PlanM (Either String (PlanEnv, Expr, [PLeafCon]))
 planOpenBinding meta env lam x b a = case planBetaReduce meta env x b a of
   Right b' -> return (Right (env, b', []))
   Left why
     | Just (nnName, plan, symArg, readNode) <- planProjectedReadOf meta a -> do
-        stack <- gets psStack
-        let symFree = not (subtreeHasOcc (planEnvOccs env ++ planEnvDetOccs env) symArg)
+        let symFree = not (subtreeHasOcc (planEnvOccs env) symArg)
                       && pType (getTypeInfo symArg) == Deterministic
-        if not (null stack)
-          then return (Left ("a neural read inside a specialized function is not supported by the plan traversal "
-                             ++ "(its specializations are shared between calls, which would merge independent reads): "
-                             ++ x ++ " = " ++ planNodeName a))
-          else if not symFree
+        if not symFree
             then return (Left ("a nested neural read's argument is not deterministic and free of the plan-bound variables: "
                                ++ x ++ " = " ++ planNodeName a))
             else do
@@ -2284,11 +2296,14 @@ planEnterSpec :: PlanSpec -> PlanM (Either String a) -> PlanM (Either String a)
 planEnterSpec spec act = do
   st <- get
   let (bodyCN, _, _) = spKey spec
-  if any (\(cn, d) -> cn == bodyCN && d >= spDepth spec) (psStack st)
+  if any (\(cn, d, _) -> cn == bodyCN && d >= spDepth spec) (psStack st)
     then return (Left ("recursive specialization of the function at " ++ bodyCN
                        ++ " does not strictly descend the plan (non-terminating recursion shape)"))
+    else if any (\(cn, _, off) -> cn == bodyCN && psNextOff st > off) (psStack st)
+    then return (Left ("recursive specialization of the function at " ++ bodyCN
+                       ++ " re-enters it after opening a neural read (its fresh plan offsets do not bound the recursion)"))
     else do
-      put st { psStack = (bodyCN, spDepth spec) : psStack st }
+      put st { psStack = (bodyCN, spDepth spec, psNextOff st) : psStack st }
       r <- act
       modify (\s -> s { psStack = drop 1 (psStack s) })
       return r
@@ -2312,7 +2327,11 @@ planSpecializeBool spec = do
           -- constructor, a two-leaf test -- from multiplying the recursive
           -- continuation. See 'planGroupBool'.
           tf <- planGroupBool tf0
-          modify (\s -> s { psBoolMemo = Map.insert (spKey spec) tf (psBoolMemo s) })
+          -- A traversal that opened a neural read placed it at fresh offsets:
+          -- another call must open its own, so it is not memoized.
+          opened <- gets ((/= psNextOff st) . psNextOff)
+          unless opened $
+            modify (\s -> s { psBoolMemo = Map.insert (spKey spec) tf (psBoolMemo s) })
           return (Right tf)
 
 -- | Specialize a value-valued callee at its arguments: (value, world) pairs
@@ -2328,7 +2347,9 @@ planSpecializeEnum spec = do
       case r of
         Left why -> return (Left why)
         Right pairs -> do
-          modify (\s -> s { psEnumMemo = Map.insert (spKey spec) pairs (psEnumMemo s) })
+          opened <- gets ((/= psNextOff st) . psNextOff)
+          unless opened $
+            modify (\s -> s { psEnumMemo = Map.insert (spKey spec) pairs (psEnumMemo s) })
           return (Right pairs)
 
 -- | Specialize a structure-returning callee directly against the observation:

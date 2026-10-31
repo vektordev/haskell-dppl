@@ -89,8 +89,11 @@ batchedCensusRouting = do
   -- A draw-bound list element: its witness guard is a select over the shape
   -- probe `sample == []`, which the batched backend emits as a Python if.
   demoted <- census <$> load "drawBoundListElementGuardsEmptyTail"
-  -- Its head arm is partial, so the branch the guard selects is split too.
-  assertEqual "a demoted structural select is not certified" [partialSplitLabel, selectDemotionLabel] (batchedUncertifiedConstructs demoted)
+  -- With the recursion typed [(Float, Bool)] rather than the literal's
+  -- NullList (task list-signature-rejected-when-empty-arm-first), the
+  -- forward pass no longer re-tests emptiness inside the cons arm, so no
+  -- partial-arm split remains; listIndexByRecursion below keeps that label.
+  assertEqual "a demoted structural select is not certified" [selectDemotionLabel] (batchedUncertifiedConstructs demoted)
   assertBool "a module without one carries no demotion label" (selectDemotionLabel `notElem` plain)
   -- A list index by recursion: the branch over the index has a partial arm
   -- (task batched-conditional-evaluates-a-partial-arm), split per element.

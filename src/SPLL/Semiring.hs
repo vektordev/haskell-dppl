@@ -367,7 +367,7 @@ data Semiring = Semiring
   , srTimes    :: IRExpr -> IRExpr -> IRExpr  -- ^ independent conjunction (prodP, change-of-variables scaling)
   , srTimesOp  :: Operand                     -- ^ the 'Operand' 'srTimes' is spelled with, for the same reason 'srReduceOp' exists: an /elementwise/ product over two tensors ('BZip', task categorical-product-ov-fusion) has to name an operator inside a node, which no binary @IRExpr -> IRExpr -> IRExpr@ function can do. Must stay in step with 'srTimes' -- @OpMult@ linear, @OpPlus@ in log space, where getting it wrong silently computes a different number rather than failing
   , srPlus     :: IRExpr -> IRExpr -> IRExpr  -- ^ mixture / alternative sum (mixP). Pairwise only -- 'srReduceOp' is this same operator's identity for 'enumSumP's fold over a whole (possibly large) enumerated domain, kept as a separate field because the fold has to pick an IR *reduction node* (design ir-tensor-values' 'BReduce'), which no binary 'IRExpr -> IRExpr -> IRExpr' function can name.
-  , srMinus    :: IRExpr -> IRExpr -> IRExpr  -- ^ AnyExcept: marginal minus one branch (mixSubP)
+  , srMinus    :: Maybe (IRExpr -> IRExpr -> IRExpr)  -- ^ AnyExcept: marginal minus one branch (mixSubP). 'Nothing' where the family has no subtraction (max-product), and 'mixSubP' then refuses the variant
   , srComplement :: IRExpr -> IRExpr          -- ^ CDF flip under a decreasing transform: 1 - x linear, log(1 - exp x) log
   , srConserves :: Bool                       -- ^ whether 'srComplement' of a COMBINED weight (one 'srPlus' / 'srReduceOp' over several derivations) is the complementary event's weight. True for sum-product, where an event and its complement add up to one. False for max-product: the complement of the best True derivation is not the best False one (@1 - max@ is not a max), so there 'srComplement' is sound only on a single derivation's weight (a leaf CDF), and a site holding a combined weight must compute the other side directly (task map-semiring-complement-and-cdf-wrong)
   }
@@ -395,11 +395,11 @@ mkSemiring SRCounting   _     = error $ "Semiring.mkSemiring: SRCounting has no 
   ++ "never have reached here -- this is a defensive check, not a documented refusal path."
 
 linearSemiring :: Semiring
-linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) OpMult (IROp OpPlus) (IROp OpSub)
+linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) OpMult (IROp OpPlus) (Just (IROp OpSub))
                           (upperTailComplement Linear (IROp OpSub const1)) True
 
 logSemiring :: Semiring
-logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus logSumExpIR logSubExpIR
+logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus logSumExpIR (Just logSubExpIR)
                        (upperTailComplement Log logComplement) True
 
 -- | Max-product (MAP/Viterbi), linear domain: independent conjunction is still
@@ -414,11 +414,11 @@ logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus lo
 --
 -- 'srMinus' has no sound definition: max has no inverse (recovering the
 -- runner-up when the excepted branch WAS the max needs more state than a
--- scalar carries), so AnyExcept under this family is refused with a named
--- error at the point it would be compiled -- see 'mapHasNoExcept'.
+-- scalar carries), so it is 'Nothing', and 'mixSubP' refuses the variant at
+-- the point an AnyExcept would be compiled -- see 'mapHasNoExceptReason'.
 maxLinearSemiring :: Semiring
 maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult maxPairIR
-                             mapHasNoExcept (upperTailComplement Linear (IROp OpSub const1)) False
+                             Nothing (upperTailComplement Linear (IROp OpSub const1)) False
 
 -- | Max-product, log domain: 'srTimes' is add (as in ordinary log-space
 -- sum-product -- independent factors still combine by adding their logs), and
@@ -429,7 +429,7 @@ maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult max
 -- stabilize).
 maxLogSemiring :: Semiring
 maxLogSemiring = Semiring True ROpMax negInfIR const0 (IROp OpPlus) OpPlus maxPairIR
-                          mapHasNoExcept (upperTailComplement Log logComplement) False
+                          Nothing (upperTailComplement Log logComplement) False
 
 -- | The log-space complement @log(1 - exp x)@ of a log-probability.
 logComplement :: IRExpr -> IRExpr
@@ -487,14 +487,17 @@ complementWhen sr cond = go
 maxPairIR :: IRExpr -> IRExpr -> IRExpr
 maxPairIR a b = IRIf (IROp OpGreaterThan a b) a b
 
--- | 'srMinus' for both max-product instances: max has no algebraic inverse, so
--- there is no way to recover "the marginal excluding one branch" from the
--- marginal's own max alone (see 'maxLinearSemiring'). Fires as a Haskell
--- 'error' at the point IRCompiler would otherwise build the AnyExcept/mixSubP
--- IR -- i.e. at compile time, on the one program shape (a marginal-except
--- query) that reaches it, not at every compile under this family.
-mapHasNoExcept :: IRExpr -> IRExpr -> IRExpr
-mapHasNoExcept = error $ "Semiring: this program compiles a marginal-except query "
+-- | Why a semiring without 'srMinus' (both max-product instances) refuses an
+-- AnyExcept: max has no algebraic inverse, so there is no way to recover "the
+-- marginal excluding one branch" from the marginal's own max alone (see
+-- 'maxLinearSemiring'). 'mixSubP' refuses the variant with this reason at the
+-- point it would build the AnyExcept IR -- at compile time, on the one program
+-- shape (a marginal-except query) that reaches it, not at every compile under
+-- this family. A refusal, not an 'error': the variant is absent and every
+-- other variant of the program compiles (task
+-- map-semiring-marginal-except-errors-instead-of-refusing).
+mapHasNoExceptReason :: String
+mapHasNoExceptReason = "Semiring: this program compiles a marginal-except query "
   ++ "(AnyExcept -- e.g. P(x != v)), which has no defined meaning under the "
   ++ "max-product (MAP) semiring: max has no subtraction, so \"the best "
   ++ "derivation excluding one specific branch\" cannot be recovered from the "
@@ -1433,7 +1436,9 @@ mixP sr = mixWith (srPlus sr)
 -- | 'mixP' for the AnyExcept case, where the excepted value's mass is
 -- subtracted from the marginal rather than added.
 mixSubP :: Semiring -> IRExpr -> PResult -> PResult -> CompilerMonad PResult
-mixSubP sr = mixWith (srMinus sr)
+mixSubP sr bc a b = case srMinus sr of
+  Just minus -> mixWith minus bc a b
+  Nothing    -> refuse "" mapHasNoExceptReason
 
 -- | Shared body of 'mixP'/'mixSubP'. Both operands are let-bound first, since
 -- each is read several times by the case analysis below.

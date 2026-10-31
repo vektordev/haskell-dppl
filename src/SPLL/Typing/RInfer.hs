@@ -508,7 +508,7 @@ infer adtsDecl expr
           let constraint = Constraint (rType ty) tVal (provenanceOf expr)
           return (rType ty, [constraint], Expr ty (Constant (VError msg)))
         (Expr ty (Constant val)) -> do
-          let tVal = getRType val
+          tVal <- freshenNullLists (getRType val)
           let constraint = Constraint (rType ty) tVal (provenanceOf expr)
           return (rType ty, [constraint], expr)
         (Expr ti (Lambda name inExpr)) -> do
@@ -657,6 +657,21 @@ fresh = do
     s <- get
     put s{var_count = var_count s + 1}
     return $ TVarR $ TV (letters !! var_count s)
+
+-- | A literal's type with every empty list given a fresh element type:
+-- @[]@ is @[a]@, not 'NullList'. 'unifies' accepts @ListOf _ ~ NullList@
+-- without binding anything, so a type variable met first by a 'NullList'
+-- stayed 'NullList' and never learnt the element type a later constraint
+-- supplied (an @if@ whose then-arm is @[]@ and whose else-arm is a nested
+-- @if@ over @[Float]@ was typed @[]@; task
+-- list-signature-rejected-when-empty-arm-first).
+freshenNullLists :: RType -> Infer RType
+freshenNullLists t = case t of
+  NullList -> ListOf <$> fresh
+  ListOf a -> ListOf <$> freshenNullLists a
+  Tuple a b -> Tuple <$> freshenNullLists a <*> freshenNullLists b
+  TEither a b -> TEither <$> freshenNullLists a <*> freshenNullLists b
+  _ -> return t
 
 freshVars :: Int -> [RType] -> Infer [RType]
 freshVars 0 rts = do
