@@ -42,7 +42,7 @@ import TestCLI (cliTests)
 import TestMemoRecursion (memoRecursionTests)
 import BackendCoverage (backendCoverageTests, irGeneratorCoverageTests)
 import GenerateCensus (generateCensusTests)
-import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+import TestFuzz (fuzzTests, samplingCheckTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, paramMainGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests)
 import TestCaseParser (parseProgram, corpusPplPath)
@@ -636,6 +636,7 @@ main = do
     , paramMainGeneratorTests
     , adtRecursionGeneratorTests
     , errorChannelTests
+    , samplingCheckTests
     , admissionOracleTests
     , fuzzScalingTests
     , injFCatalogTests
