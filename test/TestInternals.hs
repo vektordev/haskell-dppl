@@ -708,6 +708,70 @@ test_underflowedTailKeepsDimension = testCase "underflowedTailKeepsDimension" $ 
       assertEqual "and the result is not flagged impossible" (Just False) (resultImpossible res)
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
+-- Task if-condition-approx-zero-drops-tiny-branch-mass: an if-arm's dead-arm
+-- guard ('deadWeightIR') compared the condition's probability with 0.0
+-- approximately (floatApproxEqThresh = 1e-10) in linear space, so an arm whose
+-- condition has probability 1e-14 was dropped and its mass answered as
+-- (0.0, impossible); log space compared exactly and kept it. The mass is far
+-- below the corpus's probTolerance, so assert the value and the flag directly,
+-- in both semirings, for a literal bound, a run-time bound and an ADT arm.
+test_tinyConditionArmKeepsItsMass :: TestTree
+test_tinyConditionArmKeepsItsMass = testCase "tinyConditionArmKeepsItsMass" $ do
+  let parse src = case tryParseProgram "<test>" src of
+        Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+        Right p  -> return p
+      check label conf prog params sample expected = case runProb conf prog params sample of
+        Right res@(VProbDim p d) -> do
+          let p' = if logSpace conf then exp p else p
+          assertBool (label ++ ": expected " ++ show expected ++ ", got " ++ show p')
+                     (abs (p' - expected) <= 1e-6 * expected)
+          assertEqual (label ++ ": dim") 0 d
+          assertEqual (label ++ ": not impossible") (Just False) (resultImpossible res)
+        other -> assertFailure (label ++ ": expected a probability tuple, got: " ++ show other)
+  literal <- parse "main = if Uniform < 1.0e-14 then True else False"
+  runtime <- parse "main b = if Uniform < b then True else False"
+  adt <- parse (unlines [ "data Obj = Obj | Nil", "main = if Uniform < 1.0e-15 then Obj else Nil" ])
+  forM_ [(\c -> c, "linear"), (\c -> c { logSpace = True }, "log")] $ \(f, sp) ->
+    forM_ [0, 1, 2] $ \o -> do
+      let conf = f (defaultCompilerConfig { optimizerLevel = o })
+          tag = sp ++ " -O" ++ show o
+      check ("literal " ++ tag) conf literal [] (VBool True) 1e-14
+      check ("runtime " ++ tag) conf runtime [VFloat 1e-14] (VBool True) 1e-14
+      check ("adt " ++ tag) conf adt [] (VADT "Obj" []) 1e-15
+
+-- The same bug scaled so the dropped mass is a density of 1.0 (the arm's body
+-- is Uniform * t, a density of 1/t on [0, t]), checked on the interpreter and
+-- the scalar text backends. With t a run-time parameter 5e-10, between the
+-- interpreter's old threshold (1e-10) and pythonLib's isclose (1e-9), Python
+-- alone dropped the arm. These were the known-issues pins
+-- tinyConditionArmDroppedAsImpossible and tinyConditionArmPythonThreshold;
+-- they are not corpus programs because the sampling sweeps cannot estimate a
+-- density on an interval of width 5e-11.
+test_tinyConditionArmScaledOnEveryBackend :: TestTree
+test_tinyConditionArmScaledOnEveryBackend = testCase "tinyConditionArmScaledOnEveryBackend" $ do
+  let rows = [ ("main = if Uniform < 0.00000000005 then Uniform * 0.00000000005 else 5.0 + Uniform", [], 2e-11)
+             , ("main t = if Uniform < t then Uniform * t else 5.0 + Uniform", [VFloat 5e-10], 2e-10) ]
+      want = Answered 1.0 1 False
+  acs <- forM rows $ \(src, args, x) -> do
+    prog <- case tryParseProgram "<test>" src of
+      Left err -> assertFailure ("Parse failed: " ++ show err)
+      Right p  -> return p
+    env <- either (\e -> assertFailure (src ++ ": " ++ show e)) return (compile defaultCompilerConfig prog)
+    let qs = [(QProb (VFloat x), want), (QProb (VFloat 5.5), want)]
+    forM_ qs $ \(q, w) -> do
+      let got = interpreterAnswer prog env args q
+      assertBool (src ++ " interpreter at " ++ show q ++ ": want " ++ show w ++ ", got " ++ show got)
+        (maybe False (answersAgree w) got)
+    return (AgreementCase prog env args [] qs)
+  pyD <- runPythonBatch acs
+  assertBool (concatMap renderDisagreement pyD) (null pyD)
+  julia <- findJulia
+  case julia of
+    Nothing -> return ()
+    Just jl -> do
+      jlD <- runJuliaBatch jl acs
+      assertBool (concatMap renderDisagreement jlD) (null jlD)
+
 -- Task enumerated-sum-over-density-body: an enumerated sum whose terms are
 -- densities of different dims reports the lowest dim among the possible terms
 -- and sums only the terms at that dim. Here the terms at (0, 3) are a dim-2
@@ -6794,6 +6858,8 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed
+  , test_tinyConditionArmKeepsItsMass
+  , test_tinyConditionArmScaledOnEveryBackend
   , test_underflowedTailKeepsDimension
   , test_structurallyImpossibleSampleIsFlagged
   , test_observeRenormalizesViaJustAny
