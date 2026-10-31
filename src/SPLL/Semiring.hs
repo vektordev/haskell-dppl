@@ -48,7 +48,7 @@ module SPLL.Semiring (
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
   prodP, onProb, onDim, onBranches, underLambdas, substResult, errorWhen, constantResult, guardP, zipResult, zip3Result,
-  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumMinDimP, enumSumNode, tensorDomainSR, opaqueMass, closeResult, guardedResult, shareUnlessLeaf,
+  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumMinDimP, enumSumNode, tensorDomainSR, opaqueMass, closeResult, closeResults, guardedResult, shareUnlessLeaf,
   packResult, unpackResult, packedProb, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
@@ -68,6 +68,7 @@ import Control.Monad.Writer.Lazy (WriterT, runWriterT, tell, lift)
 import Control.Monad.State (MonadState)
 import Control.Monad.Except (ExceptT, MonadError, runExceptT, throwError)
 import qualified Data.Set as Set
+import Data.List (mapAccumL)
 
 -- | The compiler monad: fresh names ('Supply'), emitted let-bindings (a
 -- writer), and one refusal channel (task static-refusals-become-absent-variants).
@@ -368,6 +369,7 @@ data Semiring = Semiring
   , srPlus     :: IRExpr -> IRExpr -> IRExpr  -- ^ mixture / alternative sum (mixP). Pairwise only -- 'srReduceOp' is this same operator's identity for 'enumSumP's fold over a whole (possibly large) enumerated domain, kept as a separate field because the fold has to pick an IR *reduction node* (design ir-tensor-values' 'BReduce'), which no binary 'IRExpr -> IRExpr -> IRExpr' function can name.
   , srMinus    :: IRExpr -> IRExpr -> IRExpr  -- ^ AnyExcept: marginal minus one branch (mixSubP)
   , srComplement :: IRExpr -> IRExpr          -- ^ CDF flip under a decreasing transform: 1 - x linear, log(1 - exp x) log
+  , srConserves :: Bool                       -- ^ whether 'srComplement' of a COMBINED weight (one 'srPlus' / 'srReduceOp' over several derivations) is the complementary event's weight. True for sum-product, where an event and its complement add up to one. False for max-product: the complement of the best True derivation is not the best False one (@1 - max@ is not a max), so there 'srComplement' is sound only on a single derivation's weight (a leaf CDF), and a site holding a combined weight must compute the other side directly (task map-semiring-complement-and-cdf-wrong)
   }
 
 -- | Build the 'Semiring' for a family (task semiring-parametric-marginals) and
@@ -394,11 +396,11 @@ mkSemiring SRCounting   _     = error $ "Semiring.mkSemiring: SRCounting has no 
 
 linearSemiring :: Semiring
 linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) OpMult (IROp OpPlus) (IROp OpSub)
-                          (upperTailComplement Linear (IROp OpSub const1))
+                          (upperTailComplement Linear (IROp OpSub const1)) True
 
 logSemiring :: Semiring
 logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus logSumExpIR logSubExpIR
-                       (upperTailComplement Log logComplement)
+                       (upperTailComplement Log logComplement) True
 
 -- | Max-product (MAP/Viterbi), linear domain: independent conjunction is still
 -- plain multiply (maximizing a product of independent factors over independent
@@ -416,7 +418,7 @@ logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus lo
 -- error at the point it would be compiled -- see 'mapHasNoExcept'.
 maxLinearSemiring :: Semiring
 maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult maxPairIR
-                             mapHasNoExcept (upperTailComplement Linear (IROp OpSub const1))
+                             mapHasNoExcept (upperTailComplement Linear (IROp OpSub const1)) False
 
 -- | Max-product, log domain: 'srTimes' is add (as in ordinary log-space
 -- sum-product -- independent factors still combine by adding their logs), and
@@ -427,7 +429,7 @@ maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult max
 -- stabilize).
 maxLogSemiring :: Semiring
 maxLogSemiring = Semiring True ROpMax negInfIR const0 (IROp OpPlus) OpPlus maxPairIR
-                          mapHasNoExcept (upperTailComplement Log logComplement)
+                          mapHasNoExcept (upperTailComplement Log logComplement) False
 
 -- | The log-space complement @log(1 - exp x)@ of a log-probability.
 logComplement :: IRExpr -> IRExpr
@@ -1279,6 +1281,44 @@ closeResult sr tag guards (Open r binds)
     wrapIfRead e = if reads' e then generateLetInExpr binds e else e
     -- Guards nest as IRIf, never OpOr/OpAnd -- see 'guardP'.
     guarded orElse e = foldr (\g acc -> IRIf g acc orElse) e guards
+
+-- | 'closeResult' for several results sharing ONE block (the True and False
+-- weights of a condition arm, 'IRCompiler.condWeights'): the block is bound
+-- once, under @guards@, holding only the fields that read it, and every
+-- other field stays inline (guarded as 'closeResult' guards it), so a
+-- statically-known dim, flag or constant weight is not routed through the
+-- tuple where it would no longer fold. At most one reading field takes the
+-- block inline instead, as in 'closeResult'.
+closeResults :: Semiring -> String -> [IRExpr] -> Open [PResult] -> CompilerMonad [PResult]
+closeResults sr tag guards (Open rs binds)
+  | length readers <= 1 = return (map inlined rs)
+  | otherwise = do
+      v <- mkVariable tag
+      let n = length readers
+          fallbacks = [fb | r <- rs, (f, fb) <- zip (fieldsOf r) impossibleFields, reads' f]
+          block = generateLetInExpr binds (packMany readers)
+      setVariables [(v, foldr (\g acc -> IRIf g acc (packMany fallbacks)) block guards)]
+      let field k e orElse
+            | reads' e  = (k + 1, projMany k n (IRVar v))
+            | otherwise = (k, orElse e)
+          rebuild k r =
+            let (k1, p)   = field k  (unP (rProb r)) (guarded (srZero sr))
+                (k2, d)   = field k1 (rDim r)        (guarded dim0)
+                (k3, bc)  = field k2 (rBranches r)   id
+                (k4, imp) = field k3 (rImposs r)     (guarded constTrueIR)
+            in (k4, PResult (P p) d bc imp)
+      return (snd (mapAccumL rebuild 0 rs))
+  where
+    reads' = mentionsAny (map fst binds)
+    fieldsOf r = [unP (rProb r), rDim r, rBranches r, rImposs r]
+    impossibleFields = [srZero sr, dim0, const0, constTrueIR]
+    readers = filter reads' (concatMap fieldsOf rs)
+    wrapIfRead e = if reads' e then generateLetInExpr binds e else e
+    guarded orElse e = foldr (\g acc -> IRIf g acc orElse) e guards
+    inlined r = PResult (P (guarded (srZero sr) (wrapIfRead (unP (rProb r)))))
+                       (guarded dim0 (wrapIfRead (rDim r)))
+                       (wrapIfRead (rBranches r))
+                       (guarded constTrueIR (wrapIfRead (rImposs r)))
 
 -- | Re-attach a sub-result's let-in block: bound once ('closeResult', under
 -- @guards@) when copying it could compound, inline in each reading field when

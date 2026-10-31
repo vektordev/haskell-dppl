@@ -1062,7 +1062,7 @@ test_tstDimIsInt :: TestTree
 test_tstDimIsInt = testCase "tstDimIsInt" $ do
   let dimOf src = case parseTestCasesFromString "dim.tst" src of
         Left err -> Left err
-        Right (_, _, _, [ProbTestCase _ _ _ e]) -> Right (expectationDim e)
+        Right (_, _, _, [ProbTestCase _ _ _ e _]) -> Right (expectationDim e)
         Right (_, _, _, tcs) -> Left ("expected one row, got " ++ show tcs)
   assertEqual "an integer dim" (Right (Just 1)) (dimOf "p(0.5)=(0.35, 1)\n")
   assertEqual "a float spelling of an integral dim" (Right (Just 2)) (dimOf "p(0.5)=(0.35, 2.0)\n")
@@ -1685,7 +1685,7 @@ planEnumTopKAndBCTest testName baseName = testCase testName $ do
   (_, _, _, tcs) <- case parseTestCasesFromString tstPath tstSrc of
     Left err -> assertFailure ("tst parse error: " ++ err)
     Right r  -> return r
-  let probCases = [ (s, ps, expectationProb expct) | ProbTestCase _ s ps expct <- tcs ]
+  let probCases = [ (s, ps, expectationProb expct) | ProbTestCase _ s ps expct _ <- tcs ]
   assertBool (baseName ++ ".tst should contain prob cases") (not (null probCases))
   -- compile once per config, evaluate every pinned case against each
   let compiledWith conf = either (error . show) id (compile conf prog)
@@ -5149,6 +5149,13 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       -- sum-product "h_integ" would be the same silent-wrong-answer bug; the
       -- compiler refuses by name instead, as 'mapHasNoExcept' already does for
       -- AnyExcept under MAP.
+      --
+      -- Since task map-semiring-complement-and-cdf-wrong the comparison
+      -- refuses first: under max-product a comparison complements its
+      -- operand's CDF only when the operand has a single derivation, and a
+      -- call is not known to (an enumerable callee is summed point by point
+      -- instead, with no CDF call at all). Either refusal keeps the
+      -- sum-product h_integ out of the MAP group.
       prog <- parseOrFail (unlines
         [ "h = Uniform"
         , "main = if h > 0.5 then 1.0 else 2.0"
@@ -5156,9 +5163,87 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       -- Only the MAP group's probability function goes; the ordinary
       -- sum-product group is untouched.
       let compiled = compile defaultCompilerConfig { extraSemirings = [SRMaxProduct] } prog
-      expectVariantRefused "main_map" "prob" "no defined meaning under the SRMaxProduct semiring" compiled
+      expectVariantRefused "main_map" "prob" "needs an operand with a single derivation" compiled
       assertBool "the sum-product main still has its probability function"
         (either (const False) (isJust . probFun . lookupIREnv "main") compiled)
+  -- Task map-semiring-complement-and-cdf-wrong. An if condition's False weight
+  -- was 1 - (its True weight), a sum-product identity: under max-product that
+  -- is 1 - max, not the best False derivation. The condition below has three
+  -- derivations, True (0.5), inner True (0.25) and inner False (0.25); the
+  -- best one reaching 2 is the last.
+  , testCase "a compound if condition: the False weight is the best False derivation" $ do
+      forM_ [ ("nested if", "main = if (if Uniform < 0.5 then True else Uniform < 0.5) then 1 else 2", 0.5, 0.25)
+            , ("negated, arms swapped", "main = if not (if Uniform < 0.5 then True else Uniform < 0.5) then 2 else 1", 0.5, 0.25)
+            , ("three levels", "main = if (if Uniform < 0.3 then (if Uniform < 0.6 then True else False) else Uniform < 0.2) then 1 else 2", 0.18, 0.56)
+            ] $ \(what, src, e1, e2) -> do
+        prog <- parseOrFail src
+        p1 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 1)
+        p2 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 2)
+        assertBool (what ++ ": p_map(1) = " ++ show e1 ++ ", got " ++ show p1) (abs (p1 - e1) < 1e-9)
+        assertBool (what ++ ": p_map(2) = " ++ show e2 ++ ", got " ++ show p2) (abs (p2 - e2) < 1e-9)
+  , testCase "a depth-d chain of nested conditions matches a max-product DP" $
+      -- c0 = Uniform < 0.3, c(k+1) = if ck then Uniform < 0.3 else Uniform < 0.7.
+      -- The DP carries (best True, best False) per level; sum-product is the
+      -- same recursion with + for max, and must keep summing to one.
+      forM_ [1, 2, 4, 8 :: Int] $ \d -> do
+        let cond 0 = "Uniform < 0.3"
+            cond k = "(if " ++ cond (k - 1) ++ " then Uniform < 0.3 else Uniform < 0.7)"
+            step plus (t, f) = (plus (t * 0.3) (f * 0.7), plus (t * 0.7) (f * 0.3))
+            (mt, mf) = iterate (step max) (0.3, 0.7) !! d
+            (st, sf) = iterate (step (+)) (0.3, 0.7) !! d
+        prog <- parseOrFail ("main = if " ++ cond d ++ " then 1 else 2")
+        p1 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 1)
+        p2 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 2)
+        s1 <- probUnder defaultCompilerConfig prog [] (VInt 1)
+        s2 <- probUnder defaultCompilerConfig prog [] (VInt 2)
+        assertBool ("d=" ++ show d ++ ": p_map(1) = " ++ show mt ++ ", got " ++ show p1) (abs (p1 - mt) < 1e-12)
+        assertBool ("d=" ++ show d ++ ": p_map(2) = " ++ show mf ++ ", got " ++ show p2) (abs (p2 - mf) < 1e-12)
+        assertBool ("d=" ++ show d ++ ": p(1) = " ++ show st ++ ", got " ++ show s1) (abs (s1 - st) < 1e-12)
+        assertBool ("d=" ++ show d ++ ": p(2) = " ++ show sf ++ ", got " ++ show s2) (abs (s2 - sf) < 1e-12)
+  , testCase "a disjunction condition: its False weight is compiled, not complemented" $ do
+      -- a || b over two independent Bernoulli(0.5): each of the three True
+      -- worlds and the one False world has weight 0.25.
+      prog <- parseOrFail "main = if (Uniform < 0.5) || (Uniform < 0.5) then 1 else 2"
+      p1 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 1)
+      p2 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 2)
+      assertBool ("p_map(1) = 0.25, got " ++ show p1) (abs (p1 - 0.25) < 1e-9)
+      assertBool ("p_map(2) = 0.25, got " ++ show p2) (abs (p2 - 0.25) < 1e-9)
+  , testCase "a comparison on an enumerated sum: the upper tail is maxed, not complemented" $ do
+      -- (a + b) > 0 is True on three paths of 0.25 each; the CDF at 0 (one
+      -- path, 0.25) complemented gave 0.75.
+      forM_ [ "main = (if Uniform < 0.5 then 1 else 0) + (if Uniform < 0.5 then 1 else 0) > 0"
+            , "main = 0 < (if Uniform < 0.5 then 1 else 0) + (if Uniform < 0.5 then 1 else 0)" ] $ \src -> do
+        prog <- parseOrFail src
+        pT <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VBool True)
+        pF <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VBool False)
+        assertBool (src ++ ": p_map(True) = 0.25, got " ++ show pT) (abs (pT - 0.25) < 1e-9)
+        assertBool (src ++ ": p_map(False) = 0.25, got " ++ show pF) (abs (pF - 0.25) < 1e-9)
+        sT <- probUnder defaultCompilerConfig prog [] (VBool True)
+        assertBool (src ++ ": sum-product p(True) = 0.75, got " ++ show sT) (abs (sT - 0.75) < 1e-9)
+  , testCase "a comparison on a non-enumerable compound operand is refused" $ do
+      prog <- parseOrFail "main = if (if Uniform < 0.5 then Uniform else Normal) > 0.3 then 1 else 2"
+      let compiled = compile defaultCompilerConfig { extraSemirings = [SRMaxProduct] } prog
+      expectVariantRefused "main_map" "prob" "needs an operand with a single derivation" compiled
+      assertBool "the sum-product main still has its probability function"
+        (either (const False) (isJust . probFun . lookupIREnv "main") compiled)
+  ]
+
+-- | Task map-semiring-complement-and-cdf-wrong: an if condition that is
+-- itself an if is compiled to both its weights in one pass, each a pruned
+-- lower bound, so topK prunes inside it. Before, the condition compiled
+-- unpruned (its False weight was the complement of its True weight, and the
+-- complement of a lower bound is an upper bound) and answered the exact
+-- 0.476 / 0.524 at any threshold.
+conditionPairTopKTests :: TestTree
+conditionPairTopKTests = testGroup "Condition pair: topK prunes inside a condition"
+  [ testCase "topK prunes inside a condition" $ do
+      prog <- corpusPplPath "topKPrunesInsideCondition" >>= readFile >>= parseOrFail
+      let conf = defaultCompilerConfig { topKThreshold = Just 0.1 }
+      forM_ [(1, 0.475, 0.476), (2, 0.475, 0.524 :: Double)] $ \(q, pruned, exact) -> do
+        pK <- probUnder conf prog [] (VInt q)
+        pE <- probUnder defaultCompilerConfig prog [] (VInt q)
+        assertBool ("exact p(" ++ show q ++ ") = " ++ show exact ++ ", got " ++ show pE) (abs (pE - exact) < 1e-9)
+        assertBool ("pruned p(" ++ show q ++ ") = " ++ show pruned ++ ", got " ++ show pK) (abs (pK - pruned) < 1e-9)
   ]
 
 -- | The consumer-grade decomposability walk. Unlike 'injFLatentVerdicts' it
@@ -5546,7 +5631,7 @@ test_sharedFieldAcrossListIRNotExponential = testCase "sharedFieldAcrossListIRNo
               ++ show small ++ " -> " ++ show large ++ ")") (ratio < 4)
 
 -- | The same family at budget 0, where the plan engine answers it (task
--- plan-world-binds-dead-branch-sum-per-world). 'measurePlanWorlds' bound each
+-- plan-world-binds-dead-branch-sum-per-world). The plan world measure bound each
 -- factor-carrying world's whole result, including a branch count that 'mixP'
 -- discards and that held every world's guard chain: the -O0 IR grew ~57x from
 -- 0 to 1 answers in between, and the slow-tier plan-engine differential on
@@ -6776,6 +6861,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , setWitnessIntBoundaryTests
   , tupleCdfCorrelatedRefusedTests
   , semiringMapTests
+  , conditionPairTopKTests
   , semiringSatisfiabilityTests
   , materializationVerdictTests
   , planEnumStructuralADTTests

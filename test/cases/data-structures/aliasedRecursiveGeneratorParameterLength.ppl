@@ -1,0 +1,3 @@
+len xs = if isNull xs then 0 else 1 + len (tail xs)
+rollout k = draw j = k in if j == 0 then [] else (if Uniform < 0.5 then [] else 1 : rollout (j - 1))
+main = len (rollout 3) < 2

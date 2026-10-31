@@ -453,11 +453,7 @@ probQuery vp fname q = do
 -- ordinary program, so a variant can expose an engine crash its unmasked
 -- function never reached. The entry goes in the commit that fixes it.
 knownMaskCrashes :: [(String, String)]
-knownMaskCrashes =
-  [ -- `draw heard = Face .. in isFace heard` at p(False): the constructor-test
-    -- inverse's False witness reaches `isFace` as a value. Reached here by
-    -- tupleCtorTestOfSharedDraw at (False, ANY).
-    ("Parameter is not an ADT: VAnyExcept", "single-ctor-test-false-witness-crashes") ]
+knownMaskCrashes = []
 
 knownPrefix :: String
 knownPrefix = "KNOWN CRASH "

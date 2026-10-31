@@ -1,0 +1,3 @@
+rwh0 ts = theta ts @ 0
+inner ts x = (x + rwh0 ts)
+main ts thetas = (inner thetas) Uniform

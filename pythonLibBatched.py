@@ -39,12 +39,14 @@ DTYPE = torch.float64
 
 def density_uniform(x):
   # 1 on [0,1], 0 elsewhere.
+  x = astensor(x)
   return ((x >= 0.0) & (x <= 1.0)).to(_dtype(x))
 
 def cumulative_uniform(x):
   return torch.clamp(astensor(x), 0.0, 1.0)
 
 def density_normal(x):
+  x = astensor(x)
   return torch.exp(-(x * x) / 2.0) / math.sqrt(2.0 * math.pi)
 
 # erfc rather than 1 + erf: pythonLib.cumulative_normal says why.
@@ -254,7 +256,12 @@ def isclose(a, b):
   eps = max(torch.finfo(at.dtype).eps, torch.finfo(bt.dtype).eps)
   scale = torch.maximum(torch.abs(at), torch.abs(bt)).clamp(min=eps)
   tol = _ISCLOSE_ULPS * eps * scale
-  return torch.abs(at - bt) <= tol
+  # An infinite operand makes the scaled tolerance infinite, which would hold
+  # isclose(-inf, 1.0). The scalar runtimes answer False at any infinity
+  # (inf - inf is NaN, inf - 1 exceeds a finite tolerance), so an infinite
+  # operand is never close (task batched-isclose-holds-at-an-infinity).
+  inf = torch.isinf(at) | torch.isinf(bt)
+  return (torch.abs(at - bt) <= tol) & ~inf
 
 # --- helpers -----------------------------------------------------------------
 # astensor has no leading underscore so `from pythonLibBatched import *` exports
@@ -422,6 +429,11 @@ def categorical_index(u, out, start, n):
   # integer index k of the smallest cumulative weight of out[..., start:start+n]
   # exceeding u times the row's total, clamped to n - 1. One cumsum over the
   # slice, instead of the n-arm torch.where cascade the if-chain lowered to.
+  if isinstance(out, (list, tuple, InferenceList)):
+    # Weights given as a list (a BTensor's list of [B] tensors and floats, or
+    # a cons list) stack into the [B, N] tensor (task
+    # batched-categorical-index-over-batched-weights-fails).
+    out = torch.stack(torch.broadcast_tensors(*[astensor(w) for w in out]), -1)
   seg = out[..., start:start + n]
   c = seg.cumsum(-1)
   target = astensor(u) * c[..., -1]
@@ -712,13 +724,22 @@ class InferenceList:
       curr = curr.next
 
   def __getitem__(self, index):
+    # The emitted constant-slot read is `xs[..., k]` (a logit tensor's last
+    # axis); on a cons list the leading Ellipsis is a no-op and k is the
+    # list index (task batched-blistindex-reads-a-cons-list-as-a-tensor).
+    if isinstance(index, tuple) and len(index) == 2 and index[0] is Ellipsis:
+      index = index[1]
     if isinstance(index, slice):
       # Tail lists only, as in pythonLib: sample[1:] is the tail.
       if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):
+        # Walking past the end raises, as the interpreter's "tail of an
+        # empty list" does (task python-empty-list-head-and-tail-answer-none).
         current = self
-        for _ in range(index.start - 1):
+        for _ in range(index.start):
+          if isinstance(current, EmptyInferenceList) or current is None:
+            raise IndexError("tail of an empty list")
           current = current.next
-        return current.next
+        return current
       raise IndexError("Slices may only be used for tail lists")
     if index < 0:
       # Only a negative index needs the length; a non-negative one walks
@@ -807,12 +828,14 @@ def mapList(f, lst):
 
 def listProd(lst):
   # Product of a bucket-uniform list's [B] leaves (the probability variant of a
-  # list map multiplies the per-element Jacobians). The empty product is 1.
+  # list map multiplies the per-element Jacobians). The empty product is 1.0,
+  # and the factors multiply right to left, as in the standard library's
+  # stdListProd and the scalar runtimes.
   if isinstance(lst, AnyInferenceList):
     raise ValueError("Element not found in list")
-  acc = 1
-  for x in lst:
-    acc = acc * x
+  acc = 1.0
+  for x in reversed(list(lst)):
+    acc = x * acc
   return acc
 
 def listConcat(lst1, lst2):

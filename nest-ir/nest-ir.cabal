@@ -26,6 +26,7 @@ library
       SPLL.IROptimizer
       SPLL.IRSelectPass
       SPLL.IRTypeCheck
+      SPLL.IRUtil
       SPLL.PythonNesting
       SPLL.ReservedNames
       StandardLibrary

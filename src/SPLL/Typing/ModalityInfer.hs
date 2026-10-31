@@ -67,6 +67,7 @@ module SPLL.Typing.ModalityInfer
   , ReinferCtx
   , reinferCtx
   , reinferGiven
+  , reinferLawGiven
   ) where
 
 import qualified Data.Map.Strict as Map
@@ -529,9 +530,9 @@ data EngineCert
 data Engine
   = EnumerationEngine
   | PlanEngine
-  | PointInversionEngine
   | JointAffineEngine
   | AffineEngine
+  | PointInversionEngine
   | WorldsEngine
   | InPlaceEngine
   deriving (Eq, Ord, Enum, Bounded, Show)
@@ -756,7 +757,7 @@ inferE ctx env expr = case expr of
         affine = case affineInjF fname (zipWith (affineOf . cnOf) args laws) of
                    Just c | not (Map.null (acLatents c)) -> Just c
                    _ -> Nothing
-        m0   = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname (isJust affine) (map lawMod laws)))
+        m0   = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname (isJust affine) (map lawMod laws) (map lawValue laws)))
         l | Just z <- zeroFactor                  = Law (IG gExact) (JDirac (Just z))
           | isFieldConstructor (icADTs ctx) fname = structuredLaw fname laws m0
           | Just c <- affine                      = Law m0 (JAffine c)
@@ -1048,12 +1049,17 @@ argumentFree j = case j of
 -- | The law of a tuple accessor whose operand's law is a pair constructor
 -- ('JStructured'), at modality @m0@: a projected field of known value is
 -- that point, whatever the other field is (@fst (0.0 * z, Normal)@ is the
--- point 0.0), and a projected pair keeps its fields' laws. Any other field
--- is left to the generic rules ('Nothing').
+-- point 0.0), and a projected pair, leaf or affine form keeps the field's
+-- law: the marginal of a pair's field is that field's own law, which is
+-- what the compiler's Gaussian catch-all reads off @fst (Normal, Uniform)@
+-- or @snd (0, Normal + 1.0)@ (task gaussian-catch-all-dispatch-on-codegen-law).
+-- Any other field is left to the generic rules ('Nothing').
 projectedLaw :: String -> [Law] -> IMod -> Maybe Law
 projectedLaw fname laws m0 = field >>= \l -> case l of
   _ | Just v <- lawValue l -> Just (Law (IG gExact) (JDirac (Just v)))
   Law _ j@(JStructured _ _) -> Just (Law m0 j)
+  Law _ j@(JLeaf _ _) -> Just (Law m0 j)
+  Law _ j@(JAffine _) -> Just (Law m0 j)
   _ -> Nothing
   where
     field = case (fname, laws) of
@@ -1201,13 +1207,24 @@ letBinding ctx env lti x body arg argLaw
     -- also a conditional body ('enumerableApplication' walks the body,
     -- which made a let chain's calls quadratic in its length).
     bctx = ctx { icPoint = \v -> if v == x then pointBound else icPoint ctx v }
-    pointBound = isJust (enumerableDomain (tags (getTypeInfo arg)))
+    -- An alias of a point is one too, so a chain of aliases needs no engine
+    -- at any link ('pointHere').
+    pointBound = pointHere ctx env arg
+              || isJust (enumerableDomain (tags (getTypeInfo arg)))
               || isJust (planProjectedReadOf (icProg ctx) arg)
               || isJust (toInvExprMaybeWith (const True) (const True) (icFC ctx) (icADTs ctx) (chainName lti))
     needsEngine = gCap (outerI (lawMod argLaw)) /= Exact
                && not (isArrow (rType (getTypeInfo arg)))
                && x `Set.member` freeVarsExpr body
                && not (determinedByWitnesses env arg)
+               -- An alias of a parameter of the closure being evaluated
+               -- (@g c = draw d = c in \\n -> ..@): the compiler holds @c@ at a
+               -- point where it compiles this body, its random argument bound
+               -- at the call, which floors there where no engine applies
+               -- ('calleeBindingCerts'). The binding is that value's renaming,
+               -- as the alias inside both lambdas already was (task
+               -- alias-between-curried-lambdas-refuses-enumerable-and-function-arguments).
+               && not (pointHere ctx env arg)
                -- A body whose law is a known point (@0.0 * z@) takes that
                -- value whatever the variable draws: nothing reads the
                -- variable's value, so no engine needs to apply.
@@ -1278,18 +1295,13 @@ calleeBindingCerts ctx env ti f arg argLaw
   -- value without the declaration's observation reaching it (@gen (snd e)@
   -- in data-structures/anyMarkPassedAsRecursiveState). A call in the argument
   -- draws whatever its callee draws, which 'hasRandomLeaf' does not see.
-  | not (hasRandomLeaf arg)
-  , all pinned (Set.toList (freeVarsExpr arg)) = Nothing
+  | pointHere ctx env arg = Nothing
   | gCap (outerI (lawMod argLaw)) == Exact = Nothing
   | otherwise = do
       syn <- maybe (calleeSyntax ctx headCN) id (LMap.lookup headCN (icCallSyntax ctx))
       Just (mapMaybe (certOf syn) engineOrder)
   where
     headCN = cnOf f
-    pinned v
-      | icPoint ctx v = True
-      | isJust (lookup v (functions (icProg ctx))) = False
-      | otherwise = maybe True (inputIsPoint . lawMod) (Map.lookup v env)
     certOf syn k = case k of
       -- The compiler enumerates a call's argument on several paths (a
       -- conditional callee, a curried one, a leading argument), each over
@@ -1306,6 +1318,20 @@ calleeBindingCerts ctx env ti f arg argLaw
       _ -> Nothing
     isArrow (TArrow _ _) = True
     isArrow _ = False
+
+-- | Does a value draw nothing fresh where it is compiled: no primitive draw
+-- or neural read of its own, no call of a top-level declaration, and every
+-- variable it reads a point here -- one the compiler holds at a point
+-- ('icPoint'), or one whose law is a point or witnessed. Such a value is
+-- random only through bindings made, and measured, elsewhere, so binding it
+-- needs no engine of its own ('calleeBindingCerts', 'letBinding').
+pointHere :: ICtx -> Env -> Expr -> Bool
+pointHere ctx env arg = not (hasRandomLeaf arg) && all pinned (Set.toList (freeVarsExpr arg))
+  where
+    pinned v
+      | icPoint ctx v = True
+      | isJust (lookup v (functions (icProg ctx))) = False
+      | otherwise = maybe True (inputIsPoint . lawMod) (Map.lookup v env)
 
 -- | What a named callee's binding has for engines whatever its argument's
 -- law ('calleeBindingCerts'), for the call whose head has chain name
@@ -1620,7 +1646,7 @@ independentOperands env a b = not (any randomLocal (Set.toList shared))
 --   * __one side 'Exact'__ — the random side's own CDF evaluated at the fixed
 --     bound (@fixed_bound@\/@rhs_integral@\/@lhs_integral@).
 --   * __both sides Gaussian__ — the difference is Gaussian, so the answer is its
---     CDF at zero (@normalDiffCdfAtZero@). 'FamNormal' specifically, not merely
+--     CDF at zero (@normalDiffComparison@). 'FamNormal' specifically, not merely
 --     equal families: two 'FamLogNormal' operands enjoy no such closure and
 --     IRCompiler has no equation for them.
 --   * __both sides enumerable__ — the forward-only @|L|x|R|@ grid, which reads
@@ -1697,9 +1723,9 @@ compareGround plan enumA enumB indep a b
 -- which also covers the same-latent shape without a ledger identity). Any
 -- fresh latent beyond one in the combination floors the result — that is what
 -- keeps the two-residual guard at 'Bottom'.
-injFMod :: [ADTDecl] -> String -> Bool -> [IMod] -> IMod
-injFMod adtsDecl name gaussian mods =
-  case (if gaussian then Just PNormal else tryNormalClosure name (map projectI mods)) of
+injFMod :: [ADTDecl] -> String -> Bool -> [IMod] -> [Maybe Value] -> IMod
+injFMod adtsDecl name gaussian mods vals =
+  case (if gaussian then Just PNormal else tryNormalClosure name (zip (map projectI mods) (vals ++ repeat Nothing))) of
     Just pt -> witWrap (IG (fromClosurePType pt))
     Nothing
       | isFieldConstructor adtsDecl name, (m0:rest) <- mods -> foldl IProd m0 rest
@@ -1785,14 +1811,28 @@ injFMod adtsDecl name gaussian mods =
 -- an affine node is 'PNormal' exactly when its affine form can be built
 -- ('affineInjF'; law-carrying-modality M4), which is also what the compiler
 -- collapses.
-tryNormalClosure :: String -> [PType] -> Maybe PType
-tryNormalClosure "neg"  [Deterministic]          = Just Deterministic
-tryNormalClosure "exp"  [PNormal]                = Just PLogNormal
-tryNormalClosure "log"  [PLogNormal]             = Just PNormal
-tryNormalClosure "mult" [PLogNormal, PLogNormal]    = Just PLogNormal
-tryNormalClosure "mult" [PLogNormal, Deterministic] = Just PLogNormal
-tryNormalClosure "mult" [Deterministic, PLogNormal] = Just PLogNormal
+tryNormalClosure :: String -> [(PType, Maybe Value)] -> Maybe PType
+tryNormalClosure "neg"  [(Deterministic, _)]     = Just Deterministic
+tryNormalClosure "exp"  [(PNormal, _)]           = Just PLogNormal
+tryNormalClosure "log"  [(PLogNormal, _)]        = Just PNormal
+tryNormalClosure "mult" [(PLogNormal, _), (PLogNormal, _)] = Just PLogNormal
+-- A log-normal scaled by a constant is log-normal only for a positive scale:
+-- 'IRCompiler.toIRLogNormalParams' shifts mu by @log scale@, and a negative
+-- scale moves the support onto the negatives, where the family's density and
+-- cdf answer 0 (task lognormal-family-kept-through-nonpositive-scale-mult).
+-- Only a scale statically known positive keeps the family; any other (a
+-- negative or unknown one, e.g. a function parameter) falls to the generic
+-- floor, which drops the family and leaves the node to the inversion through
+-- @mult@. A zero scale never gets here: its law is the Dirac at 0.
+tryNormalClosure "mult" [(PLogNormal, _), (Deterministic, v)] | positiveScale v = Just PLogNormal
+tryNormalClosure "mult" [(Deterministic, v), (PLogNormal, _)] | positiveScale v = Just PLogNormal
 tryNormalClosure _      _                           = Nothing
+
+-- | A scale statically known to be strictly positive.
+positiveScale :: Maybe Value -> Bool
+positiveScale (Just (VFloat x)) = x > 0
+positiveScale (Just (VInt n))   = n > 0
+positiveScale _                 = False
 
 -- ---------------------------------------------------------------------------
 -- The vector fixpoint over top-level declarations
@@ -1926,7 +1966,20 @@ reinferCtx fcData prog@(Program decls _ adtDecls _ _) =
 -- position is looked up. A chain name found in no declaration leaves the
 -- non-pinned free variables at the law their existing annotation projects.
 reinferGiven :: ReinferCtx -> [String] -> Expr -> Expr
-reinferGiven rc pins target = e'
+reinferGiven rc pins = snd . reinferUnder rc pins
+
+-- | The law of @target@ itself under the pins, as 'reinferGiven' computes it
+-- for the re-annotation: the certificate the node has at codegen, where an
+-- enclosing engine has recovered variables the 'LawTable', issued over the
+-- program as written, does not know are fixed
+-- ('IRCompiler.codegenLaw'; task gaussian-catch-all-dispatch-on-codegen-law).
+reinferLawGiven :: ReinferCtx -> [String] -> Expr -> Law
+reinferLawGiven rc pins = fst . reinferUnder rc pins
+
+-- | 'reinferGiven' and 'reinferLawGiven': the re-inferred law and the
+-- re-annotated expression, from one run of 'inferE'.
+reinferUnder :: ReinferCtx -> [String] -> Expr -> (Law, Expr)
+reinferUnder rc pins target = (l, e')
   where
     pinSet = Set.fromList pins
     pinMap = Map.fromList [ (n, bareLaw (IG gExact)) | n <- pins ]
@@ -1935,7 +1988,7 @@ reinferGiven rc pins target = e'
     (ctx, env0) = case located of
       (b, env) : _ -> (declCtx b, env)
       [] -> (declCtx target, Map.union (annotatedFreeLaws target) (rcSummaries rc))
-    (_, e', _) = inferE ctx (Map.union pinMap env0) target
+    (l, e', _) = inferE ctx (Map.union pinMap env0) target
     declCtx b = mkICtx (rcADTs rc) (rcFC rc) (cnOf b) (rcProg rc)
 
 -- | The free variables of an expression at the law their current annotation

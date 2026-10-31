@@ -27,7 +27,7 @@ import SPLL.IR.Value
 import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
 import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd, nub)
-import Data.Char (toUpper, isDigit)
+import Data.Char (toUpper, isDigit, isAlphaNum)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -92,6 +92,16 @@ pyOps OpOr = "or"
 pyOps OpAnd = "and"
 pyOps OpEq = "=="
 pyOps x = error $ "Operator has no infix representation: " ++ show x
+
+-- | Whether a float division by this divisor goes through the runtime's
+-- @safe_div@: Python's @/@ raises ZeroDivisionError on a zero divisor, where
+-- the IR (the interpreter, Julia) answers IEEE -- a signed infinity, or NaN
+-- for 0/0 (task python-float-division-by-zero-raises). A nonzero literal
+-- divisor cannot be zero, so it keeps the plain operator and its call-free
+-- cost.
+ieeeDivision :: IRExpr -> Bool
+ieeeDivision (IRConst (VFloat d)) = d == 0
+ieeeDivision _ = True
 
 pyDistName :: Distribution -> String
 pyDistName IRNormal = "normal"
@@ -333,7 +343,7 @@ generateADTClasses decls =
 generateADTClass :: IRADTConstructorDecl -> [String]
 generateADTClass (name, fields) =
   -- Class declaration
-  ["class " ++ cls ++ ":"]++
+  ["class " ++ cls ++ "(ADTValue):"]++
   indentOnce (
     -- Constructor
     ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
@@ -671,6 +681,10 @@ generateExpressionLifted (IROp OpMax l r) = do
   (ls, le) <- generateExpressionLifted l
   (rs, re) <- generateExpressionLifted r
   return (ls ++ rs, str "max(" . le . str ", " . re . str ")")
+generateExpressionLifted (IROp OpDiv l r) | ieeeDivision r = do
+  (ls, le) <- generateExpressionLifted l
+  (rs, re) <- generateExpressionLifted r
+  return (ls ++ rs, str "safe_div(" . le . str ", " . re . str ")")
 generateExpressionLifted (IROp op l r) = do
   (ls, le) <- generateExpressionLifted l
   (rs, re) <- generateExpressionLifted r
@@ -902,6 +916,10 @@ generateExpression (IROp OpMax left right) = do
   l <- generateExpression left
   r <- generateExpression right
   return ("max(" ++ l ++ ", " ++ r ++ ")")
+generateExpression (IROp OpDiv left right) | ieeeDivision right = do
+  l <- generateExpression left
+  r <- generateExpression right
+  return ("safe_div(" ++ l ++ ", " ++ r ++ ")")
 generateExpression (IROp op left right) = do
   l <- generateExpression left
   r <- generateExpression right
@@ -1039,7 +1057,14 @@ generateExpression (IRBuiltin (BReduce op ax) [t])
       tt <- generateExpression t
       -- max of an empty tensor is the identity -inf (interpreter, Julia's
       -- init=-Inf), not Python's ValueError.
-      let dflt = if op == ROpMax then ", default=" ++ pyDouble (-1 / 0) else ""
+      -- sum's start is the float 0.0, the IR's identity: the builtin's int
+      -- start made an empty sum the int 0, which has no negative zero, so
+      -- -(sum []) was 0 where the IR answers -0.0 (task
+      -- python-empty-sum-answers-an-int).
+      let dflt = case op of
+            ROpMax -> ", default=" ++ pyDouble (-1 / 0)
+            ROpAdd -> ", 0.0"
+            ROpLogSumExp -> ""
       return (pyReduceOp op ++ "(" ++ tt ++ dflt ++ ")")
   | otherwise = error (axisUnsupported "BReduce" ax)
 generateExpression (IRBuiltin (BIndex ax) [t, k])
@@ -1060,8 +1085,10 @@ generateExpression (IRBuiltin (BZip op) [a, b]) = do
   bb <- generateExpression b
   n <- lift demandUniqueNumber
   let (x, y) = ("_z" ++ show n ++ "a", "_z" ++ show n ++ "b")
+  let elemOp = if op == OpDiv then "safe_div(" ++ x ++ ", " ++ y ++ ")"
+               else "((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ "))"
   boundIterable ("zip(" ++ aa ++ ", " ++ bb ++ ")")
-    (\it -> "[((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ ")) for "
+    (\it -> "[" ++ elemOp ++ " for "
             ++ x ++ ", " ++ y ++ " in " ++ it ++ "]")
 -- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep):
 -- one runtime call, so the emitted text is O(1) in the domain size and adds no
@@ -1072,12 +1099,20 @@ generateExpression (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
   return ("categorical_index(" ++ uu ++ ", " ++ ww ++ ", " ++ show start ++ ", " ++ show n ++ ")")
 generateExpression (IRError e) =
   return ("throw(\"" ++ escapeStr e ++ "\")")
--- The check splices its operand textually, and a list or tensor check splices
--- it into a comprehension's iterable, so there an operand carrying a let is
--- bound once first (see 'bindIterable').
+-- The check reads its operand several times (the wildcard test, the tag
+-- test, each component), so an operand that is not a bare name or number
+-- literal is bound once to a fresh temporary first: an operand that draws
+-- draws once, as in the interpreter, and a compound one is evaluated once
+-- (task text-backends-conformsto-reevaluates-its-operand). The binding also
+-- keeps a let's walrus out of the list check's comprehension iterable.
 generateExpression (IRConformsTo t x) = do
   sx <- generateExpression x
-  if checksElements t then boundIterable sx (pyConforms t) else return (pyConforms t sx)
+  if isAtomicOperand sx
+    then return (pyConforms t sx)
+    else do
+      n <- lift demandUniqueNumber
+      let tmp = "_ct" ++ show n
+      return ("((" ++ tmp ++ " := " ++ sx ++ "), " ++ pyConforms t tmp ++ ")[1]")
 generateExpression x =
   error ("Unknown expression in PyTorch codegen: " ++ show x)
 
@@ -1093,8 +1128,8 @@ escapeStr = concatMap esc
 -- | A runtime type-tag check for the query-type guard (see IRConformsTo). Full-depth
 -- structural check mirroring the interpreter's 'valueConformsTo': recurses into tuple
 -- components, either arms, and every list element; precise for float/bool/int and
--- permissive ("True") only for types with no cheap runtime tag (so it never falsely
--- rejects). The marginal-query wildcard (isAny) is accepted at every level, matching
+-- permissive ("True") only for types the interpreter does not check either
+-- (type variables, arrows). The marginal-query wildcard (isAny) is accepted at every level, matching
 -- VAny, and short-circuits before any component accessor is evaluated. The Int arg is
 -- a nesting depth used to name list-comprehension binders uniquely.
 pyConforms :: IRType -> String -> String
@@ -1119,6 +1154,13 @@ pyConformsShape d (ITTensor sh t) e
       let v = "_ce" ++ show d
       in "(isinstance(" ++ e ++ ", list) and len(" ++ e ++ ") == " ++ show (shapeNumel sh)
          ++ " and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
+-- Unit is None and a theta tree a (values, subtrees) tuple, both cheap to
+-- tell. An ADT slot accepts an instance of any ADT constructor (every emitted
+-- constructor class derives the runtime's ADTValue), as the interpreter's
+-- 'valueConformsTo' accepts any 'VADT' whatever its type name.
+pyConformsShape _ ITUnit e = "(" ++ e ++ " is None)"
+pyConformsShape _ ITThetaTree e = "isinstance(" ++ e ++ ", tuple)"
+pyConformsShape _ (ITADT _) e = "isinstance(" ++ e ++ ", ADTValue)"
 pyConformsShape _ _ _ = "True"
 
 -- | An operand as the base of an attribute access (@e.t1@): a number
@@ -1130,13 +1172,16 @@ pyAttrBase :: String -> String
 pyAttrBase e@(c : _) | c == '-' || isDigit c = "(" ++ e ++ ")"
 pyAttrBase e = e
 
--- | Whether 'pyConforms' iterates over (a component of) its operand.
-checksElements :: IRType -> Bool
-checksElements (ITList _) = True
-checksElements (ITTensor _ _) = True
-checksElements (ITTuple a b) = checksElements a || checksElements b
-checksElements (ITEither a b) = checksElements a || checksElements b
-checksElements _ = False
+-- | Whether a rendered operand can be repeated without being bound first: a
+-- name (possibly dotted) or a number literal, which reads no state and has no
+-- effect. A call, a let's walrus or any operator is bound.
+isAtomicOperand :: String -> Bool
+isAtomicOperand s = case s of
+  '-' : r@(c : _) | isDigit c -> all numChar r
+  c : _ | isDigit c -> all numChar s
+  _ : _ -> all (\ch -> isAlphaNum ch || ch == '_' || ch == '.') s
+  [] -> False
+  where numChar ch = isAlphaNum ch || ch == '.' || ch == '+' || ch == '-'
 
 
 -- | 'bindIterable' with a fresh temporary, drawn only when the iterable needs

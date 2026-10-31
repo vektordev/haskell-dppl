@@ -315,7 +315,7 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" Bottom (mainPType "main = exp(Normal) > exp(Normal)")
       , testCase "the Gaussian-difference comparison stays Integrate" $
           -- The one genuinely closed-form two-random-operand comparison
-          -- ('normalDiffCdfAtZero'). Guards the narrowing above against
+          -- ('normalDiffComparison'). Guards the narrowing above against
           -- over-refusing.
           assertEqual "" Integrate (mainPType "main = Normal > Normal")
       , testCase "a comparison against a deterministic bound stays Integrate" $

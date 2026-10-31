@@ -1403,6 +1403,75 @@ conformsLiteralCases =
   ]
   where chk t x = repro [] ITBool (IRConformsTo t x) []
 
+-- | Type-tag checks of a unit, theta-tree or ADT slot (task
+-- ir-conformsto-lowering-gaps-in-text-backends): both text backends answered
+-- True for any value there, where the interpreter checks the slot. Each slot
+-- against a value of another shape and against its own, at top level and
+-- under a tuple and a list. An ADT slot takes any ADT's value, as in the
+-- interpreter.
+conformsSlotCases :: [IRCase]
+conformsSlotCases =
+  [ chk ITUnit (IRConst (VBool True))
+  , chk ITUnit (IRConst VUnit)
+  , chk ITThetaTree (IRConst (VFloat 1))
+  , chk ITThetaTree (IRConst (VThetaTree (ThetaTree [0.5] [ThetaTree [] []])))
+  , chk (ITADT "Qt") (IRConst (VBool True))
+  , chk (ITADT "Qt") (IRConst (VADT "Qa" []))
+  , chk (ITADT "Qt") (IRConst (VADT "Ra" [VFloat 1]))
+  , chk (ITTuple ITUnit ITInt) (IRConst (VTuple (VInt 1) (VInt 2)))
+  , chk (ITTuple ITUnit ITInt) (IRConst (VTuple VUnit (VInt 2)))
+  , chk (ITList (ITADT "Rt")) (IRConst (VList (ListCont (VADT "Ra" [VFloat 1]) (ListCont (VInt 0) EmptyList))))
+  ]
+  where chk t x = (repro [] ITBool (IRConformsTo t x) [])
+                    { icADTs = [IRADTDecl "Qt" [("Qa", [])], IRADTDecl "Rt" [("Ra", [("rf", ITFloat)])]] }
+
+-- | Type-tag checks of an operand that draws, as generate bodies (task
+-- text-backends-conformsto-reevaluates-its-operand): both text backends
+-- spliced the operand into every test, so it drew once per use. The draw
+-- count is compared too.
+conformsDrawnOperandCases :: [IRCase]
+conformsDrawnOperandCases =
+  [ chk ITFloat (IRSample IRUniform)
+  , chk ITInt (IRSample IRNormal)
+  , chk (ITTuple ITFloat ITFloat) (IRConstruct TgTuple [IRSample IRUniform, IRSample IRNormal])
+  , chk (ITEither ITInt ITFloat) (IRConstruct TgRight [IRSample IRUniform])
+  , chk (ITList ITFloat) (IRConstruct TgCons [IRSample IRUniform, IRConst (VList EmptyList)])
+  , chk ITFloat (IRLetIn "l0" (IRSample IRUniform) (IRVar "l0"))
+  ]
+  where chk t x = genRepro [] ITBool (IRConformsTo t x)
+
+-- | Task interpreter-bmap-evaluates-its-function-operand-per-element: a map's
+-- function operand is evaluated once, before the collection. One that raises
+-- raises over an empty collection too, and one that draws draws once, so
+-- every element sees the same draw.
+mapFunctionOperandCases :: [IRCase]
+mapFunctionOperandCases =
+  [ repro [] (ITTensor [EFixed 0] ITFloat) (IRBuiltin BMap [raising, IRBuiltin (BTensor [EFixed 0]) []]) []
+  , repro [] (ITList ITFloat) (IRBuiltin BMapList [raising, IRConst (VList EmptyList)]) []
+  , genRepro [] ITBool
+      (IRLetIn "m" (IRBuiltin BMap [drawn, IRBuiltin (BTensor [EFixed 2]) [lcLit 0, lcLit 0]])
+         (IROp OpEq (IRBuiltin (BIndex 0) [IRVar "m", IRConst (VInt 0)]) (IRBuiltin (BIndex 0) [IRVar "m", IRConst (VInt 1)])))
+  , genRepro [] ITBool
+      (IRLetIn "m" (IRBuiltin BMapList [drawn, IRConst (VList (ListCont (VFloat 0) (ListCont (VFloat 0) EmptyList)))])
+         (IROp OpEq (IRDestruct AcHead (IRVar "m")) (IRDestruct AcHead (IRDestruct AcTail (IRVar "m")))))
+  ]
+  where
+    raising = IRError "the function operand raises"
+    drawn = IRLetIn "u" (IRSample IRUniform) (IRLambda "x" (IROp OpPlus (IRVar "x") (IRVar "u")))
+
+-- | Task julia-listprod-of-an-empty-list-raises: the standard library's
+-- @listProd@ is 1.0 on an empty list (a float, which a type-tag check tells
+-- from an int 1) and multiplies right to left, which differs from left to
+-- right where an underflow meets an infinity.
+listProdCases :: [IRCase]
+listProdCases =
+  [ repro [] ITFloat (prodOf EmptyList) []
+  , repro [] ITBool (IRConformsTo ITFloat (prodOf EmptyList)) []
+  , repro [] ITFloat (prodOf (ListCont (VFloat (-1 / 0)) (ListCont (VFloat 1e300) (ListCont (VFloat (-0.29)) (ListCont (VFloat 5e-324) EmptyList))))) []
+  , repro [] ITFloat (prodOf (ListCont (VFloat 2) (ListCont (VFloat (-0.5)) EmptyList))) []
+  ]
+  where prodOf l = IRApply (IRVar "listProd") (IRConst (VList l))
+
 -- | The batched twin (task batched-conformsto-of-a-literal-fails-to-parse):
 -- the batched float check calls a method on its operand
 -- (@0.is_floating_point()@), so a negative or positive Int or Float literal
@@ -1415,6 +1484,20 @@ conformsLiteralBatchedCases =
   , guarded (IRConst (VFloat 2))
   ]
   where guarded x = batchedRepro (IRIf (IRConformsTo ITFloat x) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1)
+
+-- | Task batched-isclose-holds-at-an-infinity: 'OpApprox' at an infinite
+-- operand is false against a finite number and true against itself.
+approxInfinityBatchedCases :: [IRCase]
+approxInfinityBatchedCases =
+  [ batchedRepro (IRIf (IROp OpApprox (IRVar "a0") (IRConst (VFloat k))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat a)
+  | a <- [-1 / 0, 1 / 0], k <- [1, 1 / 0, -1 / 0] ]
+
+-- | batched-math-on-a-constant-operand-fails (formerly a knownDisagreements
+-- family): a density of a plain Python number, not a tensor.
+constantDensityBatchedCases :: [IRCase]
+constantDensityBatchedCases =
+  [ batchedRepro (IRDensity d Linear (IRConst (VFloat c))) (VFloat 1)
+  | d <- [IRUniform, IRNormal], c <- [-0.5, 0.5, 1.5, 1 / 0] ]
 
 lcLit :: Double -> IRExpr
 lcLit = IRConst . VFloat
@@ -1475,7 +1558,7 @@ floatAgrees a b
 
 -- | Match the interpreter's value against a backend's sample tokens
 -- (@_ser@'s form). 'Right' says whether an int token stood at a float slot
--- (Python's @sign@ and uniform density answer ints; numerically that is the
+-- (Python's @sign@ answers ints; numerically that is the
 -- same value, and it is tabulated rather than failed).
 valueAgrees :: IRValue -> [String] -> Either String Bool
 valueAgrees = valueAgreesWith floatAgrees
@@ -1581,70 +1664,18 @@ knownDisagreements =
   -- The same ticket, where Python's int sign meets an operator the
   -- interpreter takes floats only for (found in M4): the rewrite above then
   -- stops the interpreter, so the family is recognised by the construct and
-  -- a differing value instead, as Python's uniform functions are below.
+  -- a differing value instead.
   , KnownFamily "opsign-nan-negative-zero-and-int-results-differ-across-engines" ["python"]
       (ByAnswer (\c o a -> isValue o && isSampled a && not (null [ () | IRUnaryOp OpSign _ <- caseUniverse c ])))
       (repro [("a0", ITFloat)] ITBool
          (IRLetIn "s" (IRUnaryOp OpSign (IRVar "a0"))
             (IRConformsTo ITFloat (IRIf (IROp OpApprox (IRVar "s") (IRConst (VFloat 1))) (IRVar "s") (IRConst (VFloat 0)))))
          [VFloat 2])
-  , KnownFamily "python-float-division-by-zero-raises" ["python"]
-      (ByAnswer (\_ o a -> isValue o && raisedWith "ZeroDivisionError" a))
-      (repro [("a0", ITFloat)] ITFloat (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a0")) [VFloat 0])
-  , KnownFamily "python-normal-density-overflows-past-1e154" ["python"]
-      (ByAnswer (\c o a -> isValue o && raisedWith "OverflowError" a && any hasNormalDensity (caseBodies c)))
-      (repro [("a0", ITFloat)] ITFloat (IRDensity IRNormal Linear (IRVar "a0")) [VFloat 1e300])
-  , KnownFamily "python-uniform-density-and-cdf-answer-ints" ["python"]
-      (AsIf (const (irMap pythonUniform)))
-      (repro [("a0", ITFloat)] ITBool (IRConformsTo ITFloat (IRDensity IRUniform Linear (IRVar "a0"))) [VFloat 0.5])
-  -- The same ticket, where the int flows on into float arithmetic: the
-  -- rewrite above then stops the interpreter (an int meets a float), so the
-  -- family is recognised by the construct and a differing value instead.
-  -- Looser: it covers any value difference in a body using a linear uniform
-  -- density or CDF.
-  , KnownFamily "python-uniform-density-and-cdf-answer-ints" ["python"]
-      (ByAnswer (\c o a -> isValue o && isSampled a
-                           && not (null [ () | x <- caseUniverse c, linearUniform x ])))
-      (repro [("a0", ITFloat)] ITBool (IRConformsTo ITFloat (IRCumulative IRUniform Linear (IRVar "a0"))) [VFloat 2])
-  , KnownFamily "python-empty-list-head-and-tail-answer-none" ["python"]
-      (ByAnswer (\_ o a -> case (o, a) of
-                  (InterpRaise m, Sampled _) -> m `elem` ["head of an empty list", "tail of an empty list"]
-                  _ -> False))
-      (repro [] ITBool (IRUnaryOp OpIsAny (IRDestruct AcHead (IRConst (VList (EmptyList :: GenericList IRValue))))) [])
-  , KnownFamily "python-ispossible-on-a-tuple-domain-answers-none" ["python"]
-      (ByAnswer (\c _ _ -> any tupleDomain [ d | IRIsPossible d _ <- caseUniverse c ]))
-      (repro [] ITBool (IRIsPossible (MultiTuple MultiContinuous MultiContinuous) (IRConst (VTuple (VFloat 1) (VFloat 2)))) [])
-  , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
-      (AsIf (const (irMap conformsUnitUnchecked)))
-      (repro [] ITBool (IRConformsTo ITUnit (IRConst (VBool True))) [])
-  , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
-      (AsIf (const (irMap conformsUnitUnchecked)))
-      ((repro [] ITBool (IRConformsTo (ITADT "Qt") (IRConst (VBool True))) []) { icADTs = [IRADTDecl "Qt" [("Qa", [])]] })
   -- M3 (builtins, tensors and function groups).
-  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
-      (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
-      (repro [] ITFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList))) [])
-  -- The same ticket (found in M4): Julia's @prod@ multiplies left to right,
-  -- the standard library right to left, which differs where an underflow
-  -- meets an infinity.
-  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
-      (ByAnswer (\c o a -> isValue o && isSampled a && not (null [ () | IRVar "listProd" <- caseUniverse c ])))
-      (repro [] ITFloat (IRApply (IRVar "listProd")
-         (IRConst (VList (ListCont (VFloat (-1 / 0)) (ListCont (VFloat 1e300) (ListCont (VFloat (-0.29)) (ListCont (VFloat 5e-324) EmptyList))))))) [])
-  -- The same ticket, Python's side (found in M4): its empty product is the
-  -- int 1, which only a type-tag check tells from 1.0. Julia raises as above.
-  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["python", "julia"]
-      (ByAnswer (\c o a -> isValue o && isSampled a
-                           && not (null [ () | IRConformsTo _ x <- caseUniverse c, IRVar "listProd" <- universe x ])))
-      (repro [] ITBool (IRConformsTo ITFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList)))) [])
   , KnownFamily "bzip-max-and-approx-have-no-text-lowering" ["python", "julia"]
       (ByAnswer (\_ _ a -> raisedWith "codegen threw" a && (raisedWith "OpMax" a || raisedWith "OpApprox" a)))
       (repro [] (ITTensor [EFixed 1] ITFloat)
          (IRBuiltin (BZip OpMax) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat 1)], IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat 2)]]) [])
-  , KnownFamily "interpreter-bmap-evaluates-its-function-operand-per-element" ["python", "julia"]
-      (AsIf (const (irMap functionOperandFirst)))
-      (repro [] (ITTensor [EFixed 0] ITFloat)
-         (IRBuiltin BMap [IRError "the function operand raises", IRBuiltin (BTensor [EFixed 0]) []]) [])
   -- Both text backends render nested lambdas as one lambda of several
   -- parameters and an application chain as one call, so only an application
   -- saturating its function's syntactic lambdas exactly works: a partial
@@ -1672,14 +1703,6 @@ knownDisagreements =
          [[VFloat 800.0, VFloat (-2.5)]] [] [] ([], []))
   -- M4 (generate bodies, judged by replaying the backend's draws).
   --
-  -- Both text backends lower a type-tag check by repeating its operand
-  -- (@isAny(x) or isFloat(x)@), so an operand that draws draws
-  -- again. Recognised by the construct: a generate body whose check has an
-  -- operand with an effect ('isPure'), answering a sample.
-  , KnownFamily "text-backends-conformsto-reevaluates-its-operand" ["python", "julia"]
-      (ByAnswer (\c o a -> icKind c == GenBody && isValue o && isSampled a
-                           && not (null [ () | IRConformsTo _ x <- caseUniverse c, not (isPure x) ])))
-      (genRepro [] ITBool (IRConformsTo ITFloat (IRSample IRUniform)))
   -- The interpreter evaluates a cons's tail before its head; both text
   -- backends evaluate the head first. Only the order of the draws differs.
   , KnownFamily "interpreter-cons-evaluates-its-tail-before-its-head" ["python", "julia"]
@@ -1697,36 +1720,12 @@ knownDisagreements =
       (ByAnswer (\c _ _ -> icKind c == GenBody
                            && not (null [ () | x <- caseUniverse c, d <- hoistedEffects x, not (isPure d) ])))
       (genRepro [] ITFloat (IROp OpSub (IRSample IRUniform) (IRLetIn "l" (IRSample IRUniform) (IRVar "l"))))
-  -- Python's empty sum is the int 0, which has no negative zero: the IR's
-  -- @-(sum [])@ is -0.0 (found in M4). Recognised by the construct (a case
-  -- summing a tensor of static length 0) and a differing value.
-  , KnownFamily "python-empty-sum-answers-an-int" ["python"]
-      (ByAnswer (\c o a -> isValue o && isSampled a
-                           && not (null [ () | IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []] <- caseUniverse c ])))
-      (repro [] ITFloat (IROp OpDiv (IRUnaryOp OpNeg (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []])) (IRConst (VFloat 2))) [])
   -- M4, the batched arm (PResult bodies through the select pass and the
   -- batched backend).
   --
-  -- The batched backend lowers a list index as a tensor slot read
-  -- (@xs[..., k]@), which a cons list does not take.
-  , KnownFamily "batched-blistindex-reads-a-cons-list-as-a-tensor" ["batched"]
-      (ByAnswer (\c _ a -> raisedWith "not supported between instances of 'tuple' and 'int'" a
-                         && not (null [ () | IRBuiltin BListIndex _ <- caseUniverse c ])))
-      (batchedRepro (IRBuiltin BListIndex [IRConstruct TgCons [IRConst (VFloat 0.5), IRConst (VList EmptyList)], IRConst (VInt 0)]) (VFloat 1))
-  -- The batched @isclose@ scales its tolerance by the operands' magnitude, so
-  -- an infinity is close to every number.
-  , KnownFamily "batched-isclose-holds-at-an-infinity" ["batched"]
-      (AsIf (const (irMap batchedApprox)))
-      (batchedRepro (IRIf (IROp OpApprox (IRVar "a0") (IRConst (VFloat 1))) (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat (-1 / 0)))
-  -- The batched runtime's densities take a tensor: of a plain Python number,
-  -- the uniform one is a bool (which has no @.to@) and the normal one calls
-  -- @torch.exp@ on a float.
-  , KnownFamily "batched-math-on-a-constant-operand-fails" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "'bool' object has no attribute 'to'" a || raisedWith "must be Tensor, not float" a))
-      (batchedRepro (IRDensity IRUniform Linear (IRConst (VFloat 0.5))) (VFloat 1))
   -- The batched backend divides by @safe_div@, a NaN at a zero divisor where
-  -- the IR's division answers an infinity (Python raises there,
-  -- 'python-float-division-by-zero-raises'), and takes logs by @safe_log@,
+  -- the IR's division (and scalar Python's @safe_div@) answers an infinity,
+  -- and takes logs by @safe_log@,
   -- minus infinity at a negative or NaN operand where the IR's log is a NaN.
   , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
       (AsIf (const (irMap (batchedSign . batchedLog . batchedDivision))))
@@ -1761,29 +1760,12 @@ knownDisagreements =
       (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
                          || raisedWith "float() argument must be a string or a real number, not '" a))
       (batchedIntKeyRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRVar "a0"])))
-  -- The batched categorical index reads its weights as a tensor, so a list
-  -- of batched weights is indexed by a tuple. (A list of constant weights
-  -- too.) While it stands, BCategoricalIndex is in
-  -- CertifiedCensus.batchedReachedNotCompared; a fix moves it to
-  -- batchedCertifiedConstructs.
-  , KnownFamily "batched-categorical-index-over-batched-weights-fails" ["batched"]
-      (ByAnswer (\c _ a -> (raisedWith "list indices must be integers or slices, not tuple" a
-                            || raisedWith "not supported between instances of 'tuple' and 'int'" a)
-                         && not (null [ () | IRBuiltin (BCategoricalIndex _ _) _ <- caseUniverse c ])))
-      (batchedRepro (IRIf (IROp OpEq (IRBuiltin (BCategoricalIndex 0 2) [IRConst (VFloat 0.5), IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat 1)]])
-                                     (IRConst (VInt 0)))
-                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
   ]
   where
     isValue (Interpreted _) = True
     isValue _ = False
     raisedWith needle (Raised m) = needle `isInfixOf` m
     raisedWith _ _ = False
-    hasNormalDensity e = not (null [ () | IRDensity IRNormal _ _ <- universe e ])
-    tupleDomain d = case d of
-      MultiTuple _ _ -> True
-      MultiEither l r -> tupleDomain l || tupleDomain r
-      _ -> False
     -- The draw counts agree (the first token after the tuple's).
     -- What Python floats out of an expression to statements before it: a
     -- let-spine or a conditional under a node that is not itself a statement
@@ -1797,10 +1779,6 @@ knownDisagreements =
       _ -> False
     isSampled (Sampled _) = True
     isSampled _ = False
-    linearUniform x = case x of
-      IRDensity IRUniform Linear _ -> True
-      IRCumulative IRUniform _ _ -> True
-      _ -> False
 
 -- | Every subexpression, the expression itself included.
 universe :: IRExpr -> [IRExpr]
@@ -1915,48 +1893,6 @@ backendSign backend e = case e of
           IRIf (isNaNE x) x $ IRIf (gtE x (IRConst zero)) (IRConst one) $
             IRIf (ltE x (IRConst zero)) (IRConst (neg one)) x
 
--- | Python's uniform density and CDF, which answer ints outside [0, 1] (and
--- the density inside it), and whose CDF is 1 at a NaN (so its log is 0).
-pythonUniform :: IRExpr -> IRExpr
-pythonUniform e = case e of
-  IRDensity IRUniform Linear a -> IRLetIn "un_a" a $
-    IRIf (IROp OpAnd (geE x (IRConst (VFloat 0))) (leE x (IRConst (VFloat 1)))) (IRConst (VInt 1)) (IRConst (VInt 0))
-  IRCumulative IRUniform Linear a -> IRLetIn "un_a" a $
-    IRIf (ltE x (IRConst (VFloat 0))) (IRConst (VInt 0)) (IRIf (leE x (IRConst (VFloat 1))) x (IRConst (VInt 1)))
-  IRCumulative IRUniform Log a -> IRLetIn "un_a" a $
-    IRIf (ltE x (IRConst (VFloat 0))) (IRConst (VFloat (-1 / 0))) $
-      IRIf (leE x (IRConst (VFloat 1)))
-           (IRIf (IROp OpEq x (IRConst (VFloat 0))) (IRConst (VFloat (-1 / 0))) (IRUnaryOp OpLog x))
-           (IRConst (VFloat 0))
-  _ -> e
-  where x = IRVar "un_a"
-
--- | 'BMap' and 'BMapList' as both text backends evaluate them: the function
--- operand once, before the collection. The interpreter evaluates it per
--- element, after the collection (so not at all over an empty one).
-functionOperandFirst :: IRExpr -> IRExpr
-functionOperandFirst e = case e of
-  IRBuiltin b [f, xs] | b == BMap || b == BMapList, not (isLambda' f) ->
-    IRLetIn "bm_f" f (IRBuiltin b [IRVar "bm_f", xs])
-  _ -> e
-  where
-    isLambda' (IRLambda _ _) = True
-    isLambda' _ = False
-
--- | 'OpApprox' as the batched backend's @isclose@ answers it: also true when
--- either operand is infinite and neither is a NaN.
-batchedApprox :: IRExpr -> IRExpr
-batchedApprox e = case e of
-  IROp OpApprox a b ->
-    IRLetIn "ap_a" a (IRLetIn "ap_b" b
-      (IROp OpOr (IROp OpApprox x y)
-         (IROp OpAnd (IROp OpOr (isInf x) (isInf y)) (IROp OpAnd (IROp OpEq x x) (IROp OpEq y y)))))
-  _ -> e
-  where
-    x = IRVar "ap_a"
-    y = IRVar "ap_b"
-    isInf v = IROp OpOr (IROp OpEq v (floatE (1 / 0))) (IROp OpEq v (floatE (-1 / 0)))
-
 -- | Whether an expression holds a partial destructor or index: one that
 -- raises outside its domain.
 partialExpr :: IRExpr -> Bool
@@ -2009,28 +1945,9 @@ consHeadFirst e = case e of
   IRConstruct TgCons [hd, tl] | not (isPure hd) -> IRLetIn "cons_hd" hd (IRConstruct TgCons [IRVar "cons_hd", tl])
   _ -> e
 
--- | 'IRConformsTo' as both text backends lower it: a unit, theta-tree or
--- ADT slot is not checked (any value conforms), where the interpreter checks
--- it.
-conformsUnitUnchecked :: IRExpr -> IRExpr
-conformsUnitUnchecked e = case e of
-  IRConformsTo t a -> IRConformsTo (loosen t) a
-  _ -> e
-  where
-    loosen t = case t of
-      ITUnit -> ITVar 0
-      ITThetaTree -> ITVar 0
-      ITADT _ -> ITVar 0
-      ITList a -> ITList (loosen a)
-      ITTuple a b -> ITTuple (loosen a) (loosen b)
-      ITEither a b -> ITEither (loosen a) (loosen b)
-      _ -> t
-
-gtE, ltE, geE, leE :: IRExpr -> IRExpr -> IRExpr
+gtE, ltE :: IRExpr -> IRExpr -> IRExpr
 gtE a b = IROp OpGreaterThan a b
 ltE a b = IROp OpLessThan a b
-geE a b = IROp OpOr (gtE a b) (IROp OpEq a b)
-leE a b = IROp OpOr (ltE a b) (IROp OpEq a b)
 
 isNaNE :: IRExpr -> IRExpr
 isNaNE x = IRUnaryOp OpNot (IROp OpEq x x)
@@ -2637,6 +2554,17 @@ fixedPlans c = unGen (vectorOf 300 drawPlan) (mkQCGen (20261013 + fromEnum c)) 3
 fixedSample :: [IRCase]
 fixedSample = unGen (vectorOf 600 genIRCase) (mkQCGen 20261013) 30
 
+-- | Regression cases run against the interpreter, scalar Python and (when on
+-- the PATH) Julia: no disagreement on either backend.
+textBackendsAgree :: [IRCase] -> IO ()
+textBackendsAgree cs = do
+  julia <- findExecutable "julia"
+  cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c))) cs
+  (_, pyD) <- runIRCasesPython cases
+  assertEqual "python disagreements" [] (map idWhy pyD)
+  jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+  assertEqual "julia disagreements" [] (map idWhy jlD)
+
 irFuzzGeneratorTests :: TestTree
 irFuzzGeneratorTests = testGroup "IR fuzz generator"
   [ testProperty "a drawn case type-checks at the type it was drawn at" $
@@ -2682,8 +2610,7 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
                                      ++ "; if the bug is fixed, drop (or narrow) its knownDisagreements entry")
                  _ -> assertFailure (kfTicket kf ++ ": two entries share this repro; give each its own")
                -- Elsewhere a repro may disagree only as another filed
-               -- family: a batched NaN at a zero divisor cannot be shown
-               -- without Python's division raising there.
+               -- family (one repro can show two bugs at once).
                else do
                  others <- mapM knownDisagreement ds
                  assertEqual (kfTicket kf ++ ": the repro disagrees on " ++ b ++ ", which the entry does not list, and not as another filed family")
@@ -2718,10 +2645,28 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
   -- batched-conformsto-of-a-literal-fails-to-parse; both formerly
   -- knownDisagreements families): a type-tag check spliced a number literal
   -- before an attribute access, which neither Python nor Julia parses.
+  -- interpreter-bmap-evaluates-its-function-operand-per-element and
+  -- julia-listprod-of-an-empty-list-raises (both formerly knownDisagreements
+  -- families).
+  , testCase "a map evaluates its function operand once, first, on the interpreter, scalar Python and Julia" $
+      textBackendsAgree mapFunctionOperandCases
+  , testCase "listProd agrees on the interpreter, scalar Python and Julia" $
+      textBackendsAgree listProdCases
   , testCase "a type-tag check of a number literal loads and agrees on scalar Python and Julia" $ do
       julia <- findExecutable "julia"
       cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c)))
                     conformsLiteralCases
+      (_, pyD) <- runIRCasesPython cases
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- ir-conformsto-lowering-gaps-in-text-backends (unit, theta-tree and ADT
+  -- slots) and text-backends-conformsto-reevaluates-its-operand (a drawn
+  -- operand), both formerly knownDisagreements families.
+  , testCase "a type-tag check of a unit, theta-tree or ADT slot, or of a drawn operand, agrees on scalar Python and Julia" $ do
+      julia <- findExecutable "julia"
+      cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c)))
+                    (conformsSlotCases ++ conformsDrawnOperandCases)
       (_, pyD) <- runIRCasesPython cases
       assertEqual "python disagreements" [] (map idWhy pyD)
       jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
@@ -2737,6 +2682,57 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             Right bs -> do
               (_, ds) <- runIRCasesBatched py bs
               assertEqual "batched disagreements" [] (map idWhy ds)
+  , testCase "batched: a density of a constant agrees with the interpreter" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched density of a constant" >>= maybe (return ()) assertFailure
+        Just py -> do
+          bcs <- mapM prepareBatchedIRCase constantDensityBatchedCases
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  , testCase "batched: OpApprox at an infinity agrees with the interpreter" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched approx at an infinity" >>= maybe (return ()) assertFailure
+        Just py -> do
+          bcs <- mapM prepareBatchedIRCase approxInfinityBatchedCases
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  -- python-ispossible-on-a-tuple-domain-answers-none (formerly a
+  -- knownDisagreements family): pythonLib.isPossible tested a tuple domain
+  -- with isinstance(expr, tuple), but runtime tuples are T objects, so it
+  -- fell off its end and answered None.
+  , testCase "isPossible over a tuple domain agrees on scalar Python and Julia" $ do
+      let dom = MultiTuple MultiContinuous (MultiDiscretes [VFloat 2])
+          cs = [ repro [] ITBool (IRIsPossible dom (IRConst (VTuple (VFloat 1) (VFloat y)))) [] | y <- [2, 3] ]
+      cases <- mapM (\c -> (\o -> (c, [([], o)])) <$> interpretIRCase c []) cs
+      assertEqual "interpreter answers" (map show [Interpreted (VBool True), Interpreted (VBool False)]) [ show o | (_, [(_, o)]) <- cases ]
+      (_, pyD) <- runIRCasesPython cases
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      julia <- findExecutable "julia"
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-empty-list-head-and-tail-answer-none (formerly a knownDisagreements
+  -- family): InferenceList.__len__ counted the EmptyInferenceList terminator
+  -- and indexing walked onto it, so head and tail of an empty list answered
+  -- None in Python where the interpreter raises.
+  , testCase "head and tail of an empty list raise on scalar Python and Julia, as in the interpreter" $ do
+      let empty = IRConst (VList (EmptyList :: GenericList IRValue))
+          cs = [ repro [] ITBool (IRUnaryOp OpIsAny (IRDestruct d empty)) [] | d <- [AcHead, AcTail] ]
+      cases <- mapM (\c -> (\o -> (c, [([], o)])) <$> interpretIRCase c []) cs
+      assertEqual "interpreter answers" (map (show . InterpRaise) ["head of an empty list", "tail of an empty list"])
+        [ show o | (_, [(_, o)]) <- cases ]
+      (_, pyD) <- runIRCasesPython cases
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      julia <- findExecutable "julia"
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
   -- python-max-of-empty-tensor-in-recursive-helper: max over a zero-extent
   -- tensor is the identity -inf on every engine (Python raised ValueError).
   , testCase "max of an empty tensor is -inf on scalar Python and Julia, as in the interpreter" $ do
@@ -2746,6 +2742,74 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
       assertEqual "python disagreements" [] (map idWhy pyD)
       julia <- findExecutable "julia"
       jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, [([], o)])]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-empty-sum-answers-an-int (formerly a knownDisagreements family):
+  -- Python's sum of an empty list was the int 0, which has no negative zero,
+  -- so -(sum []) / 2 was 0.0 where the IR answers -0.0.
+  , testCase "an empty sum is the float 0.0 on scalar Python and Julia, so its negation is -0.0" $ do
+      let emptySum = IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []]
+          c = repro [] ITFloat (IROp OpDiv (IRUnaryOp OpNeg emptySum) (IRConst (VFloat 2))) []
+      o <- interpretIRCase c []
+      assertEqual "interpreter answer" (show (Interpreted (VFloat (-0.0)))) (show o)
+      (_, pyD) <- runIRCasesPython [(c, [([], o)])]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      julia <- findExecutable "julia"
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, [([], o)])]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-uniform-density-and-cdf-answer-ints (formerly a knownDisagreements
+  -- family): Python's uniform density and CDF answered the ints 1/0 (so
+  -- @IRConformsTo TFloat@ was False), and its CDF was 1 at a NaN (so the log
+  -- CDF was 0.0) where the interpreter and Julia answer a NaN.
+  , testCase "the uniform density and CDF answer floats on scalar Python and Julia, and NaN at a NaN" $ do
+      julia <- findExecutable "julia"
+      let a0 = IRVar "a0"
+          body = IRConstruct TgTuple
+            [ IRConformsTo ITFloat (IRDensity IRUniform Linear a0)
+            , IRConstruct TgTuple
+                [ IRConformsTo ITFloat (IRCumulative IRUniform Linear a0)
+                , IRConstruct TgTuple
+                    [ IRDensity IRUniform Linear a0
+                    , IRConstruct TgTuple [IRCumulative IRUniform Linear a0, IRCumulative IRUniform Log a0] ] ] ]
+          rt = ITTuple ITBool (ITTuple ITBool (ITTuple ITFloat (ITTuple ITFloat ITFloat)))
+          argss = [ [VFloat a] | a <- [0.5, 2, -1, 0, -0.0, 1, 0 / 0, 1 / 0, -1 / 0] ]
+          c = (repro [("a0", ITFloat)] rt body [VFloat 0.5]) { icArgs = argss }
+      outs <- mapM (\as -> (\o -> (as, o)) <$> interpretIRCase c as) argss
+      (_, pyD) <- runIRCasesPython [(c, outs)]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, outs)]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-normal-density-overflows-past-1e154 (formerly a knownDisagreements
+  -- family): Python's normal density squared its argument with @**@, which
+  -- raises OverflowError past ~1.3e154; the interpreter and Julia answer 0.0
+  -- (minus infinity in log space).
+  , testCase "the normal density past 1e154 answers 0 (log: -inf) on scalar Python and Julia" $ do
+      julia <- findExecutable "julia"
+      let a0 = IRVar "a0"
+          c = (repro [("a0", ITFloat)] (ITTuple ITFloat ITFloat)
+                 (IRConstruct TgTuple [IRDensity IRNormal Linear a0, IRDensity IRNormal Log a0]) [VFloat 1e300])
+                { icArgs = [ [VFloat a] | a <- [1e300, -1e300, 1e155, 1 / 0, -1 / 0, 0 / 0, 0.5] ] }
+      outs <- mapM (\as -> (\o -> (as, o)) <$> interpretIRCase c as) (icArgs c)
+      assertEqual "interpreter answer at 1e300"
+        (show (Interpreted (VTuple (VFloat 0) (VFloat (-1 / 0))))) (show (snd (head outs)))
+      (_, pyD) <- runIRCasesPython [(c, outs)]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, outs)]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-float-division-by-zero-raises (formerly a knownDisagreements
+  -- family): Python's float division raised ZeroDivisionError on a zero
+  -- divisor, where the interpreter and Julia answer IEEE: a signed infinity,
+  -- or NaN for 0/0 and NaN/0.
+  , testCase "float division by a zero answers IEEE on scalar Python and Julia, as in the interpreter" $ do
+      julia <- findExecutable "julia"
+      let argss = [ [VFloat a, VFloat b] | a <- [1, -2.5, 0, -0.0, 0 / 0, 1 / 0], b <- [0, -0.0] ]
+          c = (repro [("a0", ITFloat), ("a1", ITFloat)] ITFloat (IROp OpDiv (IRVar "a0") (IRVar "a1")) [VFloat 1, VFloat 0])
+                { icArgs = argss }
+      outs <- mapM (\as -> (\o -> (as, o)) <$> interpretIRCase c as) argss
+      assertEqual "interpreter answers (1/0, 1/-0)"
+        (map (show . Interpreted . VFloat) [1 / 0, -1 / 0]) [ show o | (_, o) <- take 2 outs ]
+      (_, pyD) <- runIRCasesPython [(c, outs)]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, outs)]) julia
       assertEqual "julia disagreements" [] (map idWhy jlD)
   -- julia-logspace-enumerated-sum-off-by-log2-with-nan: a NaN term in a
   -- log-sum-exp reduction makes the whole reduction NaN on every engine,
@@ -2810,6 +2874,28 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
               Right b -> do
                 (_, ds) <- runIRCasesBatched py [b]
                 assertEqual ("batched disagreements on " ++ show op) [] (map idWhy ds)) [OpLessThan, OpGreaterThan]
+  -- Formerly two knownDisagreements families (batched-blistindex-reads-a-cons-list-as-a-tensor,
+  -- batched-categorical-index-over-batched-weights-fails): the batched runtime
+  -- read a cons list or a list of weights as a logit tensor.
+  , testCase "batched: a cons-list slot read and a categorical index over a weight list agree with the interpreter" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched list reads" >>= maybe (return ()) assertFailure
+        Just py -> do
+          let cons = IRConstruct TgCons [IRConst (VFloat 0.5), IRConst (VList EmptyList)]
+              cat w = IRIf (IROp OpEq (IRBuiltin (BCategoricalIndex 0 2) [IRConst (VFloat 0.5), w]) (IRConst (VInt 0)))
+                           (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))
+              cs = [ batchedRepro (IRBuiltin BListIndex [cons, IRConst (VInt 0)]) (VFloat 1)
+                   , batchedRepro (cat (IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRConst (VFloat 1)])) (VFloat 1)
+                   , batchedRepro (cat (IRBuiltin (BTensor [EFixed 2]) [IRConst (VFloat 0.3), IRConst (VFloat 1)])) (VFloat 1)
+                   , batchedRepro (cat (IRConstruct TgCons [IRVar "a0", IRConstruct TgCons [IRConst (VFloat 1), IRConst (VList EmptyList)]])) (VFloat 1)
+                   ]
+          bcs <- mapM prepareBatchedIRCase cs
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
   , testCase "a fixed-seed sample of plans reaches every PResult combinator, in every semiring" $
       assertEqual "unreached (semiring, combinator)" []
         [ (c, l) | c <- [minBound .. maxBound], let reached = nub (concatMap planNodes (fixedPlans c))

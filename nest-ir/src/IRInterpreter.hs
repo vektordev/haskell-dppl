@@ -490,11 +490,16 @@ generate f oracle adts' globalEnv env args (IRDestruct AcTail listExpr) = do
     VList (ListCont _ a) -> return $ VList a
     VList EmptyList -> raise f "tail of an empty list"
     _ -> failWith f ("Type error: tail must be called on a list: " ++ show listVal)
+-- The function operand of a map is evaluated once, before the collection, as
+-- both text backends do (task
+-- interpreter-bmap-evaluates-its-function-operand-per-element): an operand that
+-- raises raises over an empty collection too, and one that samples draws once.
 generate f oracle adts' globalEnv env args (IRBuiltin BMapList [fExpr, listExpr]) = do
+  fVal <- generate f oracle adts' globalEnv env args fExpr
   listVal <- generate f oracle adts' globalEnv env args listExpr
   case listVal of
     VList lst -> do
-      newLst <- mapM (\x -> generate f oracle adts' globalEnv env args (IRApply fExpr (IRConst x))) lst
+      newLst <- mapM (\x -> generate f oracle adts' globalEnv env args (IRApply (IRConst fVal) (IRConst x))) lst
       return $ VList newLst
     _ ->  failWith f "Type error: map must be called on a list"
 generate f oracle adts' globalEnv env [] (IRDestruct AcFromLeft expr) = do
@@ -599,11 +604,13 @@ generate f oracle adts' globalEnv env args (IRBuiltin (BTensor sh) elems) = do
 -- The flat row-major position of every element, as an integer.
 generate _ _ _ _ _ _ (IRBuiltin (BIota sh) []) =
   return $ VTensor sh (map VInt [0 .. shapeNumel sh - 1])
+-- The function operand is evaluated once, first, as for 'BMapList' above.
 generate f oracle adts' globalEnv env args (IRBuiltin BMap [fExpr, tExpr]) = do
+  fVal <- generate f oracle adts' globalEnv env args fExpr
   tVal <- generate f oracle adts' globalEnv env args tExpr
   case tVal of
     VTensor sh xs -> do
-      ys <- mapM (\x -> generate f oracle adts' globalEnv env args (IRApply fExpr (IRConst x))) xs
+      ys <- mapM (\x -> generate f oracle adts' globalEnv env args (IRApply (IRConst fVal) (IRConst x))) xs
       return $ VTensor sh ys
     _ -> failWith f ("BMap: not a tensor: " ++ show tVal)
 -- Reduction folds right within each fibre, matching the association order the
