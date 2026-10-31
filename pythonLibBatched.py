@@ -702,10 +702,14 @@ class InferenceList:
     if isinstance(index, slice):
       # Tail lists only, as in pythonLib: sample[1:] is the tail.
       if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):
+        # Walking past the end raises, as the interpreter's "tail of an
+        # empty list" does (task python-empty-list-head-and-tail-answer-none).
         current = self
-        for _ in range(index.start - 1):
+        for _ in range(index.start):
+          if isinstance(current, EmptyInferenceList) or current is None:
+            raise IndexError("tail of an empty list")
           current = current.next
-        return current.next
+        return current
       raise IndexError("Slices may only be used for tail lists")
     if index < 0:
       # Only a negative index needs the length; a non-negative one walks

@@ -262,9 +262,11 @@ class InferenceList:
     return NotImplemented
 
   def __len__(self):
+    # Counts the Cons cells only: the EmptyInferenceList terminator is not an
+    # element (task python-empty-list-head-and-tail-answer-none).
     curr = self
     cnt = 0
-    while curr is not None:
+    while isinstance(curr, ConsInferenceList):
       cnt += 1
       curr = curr.next
     return cnt
@@ -279,10 +281,14 @@ class InferenceList:
     if isinstance(index, slice):
       # Tail lists
       if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):
+        # Walking past the end of the list raises, as the interpreter's
+        # "tail of an empty list" does. An ANY list stays a wildcard here.
         current = self
-        for _ in range(index.start - 1):
+        for _ in range(index.start):
+          if isinstance(current, EmptyInferenceList) or current is None:
+            raise IndexError("tail of an empty list")
           current = current.next
-        return current.next
+        return current
       else:
         raise IndexError("Slices may only be used for tail lists")
     if index < 0:
@@ -293,9 +299,12 @@ class InferenceList:
         raise IndexError("LinkedList index out of range")
     current = self
     for _ in range(index):
-      current = current.next
-      if current is None:
+      if isinstance(current, EmptyInferenceList) or current is None:
         raise IndexError("LinkedList index out of range")
+      current = current.next
+    # The terminator holds no element: head of an empty list raises.
+    if isinstance(current, EmptyInferenceList) or current is None:
+      raise IndexError("head of an empty list" if index == 0 else "LinkedList index out of range")
     return current.value
   
   def __eq__(self, other):

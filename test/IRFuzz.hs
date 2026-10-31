@@ -1606,11 +1606,6 @@ knownDisagreements =
       (ByAnswer (\c o a -> isValue o && isSampled a
                            && not (null [ () | x <- caseUniverse c, linearUniform x ])))
       (repro [("a0", ITFloat)] ITBool (IRConformsTo ITFloat (IRCumulative IRUniform Linear (IRVar "a0"))) [VFloat 2])
-  , KnownFamily "python-empty-list-head-and-tail-answer-none" ["python"]
-      (ByAnswer (\_ o a -> case (o, a) of
-                  (InterpRaise m, Sampled _) -> m `elem` ["head of an empty list", "tail of an empty list"]
-                  _ -> False))
-      (repro [] ITBool (IRUnaryOp OpIsAny (IRDestruct AcHead (IRConst (VList (EmptyList :: GenericList IRValue))))) [])
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (AsIf (const (irMap conformsUnitUnchecked)))
       (repro [] ITBool (IRConformsTo ITUnit (IRConst (VBool True))) [])
@@ -2752,6 +2747,21 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
           cs = [ repro [] ITBool (IRIsPossible dom (IRConst (VTuple (VFloat 1) (VFloat y)))) [] | y <- [2, 3] ]
       cases <- mapM (\c -> (\o -> (c, [([], o)])) <$> interpretIRCase c []) cs
       assertEqual "interpreter answers" (map show [Interpreted (VBool True), Interpreted (VBool False)]) [ show o | (_, [(_, o)]) <- cases ]
+      (_, pyD) <- runIRCasesPython cases
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      julia <- findExecutable "julia"
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-empty-list-head-and-tail-answer-none (formerly a knownDisagreements
+  -- family): InferenceList.__len__ counted the EmptyInferenceList terminator
+  -- and indexing walked onto it, so head and tail of an empty list answered
+  -- None in Python where the interpreter raises.
+  , testCase "head and tail of an empty list raise on scalar Python and Julia, as in the interpreter" $ do
+      let empty = IRConst (VList (EmptyList :: GenericList IRValue))
+          cs = [ repro [] ITBool (IRUnaryOp OpIsAny (IRDestruct d empty)) [] | d <- [AcHead, AcTail] ]
+      cases <- mapM (\c -> (\o -> (c, [([], o)])) <$> interpretIRCase c []) cs
+      assertEqual "interpreter answers" (map (show . InterpRaise) ["head of an empty list", "tail of an empty list"])
+        [ show o | (_, [(_, o)]) <- cases ]
       (_, pyD) <- runIRCasesPython cases
       assertEqual "python disagreements" [] (map idWhy pyD)
       julia <- findExecutable "julia"
