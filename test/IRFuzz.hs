@@ -1440,6 +1440,38 @@ conformsDrawnOperandCases =
   ]
   where chk t x = genRepro [] ITBool (IRConformsTo t x)
 
+-- | Task interpreter-bmap-evaluates-its-function-operand-per-element: a map's
+-- function operand is evaluated once, before the collection. One that raises
+-- raises over an empty collection too, and one that draws draws once, so
+-- every element sees the same draw.
+mapFunctionOperandCases :: [IRCase]
+mapFunctionOperandCases =
+  [ repro [] (ITTensor [EFixed 0] ITFloat) (IRBuiltin BMap [raising, IRBuiltin (BTensor [EFixed 0]) []]) []
+  , repro [] (ITList ITFloat) (IRBuiltin BMapList [raising, IRConst (VList EmptyList)]) []
+  , genRepro [] ITBool
+      (IRLetIn "m" (IRBuiltin BMap [drawn, IRBuiltin (BTensor [EFixed 2]) [lcLit 0, lcLit 0]])
+         (IROp OpEq (IRBuiltin (BIndex 0) [IRVar "m", IRConst (VInt 0)]) (IRBuiltin (BIndex 0) [IRVar "m", IRConst (VInt 1)])))
+  , genRepro [] ITBool
+      (IRLetIn "m" (IRBuiltin BMapList [drawn, IRConst (VList (ListCont (VFloat 0) (ListCont (VFloat 0) EmptyList)))])
+         (IROp OpEq (IRDestruct AcHead (IRVar "m")) (IRDestruct AcHead (IRDestruct AcTail (IRVar "m")))))
+  ]
+  where
+    raising = IRError "the function operand raises"
+    drawn = IRLetIn "u" (IRSample IRUniform) (IRLambda "x" (IROp OpPlus (IRVar "x") (IRVar "u")))
+
+-- | Task julia-listprod-of-an-empty-list-raises: the standard library's
+-- @listProd@ is 1.0 on an empty list (a float, which a type-tag check tells
+-- from an int 1) and multiplies right to left, which differs from left to
+-- right where an underflow meets an infinity.
+listProdCases :: [IRCase]
+listProdCases =
+  [ repro [] ITFloat (prodOf EmptyList) []
+  , repro [] ITBool (IRConformsTo ITFloat (prodOf EmptyList)) []
+  , repro [] ITFloat (prodOf (ListCont (VFloat (-1 / 0)) (ListCont (VFloat 1e300) (ListCont (VFloat (-0.29)) (ListCont (VFloat 5e-324) EmptyList))))) []
+  , repro [] ITFloat (prodOf (ListCont (VFloat 2) (ListCont (VFloat (-0.5)) EmptyList))) []
+  ]
+  where prodOf l = IRApply (IRVar "listProd") (IRConst (VList l))
+
 -- | The batched twin (task batched-conformsto-of-a-literal-fails-to-parse):
 -- the batched float check calls a method on its operand
 -- (@0.is_floating_point()@), so a negative or positive Int or Float literal
@@ -1640,30 +1672,10 @@ knownDisagreements =
             (IRConformsTo ITFloat (IRIf (IROp OpApprox (IRVar "s") (IRConst (VFloat 1))) (IRVar "s") (IRConst (VFloat 0)))))
          [VFloat 2])
   -- M3 (builtins, tensors and function groups).
-  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
-      (ByAnswer (\_ o a -> isValue o && raisedWith "one(::Type{Any})" a))
-      (repro [] ITFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList))) [])
-  -- The same ticket (found in M4): Julia's @prod@ multiplies left to right,
-  -- the standard library right to left, which differs where an underflow
-  -- meets an infinity.
-  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["julia"]
-      (ByAnswer (\c o a -> isValue o && isSampled a && not (null [ () | IRVar "listProd" <- caseUniverse c ])))
-      (repro [] ITFloat (IRApply (IRVar "listProd")
-         (IRConst (VList (ListCont (VFloat (-1 / 0)) (ListCont (VFloat 1e300) (ListCont (VFloat (-0.29)) (ListCont (VFloat 5e-324) EmptyList))))))) [])
-  -- The same ticket, Python's side (found in M4): its empty product is the
-  -- int 1, which only a type-tag check tells from 1.0. Julia raises as above.
-  , KnownFamily "julia-listprod-of-an-empty-list-raises" ["python", "julia"]
-      (ByAnswer (\c o a -> isValue o && isSampled a
-                           && not (null [ () | IRConformsTo _ x <- caseUniverse c, IRVar "listProd" <- universe x ])))
-      (repro [] ITBool (IRConformsTo ITFloat (IRApply (IRVar "listProd") (IRConst (VList EmptyList)))) [])
   , KnownFamily "bzip-max-and-approx-have-no-text-lowering" ["python", "julia"]
       (ByAnswer (\_ _ a -> raisedWith "codegen threw" a && (raisedWith "OpMax" a || raisedWith "OpApprox" a)))
       (repro [] (ITTensor [EFixed 1] ITFloat)
          (IRBuiltin (BZip OpMax) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat 1)], IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat 2)]]) [])
-  , KnownFamily "interpreter-bmap-evaluates-its-function-operand-per-element" ["python", "julia"]
-      (AsIf (const (irMap functionOperandFirst)))
-      (repro [] (ITTensor [EFixed 0] ITFloat)
-         (IRBuiltin BMap [IRError "the function operand raises", IRBuiltin (BTensor [EFixed 0]) []]) [])
   -- Both text backends render nested lambdas as one lambda of several
   -- parameters and an application chain as one call, so only an application
   -- saturating its function's syntactic lambdas exactly works: a partial
@@ -1893,18 +1905,6 @@ backendSign backend e = case e of
       | otherwise =
           IRIf (isNaNE x) x $ IRIf (gtE x (IRConst zero)) (IRConst one) $
             IRIf (ltE x (IRConst zero)) (IRConst (neg one)) x
-
--- | 'BMap' and 'BMapList' as both text backends evaluate them: the function
--- operand once, before the collection. The interpreter evaluates it per
--- element, after the collection (so not at all over an empty one).
-functionOperandFirst :: IRExpr -> IRExpr
-functionOperandFirst e = case e of
-  IRBuiltin b [f, xs] | b == BMap || b == BMapList, not (isLambda' f) ->
-    IRLetIn "bm_f" f (IRBuiltin b [IRVar "bm_f", xs])
-  _ -> e
-  where
-    isLambda' (IRLambda _ _) = True
-    isLambda' _ = False
 
 -- | Whether an expression holds a partial destructor or index: one that
 -- raises outside its domain.
@@ -2567,6 +2567,17 @@ fixedPlans c = unGen (vectorOf 300 drawPlan) (mkQCGen (20261013 + fromEnum c)) 3
 fixedSample :: [IRCase]
 fixedSample = unGen (vectorOf 600 genIRCase) (mkQCGen 20261013) 30
 
+-- | Regression cases run against the interpreter, scalar Python and (when on
+-- the PATH) Julia: no disagreement on either backend.
+textBackendsAgree :: [IRCase] -> IO ()
+textBackendsAgree cs = do
+  julia <- findExecutable "julia"
+  cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c))) cs
+  (_, pyD) <- runIRCasesPython cases
+  assertEqual "python disagreements" [] (map idWhy pyD)
+  jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j cases) julia
+  assertEqual "julia disagreements" [] (map idWhy jlD)
+
 irFuzzGeneratorTests :: TestTree
 irFuzzGeneratorTests = testGroup "IR fuzz generator"
   [ testProperty "a drawn case type-checks at the type it was drawn at" $
@@ -2647,6 +2658,13 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
   -- batched-conformsto-of-a-literal-fails-to-parse; both formerly
   -- knownDisagreements families): a type-tag check spliced a number literal
   -- before an attribute access, which neither Python nor Julia parses.
+  -- interpreter-bmap-evaluates-its-function-operand-per-element and
+  -- julia-listprod-of-an-empty-list-raises (both formerly knownDisagreements
+  -- families).
+  , testCase "a map evaluates its function operand once, first, on the interpreter, scalar Python and Julia" $
+      textBackendsAgree mapFunctionOperandCases
+  , testCase "listProd agrees on the interpreter, scalar Python and Julia" $
+      textBackendsAgree listProdCases
   , testCase "a type-tag check of a number literal loads and agrees on scalar Python and Julia" $ do
       julia <- findExecutable "julia"
       cases <- mapM (\c -> (\o -> (c, [(head (icArgs c), o)])) <$> interpretIRCase c (head (icArgs c)))

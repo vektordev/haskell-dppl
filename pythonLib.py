@@ -419,7 +419,9 @@ def listProd(lst):
   if isinstance(lst, AnyInferenceList):
     raise ValueError("Element not found in list")
   elif isinstance(lst, EmptyInferenceList):
-    return 1
+    # A float, as the standard library's 1.0: a type-tag check tells an int 1
+    # apart (task julia-listprod-of-an-empty-list-raises).
+    return 1.0
   elif isinstance(lst, ConsInferenceList):
     return lst.value * listProd(lst.next)
     

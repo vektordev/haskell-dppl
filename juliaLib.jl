@@ -401,9 +401,14 @@ function indexOf(sample, lst::InferenceList)
     end
 end
 
-function listProd(lst::InferenceList)
-    prod(lst)
-end
+# The standard library's recursion (StandardLibrary.stdListProd): the empty
+# product is 1.0, and the factors multiply right to left. `prod` over an
+# InferenceList cannot see the element type, so it raised on an empty list,
+# and it multiplies left to right, which differs where an underflow meets an
+# infinity (task julia-listprod-of-an-empty-list-raises).
+listProd(lst::EmptyInferenceList) = 1.0
+listProd(lst::ConsInferenceList) = head(lst) * listProd(tail(lst))
+listProd(lst::AnyInferenceList) = throw(ArgumentError("Element not found in list"))
 
 listConcat(lst1::EmptyInferenceList, lst2::InferenceList) = lst2
 listConcat(lst1::ConsInferenceList, lst2::InferenceList) =

@@ -815,12 +815,14 @@ def mapList(f, lst):
 
 def listProd(lst):
   # Product of a bucket-uniform list's [B] leaves (the probability variant of a
-  # list map multiplies the per-element Jacobians). The empty product is 1.
+  # list map multiplies the per-element Jacobians). The empty product is 1.0,
+  # and the factors multiply right to left, as in the standard library's
+  # stdListProd and the scalar runtimes.
   if isinstance(lst, AnyInferenceList):
     raise ValueError("Element not found in list")
-  acc = 1
-  for x in lst:
-    acc = acc * x
+  acc = 1.0
+  for x in reversed(list(lst)):
+    acc = x * acc
   return acc
 
 def listConcat(lst1, lst2):
