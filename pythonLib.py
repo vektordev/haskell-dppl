@@ -70,6 +70,19 @@ def safe_log(x):
     return math.log(x)
   return -math.inf if x == 0 else math.nan
 
+# IEEE float division: the IR's OpDiv (the interpreter, Julia) answers a signed
+# infinity at a zero divisor, and NaN for 0/0 or NaN/0, where Python's `/`
+# raises ZeroDivisionError on python numbers (task
+# python-float-division-by-zero-raises). A tensor operand never raises, so it
+# takes the plain operator and keeps its graph.
+def safe_div(a, b):
+  try:
+    return a / b
+  except ZeroDivisionError:
+    if a != a or a == 0:
+      return math.nan
+    return math.copysign(math.inf, a) * math.copysign(1.0, b)
+
 def density_uniform(x):
   return 1 if 0 <= x <= 1 else 0
 

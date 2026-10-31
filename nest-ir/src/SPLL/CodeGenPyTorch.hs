@@ -93,6 +93,16 @@ pyOps OpAnd = "and"
 pyOps OpEq = "=="
 pyOps x = error $ "Operator has no infix representation: " ++ show x
 
+-- | Whether a float division by this divisor goes through the runtime's
+-- @safe_div@: Python's @/@ raises ZeroDivisionError on a zero divisor, where
+-- the IR (the interpreter, Julia) answers IEEE -- a signed infinity, or NaN
+-- for 0/0 (task python-float-division-by-zero-raises). A nonzero literal
+-- divisor cannot be zero, so it keeps the plain operator and its call-free
+-- cost.
+ieeeDivision :: IRExpr -> Bool
+ieeeDivision (IRConst (VFloat d)) = d == 0
+ieeeDivision _ = True
+
 pyDistName :: Distribution -> String
 pyDistName IRNormal = "normal"
 pyDistName IRUniform = "uniform"
@@ -671,6 +681,10 @@ generateExpressionLifted (IROp OpMax l r) = do
   (ls, le) <- generateExpressionLifted l
   (rs, re) <- generateExpressionLifted r
   return (ls ++ rs, str "max(" . le . str ", " . re . str ")")
+generateExpressionLifted (IROp OpDiv l r) | ieeeDivision r = do
+  (ls, le) <- generateExpressionLifted l
+  (rs, re) <- generateExpressionLifted r
+  return (ls ++ rs, str "safe_div(" . le . str ", " . re . str ")")
 generateExpressionLifted (IROp op l r) = do
   (ls, le) <- generateExpressionLifted l
   (rs, re) <- generateExpressionLifted r
@@ -902,6 +916,10 @@ generateExpression (IROp OpMax left right) = do
   l <- generateExpression left
   r <- generateExpression right
   return ("max(" ++ l ++ ", " ++ r ++ ")")
+generateExpression (IROp OpDiv left right) | ieeeDivision right = do
+  l <- generateExpression left
+  r <- generateExpression right
+  return ("safe_div(" ++ l ++ ", " ++ r ++ ")")
 generateExpression (IROp op left right) = do
   l <- generateExpression left
   r <- generateExpression right
@@ -1039,7 +1057,14 @@ generateExpression (IRBuiltin (BReduce op ax) [t])
       tt <- generateExpression t
       -- max of an empty tensor is the identity -inf (interpreter, Julia's
       -- init=-Inf), not Python's ValueError.
-      let dflt = if op == ROpMax then ", default=" ++ pyDouble (-1 / 0) else ""
+      -- sum's start is the float 0.0, the IR's identity: the builtin's int
+      -- start made an empty sum the int 0, which has no negative zero, so
+      -- -(sum []) was 0 where the IR answers -0.0 (task
+      -- python-empty-sum-answers-an-int).
+      let dflt = case op of
+            ROpMax -> ", default=" ++ pyDouble (-1 / 0)
+            ROpAdd -> ", 0.0"
+            ROpLogSumExp -> ""
       return (pyReduceOp op ++ "(" ++ tt ++ dflt ++ ")")
   | otherwise = error (axisUnsupported "BReduce" ax)
 generateExpression (IRBuiltin (BIndex ax) [t, k])
@@ -1060,8 +1085,10 @@ generateExpression (IRBuiltin (BZip op) [a, b]) = do
   bb <- generateExpression b
   n <- lift demandUniqueNumber
   let (x, y) = ("_z" ++ show n ++ "a", "_z" ++ show n ++ "b")
+  let elemOp = if op == OpDiv then "safe_div(" ++ x ++ ", " ++ y ++ ")"
+               else "((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ "))"
   boundIterable ("zip(" ++ aa ++ ", " ++ bb ++ ")")
-    (\it -> "[((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ ")) for "
+    (\it -> "[" ++ elemOp ++ " for "
             ++ x ++ ", " ++ y ++ " in " ++ it ++ "]")
 -- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep):
 -- one runtime call, so the emitted text is O(1) in the domain size and adds no

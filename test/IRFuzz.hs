@@ -1588,9 +1588,6 @@ knownDisagreements =
          (IRLetIn "s" (IRUnaryOp OpSign (IRVar "a0"))
             (IRConformsTo ITFloat (IRIf (IROp OpApprox (IRVar "s") (IRConst (VFloat 1))) (IRVar "s") (IRConst (VFloat 0)))))
          [VFloat 2])
-  , KnownFamily "python-float-division-by-zero-raises" ["python"]
-      (ByAnswer (\_ o a -> isValue o && raisedWith "ZeroDivisionError" a))
-      (repro [("a0", ITFloat)] ITFloat (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a0")) [VFloat 0])
   , KnownFamily "python-normal-density-overflows-past-1e154" ["python"]
       (ByAnswer (\c o a -> isValue o && raisedWith "OverflowError" a && any hasNormalDensity (caseBodies c)))
       (repro [("a0", ITFloat)] ITFloat (IRDensity IRNormal Linear (IRVar "a0")) [VFloat 1e300])
@@ -1689,13 +1686,6 @@ knownDisagreements =
       (ByAnswer (\c _ _ -> icKind c == GenBody
                            && not (null [ () | x <- caseUniverse c, d <- hoistedEffects x, not (isPure d) ])))
       (genRepro [] ITFloat (IROp OpSub (IRSample IRUniform) (IRLetIn "l" (IRSample IRUniform) (IRVar "l"))))
-  -- Python's empty sum is the int 0, which has no negative zero: the IR's
-  -- @-(sum [])@ is -0.0 (found in M4). Recognised by the construct (a case
-  -- summing a tensor of static length 0) and a differing value.
-  , KnownFamily "python-empty-sum-answers-an-int" ["python"]
-      (ByAnswer (\c o a -> isValue o && isSampled a
-                           && not (null [ () | IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []] <- caseUniverse c ])))
-      (repro [] ITFloat (IROp OpDiv (IRUnaryOp OpNeg (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []])) (IRConst (VFloat 2))) [])
   -- M4, the batched arm (PResult bodies through the select pass and the
   -- batched backend).
   --
@@ -1722,8 +1712,8 @@ knownDisagreements =
       (ByAnswer (\_ _ a -> raisedWith "'bool' object has no attribute 'to'" a || raisedWith "must be Tensor, not float" a))
       (batchedRepro (IRDensity IRUniform Linear (IRConst (VFloat 0.5))) (VFloat 1))
   -- The batched backend divides by @safe_div@, a NaN at a zero divisor where
-  -- the IR's division answers an infinity (Python raises there,
-  -- 'python-float-division-by-zero-raises'), and takes logs by @safe_log@,
+  -- the IR's division (and scalar Python's @safe_div@) answers an infinity,
+  -- and takes logs by @safe_log@,
   -- minus infinity at a negative or NaN operand where the IR's log is a NaN.
   , KnownFamily "batched-safe-div-and-safe-log-differ-off-domain" ["batched"]
       (AsIf (const (irMap (batchedSign . batchedLog . batchedDivision))))
@@ -2683,8 +2673,7 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
                                      ++ "; if the bug is fixed, drop (or narrow) its knownDisagreements entry")
                  _ -> assertFailure (kfTicket kf ++ ": two entries share this repro; give each its own")
                -- Elsewhere a repro may disagree only as another filed
-               -- family: a batched NaN at a zero divisor cannot be shown
-               -- without Python's division raising there.
+               -- family (one repro can show two bugs at once).
                else do
                  others <- mapM knownDisagreement ds
                  assertEqual (kfTicket kf ++ ": the repro disagrees on " ++ b ++ ", which the entry does not list, and not as another filed family")
@@ -2776,6 +2765,35 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
       assertEqual "python disagreements" [] (map idWhy pyD)
       julia <- findExecutable "julia"
       jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, [([], o)])]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-empty-sum-answers-an-int (formerly a knownDisagreements family):
+  -- Python's sum of an empty list was the int 0, which has no negative zero,
+  -- so -(sum []) / 2 was 0.0 where the IR answers -0.0.
+  , testCase "an empty sum is the float 0.0 on scalar Python and Julia, so its negation is -0.0" $ do
+      let emptySum = IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 0]) []]
+          c = repro [] ITFloat (IROp OpDiv (IRUnaryOp OpNeg emptySum) (IRConst (VFloat 2))) []
+      o <- interpretIRCase c []
+      assertEqual "interpreter answer" (show (Interpreted (VFloat (-0.0)))) (show o)
+      (_, pyD) <- runIRCasesPython [(c, [([], o)])]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      julia <- findExecutable "julia"
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, [([], o)])]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-float-division-by-zero-raises (formerly a knownDisagreements
+  -- family): Python's float division raised ZeroDivisionError on a zero
+  -- divisor, where the interpreter and Julia answer IEEE: a signed infinity,
+  -- or NaN for 0/0 and NaN/0.
+  , testCase "float division by a zero answers IEEE on scalar Python and Julia, as in the interpreter" $ do
+      julia <- findExecutable "julia"
+      let argss = [ [VFloat a, VFloat b] | a <- [1, -2.5, 0, -0.0, 0 / 0, 1 / 0], b <- [0, -0.0] ]
+          c = (repro [("a0", ITFloat), ("a1", ITFloat)] ITFloat (IROp OpDiv (IRVar "a0") (IRVar "a1")) [VFloat 1, VFloat 0])
+                { icArgs = argss }
+      outs <- mapM (\as -> (\o -> (as, o)) <$> interpretIRCase c as) argss
+      assertEqual "interpreter answers (1/0, 1/-0)"
+        (map (show . Interpreted . VFloat) [1 / 0, -1 / 0]) [ show o | (_, o) <- take 2 outs ]
+      (_, pyD) <- runIRCasesPython [(c, outs)]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, outs)]) julia
       assertEqual "julia disagreements" [] (map idWhy jlD)
   -- julia-logspace-enumerated-sum-off-by-log2-with-nan: a NaN term in a
   -- log-sum-exp reduction makes the whole reduction NaN on every engine,

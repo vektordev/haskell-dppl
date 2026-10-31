@@ -62,6 +62,10 @@ FLOAT_PATH = {
 # logsumexp takes a list; probed separately below.
 LIST_FLOAT_PATH = {"logsumexp"}
 
+# Two-argument float-path functions (safe_div, the scalar OpDiv); probed
+# separately below.
+BINARY_FLOAT_PATH = {"safe_div"}
+
 # Everything else: structure, control flow and sampling, not on the float
 # path -- a tensor never flows through these as a differentiable quantity
 # (listProd multiplies whatever its elements are, and is tensor-transparent).
@@ -93,7 +97,7 @@ def same_value(a, b, rel=1e-12):
 def scalar_coverage():
   import pythonLib
   have = public_functions(pythonLib)
-  known = set(FLOAT_PATH) | LIST_FLOAT_PATH | NOT_FLOAT_PATH
+  known = set(FLOAT_PATH) | LIST_FLOAT_PATH | BINARY_FLOAT_PATH | NOT_FLOAT_PATH
   for n in sorted(have - known):
     fail("pythonLib." + n + " is not classified in prelude_numerics_probe.py: "
          "decide whether a tensor can reach it on the float path, and if so "
@@ -165,6 +169,23 @@ def scalar_autograd():
   r = pythonLib.logsumexp([torch.tensor(-math.inf, dtype=torch.float64)] * 2)
   if float(r) != -math.inf:
     fail("pythonLib.logsumexp([t(-inf)] * 2) = " + repr(as_float(r)))
+
+  # safe_div: the gradient flows through both operands, and the tensor arm
+  # agrees with the float arm, a zero divisor included (IEEE, not a raise).
+  for a, b in [(0.37, 2.5), (-1.5, 0.25), (1.0, 0.0), (-1.0, -0.0), (0.0, 0.0)]:
+    ref = pythonLib.safe_div(a, b)
+    at = torch.tensor(a, dtype=torch.float64, requires_grad=True)
+    bt = torch.tensor(b, dtype=torch.float64, requires_grad=True)
+    r = pythonLib.safe_div(at, bt)
+    where = "pythonLib.safe_div(" + repr(a) + ", " + repr(b) + ")"
+    if not same_value(r, ref):
+      fail(where + ": tensor arm " + repr(as_float(r)) + " != float arm " + repr(ref))
+    if not torch.is_tensor(r) or not r.requires_grad:
+      fail(where + ": autograd graph severed")
+    elif b != 0:
+      ga, gb = torch.autograd.grad(r, (at, bt))
+      if not same_value(ga, 1 / b, rel=1e-9) or not same_value(gb, -a / b ** 2, rel=1e-9):
+        fail(where + ": gradient " + repr((as_float(ga), as_float(gb))) + " != " + repr((1 / b, -a / b ** 2)))
 
 def batched_dtype():
   import torch

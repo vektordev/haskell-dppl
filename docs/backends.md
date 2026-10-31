@@ -261,6 +261,13 @@ is a property of today's set of `InjF` inverses, not an enforced invariant, so
 it is wrapped too. Pinned by `test/cases/distributions/uniformLog.tst`'s `cdf(1000.0)` row and
 `test/cases/arithmetic/multExp.tst`'s `cdf(-5.0)`.
 
+Division follows the same rule. Python's float `/` raises `ZeroDivisionError`
+at a zero divisor where the IR answers a signed infinity (NaN for `0/0`), so
+scalar Python lowers `OpDiv` to `pythonLib.safe_div` unless the divisor is a
+nonzero literal (`CodeGenPyTorch.ieeeDivision`). An `ROpAdd` reduction is
+`sum(xs, 0.0)`: the builtin's int start would make an empty sum the int `0`,
+which has no negative zero.
+
 ## `--memoRecursion`: a per-query table for recursive calls
 
 A recursive probability function called with equal arguments from several
