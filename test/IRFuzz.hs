@@ -1527,6 +1527,21 @@ lcNestedSameName x =
                      (lcTotal (IRBuiltin BMap [IRLambda "m" (IRVar "m"), IRLetIn "l2" x (lcTensor [IRVar "l2", lcLit 1])])))
                  , lcLetTensor "l" [IRVar "l", lcLit 2] ]
 
+-- | Batched probability bodies that themselves map a list ('BMapList') and
+-- zip two tensors with @*@ ('BZip' 'OpMult'), at points the interpreter
+-- answers (task batched-fuzz-arms-never-compare-list-map-or-zip-product).
+-- The generator's own draws reach both only in helper bodies or at points the
+-- interpreter does not answer, so the batched arm's census adds these:
+-- 'irGeneratorBatchedConstructs' counts them and a test compares them.
+batchedBodyCases :: [IRCase]
+batchedBodyCases =
+  [ batchedRepro (IRDestruct AcHead (IRBuiltin BMapList
+      [ IRLambda "m" (IROp OpMult (IRVar "m") (IRConst (VFloat 0.5)))
+      , IRConstruct TgCons [IRVar "a0", IRConst (VList EmptyList)] ])) (VFloat 0.25)
+  , batchedRepro (lcTotal (IRBuiltin (BZip OpMult)
+      [ lcTensor [IRVar "a0", lcLit 0.5], lcTensor [lcLit 0.125, IRVar "a0"] ])) (VFloat 0.25)
+  ]
+
 -- | A one-query probability case for a batched pin: @main a0@ answers the
 -- given probability, dimension 0, possible.
 batchedRepro :: IRExpr -> IRValue -> IRCase
@@ -1723,11 +1738,6 @@ knownDisagreements =
   -- M4, the batched arm (PResult bodies through the select pass and the
   -- batched backend).
   --
-  -- The batched runtime's tuple has no order.
-  , KnownFamily "batched-tuple-comparison-has-no-order" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "not supported between instances of 'T' and 'T'" a))
-      (batchedRepro (IRIf (IROp OpLessThan (IRConst (VTuple (VFloat 1) (VInt 1))) (IRConst (VTuple (VFloat 2) (VInt 0))))
-                          (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1))
   -- The batched backend divides by @safe_div@, a NaN at a zero divisor where
   -- the IR's division (and scalar Python's @safe_div@) answers an infinity,
   -- and takes logs by @safe_log@,
@@ -1750,29 +1760,6 @@ knownDisagreements =
   , KnownFamily "logsumexp-reduction-nan-and-infinity-differ-across-engines" ["batched"]
       (AsIf (const (irMap batchedLogSumExp)))
       (batchedRepro (IRBuiltin (BReduce ROpLogSumExp 0) [IRBuiltin (BTensor [EFixed 2]) [IRVar "a0", IRDensity IRNormal Linear (IRVar "a0")]]) (VFloat (1 / 0)))
-  -- A rank-1 tensor's elements are read as floats at a batched key: a tensor
-  -- of booleans is stacked as a float tensor (so an element read out of it is
-  -- no condition for @torch.where@), and one of tuples fails. At a Python-int
-  -- key the element itself is read, so the key here is the batched argument
-  -- (narrowed by task grid-constraint-network-enumerated-jointly, whose
-  -- @tensor_index@ change fixed the constant-key repros).
-  , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
-                         || raisedWith "float() argument must be a string or a real number, not '" a))
-      (batchedIntKeyRepro (IRIf (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VBool False)], IRVar "a0"])
-                                (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))))
-  , KnownFamily "batched-tensor-elements-are-read-as-floats" ["batched"]
-      (ByAnswer (\_ _ a -> raisedWith "where expected condition to be a boolean tensor" a
-                         || raisedWith "float() argument must be a string or a real number, not '" a))
-      (batchedIntKeyRepro (IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRVar "a0"])))
-  -- The batched sum of one element is that element, where the IR's sum
-  -- adds it to 0.0, which turns a negative zero into 0.0. Recognised by the
-  -- answer agreeing once zeros are compared without their sign.
-  , KnownFamily "batched-sum-of-one-element-keeps-a-negative-zero" ["batched"]
-      (ByAnswer (\_ o a -> case (o, a) of
-                  (Interpreted v, Sampled toks) -> either (const False) (const True) (valueAgreesWith probAgrees v toks)
-                  _ -> False))
-      (batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat (-0.0))]]) (VFloat 1))
   ]
   where
     isValue (Interpreted _) = True
@@ -2448,7 +2435,7 @@ irGeneratorConstructs = sort (nub (concatMap checkedIRConstructs fixedSample))
 -- @Slow.IRGeneratorCoverage@. Pure Haskell and the interpreter; no torch.
 irGeneratorBatchedConstructs :: IO [String]
 irGeneratorBatchedConstructs = do
-  prepared <- mapM prepareBatchedIRCase fixedSample
+  prepared <- mapM prepareBatchedIRCase (fixedSample ++ batchedBodyCases)
   return (sort (nub [ l | Right bc <- prepared, l <- irEnvConstructs inferenceBodies (bicEnv bc) ]))
 
 -- | Constructs of 'irConstructs'' inventory, or shapes of them, with no
@@ -2649,6 +2636,17 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
         Nothing -> noTorch "IR fuzz generator batched let in a comprehension iterable" >>= maybe (return ()) assertFailure
         Just py -> do
           bcs <- mapM prepareBatchedIRCase letInComprehensionIterableBatchedCases
+          case sequence bcs of
+            Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
+            Right bs -> do
+              (_, ds) <- runIRCasesBatched py bs
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  , testCase "batched: a body mapping a list and zipping a product loads and agrees" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched list map and zipped product" >>= maybe (return ()) assertFailure
+        Just py -> do
+          bcs <- mapM prepareBatchedIRCase batchedBodyCases
           case sequence bcs of
             Left why -> assertFailure ("the batched backend does not take a case: " ++ why)
             Right bs -> do
@@ -2857,6 +2855,55 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             Right b -> do
               (_, ds) <- runIRCasesBatched py [b]
               assertEqual "batched disagreements" [] (map idWhy ds)
+  -- Formerly a knownDisagreements family: tensor_sum of one element returned
+  -- it as is, keeping a negative zero the IR's sum (0.0 + x) turns into 0.0.
+  , testCase "batched: a sum of one negative zero is 0.0 (batched-sum-of-one-element-keeps-a-negative-zero)" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched one-element sum" >>= maybe (return ()) assertFailure
+        Just py -> do
+          let c = batchedRepro (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VFloat (-0.0))]]) (VFloat 1)
+          bc <- prepareBatchedIRCase c
+          case bc of
+            Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+            Right b -> do
+              (_, ds) <- runIRCasesBatched py [b]
+              assertEqual "batched disagreements" [] (map idWhy ds)
+  -- Formerly a knownDisagreements family: a rank-1 tensor of booleans read at a
+  -- batched key was a float tensor (no condition for torch.where), and one of
+  -- tuples raised.
+  , testCase "batched: tensor elements keep their type at a batched key (batched-tensor-elements-are-read-as-floats)" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched tensor elements" >>= maybe (return ()) assertFailure
+        Just py ->
+          mapM_ (\body -> do
+            bc <- prepareBatchedIRCase (batchedIntKeyRepro body)
+            case bc of
+              Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+              Right b -> do
+                (_, ds) <- runIRCasesBatched py [b]
+                assertEqual "batched disagreements" [] (map idWhy ds))
+            [ IRIf (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VBool False)], IRVar "a0"])
+                   (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))
+            , IRDestruct AcFst (IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed 1]) [IRConst (VTuple (VFloat 0.25) (VBool True))], IRVar "a0"])
+            ]
+  -- Formerly a knownDisagreements family: the batched runtime's tuple had no
+  -- order, so a tuple comparison raised a TypeError.
+  , testCase "batched: tuples compare lexicographically (batched-tuple-comparison-has-no-order)" $ do
+      torch <- findTorchPython
+      case torch of
+        Nothing -> noTorch "IR fuzz generator batched tuple order" >>= maybe (return ()) assertFailure
+        Just py ->
+          mapM_ (\op -> do
+            let c = batchedRepro (IRIf (IROp op (IRConst (VTuple (VFloat 1) (VInt 1))) (IRConst (VTuple (VFloat 2) (VInt 0))))
+                                    (IRConst (VFloat 0.25)) (IRConst (VFloat 0.75))) (VFloat 1)
+            bc <- prepareBatchedIRCase c
+            case bc of
+              Left why -> assertFailure ("the batched backend does not take the case: " ++ why)
+              Right b -> do
+                (_, ds) <- runIRCasesBatched py [b]
+                assertEqual ("batched disagreements on " ++ show op) [] (map idWhy ds)) [OpLessThan, OpGreaterThan]
   -- Formerly two knownDisagreements families (batched-blistindex-reads-a-cons-list-as-a-tensor,
   -- batched-categorical-index-over-batched-weights-fails): the batched runtime
   -- read a cons list or a list of weights as a logit tensor.

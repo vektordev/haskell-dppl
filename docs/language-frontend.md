@@ -224,11 +224,31 @@ parse against a constructed value or two parses of different source strings.
 `TestParser`'s `prop_EquivAgreesWithEqWithoutSpans`/`prop_EquivIgnoresSpans` pin
 both halves, so the switch neither weakened those tests nor made them vacuous.
 
-**Known limitation**: a failure has two sides and is reported against one --
-whichever constraint the solver reached when the contradiction materialised,
-which is ordering-dependent. Naming both needs provenance on *types* rather than
-constraints; docs-repo task `type-error-blames-one-side-only`. The broader
-triage of every other user-facing error site is the docs-repo investigation
+**Both sides of a failure.** A failure has two sides, and the failing
+constraint names only the side written in it. The other side often arrived
+through a type variable an earlier constraint bound: in the CLEVR repro
+(`draw h : t = extractCLEVR symbol` with `Scene` an ADT) the pattern's `tail`
+constraint binds the variable to `[Object]` without failing, and the
+contradiction surfaces later at the `readNN` constraint. So `solver` keeps
+each constraint as emitted beside its substituted form, and records which
+constraint bound each variable (`BindingOrigins`). On failure,
+`explainFailure` finds the emitted subterm at each failing side's position;
+for a variable it follows variable-to-variable bindings to the constraint that
+gave the type its shape and renders that as a second site:
+
+```
+prog.spll:5:28:
+    Couldn't match type 'Scene' with '[Object]'
+      In the neural network read 'readNN extractCLEVR'
+    The type '[Object]' arises from prog.spll:5:20:
+      In the function 'tail'
+      In the pattern: h : t
+```
+
+This is provenance on bindings, not on types: a side that was never a
+variable (written in the constraint, or built by a substitution inside the
+same constraint's own unification) gets no second site. The broader triage of
+every other user-facing error site is the docs-repo investigation
 `user-facing-error-site-inventory`.
 
 ## Polymorphic top-level functions are monomorphized

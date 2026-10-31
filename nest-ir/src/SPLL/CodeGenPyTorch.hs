@@ -176,7 +176,23 @@ pyVal x = error ("unknown pyVal for " ++ show x)
 
 pyMultiVal :: GenericMultiValue IRExpr -> String
 pyMultiVal MultiContinuous = "(\"C\", None)"
-pyMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (pyVal . valueToIR) vals) ++ "])"
+-- A domain of plain scalars is a frozenset, so 'isPossible' is one hash
+-- lookup rather than a scan of the list: a V-value neural read's decode
+-- checks its sample against the domain, and inside a per-value or enumeration
+-- loop over that same domain the scan made the loop O(V^2) (task
+-- per-value-fast-path-calls-network-per-domain-value). Membership agrees with
+-- the list's for these values (@==@ and @hash@ agree on int, bool and float).
+pyMultiVal (MultiDiscretes vals)
+  | all hashableScalar ivals = "(\"D\", frozenset([" ++ elems ++ "]))"
+  | otherwise = "(\"D\", [" ++ elems ++ "])"
+  where
+    ivals = map valueToIR vals
+    elems = intercalate ", " (map pyVal ivals)
+    hashableScalar v = case v of
+      VInt _ -> True
+      VBool _ -> True
+      VFloat _ -> True
+      _ -> False
 pyMultiVal (MultiTuple l r) = "(\"T\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"
 pyMultiVal (MultiEither l r) = "(\"E\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"
 pyMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) -> 

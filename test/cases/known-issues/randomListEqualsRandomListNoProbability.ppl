@@ -1,0 +1,9 @@
+-- Equality of two random lists that both recurse over a runtime argument
+-- has no probability variant (refused: "found no way to convert to IR in
+-- probability mode"; generate only). With literal
+-- lengths (coin 2 == coin 2) it compiles and answers 0.25. Found by
+-- experiments_nest llm-noisy-channel-decoding (rung 3b: typo channel on the
+-- writer's side, glyph reads on the reader's: `corrupt cs == perceive gs`).
+-- Task random-list-equality-over-runtime-lists-no-probability.
+coin xs = if isNull xs then [] else (if Uniform < 0.5 then 1 else 0) : coin (tail xs)
+main xs ys = coin xs == coin ys

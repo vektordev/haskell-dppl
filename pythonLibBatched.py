@@ -480,6 +480,8 @@ def _tensor_stack(xs):
     return torch.stack(xs)
   ts = [x for x in xs if torch.is_tensor(x)]
   if not ts:
+    if all(isinstance(x, bool) for x in xs):
+      return torch.tensor(xs)
     return torch.stack([astensor(x) for x in xs])
   ref = ts[0]
   dt = ref.dtype
@@ -520,7 +522,8 @@ def tensor_sum(xs):
   if not xs:
     return torch.tensor(0.0, dtype=DTYPE)
   if len(xs) == 1:
-    return xs[0]
+    # 0.0 + x, as the IR's sum is: a negative zero becomes 0.0.
+    return xs[0] + 0.0
   # Python values in the axis (a term a constant guard zeroed, task
   # grid-constraint-network-enumerated-jointly) are added as one Python sum
   # rather than each broadcast to a [B] row and stacked; an axis of Python
@@ -570,6 +573,11 @@ def tensor_index(xs, idx):
     x = xs[min(max(int(idx), 0), len(xs) - 1)]
     if not isinstance(x, torch.Tensor) or _uniform_tensors(xs):
       return x
+  if isinstance(xs[0], T):
+    # An axis of tuples is read leaf by leaf (structure of arrays): each
+    # component axis is an axis of its own, and the read tuple is rebuilt.
+    return T(tensor_index([x.t1 for x in xs], idx),
+             tensor_index([x.t2 for x in xs], idx))
   stacked = _tensor_stack(xs)
   idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
   idx_t = idx_t.clamp(0, stacked.shape[0] - 1)
@@ -674,6 +682,18 @@ class T:
     if not isinstance(other, T):
       return NotImplemented
     return eq(self.t1, other.t1) & eq(self.t2, other.t2)
+
+  # Lexicographic order, as the IR's OpLessThan/OpGreaterThan define it on
+  # tuples: elementwise over the batch, nested tuples recurse through these.
+  def __lt__(self, other):
+    if not isinstance(other, T):
+      return NotImplemented
+    return (self.t1 < other.t1) | (eq(self.t1, other.t1) & (self.t2 < other.t2))
+
+  def __gt__(self, other):
+    if not isinstance(other, T):
+      return NotImplemented
+    return (self.t1 > other.t1) | (eq(self.t1, other.t1) & (self.t2 > other.t2))
 
   def __getitem__(self, index):
     if index == 0:
