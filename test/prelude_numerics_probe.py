@@ -278,6 +278,14 @@ def batched_dtype():
     # ... and a live tensor arm is never promoted: the net's dtype is its own.
     if B.where_anchored(True, torch.tensor([1.0], dtype=torch.float32), 0.5).dtype != torch.float32:
       fail("pythonLibBatched.where_anchored promoted a float32 tensor arm")
+  # A select between function values answers by selecting the applied results
+  # (task batched-select-between-functions-raises); unit leaves select to unit.
+  g = B.where_anchored(torch.tensor([True, False]), (lambda v: v + 1.0), (lambda v: v * 2.0))
+  if not callable(g) or g(3.0).tolist() != [4.0, 6.0]:
+    fail("pythonLibBatched.where_anchored over two closures did not select the applied results")
+  u = B.where_anchored(torch.tensor([True, False]), B.T(None, 1.0), B.T(None, 2.0))
+  if u.t1 is not None or u.t2.tolist() != [1.0, 2.0]:
+    fail("pythonLibBatched.where_anchored over tuples holding unit did not select leafwise")
   # A reduction whose elements mix a 0-d constant and a [B] batch broadcasts
   # the constant (task batched-reduction-over-constant-and-batched-elements-fails).
   t = B.tensor_sum([torch.tensor(0.25, dtype=torch.float64), torch.tensor([1.0, 2.0], dtype=torch.float64)])

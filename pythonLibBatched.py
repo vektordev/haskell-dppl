@@ -339,6 +339,13 @@ def where_anchored(c, t, f):
   # (CSE, a hoisted structural block `_hsN`), a call, a tuple constant -- is
   # invisible to it and reaches here as a whole T. Both arms are evaluated
   # already, so selecting leaf by leaf is the same value.
+  if callable(t) and callable(f):
+    # A select between two function values: select the applied results.
+    # Both arms run, as for every select here (task
+    # batched-select-between-functions-raises).
+    return lambda *a: where_anchored(c, t(*a), f(*a))
+  if t is None and f is None:
+    return None  # unit (VUnit) in a tuple leaf: nothing to select
   if isinstance(t, T) and isinstance(f, T):
     m = asmask(c)
     return T(where_anchored(m, t.t1, f.t1), where_anchored(m, t.t2, f.t2))
