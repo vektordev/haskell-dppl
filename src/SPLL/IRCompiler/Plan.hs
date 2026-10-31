@@ -314,8 +314,7 @@ andGuard a b | a == constTrueIR = b
 -- slots allowed by both, conjoining their guards. Continuous leaves follow
 -- the scalar 'intersectSet' conventions: interval-interval tightens the
 -- bounds, a point absorbs an interval as membership guards, and point-point
--- keeps the first (both compute the same value from the same observation --
--- the mergeExpr convention). A region cannot be discrete in one constraint
+-- keeps the first under a guard that the second agrees with it. A region cannot be discrete in one constraint
 -- and continuous in another (the plan fixes each region's kind).
 intersectLeafCon :: PLeafCon -> PLeafCon -> PLeafCon
 intersectLeafCon c@(PLeafEq _ _ _ x p _) (PLeafEq _ _ _ x' p' _)
@@ -330,7 +329,15 @@ intersectLeafCon (PLeafPt b v cov gs) (PLeafIvl _ lo hi) =
   PLeafPt b v cov (gs ++ boundGuards v lo hi)
 intersectLeafCon (PLeafIvl _ lo hi) (PLeafPt b v cov gs) =
   PLeafPt b v cov (gs ++ boundGuards v lo hi)
-intersectLeafCon p@(PLeafPt {}) (PLeafPt {}) = p
+-- Two points: keep the first, guarded on the second agreeing with it. Both
+-- come from one observation, but not necessarily from the same component of
+-- it -- @Scene (f (o1 sc)) (f (o1 sc))@ pins o1's leaf to the query's px of
+-- each field -- so a query whose two points differ is impossible (task
+-- plan-point-point-intersection-ignores-mismatch). The agreement is the float
+-- equality of every point target ('leafEqIR', 'OpApprox'); a syntactically
+-- identical point needs none. The second point's own image guards are kept.
+intersectLeafCon (PLeafPt b v cov gs) (PLeafPt _ v' _ gs') =
+  PLeafPt b v cov (gs ++ gs' ++ [leafEqIR TFloat v v' | v /= v'])
 -- Invariant, not a refusal (task static-refusals-become-absent-variants): a leaf region is either discrete or continuous.
 intersectLeafCon c c' = error ("plan leaf region at offset " ++ show (plcBase c)
   ++ " is constrained as both discrete and continuous (plan invariant violation): "
