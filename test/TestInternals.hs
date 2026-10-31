@@ -123,15 +123,23 @@ exprSubtree e = e : concatMap exprSubtree (getSubExprs e)
 -- Property: for any (untyped) generated program, if RType inference succeeds,
 -- no GreaterType ever appears in any of the resulting RType annotations.
 -- Ill-typed programs (Left) are out of scope for this invariant -- there is no
--- annotated tree to inspect.
+-- annotated tree to inspect. So are programs that declare one name twice
+-- (function or neural): the Validator rejects those before RInfer runs in the
+-- real pipeline, and RInfer's monomorphization assumes unique names.
+-- Like Left, they pass vacuously rather than being discarded, so they cost no
+-- test budget.
 prop_noGreaterTypeAfterRInfer :: Program -> Property
 prop_noGreaterTypeAfterRInfer prog = case tryAddRTypeInfo prog of
+  _ | hasDuplicateDecl -> property True
   Left _ -> property True
   Right typed ->
     let allRTypes = [ rType (getTypeInfo e)
                      | (_, body) <- functions typed
                      , e <- exprSubtree body ]
     in property (not (any containsGreaterType allRTypes))
+  where
+    declNames = map fst (functions prog) ++ [ n | (n, _, _) <- neurals prog ]
+    hasDuplicateDecl = Set.size (Set.fromList declNames) /= length declNames
 
 -- plus on two float constants should succeed
 test_plusFloat :: TestTree
