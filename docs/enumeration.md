@@ -310,7 +310,12 @@ group's draws itself, outside its applicability guard, when it is nested: a
 table built inside the guard could not leave it. The outermost loop is not
 tabulated, since there the table would only reorder the same reads, and
 neither is `--batched` mode, where `IRLeafTablePass` tabulates nested neural
-leaves as one gathered table. Pinned by
+leaves as one gathered table. Nor is a draw inside a materialized-marginal leaf
+(`pointQueryTable`, `CompilerMetadata.inTabulatedLeaf`): the leaf's compiled
+size decides whether its table is built at all, and with the scalar-only tables
+in it the scalar and batched compiles would answer through different engines
+and prune differently under topK (`Internals.tabulatedLeafBackendIndependent`,
+`neural/noisyIfFoldOfReads`). Pinned by
 `Internals.splitReadFieldLeafTabulated` and `neural/splitReadFieldChain`.
 
 The per-slot chain is then tabulated by Tier 0 materialization *inside* the

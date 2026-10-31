@@ -122,9 +122,15 @@ drawMeasured :: CompilerMetadata -> Expr -> Expr
 drawMeasured meta v = reinferRecovered meta (recoveredVars meta) v
 
 -- | Whether 'enumerateBinding' tabulates a draw's measure ahead of its loop:
--- inside an enclosing enumeration, and not under --batched.
+-- inside an enclosing enumeration, and not under --batched. Nor inside a
+-- materialized-marginal leaf ('inTabulatedLeaf'): the leaf's size gates
+-- whether its table is built, and the tables here are what --batched leaves
+-- out, so with them the two backends would materialize different operands
+-- and prune differently under topK (task
+-- batched-topk-noisy-if-fold-of-reads-disagrees).
 nestedDrawTables :: CompilerMetadata -> Bool
 nestedDrawTables meta = not (Set.null (fixedLatents meta)) && not (batched (compilerConfig meta))
+                        && not (inTabulatedLeaf meta)
 
 -- | The measure of a draw's argument at each value of its domain, one
 -- let-bound cell per value, bound in the current scope ('pointQueryTable',

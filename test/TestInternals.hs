@@ -559,6 +559,37 @@ test_splitReadFieldLeafTabulated = testCase "splitReadFieldLeafTabulated" $ do
     readerDepths d e@(IRApply (IRVar v) _) | v == "see_auto_prob" = d : concatMap (readerDepths d) (getIRSubExprs e)
     readerDepths d e = concatMap (readerDepths d) (getIRSubExprs e)
 
+-- | Task batched-topk-noisy-if-fold-of-reads-disagrees: whether an operand's
+-- marginal is materialized is gated on the size of its compiled leaf, and the
+-- scalar compile's leaf held the nested draw tables --batched leaves out
+-- ('nestedDrawTables'). On neural/noisyIfFoldOfReads the scalar leaf was then
+-- over 'maxTabulatedLeafNodes', so scalar answered through the joint
+-- enumeration (no topK guard) while batched materialized (guarded per cell),
+-- and the two pruned differently: Slow.BatchedPython topk-is-per-element.
+-- Both compiles now materialize the same cells.
+test_tabulatedLeafBackendIndependent :: TestTree
+test_tabulatedLeafBackendIndependent = testCase "tabulatedLeafBackendIndependent" $ do
+  path <- corpusPplPath "noisyIfFoldOfReads"
+  src <- readFile path
+  prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+            (tryParseProgram path src)
+  let cells b = do
+        irEnv <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+                   (compile defaultCompilerConfig { noIntegrate = True, topKThreshold = Just 0.3, batched = b } prog)
+        case probFun (lookupIREnv "main" irEnv) of
+          Just (pf, _) -> return (matCells pf)
+          Nothing -> assertFailure "compiled main has no probability variant" >> error "unreachable"
+  scalarCells <- cells False
+  batchedCells <- cells True
+  assertBool "the batched compile should materialize s - toF z" (batchedCells > 0)
+  assertEqual "materialized cells, scalar against batched" batchedCells scalarCells
+  where
+    matCells :: IRExpr -> Int
+    matCells e = (case e of
+                    IRLetIn n _ _ | "mat_cell" `isInfixOf` n -> 1
+                    _ -> 0)
+                 + sum (map matCells (getIRSubExprs e))
+
 -- | Saturated applications of the network @name@ anywhere in the expression.
 -- The reader @name_auto_prob (name sym) x@ is not one: its head is a
 -- different name, and only the inner @name sym@ is counted.
@@ -6914,6 +6945,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
       , test_nnHoistedOutOfEnumSum
       , test_nnHoistedOutOfNestedEnumSum
       , test_splitReadFieldLeafTabulated
+      , test_tabulatedLeafBackendIndependent
       , test_repeatedNeuralReadShared
       , test_networkShareScoping
       , test_agreementFusesToElementwiseProduct
