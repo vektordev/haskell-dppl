@@ -19,7 +19,7 @@
 -- is unaffected) stays a hand-written HUnit group there. This module is for
 -- the common single-diagnostic shape only, filed by dropping in a program
 -- instead of writing new Haskell.
-module TestKnownIssues (knownIssuesTests, performancePinHarnessTests) where
+module TestKnownIssues (knownIssuesTests, performancePinHarnessTests, batchedCompileBudgetTests) where
 
 import Control.Exception (AllocationLimitExceeded(..), SomeException, evaluate, finally, fromException, try)
 import Data.IORef (modifyIORef, newIORef, readIORef)
@@ -41,7 +41,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, testCaseInfo, assertBool, assertEqual, assertFailure)
 
 import SPLL.Lang.Types (CompilerError, Program, GenericValue(..))
-import SPLL.CompilerConfig (CompilerConfig, defaultCompilerConfig)
+import SPLL.CompilerConfig (CompilerConfig(..), defaultCompilerConfig)
 import SPLL.IntermediateRepresentation
   ( IREnv(..), IRValue, lookupIREnv
   , IRFunGroup(..), showRefusal
@@ -50,6 +50,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Prelude (compile, runProbC, runIntegC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.CodeGenPyTorch (generateFunctions)
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import TestCaseParser
   ( Backend(..), ExpectFailure(..), CodeVariant(..), codeVariantName, TestCase(..), Expectation(..), corpusRoot
   , GrowthSpec(..), GrowthMetric(..), PointCap(..), CompileFlag(..), applyCompileFlags
@@ -540,7 +541,13 @@ measureCompile :: PointCap -> CompilerConfig -> Program -> IO PointResult
 measureCompile = measureCompileWith False
 
 measureCompileWith :: Bool -> PointCap -> CompilerConfig -> Program -> IO PointResult
-measureCompileWith wantIR cap conf prog = do
+measureCompileWith = measureCompileEmit (Right . generateFunctions True)
+
+-- | 'measureCompileWith' with the emitter chosen: the scalar Python backend,
+-- or the batched one ('generateFunctionsBatched').
+measureCompileEmit :: (IREnv -> Either CompilerError [String]) -> Bool -> PointCap
+                   -> CompilerConfig -> Program -> IO PointResult
+measureCompileEmit emit wantIR cap conf prog = do
   let micros = max 1 (round (capSeconds cap * 1e6))
   r <- try $ timeout micros $ flip finally disableAllocationLimit $ do
     setAllocationCounter (fromInteger (capAllocBytes cap))
@@ -548,10 +555,12 @@ measureCompileWith wantIR cap conf prog = do
     t0 <- getMonotonicTime
     outcome <- case compile conf prog of
       Left err -> return (Left ("refused: " ++ err))
-      Right env -> do
-        code <- evaluate (utf8Length (intercalate "\n" (generateFunctions True env)))
-        ir <- if wantIR then evaluate (toInteger (length (show env))) else return 0
-        return (Right (code, ir))
+      Right env -> case emit env of
+        Left err -> return (Left ("emit refused: " ++ show err))
+        Right ls -> do
+          code <- evaluate (utf8Length (intercalate "\n" ls))
+          ir <- if wantIR then evaluate (toInteger (length (show env))) else return 0
+          return (Right (code, ir))
     t1 <- getMonotonicTime
     left <- getAllocationCounter
     let allocated = capAllocBytes cap - toInteger left
@@ -707,3 +716,32 @@ performancePinHarnessTests = testGroup "KnownIssuesHarness"
           args = unwords (map show [1 .. n])
           src = "data R = R " ++ fields ++ ", g::Int\n\nmain = R " ++ args ++ " (if Uniform < 0.5 then 1 else 2)\n"
       in either (fail . errorBundlePretty) return (tryParseProgram "wideRecord.ppl" src)
+
+-- | Regression guard (task batched-int-sum-ladder-compile-ooms): a two-operand
+-- Int sum walked onto the Float axis by an if-ladder over the sum domain
+-- compiled under @--batched@ to gigabytes (OOM-kill at 10 digit classes)
+-- because each tuple component re-inlined the whole inner ladder. A plain
+-- corpus entry that regressed would take the whole run down, so it compiles
+-- under the per-compile cap, and the module must stay far below the old size.
+batchedCompileBudgetTests :: TestTree
+batchedCompileBudgetTests = testGroup "BatchedCompileBudget"
+  [ testCase "noisy MNIST sum, 10 classes: batched compile finishes under the cap, small" $ do
+      let classes = 10 :: Int
+          arm d | d == 2 * (classes - 1) = show (fromIntegral d :: Double)
+                | otherwise = "if d == " ++ show d ++ " then " ++ show (fromIntegral d :: Double)
+                              ++ " else " ++ arm (d + 1)
+          src = unlines
+            [ "neural readMNist :: (Symbol -> Int) of [" ++ intercalate ", " (map show [0 .. classes - 1]) ++ "]"
+            , "toF d = " ++ arm 0
+            , "main a b = (toF (readMNist(a) ++ readMNist(b))) + Normal * 0.5"
+            ]
+      prog <- either (assertFailure . ("fixture failed to parse: " ++) . show) return (tryParseProgram "" src)
+      let conf = defaultCompilerConfig { batched = True }
+      r <- measureCompileEmit (generateFunctionsBatched True) False (PointCap 60 4000000000) conf prog
+      case r of
+        PointDone m -> assertBool ("batched module is " ++ show (mCodeBytes m)
+                                   ++ " bytes; budget 300000 (88 KB when fixed, gigabytes when broken)")
+                                  (mCodeBytes m < 300000)
+        PointCapped why -> assertFailure ("batched compile ran into the cap (" ++ why ++ "): the ladder blowup is back")
+        PointFailed why -> assertFailure ("batched compile failed: " ++ why)
+  ]
