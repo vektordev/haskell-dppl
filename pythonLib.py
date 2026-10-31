@@ -83,14 +83,20 @@ def safe_div(a, b):
       return math.nan
     return math.copysign(math.inf, a) * math.copysign(1.0, b)
 
+# Floats, never the ints 1/0: an int is not a TFloat (IRConformsTo) and has
+# no signed zero. A NaN falls through both CDF tests to answer itself, as in
+# the interpreter and Julia (task python-uniform-density-and-cdf-answer-ints).
 def density_uniform(x):
-  return 1 if 0 <= x <= 1 else 0
+  return 1.0 if 0 <= x <= 1 else 0.0
 
 def cumulative_uniform(x):
-  return 0 if x < 0 else x if x <= 1 else 1
+  return 0.0 if x < 0 else 1.0 if x > 1 else x
 
+# x * x, not x**2: a float ** raises OverflowError past ~1.3e154 where the
+# product saturates to inf, so the density is 0.0 and its log -inf there
+# (task python-normal-density-overflows-past-1e154).
 def density_normal(x):
-  return 1 / sqrt(2 * pi) * e**(-(x**2)/2)
+  return 1 / sqrt(2 * pi) * e**(-(x * x)/2)
 
 # Phi(x) = erfc(-x / sqrt 2) / 2, not (1 + erf(x / sqrt 2)) / 2: the latter
 # cancels in the lower tail (Phi(-8) came out 6.1e-16 for 6.2e-16), and the
@@ -116,7 +122,7 @@ def log_cumulative_uniform(x):
   return _log_cdf(cumulative_uniform(x))
 
 def log_density_normal(x):
-  return -(x**2) / 2 - 0.5 * math.log(2 * pi)
+  return -(x * x) / 2 - 0.5 * math.log(2 * pi)
 
 def log_cumulative_normal(x):
   return _log_cdf(cumulative_normal(x))

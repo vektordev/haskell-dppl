@@ -1475,7 +1475,7 @@ floatAgrees a b
 
 -- | Match the interpreter's value against a backend's sample tokens
 -- (@_ser@'s form). 'Right' says whether an int token stood at a float slot
--- (Python's @sign@ and uniform density answer ints; numerically that is the
+-- (Python's @sign@ answers ints; numerically that is the
 -- same value, and it is tabulated rather than failed).
 valueAgrees :: IRValue -> [String] -> Either String Bool
 valueAgrees = valueAgreesWith floatAgrees
@@ -1581,28 +1581,13 @@ knownDisagreements =
   -- The same ticket, where Python's int sign meets an operator the
   -- interpreter takes floats only for (found in M4): the rewrite above then
   -- stops the interpreter, so the family is recognised by the construct and
-  -- a differing value instead, as Python's uniform functions are below.
+  -- a differing value instead.
   , KnownFamily "opsign-nan-negative-zero-and-int-results-differ-across-engines" ["python"]
       (ByAnswer (\c o a -> isValue o && isSampled a && not (null [ () | IRUnaryOp OpSign _ <- caseUniverse c ])))
       (repro [("a0", ITFloat)] ITBool
          (IRLetIn "s" (IRUnaryOp OpSign (IRVar "a0"))
             (IRConformsTo ITFloat (IRIf (IROp OpApprox (IRVar "s") (IRConst (VFloat 1))) (IRVar "s") (IRConst (VFloat 0)))))
          [VFloat 2])
-  , KnownFamily "python-normal-density-overflows-past-1e154" ["python"]
-      (ByAnswer (\c o a -> isValue o && raisedWith "OverflowError" a && any hasNormalDensity (caseBodies c)))
-      (repro [("a0", ITFloat)] ITFloat (IRDensity IRNormal Linear (IRVar "a0")) [VFloat 1e300])
-  , KnownFamily "python-uniform-density-and-cdf-answer-ints" ["python"]
-      (AsIf (const (irMap pythonUniform)))
-      (repro [("a0", ITFloat)] ITBool (IRConformsTo ITFloat (IRDensity IRUniform Linear (IRVar "a0"))) [VFloat 0.5])
-  -- The same ticket, where the int flows on into float arithmetic: the
-  -- rewrite above then stops the interpreter (an int meets a float), so the
-  -- family is recognised by the construct and a differing value instead.
-  -- Looser: it covers any value difference in a body using a linear uniform
-  -- density or CDF.
-  , KnownFamily "python-uniform-density-and-cdf-answer-ints" ["python"]
-      (ByAnswer (\c o a -> isValue o && isSampled a
-                           && not (null [ () | x <- caseUniverse c, linearUniform x ])))
-      (repro [("a0", ITFloat)] ITBool (IRConformsTo ITFloat (IRCumulative IRUniform Linear (IRVar "a0"))) [VFloat 2])
   , KnownFamily "ir-conformsto-lowering-gaps-in-text-backends" ["python", "julia"]
       (AsIf (const (irMap conformsUnitUnchecked)))
       (repro [] ITBool (IRConformsTo ITUnit (IRConst (VBool True))) [])
@@ -1756,7 +1741,6 @@ knownDisagreements =
     isValue _ = False
     raisedWith needle (Raised m) = needle `isInfixOf` m
     raisedWith _ _ = False
-    hasNormalDensity e = not (null [ () | IRDensity IRNormal _ _ <- universe e ])
     -- The draw counts agree (the first token after the tuple's).
     -- What Python floats out of an expression to statements before it: a
     -- let-spine or a conditional under a node that is not itself a statement
@@ -1770,10 +1754,6 @@ knownDisagreements =
       _ -> False
     isSampled (Sampled _) = True
     isSampled _ = False
-    linearUniform x = case x of
-      IRDensity IRUniform Linear _ -> True
-      IRCumulative IRUniform _ _ -> True
-      _ -> False
 
 -- | Every subexpression, the expression itself included.
 universe :: IRExpr -> [IRExpr]
@@ -1888,22 +1868,6 @@ backendSign backend e = case e of
           IRIf (isNaNE x) x $ IRIf (gtE x (IRConst zero)) (IRConst one) $
             IRIf (ltE x (IRConst zero)) (IRConst (neg one)) x
 
--- | Python's uniform density and CDF, which answer ints outside [0, 1] (and
--- the density inside it), and whose CDF is 1 at a NaN (so its log is 0).
-pythonUniform :: IRExpr -> IRExpr
-pythonUniform e = case e of
-  IRDensity IRUniform Linear a -> IRLetIn "un_a" a $
-    IRIf (IROp OpAnd (geE x (IRConst (VFloat 0))) (leE x (IRConst (VFloat 1)))) (IRConst (VInt 1)) (IRConst (VInt 0))
-  IRCumulative IRUniform Linear a -> IRLetIn "un_a" a $
-    IRIf (ltE x (IRConst (VFloat 0))) (IRConst (VInt 0)) (IRIf (leE x (IRConst (VFloat 1))) x (IRConst (VInt 1)))
-  IRCumulative IRUniform Log a -> IRLetIn "un_a" a $
-    IRIf (ltE x (IRConst (VFloat 0))) (IRConst (VFloat (-1 / 0))) $
-      IRIf (leE x (IRConst (VFloat 1)))
-           (IRIf (IROp OpEq x (IRConst (VFloat 0))) (IRConst (VFloat (-1 / 0))) (IRUnaryOp OpLog x))
-           (IRConst (VFloat 0))
-  _ -> e
-  where x = IRVar "un_a"
-
 -- | 'BMap' and 'BMapList' as both text backends evaluate them: the function
 -- operand once, before the collection. The interpreter evaluates it per
 -- element, after the collection (so not at all over an empty one).
@@ -1999,11 +1963,9 @@ conformsUnitUnchecked e = case e of
       ITEither a b -> ITEither (loosen a) (loosen b)
       _ -> t
 
-gtE, ltE, geE, leE :: IRExpr -> IRExpr -> IRExpr
+gtE, ltE :: IRExpr -> IRExpr -> IRExpr
 gtE a b = IROp OpGreaterThan a b
 ltE a b = IROp OpLessThan a b
-geE a b = IROp OpOr (gtE a b) (IROp OpEq a b)
-leE a b = IROp OpOr (ltE a b) (IROp OpEq a b)
 
 isNaNE :: IRExpr -> IRExpr
 isNaNE x = IRUnaryOp OpNot (IROp OpEq x x)
@@ -2760,6 +2722,45 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
       assertEqual "python disagreements" [] (map idWhy pyD)
       julia <- findExecutable "julia"
       jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, [([], o)])]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-uniform-density-and-cdf-answer-ints (formerly a knownDisagreements
+  -- family): Python's uniform density and CDF answered the ints 1/0 (so
+  -- @IRConformsTo TFloat@ was False), and its CDF was 1 at a NaN (so the log
+  -- CDF was 0.0) where the interpreter and Julia answer a NaN.
+  , testCase "the uniform density and CDF answer floats on scalar Python and Julia, and NaN at a NaN" $ do
+      julia <- findExecutable "julia"
+      let a0 = IRVar "a0"
+          body = IRConstruct TgTuple
+            [ IRConformsTo ITFloat (IRDensity IRUniform Linear a0)
+            , IRConstruct TgTuple
+                [ IRConformsTo ITFloat (IRCumulative IRUniform Linear a0)
+                , IRConstruct TgTuple
+                    [ IRDensity IRUniform Linear a0
+                    , IRConstruct TgTuple [IRCumulative IRUniform Linear a0, IRCumulative IRUniform Log a0] ] ] ]
+          rt = ITTuple ITBool (ITTuple ITBool (ITTuple ITFloat (ITTuple ITFloat ITFloat)))
+          argss = [ [VFloat a] | a <- [0.5, 2, -1, 0, -0.0, 1, 0 / 0, 1 / 0, -1 / 0] ]
+          c = (repro [("a0", ITFloat)] rt body [VFloat 0.5]) { icArgs = argss }
+      outs <- mapM (\as -> (\o -> (as, o)) <$> interpretIRCase c as) argss
+      (_, pyD) <- runIRCasesPython [(c, outs)]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, outs)]) julia
+      assertEqual "julia disagreements" [] (map idWhy jlD)
+  -- python-normal-density-overflows-past-1e154 (formerly a knownDisagreements
+  -- family): Python's normal density squared its argument with @**@, which
+  -- raises OverflowError past ~1.3e154; the interpreter and Julia answer 0.0
+  -- (minus infinity in log space).
+  , testCase "the normal density past 1e154 answers 0 (log: -inf) on scalar Python and Julia" $ do
+      julia <- findExecutable "julia"
+      let a0 = IRVar "a0"
+          c = (repro [("a0", ITFloat)] (ITTuple ITFloat ITFloat)
+                 (IRConstruct TgTuple [IRDensity IRNormal Linear a0, IRDensity IRNormal Log a0]) [VFloat 1e300])
+                { icArgs = [ [VFloat a] | a <- [1e300, -1e300, 1e155, 1 / 0, -1 / 0, 0 / 0, 0.5] ] }
+      outs <- mapM (\as -> (\o -> (as, o)) <$> interpretIRCase c as) (icArgs c)
+      assertEqual "interpreter answer at 1e300"
+        (show (Interpreted (VTuple (VFloat 0) (VFloat (-1 / 0))))) (show (snd (head outs)))
+      (_, pyD) <- runIRCasesPython [(c, outs)]
+      assertEqual "python disagreements" [] (map idWhy pyD)
+      jlD <- maybe (return []) (\j -> snd <$> runIRCasesJulia j [(c, outs)]) julia
       assertEqual "julia disagreements" [] (map idWhy jlD)
   -- python-float-division-by-zero-raises (formerly a knownDisagreements
   -- family): Python's float division raised ZeroDivisionError on a zero
