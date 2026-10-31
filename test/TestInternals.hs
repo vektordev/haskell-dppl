@@ -3575,7 +3575,11 @@ tupleCdfCorrelatedRefusedTests = testGroup "tuple cdf through a draw read more t
             (null [ () | g <- gs, groupName g == "main", Just _ <- [lookup "prob" (refusedVariants g)] ])
         Left _ -> return ()
   | src <- [ "main = draw v = Uniform in (v, v + 1.0)"
-           , "main = draw v = Uniform in (v, v)" ]
+           , "main = draw v = Uniform in (v, v)"
+           -- The same through a named callee (task
+           -- tuple-cdf-through-named-callee-measures-only-witnessed-slot): the
+           -- refusal precedes the callee's integrate-function fold.
+           , "f x = (x, x + 1.0)\nmain = f Uniform" ]
   ]
 
 -- | Count occurrences of @IRVar name@ in an expression.

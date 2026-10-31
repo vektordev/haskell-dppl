@@ -197,11 +197,15 @@ applyBinding meta cumulative rt binding sample = do
    -- as a single witness, and keeps its emitted code.
    let underField = occursUnderFieldCtor (adtDecls meta) toInvCN (bindBody binding)
    -- A saturated call of a top-level function whose leading arguments are
-   -- deterministic: its body factor is the callee's own probability function
-   -- at the recovered witness (the 'namedCall' arm of the result below).
+   -- deterministic: its body factor is the callee's own probability (or, for
+   -- a cumulative query, integrate) function at the recovered witness (the
+   -- 'namedCall' arm of the result below). Not for a cumulative query of a
+   -- call returning a function: its closure arm was built for probability
+   -- mode and has no cumulative test, so that shape keeps the single witness.
+   let arrowRT = case rt of { TArrow _ _ -> True; _ -> False }
    let namedCall = case flattenApplySpine l of
          (Expr _ (Var fName), fArgs)
-           | underField && not cumulative && bindTopLevel binding == Just fName
+           | underField && not (cumulative && arrowRT) && bindTopLevel binding == Just fName
            , all ((== Deterministic) . pType . getTypeInfo) fArgs
            , Just (TArrow _ _, True) <- lookup fName (typeEnv meta) -> Just (fName, fArgs)
          _ -> Nothing
@@ -211,10 +215,12 @@ applyBinding meta cumulative rt binding sample = do
    -- one field and silently drop every other one (`f Normal Normal` with
    -- `f x y = (x, y)` answered p(y) alone). For such a binding whose bound
    -- variable occurs under a field constructor, point inversion is therefore
-   -- not offered. Integrate mode keeps the single witness, as it does for a
-   -- lambda in place: a CDF of a structured value is not a product of
-   -- per-field factors anyway.
-   let fieldWitnessUnfolded = underField && not cumulative && not inlineBody && isNothing namedCall
+   -- not offered, in either mode: a tuple-valued CDF through the single
+   -- witness measured only the witnessed slot too (task
+   -- tuple-cdf-through-named-callee-measures-only-witnessed-slot). A
+   -- function-valued cumulative result keeps it, as 'namedCall' declines it.
+   let fieldWitnessUnfolded = underField && not inlineBody && isNothing namedCall
+         && not (cumulative && arrowRT)
    -- An if-then-else on the way is split when its condition is deterministic
    -- here ('toInvExprMaybeWith'; the condition is bound in 'bindIfConditions').
    -- Not for a cumulative query: the point path refuses a variable read more
@@ -369,6 +375,32 @@ applyBinding meta cumulative rt binding sample = do
         let anyW = IRIf readsAnyW (IRConst (VBool True)) (IRUnaryOp OpIsAny appliedSample)
         let constResult = constantResult
         case rt of
+          -- Integrate mode, a binding read more than once, whatever its head
+          -- (a named callee's single witness answered these CDFs wrong too,
+          -- e.g. @f x = (x, x + 1.0)@ at @cdf((0.3, 1.0))@ 0.618 for 0.5): the
+          -- point inversion recovers it from ONE slot, but its other uses
+          -- correlate that slot with the rest of the body, and a joint CDF of
+          -- correlated slots is no product of per-slot factors -- @draw v =
+          -- Uniform in (v, v + 1.0)@ at @cdf((0.5, 1.2))@ is P(v <= min(0.5,
+          -- 0.2)) = 0.2, where the single witness answered 0.5 and the body
+          -- factor (v fixed at its witness, 1.5 <= 1.2 fails) answers 0. No
+          -- engine here measures that region, so the variant is refused rather
+          -- than answered wrong (task tuple-cdf-through-draw-ignores-other-slots).
+          -- A binding read ONCE reaches only the slot it is recovered from, so
+          -- the body's other slots are independent of it and the generic arm
+          -- below folds them in as a body factor, exactly as probability mode
+          -- does: @draw v = Uniform in (v, 2.0)@ at @(0.5, 1.0)@ is 0.5 * [2.0
+          -- <= 1.0] = 0, where the single witness alone answered 0.5. A named
+          -- callee read once is folded in the same way by the 'namedCall' arm,
+          -- through its own integrate function: @pair v = (v, 2.0)@ at the same
+          -- point (task tuple-cdf-through-named-callee-measures-only-witnessed-slot).
+          -- This arm comes first so that arm never meets a correlated CDF. A
+          -- function-valued result keeps the 'TArrow' arm below, as before.
+          _ | cumulative && not singleUse && not arrowRT ->
+                refuse lChainName ("cannot compute a cumulative distribution through binding '" ++ userVar
+                  ++ "': it is read more than once, so the slots it reaches are correlated and"
+                  ++ " their joint CDF is not a product of per-slot factors"
+                  ++ " (task tuple-cdf-through-draw-ignores-other-slots)")
           -- A saturated call of a top-level function (`f v`, `step 2.0 v`) whose
           -- parameter was just recovered: the body factor is the callee's own
           -- probability function evaluated at the recovered witness, i.e. the
@@ -419,35 +451,14 @@ applyBinding meta cumulative rt binding sample = do
                     return (withBody bodyRes)
           TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
                                        (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (impossibleP sr))))))
-          -- Integrate mode, a binding read more than once, whatever its head
-          -- (a named callee's single witness answered these CDFs wrong too,
-          -- e.g. @f x = (x, x + 1.0)@ at @cdf((0.3, 1.0))@ 0.618 for 0.5): the
-          -- point inversion recovers it from ONE slot, but its other uses
-          -- correlate that slot with the rest of the body, and a joint CDF of
-          -- correlated slots is no product of per-slot factors -- @draw v =
-          -- Uniform in (v, v + 1.0)@ at @cdf((0.5, 1.2))@ is P(v <= min(0.5,
-          -- 0.2)) = 0.2, where the single witness answered 0.5 and the body
-          -- factor (v fixed at its witness, 1.5 <= 1.2 fails) answers 0. No
-          -- engine here measures that region, so the variant is refused rather
-          -- than answered wrong (task tuple-cdf-through-draw-ignores-other-slots).
-          -- A binding read ONCE reaches only the slot it is recovered from, so
-          -- the body's other slots are independent of it and the generic arm
-          -- below folds them in as a body factor, exactly as probability mode
-          -- does: @draw v = Uniform in (v, 2.0)@ at @(0.5, 1.0)@ is 0.5 * [2.0
-          -- <= 1.0] = 0, where the single witness alone answered 0.5.
-          _ | cumulative && not singleUse ->
-                refuse lChainName ("cannot compute a cumulative distribution through binding '" ++ userVar
-                  ++ "': it is read more than once, so the slots it reaches are correlated and"
-                  ++ " their joint CDF is not a product of per-slot factors"
-                  ++ " (task tuple-cdf-through-draw-ignores-other-slots)")
           _ | not inlineBody ->
                 -- The single witness, where the body cannot be folded in inline
                 -- ('bindInline'): a top-level callee's body (folded by the
                 -- 'namedCall' arm above where it must be), or one that reads a
                 -- variable this scope does not bind. A wildcard witness has no
                 -- answer here (in integrate mode it used to crash in 'irCDF'), and
-                -- an unevaluable one none anywhere. A tuple-valued CDF through
-                -- such a callee still measures only the witnessed slot.
+                -- an unevaluable one none anywhere. A bound variable under a
+                -- field constructor never gets here ('fieldWitnessUnfolded').
                 let anyHere = if cumulative then anyW else readsAnyW in
                 return (underLambdas lambdaVars (guardedZero (errorWhen anyHere anyRefusal scaled)))
           _ -> do
