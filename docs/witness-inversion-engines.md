@@ -18,6 +18,13 @@ factors. p(sample) is the mixture (`mixP`) of the worlds' measures, and
 | `OnLeaf c`: a plan leaf region is constrained (`PLeafCon` discrete slots, `PLeafEq`, `PLeafIvl`, `PLeafPt`) | plan-guided enumeration | read off the logit vectors (`lrRaws`): a slot sum, a Gaussian CDF difference, a density times the change of variables |
 | `Pair a b`: continuous leaf `a` exceeds leaf `b` | plan-guided enumeration | the difference Gaussian's CDF, in closed form |
 
+Two *enumerated* plan leaves compared (`xb (obj sc) < xb (obj (rest sc))`) need
+no `Pair`: `coupleCmp` splits the outcome into one world per value of the left
+leaf, each pinning that slot and restricting the right leaf to the slots the
+comparison admits (`OnLeaf` on both; corpus
+`plan-enumeration/intPairLessThanBool`, `consLevelsIntLessThan`,
+`consLevelsIntCompareMixed`).
+
 A world's factors (`WFactor`) are either a whole sub-inference (a set-witness
 residue or x-free subtree, a plan-free subtree of a plan body) or a
 pre-measured dim-0 mass (`WMass`, a plan value group collapsed into one

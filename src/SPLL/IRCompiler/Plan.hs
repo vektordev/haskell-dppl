@@ -1207,9 +1207,41 @@ planInvertNode meta env planBody target = case planBody of
             let tw = [mkW (if isGT then (offA, offB) else (offB, offA))]
             let fw = [mkW (if isGT then (offB, offA) else (offA, offB))]
             return (Right (planBoolWorlds target tw fw))
+      -- Two enumerated leaves (task enumerated-int-pair-comparison-no-probability):
+      -- every value of each is statically known, so the outcome is split per
+      -- value of the left leaf -- one world pinning it to that slot and
+      -- restricting the right leaf to the slots the comparison admits. The
+      -- worlds of one outcome are disjoint (they pin different slots of the
+      -- left leaf), so their masses add. The same leaf on both sides is the
+      -- same split: pinning and restricting one region intersects them.
+      (Just (Right (PlanRef (Discretes _ (MultiDiscretes valsA)) offA, consA)),
+       Just (Right (PlanRef (Discretes _ (MultiDiscretes valsB)) offB, consB))) -> do
+        let cons = foldr insertLeafCon consB consA
+        let holds va vb = if isGT then valueCmpIR OpGreaterThan va vb else valueCmpIR OpLessThan va vb
+        let worldsFor pos =
+              [ pw1 (insertLeafCon (PLeafCon offB slotsB) (insertLeafCon (PLeafCon offA [(i, constTrueIR)]) cons))
+              | (i, va) <- zip [0 ..] valsA
+              , let slotsB = [ (j, g) | (j, vb) <- zip [0 ..] valsB
+                                      , let g0 = holds va vb
+                                      , let g = if pos then g0 else notIR g0
+                                      , g /= constFalseIR ]
+              , not (null slotsB) ]
+        return (Right (planBoolWorlds target (worldsFor True) (worldsFor False)))
       (Just (Left why), _) -> return (Left why)
       (_, Just (Left why)) -> return (Left why)
-      _ -> return (Left "a comparison with both sides plan-dependent is only supported between two continuous plan leaves (single pairwise coupling)")
+      _ -> return (Left "a comparison with both sides plan-dependent is only supported between two continuous plan leaves (single pairwise coupling) or two enumerated ones")
+
+-- | A comparison of two statically known leaf values as a guard: folded to
+-- a Boolean constant where both are numbers of one kind, else the comparison
+-- itself, left for the optimizer.
+valueCmpIR :: Operand -> Value -> Value -> IRExpr
+valueCmpIR op va vb = case (va, vb) of
+  (VInt a, VInt b)     -> IRConst (VBool (cmpWith a b))
+  (VFloat a, VFloat b) -> IRConst (VBool (cmpWith a b))
+  _ -> IROp op (IRConst (valueToIR va)) (IRConst (valueToIR vb))
+  where
+    cmpWith :: Ord a => a -> a -> Bool
+    cmpWith a b = if op == OpGreaterThan then a > b else a < b
 
 -- | A conjunction of world disjunctions (task
 -- scene-count-conditional-edit-exponential): the worlds of an observation that
