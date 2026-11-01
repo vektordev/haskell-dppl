@@ -43,6 +43,7 @@ module IRFuzz
   , HelperShape(..)
   , genIRCase
   , shrinkIRCase
+  , listIndexInBounds
   , irCaseEnv
   , irCaseFunction
   , irCaseWellTyped
@@ -1269,10 +1270,27 @@ shrinkIRCase c =
   ++ [ c' | i <- [0 .. length (icHelpers c) - 1]
           , let c' = c { icHelpers = [ h | (j, h) <- zip [0 :: Int ..] (icHelpers c), j /= i ] }
           , either (const False) (const True) (irCaseWellTyped c') ]
-  ++ [ c' | b <- shrinkExpr (icBody c), let c' = c { icBody = b }, either (const False) (const True) (irCaseWellTyped c') ]
-  ++ [ c' | (i, h) <- zip [0 :: Int ..] (icHelpers c), b <- shrinkExpr (hBody h)
+  ++ [ c' | b <- shrinkExpr (icBody c), listIndexInBounds b, let c' = c { icBody = b }, either (const False) (const True) (irCaseWellTyped c') ]
+  ++ [ c' | (i, h) <- zip [0 :: Int ..] (icHelpers c), b <- shrinkExpr (hBody h), listIndexInBounds b
           , let c' = c { icHelpers = [ if j == i then h { hBody = b } else h' | (j, h') <- zip [0 ..] (icHelpers c) ] }
           , either (const False) (const True) (irCaseWellTyped c') ]
+
+-- | The generator only reads a list at a constant index inside a cons
+-- prefix (or literal) of known length ('listIndex'). A shrink that drops
+-- cells or replaces the list by a child stays well typed but reads out of
+-- range, and QuickCheck then follows that unrelated interpreter refusal
+-- instead of the failure it started from. So a shrink candidate keeps every
+-- constant-index 'BListIndex' provably in range.
+listIndexInBounds :: IRExpr -> Bool
+listIndexInBounds = all ok . universe
+  where
+    ok (IRBuiltin BListIndex [l, IRConst (VInt i)]) = i >= 0 && i < knownLen l
+    ok _ = True
+    knownLen (IRConstruct TgCons [_, t]) = 1 + knownLen t
+    knownLen (IRConst (VList l)) = lit l
+    knownLen _ = 0 :: Int
+    lit (ListCont _ xs) = 1 + lit xs
+    lit _ = 0 :: Int
 
 shrinkExpr :: IRExpr -> [IRExpr]
 shrinkExpr e = children e ++ simpler e ++
@@ -2574,6 +2592,18 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
       withMaxSuccess 30 $ forAll genIRCase $ \c ->
         conjoin [ either (\e -> counterexample (renderIRCase c' ++ e) False) (const (property True)) (irCaseWellTyped c')
                 | c' <- take 40 (shrinkIRCase c) ]
+  , testProperty "a drawn case and every shrink of it keep each constant list index inside a known cons prefix" $
+      withMaxSuccess 300 $ forAll genIRCase $ \c ->
+        let inB x = all listIndexInBounds (caseBodies x)
+        in counterexample (renderIRCase c) (inB c)
+           .&&. conjoin [ counterexample (renderIRCase c') (inB c') | c' <- take 60 (shrinkIRCase c) ]
+  , testCase "listIndexInBounds rejects an index into a literal empty list or a shortened cons prefix" $ do
+      let ix l i = IRBuiltin BListIndex [l, IRConst (VInt i)]
+          nil = IRConst (VList EmptyList)
+          f = IRConst (VFloat 0.5)
+      assertBool "literal []" (not (listIndexInBounds (ix nil 0)))
+      assertBool "one cell, index 1" (not (listIndexInBounds (ix (consE f nil) 1)))
+      assertBool "one cell, index 0" (listIndexInBounds (ix (consE f nil) 0))
   , testCase "a fixed-seed sample reaches every Operand, UnaryOperand, Accessor and drawn IRExpr" $ do
       let reached = nub (concatMap checkedIRConstructs fixedSample)
       assertEqual "unreached" [] (filter (`notElem` reached) (operandLabels ++ unaryLabels ++ accessorLabels ++ exprLabels))
