@@ -218,7 +218,7 @@ order:
 
 | engine | predicate | certificate |
 |---|---|---|
-| enumeration | `Analysis.enumerableApplication` (a conditional head, `isConditional`, over a random enumerable argument) | the domain |
+| enumeration | `Analysis.enumerableApplication` (a conditional head, `isConditional`: an `if` or `&&`/`||`, and a comparison `==`/`<`/`>` unless the argument is a neural read, which the plan engine measures per slot; over a random enumerable argument) | the domain |
 | plan-guided enumeration | `AutoNeural.planReadOf` (a neural read whose declaration yields a plan) | the network |
 | joint affine marginalisation | `ModalityInfer.jointAffineBindingCert` (an affine form with latents, read by a spine of affine bindings ending in a tuple of at most 3 affine fields) | the form |
 | affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |

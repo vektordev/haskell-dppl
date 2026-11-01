@@ -84,7 +84,6 @@ enumDeadLetFreshDrawTuple main.integ=3 main.prob=7
 enumLetGatesFreshDrawCondition main.prob=5
 enumLetGatesFreshDrawTwoObs main__m011.prob=7
 enumNeuralDeadBranchFreshDraw main.prob=4
-eqFalseThroughPlusInTuple main.prob=3 main__m01.prob=5
 equals oneOfThree.integ=4 oneOfThree.prob=4
 equalsCoin main.prob=3
 fieldDiscardsComparedDraw main.integ=11 main.prob=8

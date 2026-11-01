@@ -641,7 +641,7 @@ getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of
 -- budget, the application falls through to the next engine.
 enumerableApplication :: FCData -> Program -> Expr -> Expr -> Maybe MultiValue
 enumerableApplication fcData p l v
-  | headIsConditional fcData p l
+  | headIsConditionalWith cmps fcData p l
   , pType (getTypeInfo v) /= Deterministic
   , not (returnsFunction (rType (getTypeInfo l)))
   = enumerableDomain (tags (getTypeInfo v))
@@ -649,26 +649,48 @@ enumerableApplication fcData p l v
   where
     returnsFunction (TArrow _ (TArrow _ _)) = True
     returnsFunction _ = False
+    -- A comparison (@==@, @<@, @>@) is a many-to-one case split of its
+    -- operands, like an @if@: @c == c@ or @fst p < snd p@ at the query root
+    -- was refused (or generate-only) where @if c == c then True else False@
+    -- enumerated (tasks bare-equality-of-shared-draw-reads-refused,
+    -- enumerated-int-pair-comparison-no-probability). Not for a neural read:
+    -- the plan engine, next in dispatch order, measures a comparison of its
+    -- leaves per slot ('PLeafEq', the two-leaf coupling) where enumerating
+    -- the whole read would call the network once per value.
+    cmps = not (isNeuralRead v)
+    isNeuralRead (Expr _ (ReadNN _ _)) = True
+    isNeuralRead (Expr _ (InjF _ [e])) = isNeuralRead e
+    isNeuralRead _ = False
 
 -- | Is an application head conditional ('isConditional'): a lambda whose body
 -- is, or a reference resolving to such a function. Any other head is not.
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in
 -- (modality-split-forwardchaining).
 headIsConditional :: FCData -> Program -> Expr -> Bool
-headIsConditional fcData p (Expr _ (Lambda _ b)) = isConditional fcData p [] b
-headIsConditional fcData p e@(Expr _ (Var _)) = isConditional fcData p [] e
-headIsConditional _ _ _ = False
+headIsConditional = headIsConditionalWith False
 
-isConditional :: FCData -> Program -> [ChainName] -> Expr -> Bool
-isConditional _ _ visited e | chainName (getTypeInfo e) `elem` visited = False
-isConditional _ _ _ (Expr _ (IfThenElse _ _ _)) = True
+-- | 'headIsConditional', counting a comparison as a case split when @cmps@
+-- holds ('enumerableApplication').
+headIsConditionalWith :: Bool -> FCData -> Program -> Expr -> Bool
+headIsConditionalWith cmps fcData p (Expr _ (Lambda _ b)) = isConditionalWith cmps fcData p [] b
+headIsConditionalWith cmps fcData p e@(Expr _ (Var _)) = isConditionalWith cmps fcData p [] e
+headIsConditionalWith _ _ _ _ = False
+
+-- | Is an expression a many-to-one case split ('headIsConditional'): an
+-- @if@, a connective, and with @cmps@ a comparison, anywhere in it or in a
+-- function it calls.
+isConditionalWith :: Bool -> FCData -> Program -> [ChainName] -> Expr -> Bool
+isConditionalWith _ _ _ visited e | chainName (getTypeInfo e) `elem` visited = False
+isConditionalWith _ _ _ _ (Expr _ (IfThenElse _ _ _)) = True
 -- `a && b` is `if a then b else False` and `a || b` is `if a then True else b`:
 -- the same many-to-one case split, just spelled as an InjF. Without this a body
 -- (or helper) using the connective was not enumerated where its `if` spelling
 -- was, and fell to the set-witness engine, which has no arm for a list
 -- element or a named call (task and-inside-list-or-helper-over-draws-refused).
-isConditional _ _ _ (Expr _ (InjF (Named n) _)) | n `elem` ["and", "or"] = True
-isConditional _ _ _ (Expr _ (Lambda _ _)) = False
+isConditionalWith _ _ _ _ (Expr _ (InjF (Named n) _)) | n `elem` ["and", "or"] = True
+-- A comparison, where the caller counts it ('enumerableApplication').
+isConditionalWith True _ _ _ (Expr _ (InjF (Named n) _)) | n `elem` ["eq", "lt", "gt"] = True
+isConditionalWith _ _ _ _ (Expr _ (Lambda _ _)) = False
 -- An application is conditional if the applied function or any argument is:
 -- the enumeration fallback in toIREnumerate evaluates the whole application
 -- forward, so conditionality anywhere below makes the result conditional.
@@ -676,16 +698,16 @@ isConditional _ _ _ (Expr _ (Lambda _ _)) = False
 -- into its body -- the body *is* evaluated by the application, unlike a bare
 -- (un-applied) lambda which is a closure value. This lets nested enumerable
 -- `let`s (let c = .. in let d = .. in ..) propagate conditionality outward.
-isConditional fcData p visited (Expr _ (Apply (Expr _ (Lambda _ b)) v)) = isConditional fcData p visited b || isConditional fcData p visited v
-isConditional fcData p visited (Expr _ (Apply l v)) = isConditional fcData p visited l || isConditional fcData p visited v
-isConditional fcData p visited (Expr (TypeInfo{chainName=cn}) (Var _)) = case findEquivalentExpression fcData cn of
+isConditionalWith cmps fcData p visited (Expr _ (Apply (Expr _ (Lambda _ b)) v)) = isConditionalWith cmps fcData p visited b || isConditionalWith cmps fcData p visited v
+isConditionalWith cmps fcData p visited (Expr _ (Apply l v)) = isConditionalWith cmps fcData p visited l || isConditionalWith cmps fcData p visited v
+isConditionalWith cmps fcData p visited (Expr (TypeInfo{chainName=cn}) (Var _)) = case findEquivalentExpression fcData cn of
   -- A named function reference resolves to its (possibly curried) lambda body. Strip
   -- the leading lambdas of a multi-argument function so the conditional inside a helper
   -- like `contrib u x = if u then x else 0` is reached, rather than stopping at the
   -- intermediate `\x -> ...` lambda.
-  Just (_, LambdaInfo _ bodyCn, _) -> isConditional fcData p (cn:visited) (stripLambdas (findExprWithCN (map snd (functions p)) bodyCn))
+  Just (_, LambdaInfo _ bodyCn, _) -> isConditionalWith cmps fcData p (cn:visited) (stripLambdas (findExprWithCN (map snd (functions p)) bodyCn))
   _ -> False
-isConditional fcData p visited x = any (isConditional fcData p visited) (getSubExprs x)
+isConditionalWith cmps fcData p visited x = any (isConditionalWith cmps fcData p visited) (getSubExprs x)
 
 -- Strip leading lambdas from a (curried) function body.
 stripLambdas :: Expr -> Expr
