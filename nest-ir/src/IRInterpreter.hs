@@ -244,10 +244,8 @@ generate f oracle adts' globalEnv env [] (IROp OpGreaterThan aOrig bOrig) = do
   where gt a b = case (a, b) of
           (VFloat af, VFloat bf) -> return (af > bf)
           (VInt af, VInt bf) -> return (af > bf)
-          (VTuple af1 af2, VTuple bf1 bf2) -> do
-            -- Lexicographic, as Python's and Julia's tuples order.
-            first <- gt af1 bf1
-            if first then return True else if af1 == bf1 then gt af2 bf2 else return False
+          -- Componentwise (dominance order), as the Python and Julia runtimes' tuples.
+          (VTuple af1 af2, VTuple bf1 bf2) -> (&&) <$> gt af1 bf1 <*> gt af2 bf2
           (VList (ListCont _ _), VList EmptyList) -> failWith f "When comparing lists, they must be of the same length"
           (VList EmptyList, VList (ListCont _ _)) -> failWith f "When comparing lists, they must be of the same length"
           (VList EmptyList, VList EmptyList) -> return False
@@ -260,10 +258,8 @@ generate f oracle adts' globalEnv env [] (IROp OpLessThan aOrig bOrig) = do
   where lt a b = case (a, b) of
           (VFloat af, VFloat bf) -> return (af < bf)
           (VInt af, VInt bf) -> return (af < bf)
-          (VTuple af1 af2, VTuple bf1 bf2) -> do
-            -- Lexicographic, as Python's and Julia's tuples order.
-            first <- lt af1 bf1
-            if first then return True else if af1 == bf1 then lt af2 bf2 else return False
+          -- Componentwise (dominance order), as the Python and Julia runtimes' tuples.
+          (VTuple af1 af2, VTuple bf1 bf2) -> (&&) <$> lt af1 bf1 <*> lt af2 bf2
           (VList (ListCont _ _), VList EmptyList) -> failWith f "When comparing lists, they must be of the same length"
           (VList EmptyList, VList (ListCont _ _)) -> failWith f "When comparing lists, they must be of the same length"
           (VList EmptyList, VList EmptyList) -> return False

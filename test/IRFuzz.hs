@@ -2906,7 +2906,7 @@ irFuzzGeneratorTests = testGroup "IR fuzz generator"
             ]
   -- Formerly a knownDisagreements family: the batched runtime's tuple had no
   -- order, so a tuple comparison raised a TypeError.
-  , testCase "batched: tuples compare lexicographically (batched-tuple-comparison-has-no-order)" $ do
+  , testCase "batched: tuples compare componentwise (batched-tuple-comparison-has-no-order)" $ do
       torch <- findTorchPython
       case torch of
         Nothing -> noTorch "IR fuzz generator batched tuple order" >>= maybe (return ()) assertFailure
