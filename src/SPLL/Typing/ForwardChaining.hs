@@ -1687,6 +1687,15 @@ constructTopLevelEquivalenceClauses lets clauses decls = concatMap (constructTop
 
 constructTopLevelEquivalenceClauses' :: LetEquivalences -> [[HornClause]] -> [Expr] -> FnDecl -> [[HornClause]]
 constructTopLevelEquivalenceClauses' lets clauses exprs (name, expr) = case rType (getTypeInfo expr) of
+  -- A function-typed declaration whose body is not one lambda -- e.g.
+  -- @pick = if c then (\\x -> ..) else (\\x -> ..)@, a randomly selected
+  -- closure -- has no single body to tag per-invocation copies against, the
+  -- same shape the bound-value branch of 'constructEquivalenceClauses' skips
+  -- (task forward-chaining-named-function-returns-selected-lambda). Its uses
+  -- get no equivalence to it, rather than crash: an application of such a
+  -- value is then not in the clause set, and is compiled by the mixture's
+  -- own path, which never consults these certificates.
+  TArrow _ _ | not (isLambdaDecl expr) -> []
   TArrow _ _ ->
    let (_, bodyExpr) = asLambda "constructTopLevelEquivalenceClauses'" expr
        dependent = bodyDependentGroups lets clauses bodyExpr
@@ -1695,6 +1704,9 @@ constructTopLevelEquivalenceClauses' lets clauses exprs (name, expr) = case rTyp
     let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
     return $ varClauses ++ taggedDependents) exprs
   _ -> concatMap (associateVariable name (getChainName expr) "") exprs
+  where
+    isLambdaDecl (Expr _ Lambda{}) = True
+    isLambdaDecl _ = False
 
 -- | The equivalences of every @let@ (a lambda in place applied to a
 -- non-function value) in the program: the application is its lambda's body,

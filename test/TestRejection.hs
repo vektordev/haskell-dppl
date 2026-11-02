@@ -68,6 +68,7 @@ rejectionTests = testGroup "Rejection"
   , eqSetWitnessTests
   , intractableComparisonTests
   , noGenerateSuppressedGeneratorTests
+  , namedRandomClosureDeclTests
   , setWitnessNestedLetTests
   , setWitnessSharedLatentTests
   , setWitnessTransportTests
@@ -1285,6 +1286,32 @@ intractableComparisonTests = testGroup "IntractableComparison"
           Right (Left e) -> assertFailure ("the closed-form comparison was refused: " ++ e)
           Right (Right _) -> return ()
   ]
+
+-- ----------------------------------------------------------------------------
+-- Task forward-chaining-named-function-returns-selected-lambda: a nullary
+-- declaration whose value is a randomly selected closure, bound by a @draw@.
+-- ForwardChaining's top-level equivalence clauses required every
+-- function-typed declaration to be one lambda and panicked ("expected chain
+-- name ast0 to be a Lambda"); it now gives such a declaration no equivalence,
+-- as the bound-value branch already did. Whatever the compile then answers, it
+-- answers without throwing. (The answer itself, p((2,3)) = p((4,6)) = 0.5, is
+-- pinned as a known issue: test/cases/known-issues/sharedFunctionValueFromHelper.)
+-- ----------------------------------------------------------------------------
+
+namedRandomClosureDeclTests :: TestTree
+namedRandomClosureDeclTests = testGroup "NamedRandomClosureDecl"
+  [ testCase ("compiles without throwing: " ++ body) $
+      withParsed (unlines [pickSrc, body]) $ \prog -> do
+        res <- forced (compile defaultCompilerConfig prog)
+        case res of
+          Left ex -> assertFailure ("the compile threw instead of answering or refusing: " ++ show ex)
+          Right _ -> return ()
+  | body <- [ "main = draw h = pick in (h 1.0, h 2.0)"
+            , "main = draw h = pick in h 1.0"
+            , "main = draw h = pick in h Normal" ]
+  ]
+  where
+    pickSrc = "pick = if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 3.0)"
 
 -- ----------------------------------------------------------------------------
 -- Task nogenerate-dangling-cross-function-generate-call: under --noGenerate,
