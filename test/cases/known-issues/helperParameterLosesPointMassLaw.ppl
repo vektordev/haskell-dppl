@@ -1,0 +1,2 @@
+rwh0 z rwv0 = (0.0 * z) + rwv0
+main = draw z = Normal in draw rwv0 = 0.0 in rwh0 z rwv0
