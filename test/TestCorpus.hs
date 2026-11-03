@@ -53,7 +53,7 @@ import Test.Tasty.HUnit (testCaseInfo, assertFailure)
 import Control.Exception (SomeException, evaluate, try)
 import System.Timeout (timeout)
 import Data.Maybe (fromMaybe)
-import Data.List (nubBy, isPrefixOf)
+import Data.List (nub, nubBy, isPrefixOf)
 import Data.Function (on)
 import Data.Foldable (toList)
 import Control.Monad.Random.Lazy (evalRandIO, replicateM)
@@ -69,7 +69,7 @@ import TestCaseParser (TestCase(..), Expectation(..), Backend(..))
 import TestTolerances (probTolerance, samplingTolerance)
 import TestSupport (topKConf, bcConf, reasonablyClose)
 import ImpactManifest
-import End2EndTesting (programRuntimeFields)
+import End2EndTesting (programRuntimeFields, shapedCases)
 import Rewrites (commuteSites)
 
 -- The expected-value tables that used to live here have moved into the
@@ -77,12 +77,79 @@ import Rewrites (commuteSites)
 -- properties below draw their (program, sample, params, expected) pool from
 -- that corpus instead: every interpreter-routed, non-neural prob/cdf case.
 -- Neural programs are excluded because their parameters are mock symbols that
--- only End2EndTesting knows how to construct.
+-- End2EndTesting shapes; the two sampler sweeps take them, shaped
+-- ('samplerPoolEntry', 'shapedEntry').
 type CorpusProbCase = (String, (Program, IRValue, [IRValue], (Double, Int)))
 
 -- | The slice every Corpus sweep selects.
 corpusPoolEntry :: CorpusEntry -> Bool
 corpusPoolEntry e = Interpreter `elem` ceBackends e && null (neurals (ceProgram e))
+
+-- | The slice the two sampler sweeps select: 'corpusPoolEntry' with the
+-- neural programs added, whose mock networks the interpreter's sampler and
+-- density both read through 'programMockOracle'.
+samplerPoolEntry :: CorpusEntry -> Bool
+samplerPoolEntry e = Interpreter `elem` ceBackends e
+
+-- | Corpus programs 'SamplingMatchesPDF' is known to fail on, each with its
+-- tracking document. The check is inverted for them: some row must still
+-- miss, so a fix cannot leave the list stale.
+knownSamplerMismatches :: [(String, String)]
+knownSamplerMismatches =
+  -- The enumerated sum over observe's {0, 2} reports a density-valued weight
+  -- at dim 0, so the sampler (which never draws x == 0.0) estimates 0 mass.
+  [ ("observeContinuousEqualsLetBound", "enumerated-weight-density-reported-as-mass")
+  , ("observeContinuousEqualsLetfree", "enumerated-weight-density-reported-as-mass")
+  , ("observeNegatedContinuousEqualsLetfree", "enumerated-weight-density-reported-as-mass") ]
+
+-- | A corpus entry with its rows' neural parameters shaped
+-- ('End2EndTesting.shapedCases'); a non-neural entry is unchanged.
+shapedEntry :: CorpusEntry -> CorpusEntry
+shapedEntry e = e { ceCases = shapedCases e }
+
+-- | Does 'SamplingMatchesPDF' check this row: a shape it can window, at a
+-- dimension a window over 1000-odd draws can estimate.
+samplerWindowed :: IRValue -> Int -> Bool
+samplerWindowed inp outDim = sampleable inp && outDim <= 1 && densityLivesOnSamples inp outDim
+
+-- | The parameter lists 'SamplesInSupport' samples a program at: those of its
+-- p() rows of dim >= 2, each once.
+supportCheckedParams :: CorpusEntry -> [[IRValue]]
+supportCheckedParams e = nub [ params | (_, (_, _, params, (_, d))) <- probCasesOf [e], d >= 2 ]
+
+-- | The rows 'SamplingMatchesPDF' estimates on a program, grouped by
+-- parameter list: the rows of one group share their draws.
+windowedRowGroups :: CorpusEntry -> [([IRValue], [(IRValue, (Double, Int))])]
+windowedRowGroups e = [ (params, [ (inp, ex) | (ps, inp, ex) <- rows, ps == params ]) | params <- nub [ ps | (ps, _, _) <- rows ] ]
+  where rows = [ (params, inp, ex) | (_, (_, inp, params, ex@(_, d))) <- sampledProbCasesOf [e], samplerWindowed inp d ]
+
+-- | Every group of a program through 'samplingRows'.
+runGroups :: CompiledPrograms -> String -> Bool -> Program -> [([IRValue], [(IRValue, (Double, Int))])] -> IO [((IRValue, (Double, Int)), RowVerdict)]
+runGroups envs n mayFail p groups = concat <$> mapM (\(params, rows) -> samplingRows envs n mayFail p params rows) groups
+
+-- | One row's verdict as a property.
+rowProperty :: ((IRValue, (Double, Int)), RowVerdict) -> Property
+rowProperty ((inp, _), verdict) = counterexample ("row p(" ++ show inp ++ ")") $ case verdict of
+  RowPass -> property True
+  RowSkip l -> label l True
+  RowFail why -> counterexample why False
+
+-- | Bump when the sampler checks' logic changes.
+samplingCheckVersion, supportCheckVersion :: String
+samplingCheckVersion = "corpus-sampling-v2"
+supportCheckVersion = "corpus-support-v1"
+
+-- | Key of a sampler check on one program: its default compile, its runtime
+-- fields and the rows or parameters it samples at, with the interpreter
+-- fingerprint; this module's source joins the harness. A refused compile has
+-- no key, so the check runs.
+samplerKey :: Manifest -> String -> Program -> Either CompilerError CheckedIR -> String -> IO (Maybe String)
+samplerKey _ _ _ (Left _) _ = return Nothing
+samplerKey m version p (Right env) rows = do
+  h <- harnessFingerprint m
+  src <- sourcesFingerprint m ["test/TestCorpus.hs"]
+  i <- interpreterFingerprint m
+  return $ Just $ hashKey [ version, h, src, i, show env, programRuntimeFields p, rows, show samplingTolerance ]
 
 -- | The p(...) rows of a slice.
 --
@@ -126,9 +193,11 @@ expectedProb e other = error ("malformed probability expectation in .tst corpus 
 -- cases; see forAllNamedIn), so any failing case is surfaced on every run rather
 -- than only when a random draw happens to select it. Each invariant:
 --  * ValidPrograms: every program the End2End interpreter runs must pass validateProgram.
---  * SamplingMatchesPDF: the empirical frequency of a sampleable value estimates the
---    density the .tst file asserts; non-sampleable shapes (bools, eithers, ANY) and
---    dim >= 2 cases are filtered out of the pool, zero-probability cases pass trivially.
+--  * SamplingMatchesPDF: the empirical frequency of forward samples estimates the
+--    density each dim <= 1 row asserts, discrete shapes and ANY slots included
+--    (one test per program, neural ones too).
+--  * SamplesInSupport: a program with a dim >= 2 row draws only values its
+--    probability variant gives a finite, positive density (one test per program).
 --  * TopK*: pruning may only zero out branches, never invent mass -- threshold 0 must
 --    reproduce exact inference and any threshold may only lower the probability.
 --  * ProbWithBranchCounting: branch counting adds a third result component without
@@ -177,20 +246,57 @@ corpusGroup Variant{vPath, vGroup, vTier, vHeader, vSelect} corpus manifest = fm
   -- dim 0 means the expectation refers to an atom, not a density: match drawn
   -- samples against it with a near-exact window (wide enough for float noise like
   -- 0.1+0.2, narrow enough to separate deliberately-close .tst atoms) instead of
-  -- the density-estimation window. dim >= 2 cases (and non-sampleable shapes:
-  -- bools, eithers, ANY) are filtered out of the enumerated pool rather than
-  -- discarded at test time -- conjoin treats a discard as "gave up", not as a
-  -- pass. The hit probability of a window estimate scales with density * eps^dim,
-  -- so reliable multivariate estimates need prohibitively many samples; those
-  -- cases are value-checked exactly by End2End.Interpreter instead.
+  -- the density-estimation window. Discrete components (ints, bools, eithers,
+  -- ADT constructors) match exactly and an ANY slot matches every draw, so a
+  -- marginal row estimates the marginal. dim >= 2 rows are filtered out of the
+  -- enumerated pool rather than discarded at test time -- conjoin treats a
+  -- discard as "gave up", not as a pass. The hit probability of a window
+  -- estimate scales with density * eps^dim, so reliable multivariate estimates
+  -- need prohibitively many samples; 'SamplesInSupport' checks those programs'
+  -- samplers instead. Unlike the other sweeps this one also takes the neural
+  -- programs, their rows' mock envelopes shaped the way End2End shapes them
+  -- (task generate-unchecked-against-density-outside-sampling-pool).
   , corpusSweepAll corpus SweepSpec
       { sweepName = vPath ++ ".SamplingMatchesPDF", sweepTier = vTier, sweepSlow = vHeader
-      , sweepSelect = vSelect, sweepNote = "the empirical frequency of forward samples estimates the .tst density (rows marked no-sample excepted)" } $ \es -> return $ let probPool = sampledProbCasesOf es in
-      testProperty "SamplingMatchesPDF" $ once $ conjoin
-      [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
-      | (n, tc@(_, inp, _, (_, outDim))) <- probPool
-      , sampleable inp, outDim == 0 || outDim == 1
-      , densityLivesOnSamples inp outDim ]
+      , sweepSelect = samplerPoolEntry, sweepNote = "the empirical frequency of forward samples estimates the .tst density (rows marked no-sample excepted)" } $ \es -> return $
+      let envs = samplerEnvs es
+          name = vPath ++ ".SamplingMatchesPDF" in
+      testGroup "SamplingMatchesPDF"
+        [ testProperty n $ once $ cachedProperty manifest name n
+            (samplerKey manifest samplingCheckVersion p (lookupCompiled envs n) (show groups))
+            (case lookup n knownSamplerMismatches of
+               Nothing -> ioProperty (conjoin . map rowProperty <$> runGroups envs n mayFail p groups)
+               Just doc -> counterexample ("known sampler mismatch [" ++ doc ++ "] no longer observed -- \
+                             \fixed? remove its knownSamplerMismatches entry") $ ioProperty $ do
+                 vs <- runGroups envs n mayFail p groups
+                 return (property (or [ True | (_, RowFail _) <- vs ])))
+        | e <- map shapedEntry es
+        , let n = ceName e
+        , let p = ceProgram e
+        , let mayFail = ceNoNormalization e
+        , let groups = windowedRowGroups e
+        , not (null groups) ]
+  -- The dim >= 2 rows' sampler check: support agreement. Every draw the
+  -- forward sampler makes must have a finite, positive density under the
+  -- probability variant. It needs no window, so the dimension does not matter;
+  -- what it cannot see is a sampler that puts the right support under the
+  -- wrong weights.
+  , corpusSweepAll corpus SweepSpec
+      { sweepName = vPath ++ ".SamplesInSupport", sweepTier = vTier, sweepSlow = vHeader
+      , sweepSelect = samplerPoolEntry, sweepNote = "every forward sample of a program with a dim >= 2 row has a finite, positive density" } $ \es -> return $
+      let envs = samplerEnvs es
+          name = vPath ++ ".SamplesInSupport" in
+      testGroup "SamplesInSupport"
+        [ testProperty n $ once $ cachedProperty manifest name n
+            (samplerKey manifest supportCheckVersion p (lookupCompiled envs n) (show paramLists))
+            (conjoin [ counterexample ("at parameters " ++ show params)
+                         (checkSamplesInSupport envs n (ceNoNormalization e) p params 200)
+                     | params <- paramLists ])
+        | e <- map shapedEntry es
+        , let n = ceName e
+        , let p = ceProgram e
+        , let paramLists = supportCheckedParams e
+        , not (null paramLists) ]
   , corpusProperty SweepSpec
       { sweepName = vPath ++ ".TopKInterprets", sweepTier = vTier, sweepSlow = vHeader
       , sweepSelect = vSelect, sweepNote = "a topK 0.05 compile still answers every p() row" } $ \probPool _ ->
@@ -320,7 +426,11 @@ corpusGroup Variant{vPath, vGroup, vTier, vHeader, vSelect} corpus manifest = fm
     -- Enumerate the whole (filtered) pool deterministically so any failing corpus
     -- case surfaces on every run, rather than only when a random draw selects it.
     forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f n tc) | (n, tc) <- pool]
-    samplingEps outDim = if outDim == 0 then 1e-9 else 0.05
+    -- The sampler sweeps also compile the neural programs the shared
+    -- 'defaultEnvs' leaves out ('corpusPoolEntry').
+    samplerEnvs es = Map.union defaultEnvs
+      (compileCorpusPrograms defaultCompilerConfig
+        [ (ceName e, ceProgram e) | e <- es, not (null (neurals (ceProgram e))) ])
 
 -- | Bump when 'checkLogSpaceMatchesLinear' changes.
 logSpaceCheckVersion :: String
@@ -514,19 +624,27 @@ irDensityC envs n p params s = either error id (lookupCompiled envs n >>= \c -> 
 irCumulativeC :: CompiledPrograms -> String -> Program -> [IRValue] -> IRValue -> IRValue
 irCumulativeC envs n p params s = either error id (lookupCompiled envs n >>= \c -> runIntegC p c params s)
 
--- Does a drawn sample match the expected value, within an epsilon-wide window
--- (maximum norm) on continuous components and exactly on discrete ones?
--- 'Nothing' windows every continuous component; 'Just sel' windows only the
--- float coordinates whose position (numbered left to right over the value) is
--- in @sel@ and ignores the rest -- see 'coordinateSubsets' for why that is
--- ever the right thing to do. Discrete components are matched exactly either
--- way: they carry no dimension, so they are never a coordinate to project onto.
-sampleMatchesOn :: Maybe [Int] -> Double -> IRValue -> IRValue -> Bool
-sampleMatchesOn sel epsilon expected actual = fst (go 0 expected actual)
+-- Does a drawn sample match the expected value? Float coordinate @i@
+-- (numbered left to right over the value) is matched within the window
+-- @tol i@ (maximum norm: @|a - e| <= w / 2@), or ignored when @tol i@ is
+-- 'Nothing' -- see 'coordinateSubsets' for why ignoring one is ever the right
+-- thing to do. Discrete components are matched exactly either way: they carry
+-- no dimension, so they are never a coordinate to project onto. An ANY slot
+-- matches anything.
+sampleMatchesWith :: (Int -> Maybe Double) -> IRValue -> IRValue -> Bool
+sampleMatchesWith tol expected actual = fst (go 0 expected actual)
   where
-    windowed i = maybe True (i `elem`) sel
-    go i (VFloat e) (VFloat a) = (not (windowed i) || abs (a - e) <= epsilon / 2, i + 1)
+    go i (VFloat e) (VFloat a) = (maybe True (\w -> abs (a - e) <= w / 2) (tol i), i + 1)
     go i (VInt e) (VInt a) = (e == a, i)
+    go i (VBool e) (VBool a) = (e == a, i)
+    go i (VSymbol e) (VSymbol a) = (e == a, i)
+    go i VUnit VUnit = (True, i)
+    go i VAny _ = (True, i)
+    go i (VEither (Left e)) (VEither (Left a)) = go i e a
+    go i (VEither (Right e)) (VEither (Right a)) = go i e a
+    go i (VADT ce es) (VADT ca as)
+      | ce /= ca || length es /= length as = (False, i)
+      | otherwise = foldl (\(ok, j) (ev, av) -> let (ok', j') = go j ev av in (ok && ok', j')) (True, i) (zip es as)
     go i (VTuple e1 e2) (VTuple a1 a2) =
       let (ok1, i1) = go i e1 a1
           (ok2, i2) = go i1 e2 a2
@@ -546,9 +664,11 @@ floatCoordCount :: IRValue -> Int
 floatCoordCount (VFloat _) = 1
 floatCoordCount (VTuple a b) = floatCoordCount a + floatCoordCount b
 floatCoordCount (VList l) = sum (map floatCoordCount (toList l))
+floatCoordCount (VEither e) = either floatCoordCount floatCoordCount e
+floatCoordCount (VADT _ fs) = sum (map floatCoordCount fs)
 floatCoordCount _ = 0
 
--- Which coordinate windows 'testSamplingProb' should try, given the ambient
+-- Which coordinate windows 'judgeSampledRow' should try, given the ambient
 -- float-coordinate count and the result's reported dimension.
 --
 -- When they agree (every corpus case but the degenerate-support ones) there is
@@ -568,7 +688,7 @@ floatCoordCount _ = 0
 -- respect to, and rDim fixes the exponent without fixing that choice.
 --
 -- So we enumerate every dim-sized subset of the coordinates and window on that
--- subset alone, and 'testSamplingProb' accepts if ANY of them reproduces the
+-- subset alone, and 'judgeSampledRow' accepts if ANY of them reproduces the
 -- compiler's value -- the claim being that the reported density is the marginal
 -- on SOME dim-sized set of the observed coordinates, which is what witnessed
 -- inference computes (it inverts the observation onto latents through a chosen
@@ -586,7 +706,7 @@ floatCoordCount _ = 0
 -- convention SHOULD be the language's is open; see task warn-correlated-slots.
 --
 -- A projected window says nothing about whether the query is ON the manifold --
--- it drops exactly the coordinates that decide that -- so 'testSamplingProb'
+-- it drops exactly the coordinates that decide that -- so 'judgeSampledRow'
 -- keeps the two questions apart, the way the compiled result itself does (a
 -- dim-0 support indicator times a dim-'outDim' density): the ambient window is
 -- an existence test for support, and only once some draw lands in it does a
@@ -598,10 +718,10 @@ floatCoordCount _ = 0
 --
 -- dim 0 keeps the all-coordinate window: an atom is pinned in every coordinate,
 -- and a 0-sized subset would window nothing at all and count every draw.
-coordinateSubsets :: Int -> Int -> [Maybe [Int]]
+coordinateSubsets :: [Int] -> Int -> [Maybe [Int]]
 coordinateSubsets coords dim
-  | dim <= 0 || coords <= dim = [Nothing]
-  | otherwise = map Just (subsetsOfSize dim [0 .. coords - 1])
+  | dim <= 0 || length coords <= dim = [Nothing]
+  | otherwise = map Just (subsetsOfSize dim coords)
 
 subsetsOfSize :: Int -> [a] -> [[a]]
 subsetsOfSize 0 _ = [[]]
@@ -622,47 +742,155 @@ subsetsOfSize k (x:xs) = map (x:) (subsetsOfSize (k - 1) xs) ++ subsetsOfSize k 
 densityLivesOnSamples :: IRValue -> Int -> Bool
 densityLivesOnSamples inp d = d <= floatCoordCount inp
 
--- Shapes testSamplingProb can estimate a PDF for; everything else is discarded.
+-- Shapes judgeSampledRow can estimate a PDF for; everything else is discarded.
+-- Discrete leaves match a draw exactly, so they need no window; an ANY slot
+-- matches every draw ('sampleMatchesWith'). Left out: a list with an ANY tail
+-- (its length is open, and 'sampleMatchesWith' compares lengths), an ANY-except
+-- slot, and the function, tensor and theta-tree values no row queries.
 sampleable :: IRValue -> Bool
 sampleable (VFloat _) = True
 sampleable (VInt _) = True
+sampleable (VBool _) = True
+sampleable (VSymbol _) = True
+sampleable VUnit = True
+sampleable VAny = True
+sampleable (VEither e) = either sampleable sampleable e
+sampleable (VADT _ fs) = all sampleable fs
 sampleable (VTuple a b) = sampleable a && sampleable b
-sampleable (VList l) = all sampleable l
+sampleable (VList l) = closedList l && all sampleable l
+  where closedList EmptyList = True
+        closedList (ListCont _ xs) = closedList xs
+        closedList AnyList = False
 sampleable _ = False
 
---Sample PDF against expected PDF. Retry specific number of times with double the samples each time
-testSamplingProb :: CompiledPrograms -> String -> Double -> Int -> Int -> (Program, IRValue, [IRValue], (Double, Int)) -> Property
-testSamplingProb envs n epsilon samples retries tc@(p, inp, params, (out, outDim))
-  | sampleable inp = ioProperty $ evalRandIO $ do
-    let compiledEnv = either error id (lookupCompiled envs n)
-    let gen = runGenC p compiledEnv params
-    drawn <- replicateM samples gen
+-- | 'SamplesInSupport' on one parameter list: draw @samples@ values from the
+-- forward sampler and require each to have a finite, positive density under
+-- the probability variant. A sampler that leaves the support (a wrong branch,
+-- an off-by-one constructor, a mis-shifted latent) fails at the first draw
+-- the density calls impossible.
+checkSamplesInSupport :: CompiledPrograms -> String -> Bool -> Program -> [IRValue] -> Int -> Property
+checkSamplesInSupport envs n mayFail p params samples = ioProperty $ do
+  let compiledEnv = either error id (lookupCompiled envs n)
+  Draws _ drawn raised <- drawSamples envs n p params samples
+  let judge s = case runProbC p compiledEnv params s of
+        Right (VProbDim pr _) | pr > 0 && not (isInfinite pr) && not (isNaN pr) -> Nothing
+        Right r -> Just (show s ++ " has density " ++ show r)
+        Left err -> Just (show s ++ ": " ++ err)
+      bad = [ "the sampler raised: " ++ r | r <- raised, not mayFail ] ++ [ m | Just m <- map judge drawn ]
+  return $ if null bad then property True
+    else counterexample (show (length bad) ++ " of " ++ show samples ++ " draws outside the support, e.g. "
+                         ++ unlines (take 3 bad)) False
+
+-- | The window an atom is matched in: wide enough for float noise like
+-- 0.1+0.2, narrow enough to separate deliberately-close .tst atoms.
+atomWindow :: Double
+atomWindow = 1e-9
+
+-- | What 'SamplingMatchesPDF' made of one row.
+data RowVerdict = RowPass | RowSkip String | RowFail String
+
+-- | Draws from a program's sampler at one parameter list: how many were
+-- attempted, the values, and the messages of the ones that raised.
+data Draws = Draws Int [IRValue] [String]
+
+-- | Draw @k@ values. Each draw gets its own generator, so a draw that raises
+-- costs only itself.
+drawSamples :: CompiledPrograms -> String -> Program -> [IRValue] -> Int -> IO Draws
+drawSamples envs n p params k = do
+  let compiledEnv = either error id (lookupCompiled envs n)
+  attempts <- replicateM k (try (evaluate . forceValue =<< evalRandIO (runGenC p compiledEnv params)))
+  return (Draws k [ v | Right v <- attempts ] [ takeWhile (/= '\n') (show (e :: SomeException)) | Left e <- attempts ])
+
+-- | Sample PDF against expected PDF, for every row of one program at one
+-- parameter list: the rows share their draws, and the rows that miss are
+-- retried on twice as many fresh draws, up to five times. On a
+-- @no-normalization@ program (@mayFail@) a raising draw is the program's
+-- failure mass and falls in no window, which is what a sub-probability's
+-- estimate needs; anywhere else it fails the row.
+samplingRows :: CompiledPrograms -> String -> Bool -> Program -> [IRValue] -> [(IRValue, (Double, Int))] -> IO [((IRValue, (Double, Int)), RowVerdict)]
+samplingRows envs n mayFail p params = go 1000 (5 :: Int)
+  where
+    go k retries pending = do
+      ds <- drawSamples envs n p params k
+      let verdicts = [ (r, judgeSampledRow mayFail ds r) | r <- pending ]
+          missed = [ r | (r, RowFail _) <- verdicts ]
+      if null missed || retries == 0
+        then return verdicts
+        else do
+          retried <- go (k * 2) (retries - 1) missed
+          return ([ v | v@(_, verdict) <- verdicts, not (isRowFail verdict) ] ++ retried)
+    isRowFail (RowFail _) = True
+    isRowFail _ = False
+
+-- | One row against a set of draws.
+--
+-- Which float coordinates are continuous is read off the draws: one some draw
+-- hits exactly ('atomWindow') is an atom at the query, matched exactly and
+-- carrying no dimension (the 1.0 of @((0.0, ANY), 1.0)@ on
+-- @(e, if snd e then 1.0 else 2.0)@). The windows range over the rest. When
+-- the reported dim exceeds the continuous coordinates left, the result is the
+-- density of a null event -- the 'densityLivesOnSamples' category error, seen
+-- here only once an atom is recognised (@(0.0, v0 == 1.0)@ at @(0.0, True)@)
+-- -- and the row is passed with a label rather than estimated.
+judgeSampledRow :: Bool -> Draws -> (IRValue, (Double, Int)) -> RowVerdict
+judgeSampledRow mayFail (Draws samples drawn raised) (inp, (out, outDim))
+  | not (sampleable inp) = RowFail ("not a sampleable query: " ++ show inp)
+  | not (null raised) && not mayFail =
+      RowFail ("the sampler raised on " ++ show (length raised) ++ " of " ++ show samples ++ " draws: " ++ head raised)
+  | outDim > length continuous && out > 0 = RowSkip "density of a null event"
+  | any (\e -> abs (e - out) <= samplingTolerance) estimates = RowPass
+  | otherwise = RowFail ("Sampled PDF is: " ++ show estimates ++ ", but should be: " ++ show out
+                         ++ " (" ++ show samples ++ " draws)")
+  where
+    epsilon = if outDim == 0 then atomWindow else 0.05
+    queried = floatCoordValues inp inp
+    atomic = [ i | (i, e) <- queried
+                 , any (\d -> any (\(j, a) -> j == i && abs (a - e) <= atomWindow / 2) (floatCoordValues inp d)) drawn ]
+    continuous = filter (`notElem` atomic) (map fst queried)
     -- The maximum norm creates an outDim-dimensional hypercube of volume
-    -- epsilon^outDim; for purely discrete samples outDim is 0 and no division
-    -- happens. One estimate per candidate coordinate window -- a single
-    -- all-coordinate one unless the support is a lower-dimensional manifold,
-    -- see 'coordinateSubsets'.
-    let estimateOn sel =
-          let countInside = length (filter (sampleMatchesOn sel epsilon inp) drawn)
-              ratioInside = fromIntegral countInside / fromIntegral samples
-          in ratioInside / (epsilon ^ outDim)
-    let windows = coordinateSubsets (floatCoordCount inp) outDim
+    -- epsilon^outDim; for purely discrete samples outDim is 0 and no
+    -- division happens. One estimate per candidate coordinate window -- a
+    -- single all-coordinate one unless the support is a lower-dimensional
+    -- manifold, see 'coordinateSubsets'.
+    tolOn :: Maybe [Int] -> Int -> Maybe Double
+    tolOn sel i
+      | i `elem` atomic = Just atomWindow
+      | maybe True (i `elem`) sel = Just epsilon
+      | otherwise = Nothing
+    estimateOn sel =
+      let countInside = length (filter (sampleMatchesWith (tolOn sel) inp) drawn)
+          ratioInside = fromIntegral countInside / fromIntegral samples
+      in ratioInside / (epsilon ^ outDim)
+    windows = coordinateSubsets continuous outDim
     -- On a manifold the ambient window no longer carries the measure, so it
     -- serves as the support test instead: no draw inside it means the query is
     -- off-support and the density is 0. Where the ambient window IS the only
     -- window (full-dimensional support) this is subsumed -- an empty window
     -- already estimates 0 -- so the branch changes nothing there.
-    let onSupport = windows == [Nothing] || any (sampleMatchesOn Nothing epsilon inp) drawn
-    let estimates = if onSupport then map estimateOn windows else [0]
-    let valid = any (\e -> abs (e - out) <= samplingTolerance) estimates
-    if valid then
-      return $ property True
-    else
-      if retries > 0 then
-        return $ testSamplingProb envs n epsilon (samples * 2) (retries - 1) tc
-      else
-        return $ counterexample ("Sampled PDF is: " ++ show estimates ++ ", but should be: " ++ show out) (property valid)
-testSamplingProb _ _ _ _ _ _ = False ==> False
+    onSupport = windows == [Nothing] || any (sampleMatchesWith (tolOn Nothing) inp) drawn
+    estimates = if onSupport then map estimateOn windows else [0 :: Double]
+
+-- | A draw's float coordinates, numbered as the query numbers them, wherever
+-- the draw's shape follows the query's (the same constructor, branch and list
+-- length down to the coordinate). Discrete leaves are not compared: this is
+-- what each coordinate is, whatever the rest of the draw holds.
+floatCoordValues :: IRValue -> IRValue -> [(Int, Double)]
+floatCoordValues query draw = fst (go 0 query draw)
+  where
+    go i (VFloat _) (VFloat a) = ([(i, a)], i + 1)
+    go i (VFloat _) _ = ([], i + 1)
+    go i (VEither (Left e)) (VEither (Left a)) = go i e a
+    go i (VEither (Right e)) (VEither (Right a)) = go i e a
+    go i (VADT ce es) (VADT ca as) | ce == ca && length es == length as = many i (zip es as)
+    go i (VTuple e1 e2) (VTuple a1 a2) = many i [(e1, a1), (e2, a2)]
+    go i (VList e) (VList a) | length (toList e) == length (toList a) = many i (zip (toList e) (toList a))
+    go i e _ = ([], i + floatCoordCount e)
+    many i = foldl (\(acc, j) (e, a) -> let (xs, j') = go j e a in (acc ++ xs, j')) ([], i)
+
+-- | Force a drawn value all the way down, so a draw that raises does so
+-- inside the 'try' that is waiting for it.
+forceValue :: IRValue -> IRValue
+forceValue v = length (show v) `seq` v
 
 -- Threshold=0 never prunes any branch, so results must match exact inference.
 checkTopKZeroMatchesExact :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (Double, Int)) -> Property

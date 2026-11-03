@@ -114,6 +114,31 @@ note when `python3` cannot import numpy. `test/prelude_numerics_probe.py`
 classifies all three as not on the float path, so the prelude probes leave
 them to this group.
 
+### Sampler checks: generate against the density
+
+Two interpreter sweeps compare a corpus program's forward sampler with its
+`.tst` rows, over every interpreter-routed program, neural ones included (their
+mock envelopes shaped as End2End shapes them):
+
+- `Corpus.SamplingMatchesPDF` estimates each `p()` row of dim 0 or 1 from
+  1000 draws, retried on doubled fresh draws up to five times. Floats are
+  windowed; ints, bools, `Either` branches, ADT constructors and symbols match
+  exactly; an `ANY` slot matches every draw, so a marginal row estimates the
+  marginal. A float coordinate some draw hits exactly is an atom and is matched
+  exactly too. A row whose dim exceeds the continuous coordinates left is the
+  density of a null event (`x == 0.0` observed `True`) and passes with a label.
+  On a `no-normalization` program a draw that raises is failure mass; anywhere
+  else it fails the row. Rows marked `no-sample` are skipped, and the programs
+  in `TestCorpus.knownSamplerMismatches` must still miss, each owned by a
+  ticket.
+- `Corpus.SamplesInSupport` covers the dim >= 2 rows, where a window would
+  need too many draws: at each such row's parameters, 200 draws must each
+  have a finite, positive density. It checks the support, not the weights.
+
+Neither reaches a program without `p()` rows (cdf-only, `argmax_p`,
+writeLogits and encode programs), and the scalar Python and Julia `generate`
+are only called once per program, for crash-freedom.
+
 ## Corpus sweeps
 
 A check that iterates over the programs of `test/cases/` is a **sweep**, and
@@ -759,6 +784,7 @@ its own key (`sourcesFingerprint`), so editing it reruns that sweep only.
 | `BatchedPython.<differential>` (per program, inside each of the four torch batches, and `BatchedLogSpace`'s `batched-log-space-vs-expected`, keyed as `BatchedPython.batched-log-space-vs-expected`) | the program's name, batched source, query groups and network mocks as the driver renders them, and the torch fingerprint: `pythonLibBatched.py`, and the torch python's path, Python version and torch version. An all-unchanged differential starts no python |
 | `KnownIssues` (`broken` and `wrong-result` pins) | the `expect-failure` header, the backends checked, the `IREnv` with the program fields and rows, the interpreter fingerprint, and on Python each row's exact script and the Python runtime; `TestKnownIssues.hs` joins the harness |
 | `Corpus.LogSpaceMatchesLinear` (one test per program) | the program's log-space `IREnv`, its fields, its p() rows and the tolerance, and the interpreter fingerprint; `TestCorpus.hs` joins the harness |
+| `Corpus.SamplingMatchesPDF`, `Corpus.SamplesInSupport` (one test per program) | the program's default `IREnv`, its fields, the rows (or parameter lists) it samples and the sampling tolerance, and the interpreter fingerprint; `TestCorpus.hs` joins the harness |
 | `Slow.RewriteInvarianceCorpus` | the rows, and for the original and every variant (family and site) its program fields and its compile, a refusal's message included, and the interpreter fingerprint; `TestRewrites.hs` and `Rewrites.hs` join the harness. A variant whose compile timed out, or whose shown environment crashed or timed out, leaves the program unkeyed |
 
 The **interpreter fingerprint** (M1 of the task) is the source of every
@@ -889,7 +915,8 @@ code-size, hang and growth pins, `BatchedPython`'s eligibility properties,
 and `Julia free names are escaped`. Their key could only be the compiler's
 source, which every compiler commit changes. The other `Corpus` properties
 are one property over the whole pool, so they have no per-program slot until
-each is split per program, as `Corpus.LogSpaceMatchesLinear` was. The `Slow`
+each is split per program, as `Corpus.LogSpaceMatchesLinear` and the sampler
+checks were. The `Slow`
 batched topK differentials are not covered either.
 
 ## Test suite time
