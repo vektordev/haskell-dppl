@@ -4,9 +4,10 @@
 -- so IRCompiler takes the product of the groups' own enumerations instead of
 -- enumerating a1, b1, a2, b2 jointly (2^4 worlds here, 2^(2N) at N groups).
 -- The rows pin the within-group correlation: a slot pair sharing a field is
--- not the product of its marginals. Its support is too large for the
--- Normalization sweep's 500 samples, so it is slow; recordSharedFieldGroups is
--- the small one. Task answer-record-shared-fields-enumerated-jointly.
+-- not the product of its marginals. no-normalization: its 2^7-value support
+-- is too large for the Normalization sweep's 500 samples (they cover about
+-- 0.97 of the mass); recordSharedFieldGroups is the small one. Task
+-- answer-record-shared-fields-enumerated-jointly.
 data Face = Face a1::Bool, b1::Bool, a2::Bool, b2::Bool, c::Bool
 data Ans = Ans p1::Bool, q1::Bool, r1::Bool, p2::Bool, q2::Bool, r2::Bool, s::Bool
 neural see :: (Symbol -> Face)

@@ -672,9 +672,14 @@ default tier also executes were demoted (docs-repo task
 `demote-tick-redundant-corpus-programs-to-slow`, from the report of
 "Coverage-informed tiering" below). About 100 of 630 corpus programs stay
 default.
-A demoted program still runs its interpreter rows in `End2End (slow)`, but
-leaves the Julia and Python row checks, the batched value differentials and
-the `Corpus` binary's sweeps, which are all `SkipSlow` with no `Slow` twin.
+A demoted program still runs every `End2End` sweep in `End2End (slow)`: its
+interpreter rows, and its Julia and Python row checks wherever its census
+leaves what the fuzzers certify (the same routing as the default tree, decided
+per test rather than while the tree is built). The text-backend sweeps there
+leave out `slowForCompileCost` (below): the Python check of one of those took
+up to ten minutes and 3 GB. The
+`Corpus` binary's sweeps have their `Slow` twin (above), and
+`Slow.BackendAgreementCoverage` reads the `slow` programs too.
 
 **Population checks live in `Slow`.** A check that asserts a floor on how
 much of the corpus it saw, or names programs that must be in it, needs the
