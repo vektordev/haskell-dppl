@@ -661,7 +661,8 @@ comparisonWithoutClosedForm e@(Expr ti f) = case f of
     why op = "the comparison `" ++ (if op == "lt" then "<" else ">") ++ "`"
           ++ maybe "" ((" at " ++) . spanPretty) (srcPos ti)
           ++ " has no closed form for its two random operands. NeST measures a comparison"
-          ++ " when one side is deterministic, both sides are Gaussian, both sides are"
+          ++ " when one side is deterministic or recovered from the observation as a point,"
+          ++ " both sides are Gaussian, both sides are"
           ++ " enumerable, or one side is enumerable and the two read no random variable"
           ++ " in common"
 

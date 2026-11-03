@@ -901,6 +901,7 @@ inferE ctx env expr = case expr of
                 (compareGround (planDependent ctx env a && planDependent ctx env b)
                                (enumerableOperand a) (enumerableOperand b)
                                (independentOperands env a b)
+                               (isWitI (lawMod la) || isWitI (lawMod lb))
                                (outerI (lawMod la)) (outerI (lawMod lb)))
           e' = Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])
       in doneL (pointOr (IG g) e') e' (aacc ++ bacc)
@@ -1624,7 +1625,8 @@ independentOperands env a b = not (any randomLocal (Set.toList shared))
 -- | Comparison (@>@\/@<@): the Boolean result is a Bernoulli (finite support).
 -- @plan@ says both operands project from plan reads through bindings
 -- ('planDependent'); @enumA@\/@enumB@ say whether the left\/right operand is
--- enumerable ('enumerableOperand').
+-- enumerable ('enumerableOperand'); @indep@ that they read no random local in
+-- common ('independentOperands'); @wit@ that one of them is witnessed ('IWit').
 --
 -- The capability rung is decided by whether a closed form for /this pair of
 -- operands/ exists, not by whether each operand separately owns a CDF. Owning a
@@ -1645,6 +1647,18 @@ independentOperands env a b = not (any randomLocal (Set.toList shared))
 --
 --   * __one side 'Exact'__ — the random side's own CDF evaluated at the fixed
 --     bound (@fixed_bound@\/@rhs_integral@\/@lhs_integral@).
+--   * __one side witnessed__ ('IWit', @wit@) — the observation recovers it as
+--     a point before the comparison is measured: @draw p = Uniform in (p,
+--     Uniform < p)@ reads @p@ off the first slot, so given the query the
+--     bound is fixed. The compiler re-infers the body with the recovered
+--     variable 'Exact' ('IRCompiler.Binding.reinferRecovered'), and the
+--     comparison reaches the fixed-bound equation above (or, both sides
+--     witnessed, is an indicator). Only the closed-form test reads the flag:
+--     the operand's standalone law still sets the result's rung, as a
+--     witnessed operand's does in 'injFMod''s floor (task
+--     comparison-against-point-witnessed-latent-refused). A value observed
+--     only through a set (@(x < 0.5, Uniform < x)@) is not witnessed, and
+--     stays refused.
 --   * __both sides Gaussian__ — the difference is Gaussian, so the answer is its
 --     CDF at zero (@normalDiffComparison@). 'FamNormal' specifically, not merely
 --     equal families: two 'FamLogNormal' operands enjoy no such closure and
@@ -1672,8 +1686,8 @@ independentOperands env a b = not (any randomLocal (Set.toList shared))
 --     refusal stays the net (task engine-applicability-as-data, closing
 --     @comparison-closed-form-verdict-for-plan-leaves@'s coarse
 --     declaration-wide flag).
-compareGround :: Bool -> Bool -> Bool -> Bool -> GroundMod -> GroundMod -> GroundMod
-compareGround plan enumA enumB indep a b
+compareGround :: Bool -> Bool -> Bool -> Bool -> Bool -> GroundMod -> GroundMod -> GroundMod
+compareGround plan enumA enumB indep wit a b
   | gCap a == Exact && gCap b == Exact = groundMod Exact        Finite FamNone
   | closedForm                         = groundMod DensInt      Finite FamNone
   | canSample a && canSample b         = groundMod SampleOnly   Finite FamNone
@@ -1693,6 +1707,7 @@ compareGround plan enumA enumB indep a b
         canSample g = leqCap SampleOnly (gCap g)
         closedForm  = okInt a && okInt b
                    && (  plan
+                      || wit
                       || gCap a == Exact || gCap b == Exact
                       || (gFam a == FamNormal && gFam b == FamNormal)
                       || (enumA && enumB)
