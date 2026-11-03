@@ -1451,6 +1451,17 @@ engineApplicabilityTests = testGroup "Engine applicability (law-carrying-modalit
       let es = engines "x" "main = draw x = Normal in draw y = x + Normal in if y > 0.0 then 1.0 else 0.0"
       assertHasNot "set-valued witnesses" es
       assertHas "affine marginalisation" es
+  -- The value of a binding whose body compares its parameter is transported
+  -- at an interval, so a value with only a point inverse is declined (task
+  -- admitted-binding-refused-by-engine-construction): the IR construction
+  -- refused it after the predicate had certified it.
+  , testCase "set-valued witnesses: through fromRightPartial when the inner body pins the parameter" $
+      assertHas "set-valued witnesses" (engines "m"
+        "main = draw m = observe Normal (\\u -> u > 0.0) in if isRight m then (draw w = fromRightPartial m in right w) else left ()")
+  , testCase "set-valued witnesses: not through fromRightPartial when the inner body compares the parameter" $ do
+      let src = "main = draw m = observe Normal (\\u -> u > 0.0) in if isRight m then observe (fromRightPartial m) (\\w -> w < 1.0) else left ()"
+      assertEqual "certificates" [] (engines "m" src)
+      assertEqual "main" Bottom (mainPTypeOf src)
   , testCase "no engine: the binding is sample-only, and the function Bottom" $ do
       let src = "main = draw x = Normal in if sqrt x > 0.5 then x else 0.0 - x"
       assertEqual "certificates" [] (engines "x" src)

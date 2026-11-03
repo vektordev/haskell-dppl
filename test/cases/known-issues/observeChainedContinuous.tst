@@ -3,8 +3,12 @@
 -- is right (either-maybe/observeChainedDiscreteInline), and so does the same
 -- truncation to (0, 1) written against the Normal directly
 -- (either-maybe/observeTwoSidedInterval). Here the set-witness fallback cannot
--- propagate the observation onto m through `fromRightPartial m` and refuses.
+-- propagate the observation onto m through `fromRightPartial m`: the inner
+-- `w < 1.0` leaves an interval on w, and fromRightPartial has no interval
+-- transport. Since task admitted-binding-refused-by-engine-construction the
+-- set-witness predicate says so too, so m has no engine and main types Bottom
+-- (it was admitted as Integrate and refused at IR construction).
 -- Idealized: p(Right 0.5) = (phi(0.5), 1) = (0.35206533, 1.0),
 --   p(Right 1.5) = 0, p(Left ()) = 1 - (Phi(1) - Phi(0)) = (0.65865525, 0.0),
 --   p(Right ANY) = (0.34134475, 0.0).
-expect-failure: refused "neither point-invertible"
+expect-failure: refused "no inference engine applies to the binding of 'm'"

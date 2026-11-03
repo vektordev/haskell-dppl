@@ -424,13 +424,32 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
       _ -> Nothing
     -- The body onto the inner parameter (@osY@), then the value @v@ onto the
     -- variable, which the body consults only where it constrains the
-    -- parameter at all.
+    -- parameter at all. Where the body leaves an interval on the parameter
+    -- (it was walked at an interval target, or it compares the parameter
+    -- somewhere: a comparison's worlds are intervals, and meeting a point
+    -- keeps an interval side for a wildcard sample, 'pointInInterval'), the
+    -- engine transports that interval through @v@
+    -- ('SPLL.IRCompiler.Worlds.invertOntoValue'), so @v@ has to walk at an
+    -- interval target; a value with only a point inverse
+    -- (@fromRightPartial m@ under @if w < 1.0@) is declined there (task
+    -- admitted-binding-refused-by-engine-construction).
     through os osY b v tgt = do
       wy <- walk osY b tgt
       case wy of
         WSFree -> Just (WSThrough WSFree Nothing)
         _ | isBareOcc os v -> Just (WSThrough wy Nothing)
+          | tgt == WTInterval || leavesInterval wy -> WSThrough wy . Just <$> walk os v WTInterval
           | otherwise -> WSThrough wy . Just <$> (walk os v WTPoint <|> walk os v WTInterval)
+    leavesInterval s = case s of
+      WSCompare _       -> True
+      WSFree            -> False
+      WSTransport       -> False
+      WSOpaqueCall      -> False
+      WSEquality a      -> leavesInterval a
+      WSSplit c t f     -> any leavesInterval [c, t, f]
+      WSConnective ps   -> any leavesInterval ps
+      WSTuple a b       -> leavesInterval a || leavesInterval b
+      WSThrough a mb    -> leavesInterval a || maybe False leavesInterval mb
     -- A call: a saturated call of a non-recursive top-level function entered
     -- at the one parameter the variable reaches; a function parameter's call,
     -- whose callee is known only in scope; or a callee forward chaining
