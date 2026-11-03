@@ -1,0 +1,2 @@
+cnt xs = if isNull xs then 0 else if Uniform < head xs then 1 + cnt (tail xs) else cnt (tail xs)
+main = cnt [0.5, 0.2] > cnt [0.4]

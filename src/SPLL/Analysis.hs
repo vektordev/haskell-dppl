@@ -438,23 +438,30 @@ distinctUpTo cap results = case cap of
 -- substituted for the parameters, so every condition on them is itself a
 -- closed constant, which decides its arm ('liveArm'), and the base case stops
 -- the unrolling where the program's own evaluation stops. Such a call does not
--- join @visited@. Two things bound it: 'unrollFuel' calls deep, after which it
--- falls back to the ordinary look-through, and only a callee with at most one
--- call that can recurse back into it is unrolled ('unrollableCallee'), so the
--- unrolling is a chain, never a tree (@fib 30@ stays untagged rather than
--- costing 2^30 annotations). Task recursive-consumer-of-recursive-random-list-refused:
--- @len (rollout 3) < 2@ needs @rollout 3@'s list domain to enumerate @len@'s
--- argument.
+-- join @visited@. 'unrollFuel' bounds the total number of unrolled calls,
+-- after which a call falls back to the ordinary look-through. A callee with at
+-- most one call that can recurse back into it unrolls as a chain, each level
+-- handing on one less fuel. A callee with @r > 1@ such calls unrolls as a
+-- tree, and each of the @r@ calls in an unrolled body gets an equal share,
+-- @(fuel - 1) `div` r@, so the whole tree stays within the fuel: @fib 30@ is
+-- unrolled a few levels and then left untagged rather than costing 2^30
+-- annotations, while a count over a short constant argument (@cnt n = .. if
+-- Uniform < 0.5 then 1 + cnt (n - 1) else cnt (n - 1)@, two calls) reaches its
+-- base case ('recursiveCallCount'). Task
+-- recursive-consumer-of-recursive-random-list-refused: @len (rollout 3) < 2@
+-- needs @rollout 3@'s list domain to enumerate @len@'s argument; task
+-- comparison-of-two-recursive-counts-refused: @cnt 2 > cnt 1@ needs both
+-- counts' domains.
 applyTags :: [ADTDecl] -> FunEnv -> Int -> [String] -> TagEnv -> Expr -> [Tag]
 applyTags adtsParam funEnv fuel visited env e = case appSpine e of
   (Expr _ (Var n), args@(_:_))
     | fuel > 0
     , Just calleeBody <- lookup n funEnv
     , all closedConstant args
-    , unrollableCallee funEnv n calleeBody
     , Just consts <- mapM constantOf args
     , Just unrolled <- substParams calleeBody consts ->
-        [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo (annotateIn adtsParam funEnv (fuel - 1) visited env unrolled))]
+        let share = (fuel - 1) `div` max 1 (recursiveCallCount funEnv n calleeBody)
+        in [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo (annotateIn adtsParam funEnv share visited env unrolled))]
   (Expr _ (Var n), args@(_:_))
     | n `notElem` visited
     , Just calleeBody <- lookup n funEnv -> tagOf (n:visited) calleeBody args
@@ -498,9 +505,10 @@ applyTags adtsParam funEnv fuel visited env e = case appSpine e of
     substParams (Expr _ (Lambda param lamBody)) (c:cs) = substParams (substituteVar param c lamBody) cs
     substParams _ _ = Nothing
 
--- | How many calls deep 'applyTags' unrolls a recursion on constant
--- arguments. Past it, the call is looked through the ordinary way, where the
--- recursive call is refused as visited.
+-- | How many calls 'applyTags' unrolls for a recursion on constant
+-- arguments: the depth of a chain, the size of a tree (each level's calls
+-- share what is left). Past it, the call is looked through the ordinary way,
+-- where the recursive call is refused as visited.
 unrollFuel :: Int
 unrollFuel = 64
 
@@ -534,13 +542,12 @@ liveArm fuel c
   , [VBool b] <- multiValueToValueList mv = Just b
   | otherwise = Nothing
 
--- | Does the callee's body hold at most one call that can lead back into it?
--- Each unrolled level then spawns at most one more, so unrolling costs
--- linear, not exponential, annotation work. Counted syntactically over every
--- 'Var' naming a top-level function (a shadowing local over-counts, which only
--- declines).
-unrollableCallee :: FunEnv -> String -> Expr -> Bool
-unrollableCallee funEnv n calleeBody = length (filter (reachesBack n) (topLevelRefs calleeBody)) <= 1
+-- | How many calls in the callee's body can lead back into it: how many
+-- unrolled calls one unrolled level can spawn, which 'applyTags' divides its
+-- fuel by. Counted syntactically over every 'Var' naming a top-level function
+-- (a shadowing local over-counts, which only spends fuel faster).
+recursiveCallCount :: FunEnv -> String -> Expr -> Int
+recursiveCallCount funEnv n calleeBody = length (filter (reachesBack n) (topLevelRefs calleeBody))
   where
     topLevelRefs ex = [v | Expr _ (Var v) <- universe ex, isJust (lookup v funEnv)]
     universe ex = ex : concatMap universe (getSubExprs ex)
@@ -591,8 +598,7 @@ definitelyUntagged funEnv visited e = case e of
     -- 'applyTags' may unroll it, visited or not: a "maybe".
     (Expr _ (Var n), args@(_:_))
       | all closedConstant args
-      , Just calleeBody <- lookup n funEnv
-      , unrollableCallee funEnv n calleeBody -> False
+      , isJust (lookup n funEnv) -> False
     (Expr _ (Var n), args@(_:_))
       | n `notElem` visited
       , Just calleeBody <- lookup n funEnv -> bodyUntagged (n:visited) calleeBody (length args)

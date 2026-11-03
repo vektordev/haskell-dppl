@@ -137,13 +137,20 @@ Two refusals remain, each answering "no tag":
   constants for the parameters and annotates the body without marking the
   function visited, and inside such an unrolled body a closed-constant
   condition selects its arm (`liveArm`), so the base case ends the unrolling.
-  It is bounded twice: at most `unrollFuel` (64) calls deep, and only for a
-  callee with at most one call that can lead back into it
-  (`unrollableCallee`), so a tree recursion like `fib 5` is not unrolled.
-  Either bound falls back to the ordinary look-through. This is what gives
+  `unrollFuel` (64) bounds the total number of unrolled calls. A callee with
+  one call that can lead back into it unrolls as a chain, 64 calls deep; one
+  with `r > 1` such calls (`recursiveCallCount`) unrolls as a tree whose
+  calls each get `(fuel - 1) div r`, so a two-call recursion reaches about six
+  levels and `fib 30` costs a few dozen annotations, not 2^30. Past the fuel a
+  call falls back to the ordinary look-through. This is what gives
   `len (rollout 3)` an enumerable argument (task
   `recursive-consumer-of-recursive-random-list-refused`; corpus
-  `data-structures/recursive{LengthOfRecursiveList,CountOfRecursiveBoolList}`).
+  `data-structures/recursive{LengthOfRecursiveList,CountOfRecursiveBoolList}`)
+  and `cnt 2 > cnt 1` two enumerable operands for a count that recurses in
+  both arms of a random condition (task
+  `comparison-of-two-recursive-counts-refused`; corpus
+  `enumerability/recursive{,List}CountComparison`, known-issues
+  `countVersusCountBeyondUnrollRefused` past the fuel).
 - **An empty propagated domain.** No values at all is an *absence* of a domain,
   not an empty one; tagging it would make downstream inference sum over nothing
   and report probability zero.
