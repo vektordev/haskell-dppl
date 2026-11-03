@@ -1,4 +1,5 @@
 slow
+no-normalization
 p(Ans True True True False True True False, (2, [0.7, 0.3, 0.2, 0.8, 0.6, 0.4, 0.1, 0.9, 0.35, 0.65]))=(0.007385631839999999, 0.0)
 p(Ans True ANY False ANY ANY True True, (2, [0.7, 0.3, 0.2, 0.8, 0.6, 0.4, 0.1, 0.9, 0.35, 0.65]))=(0.07161000000000002, 0.0)
 p(Ans ANY True True False False False ANY, (2, [0.7, 0.3, 0.2, 0.8, 0.6, 0.4, 0.1, 0.9, 0.35, 0.65]))=(0.02425764, 0.0)

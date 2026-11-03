@@ -4351,15 +4351,18 @@ juliaKey m (Right env) tcs nets = do
 -- | The corpus sweeps record their passes in @manifest@ ('ImpactManifest').
 end2endTests :: Corpus -> Manifest -> IO TestTree
 end2endTests corpus manifest =
-  buildEnd2EndTree corpus manifest "End2End" "End2End" Default SkipSlow True
+  buildEnd2EndTree corpus manifest "End2End" "End2End" Default SkipSlow
 
--- | The slow-only twin of end2endTests: same Interpreter/Unoptimized checks,
--- restricted to `slow`-headered programs. Julia/Python/Normalization are
--- skipped since these programs are Interpreter-only by design (see their
--- .tst headers).
+-- | The slow-only twin of end2endTests: the same sweeps, Normalization and
+-- the census-routed Julia/Python row checks included, restricted to
+-- `slow`-headered programs (docs-repo task
+-- slow-programs-skip-text-backend-and-agreement-checks). Most of them were
+-- demoted for tick redundancy, not cost, and their rows would otherwise run
+-- on no text backend in any tier. The whole-corpus checks (the duplication
+-- census, the header check) stay in the default tree, which owns them.
 slowEnd2EndTests :: Corpus -> Manifest -> IO TestTree
 slowEnd2EndTests corpus manifest =
-  buildEnd2EndTree corpus manifest "Slow.End2End (slow)" "End2End (slow)" Slow OnlySlow False
+  buildEnd2EndTree corpus manifest "Slow.End2End (slow)" "End2End (slow)" Slow OnlySlow
 
 -- | Corpus programs the interpreter cannot serve at the default -O, each with
 -- why (task impact-analysis-m2-drop-runtime-from-key). The interpreter is the
@@ -4472,19 +4475,23 @@ unoptimizedCodegenSmoke =
 
 -- | Builds the standard End2End sweeps over the corpus programs the
 -- 'SlowHeader' policy admits, under the group @treeName@ (whose path in the
--- tree is @path@). includeBackends controls whether the Normalization/Julia/
--- Python sweeps are built (skipped for the slow subset, whose programs are
--- Interpreter-only by design).
+-- tree is @path@). The duplication census and the header check read the
+-- whole corpus, so only the 'SkipSlow' (default) tree builds them.
 --
 -- Each program is compiled once at -O2 and, where needed, once at -O0; the
 -- compiles are shared by every sweep below ('optEnvs', 'unoptEnvs').
-buildEnd2EndTree :: Corpus -> Manifest -> String -> String -> Tier -> SlowHeader -> Bool -> IO TestTree
-buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
+buildEnd2EndTree :: Corpus -> Manifest -> String -> String -> Tier -> SlowHeader -> IO TestTree
+buildEnd2EndTree corpus manifest path treeName tier slowH = do
   -- The M2 census of every program the text-backend sweeps may select (see
-  -- 'textRouted'): six compiles beyond the shared -O2 and -O0 ones, about a
-  -- second each over the default corpus, so spread over the capabilities.
-  censuses <- if not includeBackends then return Map.empty else
-    Map.fromList <$> parMapIO programUncertified [ e | e <- entries, not (ceSlow e) ]
+  -- 'textRouted'), over the shared -O2 and -O0 compiles. The default tree
+  -- takes it while building, spread over the capabilities, so that a
+  -- certified program has no test at all. The slow tree defers it to each
+  -- test ('deferred'): building it would compile all ~520 `slow` programs,
+  -- at -O2 and -O0, before the first test runs, where the interpreter sweeps
+  -- spread those compiles over the run.
+  enabled <- tierEnabled tier
+  censuses <- if not enabled || deferred then return Map.empty else
+    Map.fromList <$> parMapIO (\e -> (,) (ceName e) <$> programUncertified e) (filter admitted entries)
   interp <- corpusSweep corpus SweepSpec
     { sweepName = path ++ ".Interpreter", sweepTier = tier, sweepSlow = slowH
     , sweepSelect = interpreterRouted
@@ -4500,7 +4507,7 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
       let n = ceName e; p = ceProgram e; c = unopt e; tcs = rows e
       in testProperty n (once $ cachedProperty manifest (check "Interpreter Unoptimized") n (interpreterKey manifest p c tcs)
                                   (conjoin (map (testInterpreter p c) tcs)))
-  backends <- if not includeBackends then return [] else sequence
+  backends <- sequence
     [ corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Normalization", sweepTier = tier, sweepSlow = slowH
         , sweepSelect = \e -> interpreterRouted e && neural e && not (ceNoNormalization e)
@@ -4515,24 +4522,23 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- Round-robin shards run as parallel tests instead.
     , corpusSweepAll corpus SweepSpec
         { sweepName = path ++ ".Julia", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> textRouted censuses Julia e && hasQueries e
+        , sweepSelect = \e -> textSelect censuses Julia e && hasQueries e
         , sweepNote = "every p()/cdf() row against the emitted Julia, in round-robin shards, of a program the fuzzers do not certify" } $ \es ->
           return $ testGroup "Julia"
-            [ testProperty ("shard " ++ show (i + 1) ++ "/" ++ show juliaShards)
-                (once $ cachedBatch manifest (check "Julia")
-                          [ (n, juliaKey manifest c tcs nets, (c, tcs, nets))
-                          | (k, (n, c, tcs, nets)) <- zip [0 :: Int ..] (map routedQuery es)
-                          , k `mod` juliaShards == i ]
-                          testJuliaAll)
+            [ testProperty ("shard " ++ show (i + 1) ++ "/" ++ show juliaShards) $ once $ routedBatch Julia
+                [ e | (k, e) <- zip [0 :: Int ..] es, k `mod` juliaShards == i ] $ \routed ->
+                cachedBatch manifest (check "Julia")
+                  [ (n, juliaKey manifest c tcs nets, (c, tcs, nets)) | (n, c, tcs, nets) <- map routedQuery routed ]
+                  testJuliaAll
             | i <- [0 .. juliaShards - 1] ]
     -- "Julia free names are escaped" is not here: it is
     -- 'juliaFreeNamesTests', in Slow.
     , corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Python", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> textRouted censuses Python e && hasQueries e
+        , sweepSelect = \e -> textSelect censuses Python e && hasQueries e
         , sweepNote = "every p()/cdf() row against the emitted Python, of a program the fuzzers do not certify" } $ \e ->
           let (n, c, tcs, nets) = routedQuery e
-          in testProperty n (once $ cachedProperty manifest (check "Python") n (pythonKey manifest nets c tcs)
+          in testProperty n (once $ routedProperty Python e $ cachedProperty manifest (check "Python") n (pythonKey manifest nets c tcs)
                                       (testPython nets c tcs))
     -- The same rows under --memoRecursion (docs task
     -- recursive-prob-calls-not-shared-across-branches), for every program
@@ -4541,7 +4547,7 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- the memo.
     , corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Python MemoRecursion", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> Python `elem` ceBackends e && hasQueries e && memoChanges e
+        , sweepSelect = \e -> textAffordable e && Python `elem` ceBackends e && hasQueries e && memoChanges e
                                && ceName e `notElem` map fst memoSweepExceptions
         , sweepNote = "every p()/cdf() row of a recursive program against the emitted Python under --memoRecursion" } $ \e ->
           let (n, c, tcs, nets) = routedQuery e
@@ -4552,20 +4558,20 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- crashing (task writelogits-text-backends-broken).
     , corpusSweep corpus SweepSpec
         { sweepName = path ++ ".Python WriteLogits", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> textRouted censuses Python e && hasWriteLogits e
+        , sweepSelect = \e -> textSelect censuses Python e && hasWriteLogits e
         , sweepNote = "every writeLogits row against the emitted Python, of a program the fuzzers do not certify" } $ \e ->
           let n = ceName e; nets = networkMocks (ceProgram e); c = opt e; wl = writeLogitsRows e
-          in testProperty n (once $ cachedProperty manifest (check "Python WriteLogits") n (pythonWriteLogitsKey manifest nets c wl)
+          in testProperty n (once $ routedProperty Python e $ cachedProperty manifest (check "Python WriteLogits") n (pythonWriteLogitsKey manifest nets c wl)
                                       (testPythonWriteLogits nets c wl))
     , corpusSweepAll corpus SweepSpec
         { sweepName = path ++ ".Julia WriteLogits", sweepTier = tier, sweepSlow = slowH
-        , sweepSelect = \e -> textRouted censuses Julia e && hasWriteLogits e
+        , sweepSelect = \e -> textSelect censuses Julia e && hasWriteLogits e
         , sweepNote = "every writeLogits row against the emitted Julia, in one batch, of a program the fuzzers do not certify" } $ \es ->
-          return $ testProperty "Julia WriteLogits"
-            (once $ cachedBatch manifest (check "Julia WriteLogits")
-                      [ (ceName e, juliaWriteLogitsKey manifest c wl nets, (c, wl, nets))
-                      | e <- es, let c = opt e, let wl = writeLogitsRows e, let nets = networkMocks (ceProgram e) ]
-                      testJuliaWriteLogitsAll)
+          return $ testProperty "Julia WriteLogits" $ once $ routedBatch Julia es $ \routed ->
+            cachedBatch manifest (check "Julia WriteLogits")
+              [ (ceName e, juliaWriteLogitsKey manifest c wl nets, (c, wl, nets))
+              | e <- routed, let c = opt e, let wl = writeLogitsRows e, let nets = networkMocks (ceProgram e) ]
+              testJuliaWriteLogitsAll
     -- The same corpus through the text backends at -O0. See 'unoptEnvs' for
     -- why this is not merely a duplicate of the optimized groups. None of
     -- 'unoptimizedCodegenSmoke' is neural, so this stays on the plain
@@ -4587,13 +4593,21 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
                                       (testPython [] (unopt e) (queries e)))
     ]
   -- The duplication census reads the same -O0 compiles (design ir-duplication-census).
-  census <- if includeBackends then (: []) <$> duplicationCensusSweep corpus path unopt else return []
-  let headers = [ headerBackendsTests entries | includeBackends ]
+  census <- if ownsWholeCorpus then (: []) <$> duplicationCensusSweep corpus path unopt else return []
+  let headers = [ headerBackendsTests entries | ownsWholeCorpus ]
   return $ testGroup treeName ([interp, interpUnopt] ++ headers ++ backends ++ census)
   where
     -- The manifest slot prefix: the sweep's full group name.
     check grp = treeName ++ "." ++ grp
     entries = corpusEntries corpus
+    -- The programs this tree's 'SlowHeader' admits (the sweeps apply the
+    -- same policy through 'sweepSlow').
+    admitted e = case slowH of
+      SkipSlow   -> not (ceSlow e)
+      OnlySlow   -> ceSlow e
+      IgnoreSlow -> True
+    ownsWholeCorpus = slowH /= OnlySlow
+    deferred = slowH == OnlySlow
     -- Every corpus program compiled at -O2, shared by all the sweeps.
     optEnvs = Map.fromList [ (ceName e, compile defaultCompilerConfig (ceProgram e)) | e <- entries ]
     -- Every corpus program recompiled at -O0, shared by all the "Unoptimized"
@@ -4619,12 +4633,13 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- CPython's per-line limits ('pythonProgramCensus'), which says nothing
     -- about Julia.
     programUncertified e = do
-      let guarded census = do
-            r <- try (evaluate (length (concat census) `seq` census))
-            return (either (\ex -> ["(census raised: " ++ takeWhile (/= '\n') (show (ex :: SomeException)) ++ ")"]) id r)
-      julia <- guarded (uncertifiedConstructs (programCensus [opt e, unopt e]))
-      python <- guarded (uncertifiedConstructs (pythonProgramCensus [opt e, unopt e]))
-      return (ceName e, \b -> if b == Python then python else julia)
+      julia <- uncertifiedNow Julia e
+      python <- uncertifiedNow Python e
+      return (\b -> if b == Python then python else julia)
+    uncertifiedNow b e = do
+      let census = uncertifiedConstructs ((if b == Python then pythonProgramCensus else programCensus) [opt e, unopt e])
+      r <- try (evaluate (length (concat census) `seq` census))
+      return (either (\ex -> ["(census raised: " ++ takeWhile (/= '\n') (show (ex :: SomeException)) ++ ")"]) id r)
     shaped = Map.fromList [ (ceName e, shapedCases e) | e <- entries ]
     opt e = optEnvs Map.! ceName e
     unopt e = unoptEnvs Map.! ceName e
@@ -4638,10 +4653,34 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- names those backends because the interpreter cannot serve it
     -- ('interpreterServesExempt'). Either way the check is keyed with the
     -- runtime fingerprint, as under M1.
-    textRouted cs b e = (not (interpreterRouted e) && b `elem` ceBackends e) || not (null (uncertified cs b e))
-    -- No census means not certified (only the slow programs have none, and
-    -- the text-backend sweeps skip those before asking).
+    textRouted cs b e = headerRouted b e || not (null (uncertified cs b e))
+    headerRouted b e = not (interpreterRouted e) && b `elem` ceBackends e
+    -- No census means not certified (only a program the tree does not
+    -- admit has none, and the text-backend sweeps skip those before asking).
     uncertified cs b e = maybe ["(no census)"] ($ b) (Map.lookup (ceName e) cs)
+    -- The text-backend selection. A deferred tree selects every program and
+    -- routes at test time ('routedProperty', 'routedBatch'): a certified
+    -- program's test then passes without running, labelled so.
+    textSelect cs b e = textAffordable e && (deferred || textRouted cs b e)
+    -- The slow tree leaves the programs that are slow for their own compile
+    -- cost off the text backends, as every whole-corpus Slow sweep does
+    -- ('slowForCompileCost'): their Python checks alone took up to ten
+    -- minutes and 3 GB each (the planOverBudget* family), past the slow
+    -- run's memory cap. Their rows still run on the interpreter.
+    textAffordable e = not deferred || notSlowForCompileCost e
+    routedNow b e
+      | not deferred || headerRouted b e = return True
+      | otherwise = not . null <$> uncertifiedNow b e
+    routedProperty b e prop
+      | not deferred = prop
+      | otherwise = ioProperty $ do
+          r <- routedNow b e
+          return (if r then prop else label "certified by the fuzzers: not run" (property True))
+    routedBatch b es k
+      | not deferred = k es
+      | otherwise = ioProperty $ do
+          routed <- filterM (routedNow b) es
+          return (if null routed then label "every program certified by the fuzzers: not run" (property True) else k routed)
     isQuery x = isProbTestCase x || isCumulTestCase x
     queries e = filter isQuery (rows e)
     hasQueries e = any isQuery (ceCases e)

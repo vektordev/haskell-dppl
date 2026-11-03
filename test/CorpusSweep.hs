@@ -27,6 +27,7 @@ module CorpusSweep
   , SlowHeader(..)
   , slowForCompileCost
   , notSlowForCompileCost
+  , tierEnabled
   , SweepSpec(..)
   , CorpusEntry(..)
   , Corpus

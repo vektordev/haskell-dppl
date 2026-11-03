@@ -9,7 +9,8 @@
 -- actually puts through both backends, so this test computes, over the
 -- deterministic bodies (probability, integrate, writeLogits and normal) of
 --
---   * the corpus (every non-slow program, default config;
+--   * the corpus (every program, `slow` ones included bar
+--     'slowForCompileCost', default config;
 --     'BackendAgreement.deterministicBodies'), and
 --   * a fixed-seed sample of the agreement property's own draws (the ones
 --     with at least one interpreter-answered query, and of those only the
@@ -70,6 +71,11 @@ fuzzCoverageExceptions =
   -- uses 62 constructs, the sample reaches 56 of them; IRSample and
   -- Sample:IRNormal, the writeLogits dead-arm noise, are masked rather than
   -- compared and so listed (maskedConstruct), leaving 54 covered.
+  -- Since 2026-11-03 the census reads the `slow` programs too (bar
+  -- 'slowForCompileCost'; docs-repo task
+  -- slow-programs-skip-text-backend-and-agreement-checks): 799 programs, 64
+  -- constructs, 643 of 1000 draws compared covering 55; the list was already
+  -- exact.
   [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (lambdaThetaInverse, affineChainEndpoint)")
   , ("Builtin:BIndex",     "agreement point query: needs the agreement fusion's `right v` arm over a contiguous Int domain (categoricalProductFusion)")
@@ -83,8 +89,8 @@ fuzzCoverageExceptions =
 
 -- | The batched arms' counterpart of 'fuzzCoverageExceptions' (tasks
 -- @backend-agreement-batched-arm@, @batched-backend-reference-compliance@):
--- constructs of the probability and integrate bodies of the (non-slow) corpus
--- programs, compiled for batched mode, that neither batched arm
+-- constructs of the probability and integrate bodies of the corpus programs
+-- (`slow` ones included bar 'slowForCompileCost'), compiled for batched mode, that neither batched arm
 -- (the typed fuzzer's, the IR generator's) puts through the batched backend.
 -- Exact, like the scalar list. The programs using one are the ones that keep
 -- their @batched-vs-expected@ check ('CertifiedCensus.batchedCertifiedConstructs').
@@ -95,6 +101,8 @@ batchedFuzzCoverageExceptions =
   -- Measured 2026-10-09 (the same 1000-draw sample: 337 of its 548 compared
   -- programs are batched-eligible; 233 non-slow corpus programs declare
   -- `batched`): the corpus uses 56 constructs, the sample reaches 54.
+  -- Re-measured 2026-11-03 over 799 programs, `slow` ones included: the
+  -- same three uncovered.
   --
   -- BMapList and BZip OpMult since 2026-10-22, when the batched list map
   -- (merge e9e5759) and categoricalProductFusion's batched declaration
@@ -133,8 +141,8 @@ coverageSeed = 20261006
 
 backendCoverageTests :: Corpus -> IO TestTree
 backendCoverageTests corpusIn = corpusSweepAll corpusIn SweepSpec
-  { sweepName = "Slow.BackendAgreementCoverage", sweepTier = Slow, sweepSlow = SkipSlow
-  , sweepSelect = const True
+  { sweepName = "Slow.BackendAgreementCoverage", sweepTier = Slow, sweepSlow = IgnoreSlow
+  , sweepSelect = notSlowForCompileCost
   , sweepNote = "the constructs the corpus compiles to and the agreement fuzzer never compares are listed" } $ \es -> do
   -- Both censuses draw the same sample; whichever runs first prepares it.
   cache <- newMVar Nothing
