@@ -514,7 +514,7 @@ data EngineCert
   | CertInPlace
     -- ^ The argument measured at the variable's one read
     -- ('SPLL.Lang.Lang.readOnceInPlace'): the body reads the variable once,
-    -- with no binder on the way, so the read has the argument's own law
+    -- not under a function value, so the read has the argument's own law
     -- (which is how 'bindParam' already types it) and the binding denotes
     -- @body[x := arg]@. Last: it is the engine of a binding no other engine
     -- measures, and moves no code of one another engine does. The compiler
@@ -1336,7 +1336,7 @@ calleeBindingCerts ctx env ti f arg argLaw
       AffineEngine         -> CertAffine <$> (guard (csInline syn) >> latentForm)
       JointAffineEngine    -> CertJointAffine <$> (guard (csInline syn) >> latentForm)
       WorldsEngine         -> CertWorlds <$> csWorlds syn
-      InPlaceEngine        -> if csInPlace syn then Just CertInPlace else Nothing
+      InPlaceEngine        -> if csInPlace syn arg then Just CertInPlace else Nothing
     latentForm = case affineOf (cnOf arg) argLaw of
       Just c | not (Map.null (acLatents c)) -> Just c
       _ -> Nothing
@@ -1368,7 +1368,7 @@ data CallSyntax = CallSyntax
     -- invocation, and not a top-level function's, which may be recursive
     -- ('IRCompiler.bindInline'). The affine and in-place engines need it.
   , csInline  :: Bool
-  , csInPlace :: Bool
+  , csInPlace :: Expr -> Bool
   }
 
 calleeSyntax :: ICtx -> ChainName -> Maybe CallSyntax
@@ -1383,7 +1383,7 @@ calleeSyntax ctx headCN
              { csPoint = toInvExprMaybeVia (Just (icInverses ctx)) (const True) (const True) fc (icADTs ctx) headCN
              , csWorlds = worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) (const True)) occs body
              , csInline = inline
-             , csInPlace = inline && readOnceInPlace x body }
+             , csInPlace = \a -> inline && readOnceInPlace x a body }
       _ -> Nothing
   where
     fc = icFC ctx
@@ -1438,7 +1438,7 @@ bindingCerts ctx lam arg argLaw = mapMaybe certOf engineOrder
       AffineEngine         -> CertAffine <$> affineBindingCert x arg argLaw body
       JointAffineEngine    -> CertJointAffine <$> jointAffineBindingCert x arg argLaw body
       WorldsEngine         -> CertWorlds <$> worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) permissiveDet) occs body
-      InPlaceEngine        -> if readOnceInPlace x body then Just CertInPlace else Nothing
+      InPlaceEngine        -> if readOnceInPlace x arg body then Just CertInPlace else Nothing
     fc = icFC ctx
     prog = icProg ctx
     lamCN = cnOf lam

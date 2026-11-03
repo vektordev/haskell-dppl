@@ -1467,11 +1467,17 @@ engineApplicabilityTests = testGroup "Engine applicability (law-carrying-modalit
       let src = "main = draw x = Normal in if sqrt x > 0.5 then x else 0.0 - x"
       assertEqual "certificates" [] (engines "x" src)
       assertEqual "main" Bottom (mainPTypeOf src)
-  , testCase "in place: a binding read once, with no binder on the way" $ do
+  , testCase "in place: a binding read once, not under a function value" $ do
       let src = "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
       assertEqual "certificates" ["in place"] (engines "x" src)
-      assertHasNot "in place" (engines "x" "main = draw x = Normal in (\\y -> sqrt x + y) 1.0 > 0.5")
       assertHasNot "in place" (engines "x" "main = draw x = Normal in sqrt x > sqrt x")
+  , testCase "in place: through a nested let, which runs once, unless a binder captures" $ do
+      -- task comparison-of-two-witnessed-latents-finite-slot-mask-refused
+      assertHas "in place" (engines "x" "main = draw x = Normal in (\\y -> sqrt x + y) 1.0 > 0.5")
+      assertHas "in place" (engines "x" "main = draw x = Uniform in draw q = Uniform in (q, x < q)")
+      -- the binding of x rebinds a name its argument reads, so the
+      -- argument cannot be read by name at the read
+      assertHasNot "in place" (engines "x" "main = draw a = Normal in draw x = a + Normal in (\\a -> sqrt x + a) 1.0 > 0.5")
   , testCase "in place: not for a read inside a lambda, which may run any number of times" $ do
       let src = "main = draw x = Normal in (\\f -> f 1.0 + f 2.0) (\\y -> sqrt x + y) > 0.5"
       assertHasNot "in place" (engines "x" src)

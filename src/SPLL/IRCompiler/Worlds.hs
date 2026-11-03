@@ -1150,7 +1150,7 @@ invertToWorldsStep meta occs exprBody target = do
       -- catch-all. The occurrence of x sits in `e`, so `e` is never x-free and
       -- the deterministic-given-scope admission cannot apply; the fix is to
       -- invert THROUGH the binding rather than to look past it.
-      -- An inner binding the body reads once, with no binder on the way
+      -- An inner binding the body reads once, not under a function value
       -- ('readOnceInPlace'), where x is in the body (with or without `e`):
       -- the read has the value's own law, so the body is inverted with the
       -- value in place, as 'worldsShape' walks it (task

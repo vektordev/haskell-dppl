@@ -89,8 +89,8 @@ dispatchEngines onAnswer engines none = go Nothing engines
       run diag >>= either (\d -> go (d <|> diag) rest) (\r -> onAnswer name >> return r)
 
 -- | The in-place engine's applicability to a binding, and the expression it
--- compiles: a lambda in place whose body reads its variable once, with no
--- binder on the way ('readOnceInPlace', the predicate of the modality
+-- compiles: a lambda in place whose body reads its variable once, not under
+-- a function value ('readOnceInPlace', the predicate of the modality
 -- engine's 'CertInPlace'), is the body with the argument at that read. The
 -- read has the argument's own law, so this is the binding's meaning, not a
 -- rewrite of it; it is the last engine, for bindings no other one measures
@@ -98,15 +98,23 @@ dispatchEngines onAnswer engines none = go Nothing engines
 --
 -- Only a body compiled inline here qualifies ('bindInline', no invocation
 -- tag, no leading argument, not function-valued): the body handed to the
--- engines is then the lambda's own, and every node it holds on the way to
--- the read is compiled from this tree, not looked up by chain name.
-inPlaceApplicable :: RType -> Binding -> Maybe Expr
-inPlaceApplicable rt binding
+-- engines is then the lambda's own.
+--
+-- The read may sit in a nested binding's body ('readOnceInPlace'), which the
+-- engines fetch by chain name from the program as written, still reading the
+-- variable; the variable is recorded with its argument ('inPlaceArgs') so
+-- the fetch substitutes it too ('exprWithCN').
+inPlaceApplicable :: CompilerMetadata -> RType -> Binding -> Maybe (CompilerMetadata, Expr)
+inPlaceApplicable meta rt binding
   | bindInline binding, not (bindLeadingArg binding), null (bindTag binding)
   , null (bindOuterVars binding), not (isTArrowType rt)
-  , readOnceInPlace (bindVar binding) (bindBody binding)
-  = Just (substituteVar (bindVar binding) (bindArg binding) (bindBody binding))
+  , readOnceInPlace x arg lamBody
+  = Just (meta { inPlaceArgs = (x, arg, nodeChainNames lamBody) : inPlaceArgs meta }, substituteVar x arg lamBody)
   | otherwise = Nothing
+  where
+    x = bindVar binding
+    arg = bindArg binding
+    lamBody = bindBody binding
 
 -- | The set-witness engine's applicability to a binding: the shape walk of
 -- 'SPLL.Typing.ForwardChaining.worldsShape' over its body, as the modality
@@ -700,13 +708,13 @@ applyBinding meta cumulative rt binding sample = do
        userBound = case l of Expr _ (Lambda n _) -> n; _ -> toInvCN
    -- Where no engine applies, the set-witness engine is asked anyway, and
    -- where it refuses, the in-place engine answers if it applies.
-   let fallback diag = case inPlaceApplicable rt binding of
+   let fallback diag = case inPlaceApplicable meta rt binding of
          Nothing -> setWitnessApply meta cumulative rt binding diag sample
-         Just inPlace -> do
+         Just (inPlaceMeta, inPlace) -> do
            sw <- (Right <$> scoped (setWitnessApply meta cumulative rt binding diag sample)) `catchError` (return . Left)
            case sw of
              Right o -> inline o
              Left _ -> do
                compiledFrom (engineLabel InPlaceEngine)
-               toIRInference meta cumulative inPlace sample
+               toIRInference inPlaceMeta cumulative inPlace sample
    dispatchEngines compiledFrom engines fallback
