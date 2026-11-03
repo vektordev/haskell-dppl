@@ -104,6 +104,8 @@ helperParamZeroTimesUniform h.integ=3 h.prob=3
 helperParamZeroTimesUniformShifted h.integ=3 h.prob=3
 hoNestedLambdas main.integ=3 main.prob=3
 if main.integ=4 main.prob=4
+ifRootDeterministicConditionAnyHead main.prob=10 main__m01.prob=10 main__m11.prob=8
+ifRootDeterministicConditionAnyHeadNamed f.prob=10 f__m01.prob=10 f__m11.prob=6
 ifSelectNormalDet main.integ=8 main.prob=8
 injDouble main.prob=3
 intMultKnownFactor main.integ=48 main.prob=4
@@ -200,7 +202,7 @@ rewriteProbeHelperIfGate f.integ=6 f.prob=6
 rewriteProbeHelperTwoArgs main.prob=4
 runtimeNameBinders g.integ=3 g.prob=3
 sceneCountConditionalEdit main.writeLogits=8
-setWitnessEqFalseInTupleArmApplied main.prob=4
+setWitnessEqFalseInTupleArmApplied main.prob=4 main__m1.prob=16
 setWitnessEqualityThroughExpOffImage main.integ=11 main.prob=11
 setWitnessExceptInteriorPoint main.prob=4
 setWitnessInnerTupleInPlace main__m01.prob=3
@@ -210,7 +212,7 @@ setWitnessSiblingBoolAny main.prob=3
 setWitnessSiblingEither main.prob=3
 setWitnessSiblingFresh main.prob=3
 setWitnessSiblingNestedLet main.prob=3
-setWitnessTupleDisjointFields main.prob=4
+setWitnessTupleDisjointFields main.prob=4 main__m01.prob=4 main__m10.prob=4 main__m11.prob=16
 sharedFieldAcrossList main.integ=3 main.prob=3
 sharedLatentCallChain inner.prob=3
 sharedLatentNestedLet contrib.prob=3
@@ -246,13 +248,13 @@ twiceApplicationTop main.integ=8 main.prob=5
 twoIsLeftSplitsInOneBatch main.integ=8 main.prob=10
 uniformIf main.integ=4 main.prob=4
 uniformNeg main.prob=3
-witnessThroughDetIfElse main.prob=10
+witnessThroughDetIfElse main.prob=10 main__m01.prob=10 main__m11.prob=8
 witnessThroughDetIfNamed f.integ=6 f.prob=6 main.prob=12
 witnessThroughDetIfNamedLast f.integ=6 f.prob=6 main.prob=12
 witnessThroughDetIfScalar main.prob=5
-witnessThroughDetIfThen main.prob=10
-witnessThroughDrawBoundIfElse main.prob=12
-witnessThroughDrawBoundIfThen main.prob=12
+witnessThroughDetIfThen main.prob=10 main__m01.prob=10 main__m11.prob=8
+witnessThroughDrawBoundIfElse main.prob=12 main__m01.prob=12
+witnessThroughDrawBoundIfThen main.prob=12 main__m01.prob=12
 wrappedHoAdt main.prob=4
 writeLogits_continuous_under_sum side.integ=4 side.prob=8
 writeLogits_dead_arm side.integ=3 side.prob=6

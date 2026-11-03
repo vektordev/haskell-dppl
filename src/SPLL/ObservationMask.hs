@@ -27,6 +27,8 @@ module SPLL.ObservationMask
   , LetEnv
   , lookupBinding
   , observationTree
+  , observationArms
+  , armsEnumeratedSlots
   , obsPath
   , obsLeaves
   , obsSlots
@@ -182,6 +184,47 @@ obsSlots t = [ s | (s, _, _) <- obsLeaves t ]
 -- root itself.
 observationTree :: [ADTDecl] -> FnDecl -> ObsTree
 observationTree decls (_, body) = buildObs decls [] [] (stripParams body)
+
+-- | The observation trees of a declaration, one per arm of a root @if@ whose
+-- condition reads no latent (task
+-- @if-root-deterministic-condition-any-marginal-refused@).
+--
+-- Such a condition is fixed for a given call, so exactly one arm is the
+-- observation, and each arm's constructor tree can be masked on its own:
+-- @draw x = Normal in if c then [x] else x : [x]@ answers @[ANY, 0.5]@ as its
+-- if-free spelling does. The arms are trees over the same accessor paths
+-- (both are read off one query), so a slot names a position in the query, and
+-- pruning it prunes it in every arm that has it ('pruneObservation'). Nested
+-- such @if@s split recursively. Any other root is the single
+-- 'observationTree'. The condition is the one 'pruneObservation' descends
+-- through, so the two cannot disagree about which arms are observed.
+observationArms :: [ADTDecl] -> [FnDecl] -> FnDecl -> [ObsTree]
+observationArms decls fenv (_, body) = go [] (stripParams body)
+  where
+    go env e = case node core of
+      IfThenElse c a b | deterministicCondition decls fenv env' c -> go env' a ++ go env' b
+      _ -> [buildObs decls env [] e]
+      where (env', core, _) = focus env e
+
+-- | A condition that reads no random source (no draw, neural read, probabilistic
+-- top-level function, nor a @let@-bound variable reaching one): parameters and
+-- constants only, so it is fixed for a given call.
+deterministicCondition :: [ADTDecl] -> [FnDecl] -> LetEnv -> Expr -> Bool
+deterministicCondition decls fenv env c = Set.null (latentsOf decls fenv env [] c)
+
+-- | The enumerated slots of a list of arm trees ('observationArms'): a slot is
+-- enumerated when it is in any arm, in order of first appearance. Each arm's
+-- verdicts are its own: the arms are exclusive, so a latent two arms both read
+-- correlates nothing. 'Nothing' when one enumerated slot lies under another
+-- (an arm's leaf where another arm has a constructor): the dispatcher's flags
+-- assume the masked slots are disjoint positions of the query.
+armsEnumeratedSlots :: [ADTDecl] -> [FnDecl] -> [ObsTree] -> Maybe [Slot]
+armsEnumeratedSlots decls fenv arms
+  | or [ s `isPrefixOf` s' | s <- enums, s' <- enums, s /= s' ] = Nothing
+  | otherwise = Just enums
+  where
+    enums = foldl' (\acc s -> if s `elem` acc then acc else acc ++ [s]) []
+              (concatMap (enumeratedSlots decls fenv) arms)
 
 stripParams :: Expr -> Expr
 stripParams (Expr _ (Lambda _ b)) = stripParams b
@@ -547,21 +590,28 @@ dropDeadBindings e = case e of
 -- 1.0 else Normal) in (x > 0.0, y)@ at @(_, ANY)@ refused the binding of @x@
 -- (task dead-draw-bound-mixture-blocks-shared-condition-inversion). Only a
 -- non-empty mask drops anything, so the empty mask stays the identity.
-pruneObservation :: [ADTDecl] -> Mask -> FnDecl -> FnDecl
-pruneObservation decls m (name, body)
+pruneObservation :: [ADTDecl] -> [FnDecl] -> Mask -> FnDecl -> FnDecl
+pruneObservation decls fenv m (name, body)
   | Set.null m = (name, body)
   | otherwise  = (name, goParams body)
   where
     goParams (Expr ti (Lambda x b)) = Expr ti (Lambda x (goParams b))
     goParams e                      = dropDeadBindings (prune [] e)
 
-    prune path e = reb (rewrite path core)
-      where (_, core, reb) = focus [] e
+    prune = pruneIn []
 
-    rewrite path core = case node core of
+    pruneIn env path e = reb (rewrite env' path core)
+      where (env', core, reb) = focus env e
+
+    rewrite env path core = case node core of
       InjF (Named c) args
         | isObsConstructor decls c ->
             Expr (getTypeInfo core) (InjF (Named c)
               [ prune (path ++ [Accessor c i]) a | (i, a) <- zip [0 ..] args ])
+      -- The root arms 'observationArms' descends: each arm is pruned at the
+      -- same paths, the condition is left alone.
+      IfThenElse c a b
+        | null path, not (path `Set.member` m), deterministicCondition decls fenv env c ->
+            Expr (getTypeInfo core) (IfThenElse c (pruneIn env path a) (pruneIn env path b))
       _ | path `Set.member` m -> holeFor core
         | otherwise           -> core

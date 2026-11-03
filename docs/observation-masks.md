@@ -18,6 +18,17 @@ the root (`fst`, `snd.fromLeft`, a field name). A root that is not a constructor
 tree — an `if`, a call, a comparison — has exactly one leaf, the root itself,
 and nothing here applies to it.
 
+One exception: a root `if` whose condition reads no latent (parameters and
+constants only) is fixed for a given call, so exactly one arm is the
+observation. `observationArms` gives each arm its own tree, recursively through
+nested such `if`s. The arms share accessor paths (one query is read off them
+all), the enumerated slots are the union of each arm's own enumerated slots,
+and `pruneObservation` prunes a masked slot in every arm that has it. A
+latent two arms both read correlates nothing, since the arms are exclusive.
+When one arm's enumerated slot lies under another's (a leaf where the other arm
+has a constructor), the function gets no masks. Mask analysis users other than
+the variants (the chart and writeLogits warnings) still read the single tree.
+
 A slot's **latents** are the random sources it reaches through `let` bindings.
 Identity is per *occurrence*, keyed by chain name, which is what makes SPLL's
 eager `let` come out right: two slots reading the same bound variable reach one

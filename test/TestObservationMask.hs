@@ -270,6 +270,34 @@ maskTableTests = testGroup "per-mask capability (the masked program's PType)"
           Just (OverBudget k b) -> assertEqual "budget" (3 :: Int, 2 :: Int) (k, b)
           other -> assertFailure ("expected OverBudget, got " ++ show other)
 
+    -- Task if-root-deterministic-condition-any-marginal-refused: each arm of a
+    -- root if whose condition reads no latent is a tree of its own, and the
+    -- masks range over the union of their enumerated slots.
+  , testCase "a deterministic-condition if root masks the union of its arms' slots" $ do
+      rows <- tableOf "main" "main = draw x = Normal in if 2.0 < 0.5 then [x] else x : [x]"
+      assertEqual "masks" ["(_, _)", "(ANY, _)", "(_, ANY)", "(ANY, ANY)"] (map fst rows)
+      assertRow rows "(ANY, _)" Integrate
+      assertRow rows "(_, ANY)" Integrate
+
+  , testCase "an if root whose condition is random stays one leaf" $ do
+      prog <- parseOrFail "main = draw x = Normal in if Uniform < 0.5 then [x] else x : [x]"
+      case marginalReport defaultCompilerConfig prog of
+        Left err -> assertFailure err
+        Right rs -> case find ((== "main") . fmName) rs of
+          Just r -> assertEqual "slots" [[]] (map fst (fmSlots r))
+          Nothing -> assertFailure "no report for main"
+
+  , testCase "arms whose enumerated slots nest get no masks" $ do
+      -- The then arm's tail is an enumerated leaf, the else arm's tail.head
+      -- one: no disjoint flags describe both, so no plan.
+      prog <- parseOrFail ("g y = [y]\n"
+                           ++ "main = draw x = Normal in if 2.0 < 0.5 then x : g x else x : [x]")
+      case marginalReport defaultCompilerConfig prog of
+        Left err -> assertFailure err
+        Right rs -> case fmTable <$> find ((== "main") . fmName) rs of
+          Just NoEnumeratedSlots -> return ()
+          other -> assertFailure ("expected no mask table, got " ++ show other)
+
   , testCase "maskTable lists only functions that have one" $ do
       prog <- parseOrFail progW
       case maskTable defaultCompilerConfig prog of
@@ -291,7 +319,7 @@ prunedEnv fname m src = do
     Right rtyped -> do
       let decls  = adts rtyped
           pruned = rtyped
-            { functions = [ if n == fname then pruneObservation decls m d else d
+            { functions = [ if n == fname then pruneObservation decls (functions rtyped) m d else d
                           | d@(n, _) <- functions rtyped ] }
       case compileRTyped defaultCompilerConfig pruned of
         Left err  -> assertFailure ("compiling the pruned program failed: " ++ err)
@@ -312,7 +340,7 @@ pruneTests = testGroup "pruneObservation and the pipeline below it"
         Left err -> assertFailure err
         Right rtyped -> do
           let d = head (functions rtyped)
-          assertEqual "unchanged" d (pruneObservation decls Set.empty d)
+          assertEqual "unchanged" d (pruneObservation decls (functions rtyped) Set.empty d)
 
   , testCase "a masked leaf becomes a Constant VAny carrying its rType" $ do
       (decls, _, _) <- treeOf "main" progW
@@ -321,7 +349,7 @@ pruneTests = testGroup "pruneObservation and the pipeline below it"
       case rtypedProgram prog of
         Left err -> assertFailure err
         Right rtyped -> do
-          let (_, body) = pruneObservation decls m (head (functions rtyped))
+          let (_, body) = pruneObservation decls (functions rtyped) m (head (functions rtyped))
               holes = [ rType (getTypeInfo e)
                       | e <- flatten body, Constant VAny <- [node e] ]
           assertEqual "one hole, Float-typed" [TFloat] holes

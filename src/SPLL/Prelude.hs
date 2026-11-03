@@ -153,7 +153,7 @@ import Text.Pretty.Simple (pShow)
 import qualified Data.Text.Lazy as TL
 import Data.Char (toUpper)
 import Data.Maybe (isNothing, isJust, fromMaybe, maybeToList)
-import Data.List (find, intercalate)
+import Data.List (find, intercalate, foldl', nub)
 
 -- | Build an AST node with a blank annotation. All the smart constructors
 -- below are annotation-free by construction; the inference passes fill them in.
@@ -1072,11 +1072,19 @@ oneFunction conf rtyped decls fenv decl@(fname, _) = do
   return FnMarginals { fmName = fname, fmSlots = verdicts, fmClasses = classes
                      , fmEnumerated = enums, fmTable = table }
   where
-    tree     = observationTree decls decl
-    verdicts = slotVerdicts decls fenv tree
-    classes  = correlationClasses (slotLatents decls fenv tree)
-    enums    = [ s | (s, v) <- verdicts, v /= SelfContained ]
+    -- One tree per arm of a root if with a deterministic condition
+    -- ('observationArms'); each arm's verdicts and classes are its own, and a
+    -- slot is listed once, enumerated when it is enumerated in some arm.
+    arms     = observationArms decls fenv decl
+    verdicts = mergeVerdicts (concatMap (slotVerdicts decls fenv) arms)
+    classes  = nub (concatMap (correlationClasses . slotLatents decls fenv) arms)
+    enums    = fromMaybe [] (armsEnumeratedSlots decls fenv arms)
     k        = length enums
+    mergeVerdicts = foldl' addVerdict []
+    addVerdict acc (s, v) = case lookup s acc of
+      Nothing -> acc ++ [(s, v)]
+      Just SelfContained -> [ (s', if s' == s then v else v') | (s', v') <- acc ]
+      Just _ -> acc
     row m    = (,) m <$> maskedPType rtyped decls fname m
 
 -- | The projected 'PType' of one masked program: prune, then run the rest of
@@ -1089,7 +1097,7 @@ maskedPType rtyped decls fname m = do
     Nothing        -> Left ("maskedPType: function vanished: " ++ fname)
   where
     pruned = rtyped
-      { functions = [ if n == fname then pruneObservation decls m d else d
+      { functions = [ if n == fname then pruneObservation decls (functions rtyped) m d else d
                     | d@(n, _) <- functions rtyped ] }
 
 -- | The task's headline entry point: for every function with at least one
@@ -1156,7 +1164,7 @@ data MaskPlan
 -- a single leaf has nothing to mask: an @ANY@ there is the root unit factor).
 maskPlans :: CompilerConfig -> Program -> [(String, MaskPlan)]
 maskPlans conf rtyped
-  | not (any (isTree . observationTree (adts rtyped)) (functions rtyped)) =
+  | not (any (any isTree . observationArms (adts rtyped) (functions rtyped)) (functions rtyped)) =
       [ (n, NoMasks) | (n, _) <- functions rtyped ]
   | otherwise = map plan (functions named)
   where
@@ -1166,13 +1174,14 @@ maskPlans conf rtyped
     isTree ObsCon{} = True
     isTree _        = False
     plan decl@(n, _)
-      | not (isTree tree) = (n, NoMasks)
+      | not (any isTree arms) = (n, NoMasks)
       | null enums        = (n, NoMasks)
       | k > marginalSlots conf = (n, MasksOverBudget k)
       | otherwise         = (n, Masks enums)
       where
-        tree  = observationTree decls decl
-        enums = enumeratedSlots decls fenv tree
+        arms  = observationArms decls fenv decl
+        -- Arms whose enumerated slots nest have no plan ('armsEnumeratedSlots').
+        enums = fromMaybe [] (armsEnumeratedSlots decls fenv arms)
         k     = length enums
 
 -- | The compile-time warnings that read only the program, not what the compile
@@ -1322,7 +1331,7 @@ withMaskVariants conf rtyped env@(IREnv groups decls consts)
              (if admitted && not (noIntegrate conf) then Just (body "integ" integFun) else Nothing)
       where
         pruned = restrictToCallees fname rtyped
-          { functions = [ if n == fname then pruneObservation (adts rtyped) m d else d
+          { functions = [ if n == fname then pruneObservation (adts rtyped) (functions rtyped) m d else d
                         | d@(n, _) <- functions rtyped ] }
 
     irGroups (IREnv gs _ _) = gs
