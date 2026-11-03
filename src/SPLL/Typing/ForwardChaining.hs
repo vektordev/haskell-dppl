@@ -401,7 +401,7 @@ worldsShape wc occs bodyE = walk occs bodyE WTPoint <|> walk occs bodyE WTInterv
         | op `elem` ["and", "or"] -> (\x y -> WSConnective [x, y]) <$> walk os a WTPoint <*> walk os b WTPoint
         | op == "TCons", tgt == WTPoint -> WSTuple <$> walk os a WTPoint <*> walk os b WTPoint
       Expr _ (InjF (Named "not") [a]) -> WSConnective . (: []) <$> walk os a WTPoint
-      -- An inner binding read once with no binder on the way is its value
+      -- An inner binding read once, not under a function value, is its value
       -- at that read ('readOnceInPlace', the in-place engine's predicate), and
       -- so is an alias of a local at every read ('entersInPlace'), so the
       -- body can be walked with the value in place ('enterInPlace'). That

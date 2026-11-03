@@ -157,29 +157,41 @@ substituteVar x r = go
       | otherwise = Expr t (Lambda y (go b))
     go (Expr t f) = Expr t (fmap go f)
 
--- | @readOnceInPlace x body@: does @body@ read @x@ exactly once, with no
--- binder on the way to the read? The read may not sit under a lambda (a
--- function value, which may be called any number of times) nor in the body of
--- a nested @let@ (the applied literal lambda the parser makes of one). Such a
--- read is evaluated at most once, by the body itself, so the variable's
--- marginal law is the bound value's own law there, and @body[x := arg]@
--- denotes what the binding does. No binder lies on the way, so the
--- substitution captures nothing.
+-- | @readOnceInPlace x body@: does @body@ read @x@ exactly once, and not
+-- under a function value? The read may not sit under a lambda (a function
+-- value, which may be called any number of times), but it may sit in the
+-- value or the body of a nested @let@ (the applied literal lambda the parser
+-- makes of one), which is evaluated once. Such a read is evaluated at most
+-- once, by the body itself, so the variable's marginal law is the bound
+-- value's own law there, and @body[x := arg]@ denotes what the binding does.
+-- A nested @let@ on the way commutes with the binding: @draw p = Uniform in
+-- draw q = Uniform in (q, p < q)@ is @draw q = Uniform in (q, Uniform < q)@,
+-- since @q@'s value does not read @p@ (task
+-- comparison-of-two-witnessed-latents-finite-slot-mask-refused, the mask of
+-- @(p, (q, p < q))@ with @p@ unobserved).
+-- No binder in @body@ may rebind @x@ or a name @arg@ reads: a nested
+-- binding's body is fetched from the program as written by chain name, still
+-- reading @x@, and the compiler reads @arg@ there by name
+-- ('SPLL.IRCompiler.Monad.inPlaceArgs'), with nothing renamed.
 --
 -- The single predicate of the in-place engine (task
 -- dispatch-on-law-certificates): the modality engine's certificate
 -- ('SPLL.Typing.ModalityInfer.CertInPlace'), the compiler's construction and
 -- the set-witness walk's entry into an inner binding all read it.
-readOnceInPlace :: String -> Expr -> Bool
-readOnceInPlace x body = go body == Just (1 :: Int)
+readOnceInPlace :: String -> Expr -> Expr -> Bool
+readOnceInPlace x arg body =
+  go body == Just (1 :: Int)
+    && Set.null (Set.intersection (binders body) (Set.insert x (freeVarsExpr arg)))
   where
+    binders (Expr _ (Lambda y b)) = Set.insert y (binders b)
+    binders (Expr _ f) = foldr (Set.union . binders) Set.empty f
     go (Expr _ (Var v)) = Just (if v == x then 1 else 0)
     go (Expr _ (Lambda y b))
       | y == x || not (x `Set.member` freeVarsExpr b) = Just 0
       | otherwise = Nothing
     go (Expr _ (Apply (Expr _ (Lambda y b)) a))
-      | y /= x, x `Set.member` freeVarsExpr b = Nothing
-      | otherwise = go a
+      | y == x = go a
+      | otherwise = (+) <$> go a <*> go b
     go (Expr _ f) = sum <$> traverse go (foldr (:) [] f)
 
 -- | Can the inner binding @let y = e in b@ be entered in place, as
@@ -191,7 +203,7 @@ readOnceInPlace x body = go body == Just (1 :: Int)
 -- alias-between-curried-lambdas-refuses-enumerable-and-function-arguments).
 -- 'substituteVar' renames any binder on the way that would capture it.
 entersInPlace :: (String -> Bool) -> String -> Expr -> Expr -> Bool
-entersInPlace isValue y e b = readOnceInPlace y b || case e of
+entersInPlace isValue y e b = readOnceInPlace y e b || case e of
   Expr _ (Var v) -> isValue v
   _ -> False
 

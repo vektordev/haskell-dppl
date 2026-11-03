@@ -154,6 +154,15 @@ data CompilerMetadata = CompilerMetadata {
   -- same way ('anchorAtCall'); otherwise it reads the caller's namesake of
   -- the parameter (task theta-anchor-through-callee-local-binding).
   enteredScopes :: [(Set.Set ChainName, [(String, String)])],
+  -- | Variables the in-place engine ('SPLL.IRCompiler.Dispatch.inPlaceApplicable')
+  -- measures at their one read, innermost first, each with the argument it
+  -- was bound to and the chain names of the body it binds. 'substituteVar'
+  -- puts the argument at the read in the body handed to the engines, but a
+  -- nested binding on the way fetches its body by chain name from the program
+  -- as written ('resolveBinding'), which still reads the variable:
+  -- 'exprWithCN' substitutes it there as well (task
+  -- comparison-of-two-witnessed-latents-finite-slot-mask-refused).
+  inPlaceArgs :: [(String, Expr, Set.Set ChainName)],
   -- | The modality engine's certificate for every node of the program, by
   -- chain name ('SPLL.Typing.ModalityInfer.inferProgram'; design
   -- law-carrying-modality §B). Not a 'TypeInfo' field: a 'Law' holds closures.
@@ -415,10 +424,17 @@ data Binding = Binding
   }
 
 -- | The expression carrying a chain name, looked up in the program being compiled.
+--
+-- A node inside the body of a binding the in-place engine measures has that
+-- binding's argument substituted for its variable ('inPlaceArgs'), as the
+-- body the engine compiles does.
 exprWithCN :: CompilerMetadata -> ChainName -> Expr
 exprWithCN meta cn =
   let Program{functions=fs} = compilingProgram meta
-  in findExprWithCN (map snd fs) cn
+      inPlace e (x, arg, scope)
+        | cn `Set.member` scope = substituteVar x arg e
+        | otherwise = e
+  in foldl inPlace (findExprWithCN (map snd fs) cn) (inPlaceArgs meta)
 
 -- | The compiler's binder environment ('lawEnv'), by variable.
 type LawEnv = Map.Map String BoundVar

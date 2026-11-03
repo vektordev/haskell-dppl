@@ -224,7 +224,7 @@ order:
 | affine marginalisation | `ModalityInfer.affineBindingCert` (an affine form with latents, every use flowing into one affine consumer) | the form |
 | point inversion | `ForwardChaining.pointWitnessCert` (`toInvExprMaybe`, seeded at the lambda's body) | the inverse, and the root-seeded witness verdict |
 | set-valued witnesses | `ForwardChaining.worldsShape`, `invertToWorlds`' shape walk without its IR | the shape |
-| in place | `Lang.readOnceInPlace` (the body reads the variable once, under no lambda and in no nested `let`'s body) | none: the argument is measured at the read |
+| in place | `Lang.readOnceInPlace` (the body reads the variable once, under no lambda, and no binder in it rebinds the variable or a name the argument reads) | none: the argument is measured at the read |
 
 For a `draw` (a lambda in place) whose argument is random, not a function of
 witnessed variables alone (`determinedByWitnesses`) or of variables the
@@ -242,12 +242,20 @@ in-place engine is tried last, after the set-witness engine's fallback (which
 can answer where its predicate declined).
 
 **The in-place engine** (task `dispatch-on-law-certificates`, law-carrying-modality
-M6). A binding whose body reads its variable once, under no lambda and in no
-nested `let`'s body, has the argument's own law at that read, which is how
-`bindParam` types the read anyway. So `body[x := arg]` is what the binding
-denotes, and the engine compiles that (`inPlaceApplicable`; only for a lambda
-in place compiled inline, so every node on the way is compiled from this
-tree). It is an engine with a certificate (`CertInPlace`), last in the order,
+M6). A binding whose body reads its variable once, under no lambda, has the
+argument's own law at that read, which is how `bindParam` types the read
+anyway. So `body[x := arg]` is what the binding denotes, and the engine
+compiles that (`inPlaceApplicable`; only for a lambda in place compiled
+inline). The read may sit in a nested `let`'s value or body, which runs once:
+the binding commutes past it, `draw p = Uniform in draw q = Uniform in (q, p
+< q)` is `draw q = Uniform in (q, Uniform < q)`. A nested binding's body is
+fetched by chain name from the program as written, still reading the
+variable, so the engine records the variable with its argument
+(`inPlaceArgs`) and `exprWithCN` substitutes it in every node fetched from
+the body; hence no binder in the body may rebind the variable or a name the
+argument reads (task
+`comparison-of-two-witnessed-latents-finite-slot-mask-refused`, corpus
+`distributions/comparisonAgainstInnerWitnessedLatent`). It is an engine with a certificate (`CertInPlace`), last in the order,
 not a source rewrite: a binding any other engine measures keeps that engine's
 code. The set-witness walk uses the same predicate to enter an inner binding
 whose body holds x (`draw c = x < 0.5 in if c ..`, `draw z = 0.5 in x < z`):

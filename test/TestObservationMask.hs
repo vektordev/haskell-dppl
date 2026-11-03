@@ -656,7 +656,15 @@ variantCorpusTests corpus = sequence
                           stray = [ t | Just t@(Right (VProbDim p d)) <- terms, p /= 0, d /= dAny ]
                           known = [ e | Just (Left e) <- terms, knownPrefix `isPrefixOf` e ]
                           refused = [ e | Just (Left e) <- terms, not (knownPrefix `isPrefixOf` e) ]
-                      if not (null known) then return 0 else do
+                      -- With every enumerated slot masked the ANY query is
+                      -- the total mass, 1 by normalisation with no engine,
+                      -- so it is no evidence that the points are tractable:
+                      -- (ANY, (ANY, p < q)) over two independent Uniform
+                      -- latents answers 1 while P(p < q) has no closed form
+                      -- (task comparison-of-two-witnessed-latents-finite-slot-mask-refused).
+                      -- Where the points answer, their sum is still checked.
+                      let totalMass = Set.insert s m == Set.fromList slots
+                      if not (null known) || (totalMass && not (null refused)) then return 0 else do
                         when (not (null refused)) $
                           assertFailure (vpName vp ++ ": the ANY query answers but a point refuses: " ++ head refused)
                         assertEqual (vpName vp ++ ": no point at another dim") [] (map show stray)
