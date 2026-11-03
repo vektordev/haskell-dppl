@@ -921,6 +921,61 @@ population assertions: a check with a floor on the corpus it reads goes red
 when its programs are demoted, though no tick is lost ("Population checks
 live in `Slow`" above).
 
+## Test suite memory
+
+A test run that is killed for low memory (an OOM kill, `SIGKILL`/`-9`, or a
+memory-pressure reaper) with no assertion failure is a fault of the suite.
+`scripts/test-memory/test_memory.py` finds what drives it (docs-repo
+investigation `slow-tier-run-killed-for-low-memory`). It runs the already
+built test binary (`stack build --test --no-run-tests` first) in a transient
+systemd unit under a hard cap (`MemoryMax`, no swap), so a runaway is killed
+alone rather than taking the machine and other work with it, and reads the
+unit's memory peak (the binary *and* its python/julia/nest children) and
+GHC's own `+RTS -t` figures (maximum residency, heap in use, allocation).
+
+```bash
+# one capped process per group (Tests.<group>; Slow split one level deeper)
+NEST_SLOW_TESTS=1 NEST_FULL_TESTS=1 scripts/test-memory/test_memory.py --cap 6G groups
+# which test inside a group: -j1, memory sampled and charged to the running test
+NEST_SLOW_TESTS=1 NEST_FULL_TESTS=1 scripts/test-memory/test_memory.py --cap 7G trace -p '/RewriteInvarianceCorpus/'
+```
+
+`groups` prints the units by peak with their outcome (`ok`, `failed`,
+`oom-kill`) and writes `.stack-work/test-memory/groups.csv`; `--split`,
+`--depth`, `--only` and `-p` choose the units, `--suite
+haskell-dppl-test-corpus` the corpus binary. `trace` builds the tree once,
+runs the selection at `-j1`, samples the cgroup's anonymous memory and
+charges each sample to the test tasty is running (it prints a test's name
+when the test starts). It lists the tests by the rise they caused, and names
+the test running when the unit was OOM-killed (`KILLED`). Set
+`NEST_FULL_TESTS=1`, or impact analysis skips most of the work being
+measured. Both pass `NEST_*`/`TASTY_*` through, and run one unit at a time
+by default so the figures are not shared.
+
+What it found the first time, and the rules that follow:
+
+- **A runaway compile is a memory problem before it is a time problem.** A
+  compile that does not terminate can retain a third of what it allocates:
+  one rewrite variant in `Slow.RewriteInvarianceCorpus` reached 7 GB inside
+  its 20 s timeout and killed the binary. A timeout alone does not bound
+  memory. Every compile and query a sweep runs on a program it did not
+  choose (a rewrite, a generated program) runs under a per-thread allocation
+  cap as well (`enableAllocationLimit`): `TestRewrites.timedTry` (3 GB per
+  compile, query run or key rendering, `stepCap`) and the known-issues
+  harness (`cap:`, "The cap" above) do. Size the cap from what the
+  concurrent actions may retain together, not from the largest legitimate
+  action: allocation is only a proxy for retention, and the rewrite sweep
+  runs up to one action per capability in each of tasty's parallel tests.
+  A cap that bites a legitimate action shows up as a logged refusal
+  ("allocation cap"); the comment on `stepCap` lists the known ones.
+- **Don't hold a rendering for a hash.** A key over `show` of an `IREnv`
+  hashes each rendering as it is made (`hashKey [show env]`), rather than
+  collecting the strings and hashing them together: a `String` costs about
+  40 bytes a character, and a program with 140 variants held all of them.
+- **Tasty keeps the tree.** What a `TestTree` closure captures stays live
+  until the run ends (the reason `Corpus` is its own binary, above). Build
+  per-program data inside the test's action, not when the tree is built.
+
 ## Benchmarks
 
 `benchmarks/` holds compiler-performance stress programs

@@ -29,13 +29,15 @@ module TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rew
 import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
-import Control.Exception (SomeException, bracket_, evaluate, throwIO, try)
+import Control.Exception (AllocationLimitExceeded(..), SomeException, bracket_, evaluate, finally, fromException, throwIO, try)
 import Control.Monad (forM, replicateM)
 import Control.Monad.Random.Lazy (evalRandIO)
+import Data.Int (Int64)
 import Data.List (intercalate, isInfixOf, isPrefixOf, nub)
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Set as Set
 import System.Timeout (timeout)
+import System.Mem (setAllocationCounter, enableAllocationLimit, disableAllocationLimit)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, testCaseInfo, assertBool, assertFailure, (@?=))
 import Test.QuickCheck (Property, Result(..), Discard(..), stdArgs, quickCheckWithResult, replay, maxSuccess, chatty, maxShrinks,
@@ -256,10 +258,10 @@ compileTimed = compileTimedWith defaultCompilerConfig
 -- | 'compileTimed' under another config.
 compileTimedWith :: CompilerConfig -> Program -> IO (Either String IREnv)
 compileTimedWith conf p = do
-  r <- timedTry (20 * 1000000) (evaluate (compile conf p))
+  r <- timedTry stepCap (20 * 1000000) (evaluate (compile conf p))
   return $ case r of
     Nothing -> Left "timeout (20s)"
-    Just (Left ex) -> Left ("crash: " ++ firstLine (show (ex :: SomeException)))
+    Just (Left ex) -> Left (crashLine ex)
     Just (Right (Left err)) -> Left ("refused: " ++ shorten (takeWhile (/= '\n') err))
     Just (Right (Right env)) -> Right env
 
@@ -267,23 +269,66 @@ compileTimedWith conf p = do
 runCompiled :: Program -> Either String IREnv -> [Query] -> IO Outcome
 runCompiled _ (Left why) _ = return (Refused why)
 runCompiled p (Right env) qs = do
-  r <- timedTry (20 * 1000000) (evaluate (forceOutcome (answer p env qs)))
+  r <- timedTry stepCap (20 * 1000000) (evaluate (forceOutcome (answer p env qs)))
   return $ case r of
     Nothing -> Refused "timeout (20s)"
-    Just (Left ex) -> Refused ("crash: " ++ firstLine (show (ex :: SomeException)))
+    Just (Left ex) -> Refused (crashLine ex)
     Just (Right o) -> o
 
 -- | 'timeout' around 'try', the other way round: an action run as
 -- @timeout n (try act)@ catches 'timeout''s own exception, so a timeout came
 -- back as @Just (Left <<timeout>>)@, a crash, and was keyed and judged as one.
 -- 'Nothing' is a timeout; 'Just' the action's result or its exception.
-timedTry :: Int -> IO a -> IO (Maybe (Either SomeException a))
-timedTry n act = do
-  r <- try (timeout n act)
+--
+-- The action also runs under an allocation cap ('stepCap' or 'wholeCap'): a
+-- compile that runs away keeps much of what it allocates (the compare-negate
+-- rewrite of setWitnessContinuousEqualsThenInterval held 3 GB after 9 GB
+-- allocated), and within the timeout that was enough to OOM-kill the whole
+-- test binary (docs investigation slow-tier-run-killed-for-low-memory). The
+-- cap's exception comes back as @Just (Left ex)@, which 'crashLine' names. The
+-- allocation counter is per Haskell thread and the action runs on the calling
+-- thread, so this must not nest within one thread: the inner call would reset
+-- the outer one's budget.
+timedTry :: Int64 -> Int -> IO a -> IO (Maybe (Either SomeException a))
+timedTry cap n act = do
+  r <- try (timeout n (allocCapped cap act))
   return $ case r of
     Left ex -> Just (Left ex)
     Right Nothing -> Nothing
     Right (Just x) -> Just (Right x)
+
+-- | Bytes one compile, one program's queries, or one rendering of a
+-- compiled environment for the impact key may allocate. Measured 2026-11-03
+-- over the Slow rewrite sweep: the largest compile that finishes (to WHNF)
+-- allocates 1.6 GB, and the setWitnessContinuousEqualsThenInterval runaway
+-- passes 3 GB in a few seconds, retaining about 1 GB by then. Many of these
+-- run at once (one per capability in each of tasty's parallel tests), so
+-- this cap is what bounds the sweep's memory. Rendering forces every part of
+-- the environment, also those no query reads, and that is where most of a
+-- lazy runaway's work happens. It legitimately costs more for one large
+-- program: gaussianTrajectory8's longest variants take 4 to 8.4 GB to
+-- render, so that program gets no impact key and always runs, and one of its
+-- variants (helper-extract at its longest tail) needs 3.8 GB for its queries
+-- and is logged as refused ("allocation cap"). That is the price of the
+-- bound: at 6 GB, two runaways at once still OOM-killed the sweep under a
+-- 6 GB limit.
+stepCap :: Int64
+stepCap = 3000000000
+
+-- | Bytes for a stage diff (two compiles and their stages, run only on a
+-- mismatch) and for the of-toggle sweep's renderings of corpus programs.
+wholeCap :: Int64
+wholeCap = 8000000000
+
+allocCapped :: Int64 -> IO a -> IO a
+allocCapped cap act = (setAllocationCounter cap >> enableAllocationLimit >> act) `finally` disableAllocationLimit
+
+-- | A 'timedTry' exception as a refusal message: the allocation cap by name,
+-- anything else as a crash.
+crashLine :: SomeException -> String
+crashLine ex = case fromException ex of
+  Just AllocationLimitExceeded -> "allocation cap"
+  Nothing -> "crash: " ++ firstLine (show ex)
 
 firstLine :: String -> String
 firstLine = shorten . takeWhile (/= '\n')
@@ -437,7 +482,7 @@ sweepCompiled prog p qs orig vs = do
 -- rows, under a 60 s timeout.
 stageReport :: Program -> Program -> [Query] -> IO (Either String StageReport)
 stageReport a b qs = do
-  t <- timedTry (60 * 1000000) $ do
+  t <- timedTry wholeCap (60 * 1000000) $ do
     r <- stageDiff (defaultStageDiffOpts defaultCompilerConfig) { sdQueries = qs, sdTolerance = probTolerance } a b
     evaluate (length (renderStageReport r) `seq` r)
   return $ case t of
@@ -1132,7 +1177,7 @@ integrate prog origOut origBC origPT qs sf v c = do
 branchCounts :: Program -> Either String IREnv -> [Query] -> IO (Maybe [Double])
 branchCounts _ (Left _) _ = return Nothing
 branchCounts p (Right env) qs = do
-  r <- timedTry (20 * 1000000) (evaluate (forceBCs (mapM (\(s, params) -> either (const Nothing) bcOf (runProbC p env params s)) qs)))
+  r <- timedTry stepCap (20 * 1000000) (evaluate (forceBCs (mapM (\(s, params) -> either (const Nothing) bcOf (runProbC p env params s)) qs)))
   return $ case r of
     Just (Right x) -> x
     _ -> Nothing
@@ -1154,8 +1199,8 @@ rewriteCheckVersion :: String
 rewriteCheckVersion = "rewrite-invariance-v1"
 
 -- | Key of one program's rewrite sweep: the query rows, and for the original
--- and every variant (by family and site) its runtime fields and its compile
--- as shown, a refusal's message included, with the interpreter fingerprint.
+-- and every variant (by family and site) its runtime fields and the digest of
+-- its compile as shown, a refusal's message included, with the interpreter fingerprint.
 -- This module's and "Rewrites"' sources join the harness. A crash is keyed by
 -- its message, as it is deterministic. A compile that timed out, or whose
 -- environment crashes or runs out of time while shown, leaves the program
@@ -1181,7 +1226,10 @@ rewriteKey m p qs orig vs
       Left why -> "timeout" `isPrefixOf` why
       Right _ -> False
     renderTimed c = do
-      r <- timedTry (20 * 1000000) (evaluate (let str = show c in length str `seq` str))
+      -- Each compile's digest, not its text: a shown IREnv is a String of
+      -- up to megabytes, and a program has up to ~140 variants, all held
+      -- until the key is hashed.
+      r <- timedTry stepCap (20 * 1000000) (evaluate (let d = hashKey [show c] in length d `seq` d))
       return $ case r of
         Just (Right str) -> Just str
         Just (Left (_ :: SomeException)) -> Nothing
@@ -1219,8 +1267,9 @@ ofToggleCorpusTests corpus = corpusSweep corpus SweepSpec
         bad -> assertFailure (unlines bad) >> return ""
   where
     shownCompile q = do
-      r <- timedTry (60 * 1000000) (evaluate (let s = show (compile defaultCompilerConfig q) in length s `seq` s))
+      -- The digest, not the text: a shown IREnv is megabytes of String.
+      r <- timedTry wholeCap (60 * 1000000) (evaluate (let d = hashKey [show (compile defaultCompilerConfig q)] in length d `seq` d))
       return $ case r of
         Nothing -> Nothing
-        Just (Left (ex :: SomeException)) -> Just ("crash: " ++ show ex)
+        Just (Left ex) -> Just (crashLine ex)
         Just (Right s) -> Just s
