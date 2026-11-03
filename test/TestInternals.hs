@@ -125,15 +125,23 @@ exprSubtree e = e : concatMap exprSubtree (getSubExprs e)
 -- Property: for any (untyped) generated program, if RType inference succeeds,
 -- no GreaterType ever appears in any of the resulting RType annotations.
 -- Ill-typed programs (Left) are out of scope for this invariant -- there is no
--- annotated tree to inspect.
+-- annotated tree to inspect. So are programs that declare one name twice
+-- (function or neural): the Validator rejects those before RInfer runs in the
+-- real pipeline, and RInfer's monomorphization assumes unique names.
+-- Like Left, they pass vacuously rather than being discarded, so they cost no
+-- test budget.
 prop_noGreaterTypeAfterRInfer :: Program -> Property
 prop_noGreaterTypeAfterRInfer prog = case tryAddRTypeInfo prog of
+  _ | hasDuplicateDecl -> property True
   Left _ -> property True
   Right typed ->
     let allRTypes = [ rType (getTypeInfo e)
                      | (_, body) <- functions typed
                      , e <- exprSubtree body ]
     in property (not (any containsGreaterType allRTypes))
+  where
+    declNames = map fst (functions prog) ++ [ n | (n, _, _) <- neurals prog ]
+    hasDuplicateDecl = Set.size (Set.fromList declNames) /= length declNames
 
 -- plus on two float constants should succeed
 test_plusFloat :: TestTree
@@ -553,6 +561,37 @@ test_splitReadFieldLeafTabulated = testCase "splitReadFieldLeafTabulated" $ do
     readerDepths d e@(IRApply (IRVar v) _) | v == "see_auto_prob" = d : concatMap (readerDepths d) (getIRSubExprs e)
     readerDepths d e = concatMap (readerDepths d) (getIRSubExprs e)
 
+-- | Task batched-topk-noisy-if-fold-of-reads-disagrees: whether an operand's
+-- marginal is materialized is gated on the size of its compiled leaf, and the
+-- scalar compile's leaf held the nested draw tables --batched leaves out
+-- ('nestedDrawTables'). On neural/noisyIfFoldOfReads the scalar leaf was then
+-- over 'maxTabulatedLeafNodes', so scalar answered through the joint
+-- enumeration (no topK guard) while batched materialized (guarded per cell),
+-- and the two pruned differently: Slow.BatchedPython topk-is-per-element.
+-- Both compiles now materialize the same cells.
+test_tabulatedLeafBackendIndependent :: TestTree
+test_tabulatedLeafBackendIndependent = testCase "tabulatedLeafBackendIndependent" $ do
+  path <- corpusPplPath "noisyIfFoldOfReads"
+  src <- readFile path
+  prog <- either (\e -> assertFailure ("parse error: " ++ show e) >> error "unreachable") return
+            (tryParseProgram path src)
+  let cells b = do
+        irEnv <- either (\e -> assertFailure ("compile error: " ++ show e) >> error "unreachable") return
+                   (compile defaultCompilerConfig { noIntegrate = True, topKThreshold = Just 0.3, batched = b } prog)
+        case probFun (lookupIREnv "main" irEnv) of
+          Just (pf, _) -> return (matCells pf)
+          Nothing -> assertFailure "compiled main has no probability variant" >> error "unreachable"
+  scalarCells <- cells False
+  batchedCells <- cells True
+  assertBool "the batched compile should materialize s - toF z" (batchedCells > 0)
+  assertEqual "materialized cells, scalar against batched" batchedCells scalarCells
+  where
+    matCells :: IRExpr -> Int
+    matCells e = (case e of
+                    IRLetIn n _ _ | "mat_cell" `isInfixOf` n -> 1
+                    _ -> 0)
+                 + sum (map matCells (getIRSubExprs e))
+
 -- | Saturated applications of the network @name@ anywhere in the expression.
 -- The reader @name_auto_prob (name sym) x@ is not one: its head is a
 -- different name, and only the inner @name sym@ is counted.
@@ -709,6 +748,70 @@ test_underflowedTailKeepsDimension = testCase "underflowedTailKeepsDimension" $ 
       assertEqual "but the branch is possible, so the mixture keeps dim=1" 1 d
       assertEqual "and the result is not flagged impossible" (Just False) (resultImpossible res)
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- Task if-condition-approx-zero-drops-tiny-branch-mass: an if-arm's dead-arm
+-- guard ('deadWeightIR') compared the condition's probability with 0.0
+-- approximately (floatApproxEqThresh = 1e-10) in linear space, so an arm whose
+-- condition has probability 1e-14 was dropped and its mass answered as
+-- (0.0, impossible); log space compared exactly and kept it. The mass is far
+-- below the corpus's probTolerance, so assert the value and the flag directly,
+-- in both semirings, for a literal bound, a run-time bound and an ADT arm.
+test_tinyConditionArmKeepsItsMass :: TestTree
+test_tinyConditionArmKeepsItsMass = testCase "tinyConditionArmKeepsItsMass" $ do
+  let parse src = case tryParseProgram "<test>" src of
+        Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+        Right p  -> return p
+      check label conf prog params sample expected = case runProb conf prog params sample of
+        Right res@(VProbDim p d) -> do
+          let p' = if logSpace conf then exp p else p
+          assertBool (label ++ ": expected " ++ show expected ++ ", got " ++ show p')
+                     (abs (p' - expected) <= 1e-6 * expected)
+          assertEqual (label ++ ": dim") 0 d
+          assertEqual (label ++ ": not impossible") (Just False) (resultImpossible res)
+        other -> assertFailure (label ++ ": expected a probability tuple, got: " ++ show other)
+  literal <- parse "main = if Uniform < 1.0e-14 then True else False"
+  runtime <- parse "main b = if Uniform < b then True else False"
+  adt <- parse (unlines [ "data Obj = Obj | Nil", "main = if Uniform < 1.0e-15 then Obj else Nil" ])
+  forM_ [(\c -> c, "linear"), (\c -> c { logSpace = True }, "log")] $ \(f, sp) ->
+    forM_ [0, 1, 2] $ \o -> do
+      let conf = f (defaultCompilerConfig { optimizerLevel = o })
+          tag = sp ++ " -O" ++ show o
+      check ("literal " ++ tag) conf literal [] (VBool True) 1e-14
+      check ("runtime " ++ tag) conf runtime [VFloat 1e-14] (VBool True) 1e-14
+      check ("adt " ++ tag) conf adt [] (VADT "Obj" []) 1e-15
+
+-- The same bug scaled so the dropped mass is a density of 1.0 (the arm's body
+-- is Uniform * t, a density of 1/t on [0, t]), checked on the interpreter and
+-- the scalar text backends. With t a run-time parameter 5e-10, between the
+-- interpreter's old threshold (1e-10) and pythonLib's isclose (1e-9), Python
+-- alone dropped the arm. These were the known-issues pins
+-- tinyConditionArmDroppedAsImpossible and tinyConditionArmPythonThreshold;
+-- they are not corpus programs because the sampling sweeps cannot estimate a
+-- density on an interval of width 5e-11.
+test_tinyConditionArmScaledOnEveryBackend :: TestTree
+test_tinyConditionArmScaledOnEveryBackend = testCase "tinyConditionArmScaledOnEveryBackend" $ do
+  let rows = [ ("main = if Uniform < 0.00000000005 then Uniform * 0.00000000005 else 5.0 + Uniform", [], 2e-11)
+             , ("main t = if Uniform < t then Uniform * t else 5.0 + Uniform", [VFloat 5e-10], 2e-10) ]
+      want = Answered 1.0 1 False
+  acs <- forM rows $ \(src, args, x) -> do
+    prog <- case tryParseProgram "<test>" src of
+      Left err -> assertFailure ("Parse failed: " ++ show err)
+      Right p  -> return p
+    env <- either (\e -> assertFailure (src ++ ": " ++ show e)) return (compile defaultCompilerConfig prog)
+    let qs = [(QProb (VFloat x), want), (QProb (VFloat 5.5), want)]
+    forM_ qs $ \(q, w) -> do
+      let got = interpreterAnswer prog env args q
+      assertBool (src ++ " interpreter at " ++ show q ++ ": want " ++ show w ++ ", got " ++ show got)
+        (maybe False (answersAgree w) got)
+    return (AgreementCase prog env args [] qs)
+  pyD <- runPythonBatch acs
+  assertBool (concatMap renderDisagreement pyD) (null pyD)
+  julia <- findJulia
+  case julia of
+    Nothing -> return ()
+    Just jl -> do
+      jlD <- runJuliaBatch jl acs
+      assertBool (concatMap renderDisagreement jlD) (null jlD)
 
 -- Task enumerated-sum-over-density-body: an enumerated sum whose terms are
 -- densities of different dims reports the lowest dim among the possible terms
@@ -1064,7 +1167,7 @@ test_tstDimIsInt :: TestTree
 test_tstDimIsInt = testCase "tstDimIsInt" $ do
   let dimOf src = case parseTestCasesFromString "dim.tst" src of
         Left err -> Left err
-        Right (_, _, _, [ProbTestCase _ _ _ e]) -> Right (expectationDim e)
+        Right (_, _, _, [ProbTestCase _ _ _ e _]) -> Right (expectationDim e)
         Right (_, _, _, tcs) -> Left ("expected one row, got " ++ show tcs)
   assertEqual "an integer dim" (Right (Just 1)) (dimOf "p(0.5)=(0.35, 1)\n")
   assertEqual "a float spelling of an integral dim" (Right (Just 2)) (dimOf "p(0.5)=(0.35, 2.0)\n")
@@ -1687,7 +1790,7 @@ planEnumTopKAndBCTest testName baseName = testCase testName $ do
   (_, _, _, tcs) <- case parseTestCasesFromString tstPath tstSrc of
     Left err -> assertFailure ("tst parse error: " ++ err)
     Right r  -> return r
-  let probCases = [ (s, ps, expectationProb expct) | ProbTestCase _ s ps expct <- tcs ]
+  let probCases = [ (s, ps, expectationProb expct) | ProbTestCase _ s ps expct _ <- tcs ]
   assertBool (baseName ++ ".tst should contain prob cases") (not (null probCases))
   -- compile once per config, evaluate every pinned case against each
   let compiledWith conf = either (error . show) id (compile conf prog)
@@ -3513,7 +3616,11 @@ tupleCdfCorrelatedRefusedTests = testGroup "tuple cdf through a draw read more t
             (null [ () | g <- gs, groupName g == "main", Just _ <- [lookup "prob" (refusedVariants g)] ])
         Left _ -> return ()
   | src <- [ "main = draw v = Uniform in (v, v + 1.0)"
-           , "main = draw v = Uniform in (v, v)" ]
+           , "main = draw v = Uniform in (v, v)"
+           -- The same through a named callee (task
+           -- tuple-cdf-through-named-callee-measures-only-witnessed-slot): the
+           -- refusal precedes the callee's integrate-function fold.
+           , "f x = (x, x + 1.0)\nmain = f Uniform" ]
   ]
 
 -- | Count occurrences of @IRVar name@ in an expression.
@@ -5149,8 +5256,17 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       -- because a CDF has no settled meaning under max-product), so there is no
       -- "h_map_integ" for a cumulative call to reach. Routing it to the
       -- sum-product "h_integ" would be the same silent-wrong-answer bug; the
-      -- compiler refuses by name instead, as 'mapHasNoExcept' already does for
-      -- AnyExcept under MAP.
+      -- compiler refuses by name instead.
+      --
+      -- Since task map-semiring-complement-and-cdf-wrong the comparison
+      -- refuses first: under max-product a comparison complements its
+      -- operand's CDF only when the operand has a single derivation, and a
+      -- call is not known to (an enumerable callee is summed point by point
+      -- instead, with no CDF call at all). Either refusal keeps the
+      -- sum-product h_integ out of the MAP group.
+      --
+      -- AnyExcept under MAP is refused the same way, as an absent variant
+      -- (next test).
       prog <- parseOrFail (unlines
         [ "h = Uniform"
         , "main = if h > 0.5 then 1.0 else 2.0"
@@ -5158,9 +5274,107 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       -- Only the MAP group's probability function goes; the ordinary
       -- sum-product group is untouched.
       let compiled = compile defaultCompilerConfig { extraSemirings = [SRMaxProduct] } prog
-      expectVariantRefused "main_map" "prob" "no defined meaning under the SRMaxProduct semiring" compiled
+      expectVariantRefused "main_map" "prob" "needs an operand with a single derivation" compiled
       assertBool "the sum-product main still has its probability function"
         (either (const False) (isJust . probFun . lookupIREnv "main") compiled)
+  , testCase "a marginal-except query is refused as an absent variant, not a crash" $
+      -- Task map-semiring-marginal-except-errors-instead-of-refusing. A query
+      -- of a == v (or its negation) compiles P(a /= v) as the marginal minus
+      -- one branch, which max-product has no operator for. srMinus of the
+      -- MAP semirings was a bare 'error', so the whole compile died, the
+      -- sum-product variants included; now main_map.prob alone is refused.
+      forM_ [ ("== 1", "main = (if Uniform < 0.3 then 1 else 2) == 1", 0.3)
+            , ("not (== 1)", "main = not ((if Uniform < 0.3 then 1 else 2) == 1)", 0.7) ] $ \(what, src, eTrue) ->
+        forM_ [False, True] $ \ls -> do
+          prog <- parseOrFail src
+          let cfg = defaultCompilerConfig { extraSemirings = [SRMaxProduct], logSpace = ls }
+              compiled = compile cfg prog
+              tag = what ++ (if ls then " (log space)" else "")
+          expectVariantRefused "main_map" "prob" "marginal-except" compiled
+          assertBool (tag ++ ": the sum-product main still has its probability function")
+            (either (const False) (isJust . probFun . lookupIREnv "main") compiled)
+          sp <- probUnder cfg prog [] (VBool True)
+          let lin = if ls then exp sp else sp
+          assertBool (tag ++ ": sum-product p(True) = " ++ show eTrue ++ ", got " ++ show lin)
+            (abs (lin - eTrue) < 1e-9)
+  -- Task map-semiring-complement-and-cdf-wrong. An if condition's False weight
+  -- was 1 - (its True weight), a sum-product identity: under max-product that
+  -- is 1 - max, not the best False derivation. The condition below has three
+  -- derivations, True (0.5), inner True (0.25) and inner False (0.25); the
+  -- best one reaching 2 is the last.
+  , testCase "a compound if condition: the False weight is the best False derivation" $ do
+      forM_ [ ("nested if", "main = if (if Uniform < 0.5 then True else Uniform < 0.5) then 1 else 2", 0.5, 0.25)
+            , ("negated, arms swapped", "main = if not (if Uniform < 0.5 then True else Uniform < 0.5) then 2 else 1", 0.5, 0.25)
+            , ("three levels", "main = if (if Uniform < 0.3 then (if Uniform < 0.6 then True else False) else Uniform < 0.2) then 1 else 2", 0.18, 0.56)
+            ] $ \(what, src, e1, e2) -> do
+        prog <- parseOrFail src
+        p1 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 1)
+        p2 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 2)
+        assertBool (what ++ ": p_map(1) = " ++ show e1 ++ ", got " ++ show p1) (abs (p1 - e1) < 1e-9)
+        assertBool (what ++ ": p_map(2) = " ++ show e2 ++ ", got " ++ show p2) (abs (p2 - e2) < 1e-9)
+  , testCase "a depth-d chain of nested conditions matches a max-product DP" $
+      -- c0 = Uniform < 0.3, c(k+1) = if ck then Uniform < 0.3 else Uniform < 0.7.
+      -- The DP carries (best True, best False) per level; sum-product is the
+      -- same recursion with + for max, and must keep summing to one.
+      forM_ [1, 2, 4, 8 :: Int] $ \d -> do
+        let cond 0 = "Uniform < 0.3"
+            cond k = "(if " ++ cond (k - 1) ++ " then Uniform < 0.3 else Uniform < 0.7)"
+            step plus (t, f) = (plus (t * 0.3) (f * 0.7), plus (t * 0.7) (f * 0.3))
+            (mt, mf) = iterate (step max) (0.3, 0.7) !! d
+            (st, sf) = iterate (step (+)) (0.3, 0.7) !! d
+        prog <- parseOrFail ("main = if " ++ cond d ++ " then 1 else 2")
+        p1 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 1)
+        p2 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 2)
+        s1 <- probUnder defaultCompilerConfig prog [] (VInt 1)
+        s2 <- probUnder defaultCompilerConfig prog [] (VInt 2)
+        assertBool ("d=" ++ show d ++ ": p_map(1) = " ++ show mt ++ ", got " ++ show p1) (abs (p1 - mt) < 1e-12)
+        assertBool ("d=" ++ show d ++ ": p_map(2) = " ++ show mf ++ ", got " ++ show p2) (abs (p2 - mf) < 1e-12)
+        assertBool ("d=" ++ show d ++ ": p(1) = " ++ show st ++ ", got " ++ show s1) (abs (s1 - st) < 1e-12)
+        assertBool ("d=" ++ show d ++ ": p(2) = " ++ show sf ++ ", got " ++ show s2) (abs (s2 - sf) < 1e-12)
+  , testCase "a disjunction condition: its False weight is compiled, not complemented" $ do
+      -- a || b over two independent Bernoulli(0.5): each of the three True
+      -- worlds and the one False world has weight 0.25.
+      prog <- parseOrFail "main = if (Uniform < 0.5) || (Uniform < 0.5) then 1 else 2"
+      p1 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 1)
+      p2 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 2)
+      assertBool ("p_map(1) = 0.25, got " ++ show p1) (abs (p1 - 0.25) < 1e-9)
+      assertBool ("p_map(2) = 0.25, got " ++ show p2) (abs (p2 - 0.25) < 1e-9)
+  , testCase "a comparison on an enumerated sum: the upper tail is maxed, not complemented" $ do
+      -- (a + b) > 0 is True on three paths of 0.25 each; the CDF at 0 (one
+      -- path, 0.25) complemented gave 0.75.
+      forM_ [ "main = (if Uniform < 0.5 then 1 else 0) + (if Uniform < 0.5 then 1 else 0) > 0"
+            , "main = 0 < (if Uniform < 0.5 then 1 else 0) + (if Uniform < 0.5 then 1 else 0)" ] $ \src -> do
+        prog <- parseOrFail src
+        pT <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VBool True)
+        pF <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VBool False)
+        assertBool (src ++ ": p_map(True) = 0.25, got " ++ show pT) (abs (pT - 0.25) < 1e-9)
+        assertBool (src ++ ": p_map(False) = 0.25, got " ++ show pF) (abs (pF - 0.25) < 1e-9)
+        sT <- probUnder defaultCompilerConfig prog [] (VBool True)
+        assertBool (src ++ ": sum-product p(True) = 0.75, got " ++ show sT) (abs (sT - 0.75) < 1e-9)
+  , testCase "a comparison on a non-enumerable compound operand is refused" $ do
+      prog <- parseOrFail "main = if (if Uniform < 0.5 then Uniform else Normal) > 0.3 then 1 else 2"
+      let compiled = compile defaultCompilerConfig { extraSemirings = [SRMaxProduct] } prog
+      expectVariantRefused "main_map" "prob" "needs an operand with a single derivation" compiled
+      assertBool "the sum-product main still has its probability function"
+        (either (const False) (isJust . probFun . lookupIREnv "main") compiled)
+  ]
+
+-- | Task map-semiring-complement-and-cdf-wrong: an if condition that is
+-- itself an if is compiled to both its weights in one pass, each a pruned
+-- lower bound, so topK prunes inside it. Before, the condition compiled
+-- unpruned (its False weight was the complement of its True weight, and the
+-- complement of a lower bound is an upper bound) and answered the exact
+-- 0.476 / 0.524 at any threshold.
+conditionPairTopKTests :: TestTree
+conditionPairTopKTests = testGroup "Condition pair: topK prunes inside a condition"
+  [ testCase "topK prunes inside a condition" $ do
+      prog <- corpusPplPath "topKPrunesInsideCondition" >>= readFile >>= parseOrFail
+      let conf = defaultCompilerConfig { topKThreshold = Just 0.1 }
+      forM_ [(1, 0.475, 0.476), (2, 0.475, 0.524 :: Double)] $ \(q, pruned, exact) -> do
+        pK <- probUnder conf prog [] (VInt q)
+        pE <- probUnder defaultCompilerConfig prog [] (VInt q)
+        assertBool ("exact p(" ++ show q ++ ") = " ++ show exact ++ ", got " ++ show pE) (abs (pE - exact) < 1e-9)
+        assertBool ("pruned p(" ++ show q ++ ") = " ++ show pruned ++ ", got " ++ show pK) (abs (pK - pruned) < 1e-9)
   ]
 
 -- | The consumer-grade decomposability walk. Unlike 'injFLatentVerdicts' it
@@ -5407,6 +5621,41 @@ test_agreementPointQueryIndexes = testCase "agreementPointQueryIndexes" $ do
     mentionsQuery (IRVar n) = n == queryParamName
     mentionsQuery e = any mentionsQuery (getIRSubExprs e)
 
+-- | Task scalar-backend-tensor-ops-lower-to-torch: the scalar Python lowering
+-- of the fused agreement body. The IR is the elementwise product
+-- 'test_agreementFusesToElementwiseProduct' pins; this pins what the scalar
+-- backend makes of it. Each marginal is one slice of the network's output
+-- vector (the reader's probability branch inlined at the map, where the
+-- domain is known to lie inside the reader's), not a call per domain value;
+-- the zips and reduces are runtime calls that run as torch ops on a tensor
+-- and as the former comprehensions on a list; and the domain literal is no
+-- longer rebuilt on every call, since nothing reads it once the readouts are
+-- slices. Structural, like its sibling: the timings are in the task document
+-- and in @benchmarks/stressAgreementProduct.ppl@.
+test_agreementScalarPythonLowersTensorOps :: TestTree
+test_agreementScalarPythonLowersTensorOps = testCase "agreementScalarPythonLowersTensorOps" $ do
+  prog <- loadCorpusProgram "categoricalProductFusion"
+  case compile defaultCompilerConfig prog of
+    Left err -> assertFailure ("Compile error: " ++ show err)
+    Right env -> do
+      let py = lines (unlines (SPLL.CodeGenPyTorch.generateFunctions True env))
+          -- main's probability method: the cumulative one keeps its scan over
+          -- the domain, which is what 'test_agreementPointQueryIndexes' pins.
+          forward = drop 1 (dropWhile (not . isInfixOf "def forward(") (dropWhile (not . isPrefixOf "class Main") py))
+          mainLines = takeWhile (\l -> not ("    def " `isPrefixOf` l || "# Example" `isPrefixOf` l)) forward
+          has s = any (s `isInfixOf`) mainLines
+      assertBool "main's probability method should be emitted" (not (null mainLines))
+      assertBool "a marginal should not call the network reader once per domain value" $
+        not (any (\l -> "_auto.forward(" `isInfixOf` l && " for " `isInfixOf` l) mainLines)
+      assertBool "each marginal should be a slice of the network output" $
+        has "vec_slice("
+      assertBool "the elementwise product should be a runtime call, not a zip comprehension" $
+        not (has "zip(") && has "vec_zip_mul("
+      assertBool "the reductions should be runtime calls" $
+        has "vec_sum(" && not (has "sum([")
+      assertBool "the domain literal should not be rebuilt on every call" $
+        not (has "= [0, 1, 2]")
+
 -- | The most loop-body evaluations one chain of nested enumerations costs: the
 -- largest product of domain sizes along any path of 'BMap's inside one
 -- another's bodies. A joint enumeration over @k@ stacked draws of a @V@-valued
@@ -5548,7 +5797,7 @@ test_sharedFieldAcrossListIRNotExponential = testCase "sharedFieldAcrossListIRNo
               ++ show small ++ " -> " ++ show large ++ ")") (ratio < 4)
 
 -- | The same family at budget 0, where the plan engine answers it (task
--- plan-world-binds-dead-branch-sum-per-world). 'measurePlanWorlds' bound each
+-- plan-world-binds-dead-branch-sum-per-world). The plan world measure bound each
 -- factor-carrying world's whole result, including a branch count that 'mixP'
 -- discards and that held every world's guard chain: the -O0 IR grew ~57x from
 -- 0 to 1 answers in between, and the slow-tier plan-engine differential on
@@ -6698,10 +6947,12 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
       , test_nnHoistedOutOfEnumSum
       , test_nnHoistedOutOfNestedEnumSum
       , test_splitReadFieldLeafTabulated
+      , test_tabulatedLeafBackendIndependent
       , test_repeatedNeuralReadShared
       , test_networkShareScoping
       , test_agreementFusesToElementwiseProduct
       , test_agreementPointQueryIndexes
+      , test_agreementScalarPythonLowersTensorOps
       , test_nestedEnumerationHonoursBudget
       , test_sharedLatentFactorizesPerSlot
       , test_drawProductReadFactorizesPerField
@@ -6711,6 +6962,8 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed
+  , test_tinyConditionArmKeepsItsMass
+  , test_tinyConditionArmScaledOnEveryBackend
   , test_underflowedTailKeepsDimension
   , test_structurallyImpossibleSampleIsFlagged
   , test_observeRenormalizesViaJustAny
@@ -6778,6 +7031,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , setWitnessIntBoundaryTests
   , tupleCdfCorrelatedRefusedTests
   , semiringMapTests
+  , conditionPairTopKTests
   , semiringSatisfiabilityTests
   , materializationVerdictTests
   , planEnumStructuralADTTests

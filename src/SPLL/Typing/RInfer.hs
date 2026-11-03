@@ -73,7 +73,12 @@ describeExpr (Expr _ (ThetaI _ i)) = "the parameter 'theta ... @ " ++ show i ++ 
 describeExpr (Expr _ (Subtree _ i)) = "the subtree 'subtree ... @ " ++ show i ++ "'"
 
 data RTypeError
-  = UnificationFail RType RType (Maybe Provenance)
+  -- | Two types that failed to reconcile, the provenance of the constraint
+  -- that met the contradiction, and, for a side that reached that constraint
+  -- through the substitution rather than being written in it, that side's
+  -- type and the provenance of the constraint that bound it (task
+  -- type-error-blames-one-side-only).
+  = UnificationFail RType RType (Maybe Provenance) [(RType, Provenance)]
   | InfiniteType TVarR RType
   | UnboundVariable String
   | UnificationMismatch [RType] [RType]
@@ -202,11 +207,18 @@ showConstraint (Constraint a b (Just c)) =
 -- unification failure in the compiler at once, and lets the reader draw the
 -- conclusion -- which is the whole point of task @opaque-user-facing-errors@.
 renderRTypeError :: RTypeError -> String
-renderRTypeError (UnificationFail t1 t2 prov) =
-  unlines (provenanceLocation prov ++ [header] ++ provenanceLines prov)
+renderRTypeError (UnificationFail t1 t2 prov origins) =
+  unlines (provenanceLocation prov ++ [header] ++ provenanceLines prov
+           ++ concatMap originLines origins)
   where
     header = "    Couldn't match type '" ++ prettyRType t1
                ++ "' with '" ++ prettyRType t2 ++ "'"
+    -- The other side of the failure: where the type that arrived by
+    -- substitution was introduced.
+    originLines (t, o) =
+      ("    The type '" ++ prettyRType t ++ "' arises from"
+         ++ maybe "" ((" " ++) . (++ ":") . spanPretty) (provSpan o))
+      : provenanceLines (Just o)
 renderRTypeError (ClassConstraintViolation cc t prov) =
   unlines (provenanceLocation prov
            ++ ["    No instance for (" ++ className cc ++ " " ++ prettyRType t ++ ")"]
@@ -496,7 +508,7 @@ infer adtsDecl expr
           let constraint = Constraint (rType ty) tVal (provenanceOf expr)
           return (rType ty, [constraint], Expr ty (Constant (VError msg)))
         (Expr ty (Constant val)) -> do
-          let tVal = getRType val
+          tVal <- freshenNullLists (getRType val)
           let constraint = Constraint (rType ty) tVal (provenanceOf expr)
           return (rType ty, [constraint], expr)
         (Expr ti (Lambda name inExpr)) -> do
@@ -646,6 +658,25 @@ fresh = do
     put s{var_count = var_count s + 1}
     return $ TVarR $ TV (letters !! var_count s)
 
+-- | A literal's type with every empty list given a fresh element type:
+-- @[]@ is @[a]@, not 'NullList'. 'unifies' accepts @ListOf _ ~ NullList@
+-- without binding anything, so a type variable met first by a 'NullList'
+-- stayed 'NullList' and never learnt the element type a later constraint
+-- supplied (an @if@ whose then-arm is @[]@ and whose else-arm is a nested
+-- @if@ over @[Float]@ was typed @[]@; task
+-- list-signature-rejected-when-empty-arm-first). Likewise a 'NotSetYet' the
+-- value cannot speak to (the absent side of an Either literal @Left True@, the
+-- element of an 'AnyList') is a fresh variable: as a concrete type it unified
+-- with nothing, not even itself (task either-literal-constant-untyped-side).
+freshenNullLists :: RType -> Infer RType
+freshenNullLists t = case t of
+  NullList -> ListOf <$> fresh
+  NotSetYet -> fresh
+  ListOf a -> ListOf <$> freshenNullLists a
+  Tuple a b -> Tuple <$> freshenNullLists a <*> freshenNullLists b
+  TEither a b -> TEither <$> freshenNullLists a <*> freshenNullLists b
+  _ -> return t
+
 freshVars :: Int -> [RType] -> Infer [RType]
 freshVars 0 rts = do
     return rts
@@ -677,8 +708,7 @@ compose :: Subst -> Subst -> Subst
 
 -- | Run the constraint solver
 runSolve :: [Constraint] -> Either RTypeError Subst
-runSolve cs = runIdentity $ runExceptT $ solver st
-  where st = (emptySubst, cs)
+runSolve cs = runIdentity $ runExceptT $ solver Map.empty emptySubst [ (c, c) | c <- cs ]
 
 -- same logic as a constraint solver,
 -- except it skips but records all failing constraints
@@ -694,14 +724,63 @@ simplify (su, ((Constraint t1 t2 c): cs0)) =
     addLeftoverConstraint :: Unifier -> Constraint -> Unifier
     addLeftoverConstraint (suDecl, cs) cs2 = (suDecl, cs2:cs)
 
--- Unification solver
-solver :: Unifier -> Solve Subst
-solver (su, cs) =
-  case cs of
-    [] -> return su
-    ((Constraint t1 t2 prov): cs0) -> do
-      su1  <- unifies prov t1 t2
-      solver (su1 `compose` su, apply su1 cs0)
+-- | Which constraint bound each type variable, and to what (before any later
+-- substitution). Consulted only to explain a failure.
+type BindingOrigins = Map.Map TVarR (RType, Maybe Provenance)
+
+-- Unification solver.
+--
+-- Each pending constraint is kept twice: as emitted, and with the
+-- substitution so far applied. Only the second takes part in unification.
+-- The first, together with 'BindingOrigins', lets a failure name the source of
+-- a side that is not written in the failing constraint but reached it through
+-- a variable some earlier constraint bound (task
+-- type-error-blames-one-side-only): GHC's "arising from" for the other side.
+solver :: BindingOrigins -> Subst -> [(Constraint, Constraint)] -> Solve Subst
+solver _ su [] = return su
+solver origins su ((original, Constraint t1 t2 prov) : cs0) = do
+  su1@(Subst bound) <- unifies prov t1 t2 `catchError` (throwError . explainFailure origins original (Constraint t1 t2 prov))
+  let origins' = Map.union origins (Map.map (\t -> (t, prov)) bound)
+  solver origins' (su1 `compose` su) [ (o, apply su1 c) | (o, c) <- cs0 ]
+
+-- | Attach, to a unification failure, where each failing side that arrived
+-- by substitution came from.
+--
+-- The failing types are subterms of the substituted constraint. At the same
+-- position in the emitted constraint sits either the type as written (the
+-- constraint's own provenance already names it) or a type variable; for a
+-- variable, the binding chain in 'BindingOrigins' leads to the constraint that
+-- introduced the type's outermost constructor.
+explainFailure :: BindingOrigins -> Constraint -> Constraint -> RTypeError -> RTypeError
+explainFailure origins (Constraint o1 o2 _) (Constraint c1 c2 _) (UnificationFail a b prov []) =
+  UnificationFail a b prov (dedupe (concatMap sideOrigin [a, b]))
+  where
+    sideOrigin x =
+      [ (x, o) | orig <- correspondents x (o1, c1) ++ correspondents x (o2, c2)
+               , Just o <- [originOf (Set.empty :: Set.Set TVarR) orig x]
+               , Just o /= prov ]
+    dedupe = foldr (\e acc -> if snd e `elem` map snd acc then acc else e : acc) []
+    -- Subterms of the emitted type at positions where the substituted type is x.
+    correspondents x (o, c)
+      | c == x = [o]
+      | otherwise = case (o, c) of
+          (ListOf o', ListOf c') -> correspondents x (o', c')
+          (Tuple oa ob, Tuple ca cb) -> correspondents x (oa, ca) ++ correspondents x (ob, cb)
+          (TEither oa ob, TEither ca cb) -> correspondents x (oa, ca) ++ correspondents x (ob, cb)
+          (TArrow oa ob, TArrow ca cb) -> correspondents x (oa, ca) ++ correspondents x (ob, cb)
+          (GreaterType oa ob, GreaterType ca cb) -> correspondents x (oa, ca) ++ correspondents x (ob, cb)
+          (TTensor _ o', TTensor _ c') -> correspondents x (o', c')
+          _ -> []
+    -- Follow variable-to-variable bindings to the one that gave the type its
+    -- shape.
+    originOf seen (TVarR v) x
+      | v `Set.member` seen = Nothing
+      | otherwise = case Map.lookup v origins of
+          Just (TVarR w, _) -> originOf (Set.insert v seen) (TVarR w) x
+          Just (_, o) -> o
+          Nothing -> Nothing
+    originOf _ _ _ = Nothing
+explainFailure _ _ _ err = err
 
 -- The 'Maybe Provenance' is carried purely so that a failure can say where the
 -- constraint came from; it takes no part in unification itself.
@@ -713,16 +792,16 @@ unifies _ (ListOf _) NullList = return emptySubst
 unifies _ NullList (ListOf _) = return emptySubst
 unifies p (ListOf t1) (ListOf t2) = unifies p t1 t2
 unifies p t1 (GreaterType (TVarR v) t3) = if t1 `matches` t3 then v `bind` t1 else
-  throwError $ UnificationFail t1 t3 p
+  throwError $ UnificationFail t1 t3 p []
 unifies p t1 (GreaterType t3 (TVarR v)) = if t1 `matches` t3 then v `bind` t1 else
-  throwError $ UnificationFail t1 t3 p
+  throwError $ UnificationFail t1 t3 p []
 unifies p (TVarR v) (GreaterType t2 t3) = case greaterType t2 t3 of
-  Nothing -> throwError $ UnificationFail t2 t3 p
+  Nothing -> throwError $ UnificationFail t2 t3 p []
   Just t -> v `bind` t
 unifies p t1 (GreaterType t2 t3) = if t1 `matches` t2 && t2 `matches` t3 then return emptySubst else
   (case greaterType t2 t3 of
-    Nothing -> throwError $ UnificationFail t1 (GreaterType t2 t3) p
-    Just tt -> if t1 `matches` tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3) p)
+    Nothing -> throwError $ UnificationFail t1 (GreaterType t2 t3) p []
+    Just tt -> if t1 `matches` tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3) p [])
 unifies _ (TVarR v) t = v `bind` t
 unifies _ t (TVarR v) = v `bind` t
 unifies p (TArrow t1 t2) (TArrow t3 t4) = unifyMany p [t1, t2] [t3, t4]
@@ -733,9 +812,9 @@ unifies p (TEither t1 t2) (TEither t3 t4) = unifyMany p [t1, t2] [t3, t4]
 -- is a failure naming both whole tensor types, so the diagnostic shows both
 -- shapes. No shape variables, no rank polymorphism, no broadcasting.
 unifies p t1@(TTensor s1 e1) t2@(TTensor s2 e2)
-  | s1 == s2  = unifies p e1 e2 `catchError` \_ -> throwError (UnificationFail t1 t2 p)
-  | otherwise = throwError (UnificationFail t1 t2 p)
-unifies p t1 t2 = throwError $ UnificationFail t1 t2 p
+  | s1 == s2  = unifies p e1 e2 `catchError` \_ -> throwError (UnificationFail t1 t2 p [])
+  | otherwise = throwError (UnificationFail t1 t2 p [])
+unifies p t1 t2 = throwError $ UnificationFail t1 t2 p []
 
 unifyMany :: Maybe Provenance -> [RType] -> [RType] -> Solve Subst
 unifyMany _ [] [] = return emptySubst

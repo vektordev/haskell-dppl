@@ -107,8 +107,6 @@ batchedFuzzCoverageExceptions =
   [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (gaussianTrajectory4, theta)")
   , ("Builtin:BIota",      "tensor Gaussian head: the typed generator draws no tensor-valued neural output, and the IR generator's batched arm builds no tensor plan reader (tensorDiffusionTrajectory, tensorHeadLayout)")
-  , ("Builtin:BMapList",   "list map: the typed generator has no higher-order map over a list, and the IR generator's batched cases map a list only in helper bodies (mapMultList)")
-  , ("Builtin:BZip OpMult", "agreement fusion: the typed generator never builds two independent categoricals compared with ==, and the interpreter answers none of the IR generator's batched zipped products (categoricalProductFusion)")
   ]
 
 -- | Constructs some corpus config compiles to that the IR fuzz generator has

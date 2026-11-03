@@ -1,0 +1,4 @@
+-- Task bare-equality-of-shared-draw-reads-refused: `c == c` at the query root
+-- was refused ("no inference engine applies to the binding of 'c'") while
+-- `if c == c then True else False` compiled. Always True.
+main = draw c = Uniform < 0.5 in c == c

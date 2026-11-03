@@ -1,9 +1,46 @@
 # Witness inversion engines for non-invertible observations
 
-Two engines in `IRCompiler.hs` handle `let`-bindings whose observation can't
+Two engines in `IRCompiler` (`IRCompiler/Worlds.hs`, `IRCompiler/Plan.hs`) handle `let`-bindings whose observation can't
 be point-inverted onto the bound variable via ordinary forward chaining.
 The probabilistic `Apply` arm tries them in the order below, with
 forward-chaining point inversion in between.
+
+## Worlds and their measure
+
+Both engines invert the observation into **worlds** that partition it, of one
+type (`Worlds.World`): guards, a conjunction of constraints, and independent
+factors. p(sample) is the mixture (`mixP`) of the worlds' measures, and
+`measureWorlds` is the one measure for both engines. A constraint is one of:
+
+| constraint | built by | measured as |
+|---|---|---|
+| `OnDraw s`: the bound draw lies in the set `s` (`WPoint`, `WInterval`, `WExcept`, `WChoice`, `WFull`, `WEmpty`) | set-valued witnesses (`DrawWorld`, one per world) | the reader's `lrDraw` (`measureSet` against the bound distribution): a density times the change of variables, a CDF difference, a set minus a point |
+| `OnLeaf c`: a plan leaf region is constrained (`PLeafCon` discrete slots, `PLeafEq`, `PLeafIvl`, `PLeafPt`) | plan-guided enumeration | read off the logit vectors (`lrRaws`): a slot sum, a Gaussian CDF difference, a density times the change of variables |
+| `Pair a b`: continuous leaf `a` exceeds leaf `b` | plan-guided enumeration | the difference Gaussian's CDF, in closed form |
+
+Two *enumerated* plan leaves compared (`xb (obj sc) < xb (obj (rest sc))`) need
+no `Pair`: `coupleCmp` splits the outcome into one world per value of the left
+leaf, each pinning that slot and restricting the right leaf to the slots the
+comparison admits (`OnLeaf` on both; corpus
+`plan-enumeration/intPairLessThanBool`, `consLevelsIntLessThan`,
+`consLevelsIntCompareMixed`).
+
+A world's factors (`WFactor`) are either a whole sub-inference (a set-witness
+residue or x-free subtree, a plan-free subtree of a plan body) or a
+pre-measured dim-0 mass (`WMass`, a plan value group collapsed into one
+world).
+
+The measure, per world: the constraints' measure times the factors
+(`prodP`), under the world's guards, so nothing a world binds is evaluated
+before its guards hold. A draw constraint is measured in the world's own
+scope. The plan leaf constraints of a world are one closed-form mass read off
+the logits (`planWorldMass`), which absorbs the guards; at dim 0 its
+impossibility is an exact zero (`opaqueMass`), and a density (one point
+constraint per dimension) is impossible exactly when a structural guard (the
+world's, or a point's membership or image guard) fails. When every world is closed form (plan leaves only, no
+point, no sub-inference factor: `closedFormWorld`) the masses, guards inside,
+sum directly in one `opaqueMass`. Every world counts its own branches for
+`-c`, its factors' included, and the mixture sums them.
 
 ## Plan-guided lazy enumeration
 
@@ -31,8 +68,8 @@ tree (a shared `let`-bound draw is an `Apply` of a `Lambda`, which is
 plan-free as a whole and is caught at that node instead), so such a subtree
 shares no draw with the plan leaves. Under independence the joint factorizes,
 so the subtree is compiled by the *ordinary* probability compiler against the
-same target and multiplied into the world (`PlanWorld`'s `pwFactors`,
-combined with `prodP` in `measurePlanWorlds`: probabilities multiply, dims and
+same target and multiplied into the world (a `WFactor` of the world,
+combined with `prodP` in `measureWorlds`: probabilities multiply, dims and
 branch counts add). This is the plan analogue of the set-witness residue
 factor below, and it is what lets a plan-enumerated neural declaration coexist
 with fresh continuous randomness at all.
@@ -186,11 +223,11 @@ point-witness path's body-factor fold, applied per world. For a residue
 that is deterministic given the witness the factor is the missing
 consistency indicator (`(x, 1.0) == s` with `x := fst s`, dim 0); for one
 that draws fresh randomness it is the sibling's own density, and dims add,
-so `(s, Normal)` at `(-0.5, 0.3)` is `φ(-0.5)·φ(0.3)` at dim 2. `WWorld`
+so `(s, Normal)` at `(-0.5, 0.3)` is `φ(-0.5)·φ(0.3)` at dim 2. The world
 carries the factors as a list of `PResult`s; `intersectW` concatenates them,
 the nested-`let` case carries a y-world's factors over to its x-worlds
 unchanged (they read `y` at its observed value, a function of the sample
-alone), and `measureWorld` multiplies them in with `prodP` under the world's
+alone), and `measureWorlds` multiplies them in with `prodP` under the world's
 guards. No factor is emitted where no field constructor is crossed, since
 the inverse path consumed every sibling there and the indicator would be an
 always-true tautology on every transported subtree in the corpus; the
@@ -216,13 +253,13 @@ let x = Uniform in if x < 0.5 then Normal else x
 had no probability function although `Normal` alone is the simplest thing the
 compiler compiles (task `world-residual-factor-delegation`, design finding F8).
 `worldFactorFree` now measures it as the factor of one unconstrained world
-(`WWorld [] WFull [f]`), reusing `measureSet` with the subtree in the bound
+(`DrawWorld [] WFull [f]`), reusing `measureSet` with the subtree in the bound
 distribution's role: a point target is its density or mass there (times the
 target's change-of-variables factor, which matters when the target is a
 nested `let`'s transported y-point), an interval its CDF difference, a
 `WChoice` either side at runtime. The factor is compiled in its own writer
 scope into a self-contained block that is let-bound **once** (`WFactor` carries
-the binding), and `measureWorld` emits it under the world's guards through
+the binding), and `measureWorlds` emits it under the world's guards through
 `closeResult`. Folding the block into each of the four `PResult` fields instead
 (as `residueFactor` does) copied it four times per nesting level: a fuzz
 program with a fresh `draw` nested in an x-free field grew to 23MB of `-O0`
@@ -372,13 +409,16 @@ One traversal can hold **several neural reads** (`planOpenBinding`, task
 logit offset, so a nested `draw b = readX s2` met inside the body gets its own
 disjoint offset range (`psNextOff`) and its own raw-vector binding
 (`psRaws`, read through `planRawRead`); two independent reads' joint is the
-concatenated plan, and a comparison across them is the same `pwPairs`
+concatenated plan, and a comparison across them is the same `Pair`
 difference Gaussian as inside one read. That is the one-read-per-object CLEVR
 layout (`plan-enumeration/planPairwise*`). A single read is `[(0, nn_raw)]`
-and emits what it always did. Refused inside a specialized function (its
-memoized specializations would share one range between two calls, merging
-independent reads) and for a symbol argument that is not plan-free and
-deterministic; pinned in `known-issues/planPairwise*`, together with the
+and emits what it always did. Inside a specialized function the read opens
+the same way, its symbol free to read the helper's deterministic parameters: a
+specialization whose traversal opened a read is never memoized (two calls are
+two independent reads, `planReadInsideHelperTwoCalls`), and re-entering a body
+on the stack after a read was opened below it is declined, since fresh offsets
+do not bound a recursion. Refused for a symbol argument that is not plan-free
+and deterministic; pinned in `known-issues/planPairwise*`, together with the
 helper shapes ModalityInfer types `Bottom` first.
 
 A call argument that *is* plan-dependent but not an accessor chain -- a fold's
@@ -457,7 +497,8 @@ complemented; anything else is refused. Corpus
 `setWitnessContinuousEquals*`, `setWitnessIntervalThenContinuousEquals`,
 `setWitnessNestedLetContinuousEquals`.
 
-The same rule decides the letfree `IfThenElse`: its False weight is
+The same rule decides the letfree `IfThenElse` at a leaf condition (one
+`condWeights` does not split into a pair): its False weight is
 "certain minus `p(cond = True)`" through `mixWith`, not a bare
 `srComplement`, so a condition whose True outcome is a density (a continuous
 `Normal == 0.5`) leaves its False branch the whole unit mass at dim 0, where
@@ -466,8 +507,9 @@ combine is still `srComplement` (max-product refuses `srMinus`).
 
 ## Affine Gaussian marginalisation of an unwitnessed `draw`
 
-A third answer to "no occurrence of the bound variable is point-invertible",
-tried before set-valued witnesses: if the binding's certificate is a Gaussian
+An answer that needs no point inverse, tried after joint affine
+marginalisation and before point inversion (the order and its measurement:
+`modality-and-admission.md`, "Why this order"): if the binding's certificate is a Gaussian
 affine form and **every** use of the variable flows affinely into **one**
 Gaussian density leaf, the variable needs no witness at all -- it is
 integrated out analytically inside that leaf (task
@@ -494,12 +536,18 @@ is not a reason to floor.
 **The compiler.** The variable's entry in `CompilerMetadata.lawEnv` holds the IR
 of its form (`BoundVar.bvForm`, set by `marginaliseAs`), `c + sum a_i * eps_i` over independent standard normals, keyed the same
 way: by the chain name of the env-free Gaussian leaf that introduced each
-latent. `toIRNormalParams` collapses a form (`mu = c`, `sigma` the norm of the
-coefficient vector) **only** for expressions reading such a variable (`affineVars`),
-so everything else emits exactly what it did before. The Gaussian catch-all
-takes such an expression (`readsMarginalised`) whether or not it has a handler
-of its own. The rules are `plus`, `mult` by a deterministic operand, `neg` and
-the env lookup; `-` is `plus`/`neg` by the time IRCompiler sees it.
+latent. `affineFormOf` is the certificate's builder: a node whose codegen law
+is affine is built by it and collapsed (`mu = c`, `sigma` the norm of the
+coefficient vector) by the Gaussian catch-all (`modality-and-admission.md`,
+"The Gaussian catch-all reads the codegen law"). The rules are `plus`, `mult`
+by a deterministic operand, `neg`, `fst`/`snd` of a literal pair and the env
+lookup; `-` is `plus`/`neg` by the time IRCompiler sees it. A Gaussian the
+certificate sees as one fresh latent (a call, a `draw`, a neural read) the
+builder realises: a saturated call of a non-recursive declaration, with or
+without arguments, and a lambda redex are entered as bindings
+(`affineCallForm`), a `collapse` is a fresh leaf whatever it reads, and any
+other leaf reading no marginalised variable is the scalar extractor's
+(`toIRNormalParams`).
 
 `affineMarginalisable` decides applicability. It reads the argument's
 certificate (`affineOf` over its `lawTable` law), and keeps `isAffineOver` as
@@ -537,8 +585,8 @@ answers a partial observation like `(s1, s3)` of a three-step chain, as
 
 ### Joint affine marginalisation: correlated Gaussian fields
 
-The fourth engine, tried after the single-consumer collapse and before
-set-valued witnesses (design `affine-gaussian-forms` M2). It applies when the
+Tried ahead of the single-consumer collapse and point inversion
+(design `affine-gaussian-forms` M2). It applies when the
 binding's certificate is an affine form and the body is a let spine whose
 every binding is affine over the variables bound so far, ending in a tree of
 tuples (`jointAffineApplicable`, twin of `ModalityInfer.jointAffineBindingCert`).
@@ -650,7 +698,7 @@ law: IRCompiler asks the same `Deterministic` test it asks of a condition,
 the modality's `pointWitnessCert` the value's inferred `pType` in the body.
 
 The condition enters the chain as a free variable (`ifConditionVars`: its
-chain name plus the invocation tag). `IRCompiler.bindIfConditions` binds it to
+chain name plus the invocation tag). `IRCompiler.Dispatch.bindIfConditions` binds it to
 the condition compiled where the body means what it means in the callee
 (`enterBindingScope`), so `t < 0.5` reads the call's argument for `t`. The
 engine declines when the body can't be entered, when the condition is not in
@@ -668,6 +716,18 @@ The per-invocation copy (`getDependentGroups`) steps into the arms of an
 arms. Before this, a callee whose body is an `if` had an empty copy. Copying
 every `if`'s arms and condition made the copies of a recursive body whole,
 which cost 5x on the Markov branch-chain family (now `TestInternals` `markovBranchRandomRateCompilePolynomial`).
+
+The copy also follows the equivalences of every `draw` in the body (the
+application is its lambda's body, each occurrence of the variable is the
+value), taken from `letEquivalenceClauses`, indexed once per compile. The
+clause set itself gains them one nesting level per iteration of
+`lambdasToHornClauses`' fixpoint, which is also where calls are copied, so a
+copy made first held nothing behind a `draw`: `f x = draw z = x * Normal in
+(x, z)` called as `f Uniform` did not witness `x`, and `main` was `Bottom`
+where the in-place twin compiles (task `named-callee-binding-not-floored`).
+They are not added to the clause set up front: that reorders it, which moves
+the slot a non-identifiable density is recovered through
+(`let-bindings/letWitnessedTupleFpUlp`'s warning).
 
 An `ANY` in the witnessing slot of an if-rooted program stays a runtime
 refusal: observation masks stop at an `if` root (`observation-masks.md`).
@@ -750,7 +810,7 @@ program reaches that fallback. Corpus: `crossLatentSideOperandJacobian`,
 
 A variable read more than once has one inverse chain per read, and
 `ForwardChaining.mergeExpr` combines them (the set-witness engine's
-`IRCompiler.mergeWitnessValue` does the same for its point witnesses). Two
+`IRCompiler.Worlds.mergeWitnessValue` does the same for its point witnesses). Two
 witnesses that are tuples or constructions with complementary wildcard fields
 merge field by field, with the product of their Jacobians; any other pair is
 taken as two routes to the same value, and one is kept (`mergeExpr2`: the
@@ -784,7 +844,7 @@ prev in e : gen (snd e)` at `[(0.0, ANY), ..]`, `gen` got the `ANY` as its
 state and every `prev == 0` test answered False (task
 `any-mark-passed-as-recursive-call-state`). In a condition it compared False
 or raised "Condition is not a boolean: VAny", and in a second output slot it
-matched anything. `IRCompiler.applyBinding`'s `pointInvert` sums such a leaf
+matched anything. `IRCompiler.Dispatch.applyBinding`'s `pointInvert` sums such a leaf
 over its finite domain: where it is `ANY` at run time (and its enclosing
 tuples are not), the binding's result is the mixture (`mixP`) over the
 domain of the same result at the witness with the leaf fixed. That is exact

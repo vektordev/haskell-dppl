@@ -14,7 +14,7 @@ import Data.List (groupBy)
 import Data.Function (on)
 import Control.Monad.Random
 import Data.Maybe
-import Data.List (intercalate, nub, isInfixOf, isPrefixOf, stripPrefix, transpose, zip4, sort)
+import Data.List (intercalate, nub, isInfixOf, isPrefixOf, stripPrefix, transpose, zip4, zip5, sort)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -173,7 +173,7 @@ budgetZeroDifferentialTests corpus manifest = corpusSweep corpus SweepSpec
                                 (conjoin (map (planMatchesDense n p zeroEnv defEnv) tcs)))
   where
     knownDivergentRow n tc = case tc of
-      ProbTestCase _ sample _ _ -> (n, sample) `elem` budgetZeroKnownDivergentRows
+      ProbTestCase _ sample _ _ _ -> (n, sample) `elem` budgetZeroKnownDivergentRows
       _                         -> False
 
 -- | Non-neural corpus programs whose budget-0 answer differs from the default
@@ -238,7 +238,7 @@ neuralLogSpaceSweep name version note conf corpus manifest = corpusSweep corpus 
                                   (conjoin (map (logMatchesLinear p linEnv logEnv) (ceCases e))))
   where
     logMatchesLinear p linEnv logEnv tc = case tc of
-      ProbTestCase  n sample params _ -> cmp (n ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
+      ProbTestCase  n sample params _ _ -> cmp (n ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
       CumulTestCase n sample params _ -> cmp (n ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
       _ -> property True
       where
@@ -268,7 +268,7 @@ planEngineCorpus =
 
 planMatchesDense :: String -> Program -> Either CompilerError CheckedIR -> Either CompilerError CheckedIR -> TestCase -> Property
 planMatchesDense n p planEnv denseEnv tc = case tc of
-  ProbTestCase  name sample params _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
+  ProbTestCase  name sample params _ _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
   CumulTestCase name sample params _ -> cmp (name ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
   _ -> property True
   where
@@ -286,7 +286,7 @@ planMatchesDense n p planEnv denseEnv tc = case tc of
 -- Takes the program's scalar/batched compiles already done, shared across
 -- every query point of that program.
 selectNoOp :: Program -> Either CompilerError CheckedIR -> Either CompilerError CheckedIR -> TestCase -> Property
-selectNoOp p scalarEnv batchedEnv (ProbTestCase  name sample params _) =
+selectNoOp p scalarEnv batchedEnv (ProbTestCase  name sample params _ _) =
   selectNoOpCmp scalarEnv batchedEnv name (\c -> runProbC  p c params sample)
 selectNoOp p scalarEnv batchedEnv (CumulTestCase name sample params _) =
   selectNoOpCmp scalarEnv batchedEnv name (\c -> runIntegC p c params sample)
@@ -356,7 +356,7 @@ checkExpectation probLabel name Impossible outProb _outDim res =
     checkImposs name (Just True) res
 
 testInterpreter :: Program -> Either CompilerError CheckedIR -> TestCase -> Property
-testInterpreter p compiledE (ProbTestCase name sample params expct) = ioProperty $ do
+testInterpreter p compiledE (ProbTestCase name sample params expct _) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right res@(VProbDim outProb outDim)) -> checkExpectation "Probability" name expct outProb outDim res
@@ -758,7 +758,7 @@ envelopesShapeable p = and [ inTy == TSymbol || inputWidth inTy >= SPLL.AutoNeur
 -- inputs.
 shapeNeuralTestCase :: Program -> TestCase -> TestCase
 shapeNeuralTestCase p tc = case tc of
-  ProbTestCase n s ps e  -> ProbTestCase n s (shapeNeuralParams p ps) e
+  ProbTestCase n s ps e m -> ProbTestCase n s (shapeNeuralParams p ps) e m
   CumulTestCase n s ps e -> CumulTestCase n s (shapeNeuralParams p ps) e
   _                      -> tc
 
@@ -796,7 +796,7 @@ resolveNeuralParams p params = zipWith resolve (paramNetworks p ++ repeat Nothin
 -- A no-op on a non-neural program (every parameter position resolves to
 -- 'Nothing') and on any non-prob/cumulative case.
 resolveNeuralTestCase :: Program -> TestCase -> TestCase
-resolveNeuralTestCase p (ProbTestCase n s ps e)  = ProbTestCase  n s (resolveNeuralParams p ps) e
+resolveNeuralTestCase p (ProbTestCase n s ps e m)  = ProbTestCase  n s (resolveNeuralParams p ps) e m
 resolveNeuralTestCase p (CumulTestCase n s ps e) = CumulTestCase n s (resolveNeuralParams p ps) e
 resolveNeuralTestCase _ tc                       = tc
 
@@ -810,7 +810,7 @@ resolveNeuralTestCase _ tc                       = tc
 -- of two different plans has no single literal envelope, and stays as it is.
 literalSymbolEnvelopes :: Program -> TestCase -> TestCase
 literalSymbolEnvelopes p tc = case tc of
-  ProbTestCase n s ps e  -> ProbTestCase n s (zipWith lit params ps) e
+  ProbTestCase n s ps e m -> ProbTestCase n s (zipWith lit params ps) e m
   CumulTestCase n s ps e -> CumulTestCase n s (zipWith lit params ps) e
   _                      -> tc
   where
@@ -1283,10 +1283,10 @@ juliaModuleTestCases modName tcs =
     ) tcs)
   where
     (_, _, exampleParams, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params expct) = (name, sample, params, expct)
+    unpackTestCase (ProbTestCase name sample params expct _) = (name, sample, params, expct)
     unpackTestCase (CumulTestCase name sample params expct) = (name, sample, params, expct)
     unpackTestCase tc = error (harnessRoutingError "Julia" tc)
-    mainName (ProbTestCase _ _ _ _) = "main_prob"
+    mainName (ProbTestCase _ _ _ _ _) = "main_prob"
     mainName (CumulTestCase _ _ _ _) = "main_integ"
     mainName tc = error (harnessRoutingError "Julia" tc)
     -- Each program is wrapped in its own module, so its ADT constructors are
@@ -1328,10 +1328,10 @@ pythonTestCode src tcs =
   concatMap pyCase tcs
   where
     (_, _, exampleParams, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params expct) = (name, sample, params, expct)
+    unpackTestCase (ProbTestCase name sample params expct _) = (name, sample, params, expct)
     unpackTestCase (CumulTestCase name sample params expct) = (name, sample, params, expct)
     unpackTestCase tc = error (harnessRoutingError "Python" tc)
-    mainName (ProbTestCase _ _ _ _) = "main.forward"
+    mainName (ProbTestCase _ _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
     mainName tc = error (harnessRoutingError "Python" tc)
     -- The dim's value is checked only when the .tst row's 'Expectation'
@@ -1581,21 +1581,62 @@ batchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
             noTorchProperty "BatchedPython value differential" ]
       Just (py, torch) ->
         [ testProperty "batched-vs-expected" (once (certifiedNote censuses (length eligible) valueRouted
-                                                     (cachedTorch manifest torch "batched-vs-expected" valueRouted (runBatchedPython py))))
-        , testProperty "gradients-nan-free" (once (cachedTorch manifest torch "gradients-nan-free" eligible (runBatchedGradients py)))
+                                                     (cachedTorch manifest torch "batched-vs-expected" valueRouted (const (runBatchedPython py)))))
+        , testProperty "gradients-nan-free" (once (cachedTorch manifest torch "gradients-nan-free" eligible (const (runBatchedGradients py))))
         , testProperty "generate-density-matches-expected"
             (once (cachedTorch manifest torch "generate-density-matches-expected" eligible (runBatchedGenerate py))) ]
+
+-- | @--batched --logSpace@ against the corpus (task
+-- batched-log-space-density-and-cdf-leaves): a fixed handful of continuous
+-- programs, between them reaching the normal and uniform density and CDF
+-- leaves, compiled batched in log space; every p()/cdf() row is run through
+-- the emitted code and its exponentiated answer compared with the .tst
+-- expectation the interpreter is held to. The programs must be batched-
+-- eligible in log space: a refusal fails the check rather than shrinking it.
+batchedLogSpacePrograms :: [String]
+batchedLogSpacePrograms =
+  [ "negativeScaledLogNormal", "normalThroughFunctionParamAliased", "comparisonSiblingJacobian"
+  , "uniformLog", "collapseMixture", "mapMultList" ]
+
+batchedLogSpaceTests :: Corpus -> Manifest -> IO TestTree
+batchedLogSpaceTests corpus manifest = corpusSweepAll corpus SweepSpec
+  { sweepName = "BatchedLogSpace", sweepTier = Default, sweepSlow = SkipSlow
+  , sweepSelect = (`elem` batchedLogSpacePrograms) . ceName
+  , sweepNote = "a few continuous programs' rows under --batched --logSpace, exponentiated, against the .tst" } $ \entries -> do
+  verdicts <- mapM (\e -> (,) (ceName e) <$> batchedEligibilityCensusWith defaultCompilerConfig{batched = True, logSpace = True}
+                                         (ceProgram e) (map (literalSymbolEnvelopes (ceProgram e)) (shapedCases e))) entries
+  mpy <- findTorchPython
+  mtorch <- traverse (\py -> (,) py <$> torchFingerprint py) mpy
+  let eligible = [ (n, src, gs, nets) | (n, Right ((src, gs, nets), _)) <- verdicts ]
+      refused = [ (n, err) | (n, Left err) <- verdicts ]
+      missing = [ n | n <- batchedLogSpacePrograms, n `notElem` map ceName entries ]
+  return $ testGroup "BatchedLogSpace" $
+    [ testProperty "all-selected-and-eligible" $ once $
+        counterexample ("not in the default corpus slice: " ++ show missing ++ "; refused in batched log space: " ++ show refused)
+          (null missing && null refused) ]
+    ++ case mtorch of
+      Nothing -> [ testProperty "torch-python-found" $ once $ ioProperty $ noTorchProperty "BatchedLogSpace value differential" ]
+      Just (py, torch) ->
+        [ testProperty "batched-log-space-vs-expected"
+            (once (cachedTorch manifest torch "batched-log-space-vs-expected" eligible (const (runBatchedPythonWith True py)))) ]
 
 -- | Each value differential runs every program in one torch process, so it
 -- is a batch: only the programs whose key changed are run, and an
 -- all-unchanged differential starts no python. An empty selection runs
 -- as it is, so the differential's own "nothing eligible" failure stands.
+-- The run is told whether it has the whole selection or an impact subset: a
+-- sanity check that holds of the whole does not hold of a subset. The
+-- generate check fails when no program was checked, every one being
+-- skip-shaped (a parameterised @main@, a stub generate); a subset of three
+-- such programs is a legitimate rerun that checks nothing (task
+-- gaussian-catch-all-dispatch-on-codegen-law).
 cachedTorch :: Manifest -> String -> String -> [(String, String, [BatchGroup], [NetMock])]
-            -> ([(String, String, [BatchGroup], [NetMock])] -> Property) -> Property
+            -> (Bool -> [(String, String, [BatchGroup], [NetMock])] -> Property) -> Property
 cachedTorch manifest torch name entries run
-  | null entries = run entries
+  | null entries = run True entries
   | otherwise = cachedBatch manifest ("BatchedPython." ++ name)
-                  [ (n, batchedKey manifest torch name x, x) | x@(n, _, _, _) <- entries ] run
+                  [ (n, batchedKey manifest torch name x, x) | x@(n, _, _, _) <- entries ]
+                  (\sel -> run (length sel == length entries) sel)
 
 -- | The topK-threshold half of the M5 differential ('topk-is-per-element',
 -- 'dense-inherits-topk'): each recompiles every batched-eligible program at
@@ -1647,8 +1688,8 @@ slowBatchedPythonTests corpus manifest = corpusSweepAll corpus SweepSpec
           [ testProperty "torch-python-found" $ once $ ioProperty $
               noTorchProperty "BatchedPython (slow) dense and topK differentials" ]
         Just (py, torch) ->
-          [ testProperty "batched-vs-expected" (once (cachedTorch manifest torch "batched-vs-expected" slowValueRouted (runBatchedPython py)))
-          , testProperty "dense-matches-expected" (once (cachedTorch manifest torch "dense-matches-expected" denseDeclared (runBatchedDense False py)))
+          [ testProperty "batched-vs-expected" (once (cachedTorch manifest torch "batched-vs-expected" slowValueRouted (const (runBatchedPython py))))
+          , testProperty "dense-matches-expected" (once (cachedTorch manifest torch "dense-matches-expected" denseDeclared (const (runBatchedDense False py))))
           , testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
           , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
@@ -1676,7 +1717,12 @@ batchedEligibility p tcs = fmap fst <$> batchedEligibilityCensus p tcs
 -- | 'batchedEligibility', with the constructs of the batched compile the
 -- batched fuzz arm does not certify ('batchedUncertifiedConstructs').
 batchedEligibilityCensus :: Program -> [TestCase] -> IO (Either String ((String, [BatchGroup], [NetMock]), [String]))
-batchedEligibilityCensus p tcs = do
+batchedEligibilityCensus = batchedEligibilityCensusWith defaultCompilerConfig{batched = True}
+
+-- | 'batchedEligibilityCensus' under a given (batched) compiler configuration,
+-- e.g. with @logSpace@ set ('batchedLogSpaceTests').
+batchedEligibilityCensusWith :: CompilerConfig -> Program -> [TestCase] -> IO (Either String ((String, [BatchGroup], [NetMock]), [String]))
+batchedEligibilityCensusWith conf p tcs = do
   r <- try (evaluate (force (go p tcs))) :: IO (Either SomeException (Either String ((String, [BatchGroup], [NetMock]), [String])))
   return $ either (\e -> Left ("crashed while compiling for batched mode: " ++ show e)) id r
   where
@@ -1689,7 +1735,7 @@ batchedEligibilityCensus p tcs = do
       if null qtcs
         then Left "the .tst file declares no p()/cdf() query points to batch"
         else Right ()
-      env <- compile defaultCompilerConfig{batched = True} prog
+      env <- compile conf prog
       srcLines <- generateFunctionsBatched True env
       groups <- maybe (Left "query samples are not structure-of-arrays batchable") Right
                       (batchGroups (collapsedEnumCtors (adts prog) (intercalate "\n" srcLines)) (not (null netNames)) qtcs)
@@ -2537,9 +2583,9 @@ normalTailPrecisionTests = testGroup "normal upper-tail precision (cumulative-no
         Nothing -> do
           hPutStrLn stderr "normal tail precision: batched case skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
           return (property True)
-        -- Linear variants only: the tensor fragment admits no log-space CDF
-        -- leaf ('SPLL.CodeGenPyTorchBatched' refuses @IRCumulative _ Log@).
-        Just py -> backendCheck "batched" (Just py) not batchedScript
+        -- Both spaces: the log-space variants reach pythonLibBatched's
+        -- log_cumulative_normal (task batched-log-space-density-and-cdf-leaves).
+        Just py -> backendCheck "batched" (Just py) (const True) batchedScript
   , testProperty "Julia" $ once $ ioProperty $ do
       mj <- findExecutable "julia"
       case mj of
@@ -2957,6 +3003,10 @@ data BatchGroup = BatchGroup
   , bgSamples    :: [IRValue]
   , bgExpProb    :: [Double]
   , bgExpDim     :: [Int]
+  -- | Per point, the row's @no-sample@ marker: the generate differential
+  -- (an empirical window estimate) skips these points; every other check
+  -- uses them. Always False for a cumulative group.
+  , bgNoSample   :: [Bool]
   -- | How the samples go to the kernel ('batchSamples').
   , bgBatch      :: SampleBatch
   } deriving (Show)
@@ -2979,28 +3029,29 @@ batchGroups enumOf isNeural tcs = mapM build grouped
     -- is the one still-unsupported case and is dropped, the same treatment
     -- 'containsAnyExceptV' below gives it -- one such point no longer keeps
     -- every *other* point of that program out of the differential either.
-    keyed = [ q | t <- tcs, Just q@(_, _, sm, _, _) <- [asQuery t], not (containsAnyExceptV sm) ]
+    keyed = [ q | t <- tcs, Just q@(_, _, sm, _, _, _) <- [asQuery t], not (containsAnyExceptV sm) ]
     grouped
-      | isNeural  = groupBy ((==) `on` (\(c, _, _, _, _) -> c)) keyed
-      | otherwise = groupBy ((==) `on` (\(c, ps, _, _, _) -> (c, show ps))) keyed
-    build g@((c, _, _, _, _):_) =
-      let samples = [s | (_, _, s, _, _) <- g]
-          paramRows = [ps | (_, ps, _, _, _) <- g]
+      | isNeural  = groupBy ((==) `on` (\(c, _, _, _, _, _) -> c)) keyed
+      | otherwise = groupBy ((==) `on` (\(c, ps, _, _, _, _) -> (c, show ps))) keyed
+    build g@((c, _, _, _, _, _):_) =
+      let samples = [s | (_, _, s, _, _, _) <- g]
+          paramRows = [ps | (_, ps, _, _, _, _) <- g]
       in do sb <- batchSamples enumOf samples
             paramExprs <- if isNeural
               then batchSymParamCols paramRows
               else Just (map pyVal (head paramRows))
             Just BatchGroup { bgIsCumul = c, bgParamExprs = paramExprs
                             , bgParamRows = paramRows, bgSamples = samples
-                            , bgExpProb = [ep | (_, _, _, ep, _) <- g]
-                            , bgExpDim  = [ed | (_, _, _, _, ed) <- g]
+                            , bgExpProb = [ep | (_, _, _, ep, _, _) <- g]
+                            , bgExpDim  = [ed | (_, _, _, _, ed, _) <- g]
+                            , bgNoSample = [ns | (_, _, _, _, _, ns) <- g]
                             , bgBatch   = sb }
     build [] = Nothing
     -- 'Impossible' rows (no stated dim) fall through to the final wildcard and
     -- are simply not batched, the same treatment 'containsAnyExceptV' above
     -- gives a 'VAnyExcept'-carrying query point.
-    asQuery (ProbTestCase _ s ps (Possible (VFloat ep) ed _))  = Just (False, ps, s, ep, ed)
-    asQuery (CumulTestCase _ s ps (Possible (VFloat ep) ed _)) = Just (True,  ps, s, ep, ed)
+    asQuery (ProbTestCase _ s ps (Possible (VFloat ep) ed _) ns)  = Just (False, ps, s, ep, ed, ns)
+    asQuery (CumulTestCase _ s ps (Possible (VFloat ep) ed _)) = Just (True,  ps, s, ep, ed, False)
     asQuery _ = Nothing
 
 -- | Batch the positional symbol arguments of a neural program across points.
@@ -3249,8 +3300,13 @@ noTorchProperty what = maybe (property True) (`counterexample` False) <$> noTorc
 -- | Run every eligible program's batched code in one shared torch process and
 -- assert every batched query point matches its expected value.
 runBatchedPython :: FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
-runBatchedPython _ [] = counterexample "BatchedPython: no eligible corpus programs found" False
-runBatchedPython py eligible = ioProperty $ do
+runBatchedPython = runBatchedPythonWith False
+
+-- | 'runBatchedPython' on programs compiled in log space when the flag is set
+-- ('batchedDriverWith').
+runBatchedPythonWith :: Bool -> FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
+runBatchedPythonWith _ _ [] = counterexample "BatchedPython: no eligible corpus programs found" False
+runBatchedPythonWith logArg py eligible = ioProperty $ do
   hPutStrLn stderr ("BatchedPython: " ++ show (length eligible) ++ " eligible corpus programs, "
                     ++ show (sum [sum (map (length . bgSamples) gs) | (_, _, gs, _) <- eligible])
                     ++ " query points, via " ++ py)
@@ -3259,7 +3315,7 @@ runBatchedPython py eligible = ioProperty $ do
   -- temp file puts its own directory (not cwd) on sys.path, so prepend the
   -- project root explicitly so `pythonLibBatched` resolves.
   cwd <- getCurrentDirectory
-  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ batchedDriver False eligible
+  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ batchedDriverWith logArg False eligible
   (code, out, err) <- withSystemTempFile "batched_diff.py" $ \tmpPath tmpHandle -> do
     hPutStr tmpHandle script
     hClose tmpHandle
@@ -3273,12 +3329,19 @@ runBatchedPython py eligible = ioProperty $ do
 -- element whose prob (or dim, where prob is non-zero) disagrees with the corpus
 -- expectation beyond 'probTolerance'.
 batchedDriver :: Bool -> [(String, String, [BatchGroup], [NetMock])] -> String
-batchedDriver accArg eligible = unlines $
-  [ "import torch, sys, traceback"
+batchedDriver = batchedDriverWith False
+
+-- | 'batchedDriver', where @logArg@ says the programs were compiled in log
+-- space: each answer is exponentiated before it is compared with the linear
+-- corpus expectation.
+batchedDriverWith :: Bool -> Bool -> [(String, String, [BatchGroup], [NetMock])] -> String
+batchedDriverWith logArg accArg eligible = unlines $
+  [ "import torch, sys, traceback, math"
   -- T for structure-of-arrays tuple sample batches; the list constructors and
   -- the bucketing wrapper for heterogeneous (list-shaped) samples.
   , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, AnyInferenceList, Left, Right, bucketed, bucket_count"
   , "TOL = " ++ show probTolerance
+  , "LOGSPACE = " ++ (if logArg then "True" else "False")
   , "failures = []"
   , "def _bucket_count(name, samples, expected):"
   , "    got = bucket_count(samples)"
@@ -3290,6 +3353,7 @@ batchedDriver accArg eligible = unlines $
   , "    p = r[0]; d = r[1][0]"
   , "    for i in range(len(exp_p)):"
   , "        pv = _leaf(p, i)"
+  , "        if LOGSPACE: pv = math.exp(pv)"
   , "        if abs(pv - exp_p[i]) > TOL:"
   , "            failures.append(name + '.' + method + ' pt ' + str(i) + ': prob ' + str(pv) + ' != ' + str(exp_p[i]))"
   , "        if pv != 0.0:"
@@ -3319,7 +3383,7 @@ batchedDriver accArg eligible = unlines $
       [ "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
-    groupCall name (BatchGroup isCumul paramExprs _ _ expP expD sb) =
+    groupCall name (BatchGroup isCumul paramExprs _ _ expP expD _ sb) =
       let method = if isCumul then "integrate" else "forward"
           -- A topK-compiled prob function takes an accumulated-probability
           -- parameter right after the sample, then the runtime cutoff (see
@@ -3780,9 +3844,9 @@ gradientDriver probes = unlines $
 -- skipped dynamically in the driver (arity-checked via
 -- @inspect.signature@), since Haskell-side arity bookkeeping would only
 -- duplicate what the emitted signature already says.
-runBatchedGenerate :: FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
-runBatchedGenerate _ [] = counterexample "BatchedPython generate: no eligible corpus programs found" False
-runBatchedGenerate py eligible
+runBatchedGenerate :: FilePath -> Bool -> [(String, String, [BatchGroup], [NetMock])] -> Property
+runBatchedGenerate _ _ [] = counterexample "BatchedPython generate: no eligible corpus programs found" False
+runBatchedGenerate py whole eligible
   | null nonNeuralProbes && null neuralProbes = ioProperty $ do
       hPutStrLn stderr "BatchedPython generate: no eligible programs with a compiled generate found (skipped)."
       return True
@@ -3791,7 +3855,7 @@ runBatchedGenerate py eligible
                         ++ show (length neuralProbes) ++ " neural programs, via " ++ py)
       cwd <- getCurrentDirectory
       let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n"
-                 ++ generateDriver nonNeuralProbes neuralProbes
+                 ++ generateDriver whole nonNeuralProbes neuralProbes
       (code, out, err) <- withSystemTempFile "batched_generate.py" $ \tmpPath tmpHandle -> do
         hPutStr tmpHandle script
         hClose tmpHandle
@@ -3805,16 +3869,16 @@ runBatchedGenerate py eligible
              , null netNames
              , let points = [ (pyVal s, ep, ed)
                             | g <- groups, not (bgIsCumul g)
-                            , (s, ep, ed) <- zip3 (bgSamples g) (bgExpProb g) (bgExpDim g)
-                            , isScalarSample s, densityLivesOnScalar s ed ]
+                            , (s, ep, ed, ns) <- zip4 (bgSamples g) (bgExpProb g) (bgExpDim g) (bgNoSample g)
+                            , not ns, isScalarSample s, densityLivesOnScalar s ed ]
              , not (null points) ]
     neuralProbes = [ (name, src, netNames, bgParamExprs g, points)
              | (name, src, groups, netNames) <- eligible
              , not (null netNames)
              , (g:_) <- [[gr | gr <- groups, not (bgIsCumul gr)]]
              , let points = [ (pyVal s, ep, ed, i)
-                            | (i, s, ep, ed) <- zip4 [0 :: Int ..] (bgSamples g) (bgExpProb g) (bgExpDim g)
-                            , isScalarSample s, densityLivesOnScalar s ed ]
+                            | (i, s, ep, ed, ns) <- zip5 [0 :: Int ..] (bgSamples g) (bgExpProb g) (bgExpDim g) (bgNoSample g)
+                            , not ns, isScalarSample s, densityLivesOnScalar s ed ]
              , not (null points) ]
 
 -- | The scalar twin of @TestCorpus.densityLivesOnSamples@: a window over drawn
@@ -3839,10 +3903,10 @@ isScalarSample v = isNum v || isBoolV v
 -- fresh per-point batch (the point's own read-logits symbol, repeated) and test
 -- that point alone. Single-shot rather than retried -- the batch size is
 -- fixed large enough, and the seed is pinned, to keep this non-flaky.
-generateDriver :: [(String, String, [(String, Double, Int)])]
+generateDriver :: Bool -> [(String, String, [(String, Double, Int)])]
                -> [(String, String, [NetMock], [String], [(String, Double, Int, Int)])]
                -> String
-generateDriver nonNeuralProbes neuralProbes = unlines $
+generateDriver whole nonNeuralProbes neuralProbes = unlines $
   [ "import torch, sys, traceback, inspect"
   , "from pythonLibBatched import T"
   , "torch.manual_seed(1234)"
@@ -3851,8 +3915,12 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
   , "failures = []"
   , "checked = 0"
   , "skipped = 0"
+  -- Whether this is the whole selection ('cachedTorch'): only then is
+  -- "nothing checked" a broken harness rather than an impact subset of
+  -- skip-shaped programs.
+  , "WHOLE = " ++ (if whole then "True" else "False")
   ] ++ concatMap block nonNeuralProbes ++ concatMap neuralBlock neuralProbes ++
-  [ "if checked == 0:"
+  [ "if checked == 0 and WHOLE:"
   , "    failures.append('no program actually had its generate density checked (all skipped)')"
   , "if failures:"
   , "    print('BATCHED GENERATE FAILURES (' + str(len(failures)) + '):')"
@@ -4040,7 +4108,7 @@ loadBranchCountCase name = do
       row t = case runOf t of
         Right (VProbDimBC p d bc) -> (t, p, d, bc)
         other -> error (name ++ ": branch-counted run gave " ++ show other)
-        where runOf (ProbTestCase _ s ps _)  = runProbC prog env ps s
+        where runOf (ProbTestCase _ s ps _ _)  = runProbC prog env ps s
               runOf (CumulTestCase _ s ps _) = runIntegC prog env ps s
               runOf _ = error "not a query case"
   return (name, prog, env, map row queries)
@@ -4079,7 +4147,7 @@ branchCountPython name env rows = ioProperty $ do
   return $ case c of
     ExitSuccess   -> property True
     ExitFailure _ -> counterexample (name ++ ": branch-counted Python differed from the interpreter") False
-  where pyCall (ProbTestCase _ s ps _)  = (s, ps, "main.forward")
+  where pyCall (ProbTestCase _ s ps _ _)  = (s, ps, "main.forward")
         pyCall (CumulTestCase _ s ps _) = (s, ps, "main.integrate")
         pyCall _ = error "not a query case"
 
@@ -4118,7 +4186,7 @@ branchCountJulia loaded = ioProperty $ do
   return $ case code of
     ExitSuccess   -> property True
     ExitFailure _ -> counterexample "branch-counted Julia differed from the interpreter" False
-  where jlCall (ProbTestCase _ s ps _)  = (s, ps, "main_prob")
+  where jlCall (ProbTestCase _ s ps _ _)  = (s, ps, "main_prob")
         jlCall (CumulTestCase _ s ps _) = (s, ps, "main_integ")
         jlCall _ = error "not a query case"
 
@@ -4138,12 +4206,12 @@ branchCountLogSpace name prog rows =
         , counterexample (name ++ "/" ++ tcName tc ++ ": branch count " ++ show lbc ++ " /= " ++ show bc)
             (lbc == bc) ]
       other -> counterexample (name ++ ": log-space run gave " ++ show other) False
-    runOf env (ProbTestCase _ s ps _)  = runProbC prog env ps s
+    runOf env (ProbTestCase _ s ps _ _)  = runProbC prog env ps s
     runOf env (CumulTestCase _ s ps _) = runIntegC prog env ps s
     runOf _ _ = error "not a query case"
 
 tcName :: TestCase -> String
-tcName (ProbTestCase n _ _ _)  = n
+tcName (ProbTestCase n _ _ _ _)  = n
 tcName (CumulTestCase n _ _ _) = n
 tcName _ = "?"
 

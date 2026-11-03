@@ -5,4 +5,7 @@
 -- not a mechanical bugfix: the doc's own directive is that this program
 -- should keep failing loudly (no idealized value is claimed), even once the
 -- G0/G1/G2 gaps in this same doc are fixed.
-expect-failure: refused "set-valued witness construction failed"
+-- Since task named-callee-binding-not-floored the modality engine asks the
+-- engines of genNested's binding of genS's continuation at the call, finds
+-- none, and types all four functions Bottom with that reason recorded.
+expect-failure: refused "no inference engine applies to the parameter bound by the call of 'genS'"

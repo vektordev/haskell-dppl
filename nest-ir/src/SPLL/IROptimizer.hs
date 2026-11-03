@@ -819,9 +819,9 @@ isNumOne _ = False
 -- mixture-combination-rules-compile-hang -- reached via a deterministic
 -- scale factor going into @log@ while deriving a PLogNormal expression's
 -- closed-form parameters, e.g. @(-51.84) * exp(Normal-derived)@, where the
--- scale's sign makes the family classification unsound but nothing upstream
--- of the optimizer checks that; only 'toIRLogNormalParams' assumes a
--- positive scale). Every fold site below that calls 'forceOp'/'forceUnaryOp'
+-- scale's sign made the family classification unsound; ModalityInfer now
+-- keeps the family only for a scale statically known positive, but a NaN fold
+-- can still arise elsewhere). Every fold site below that calls 'forceOp'/'forceUnaryOp'
 -- checks this before embedding an 'IRConst': on a NaN result the rewrite
 -- backs off and leaves the operation symbolic, so it is still evaluated (via
 -- the runtime's own IEEE-conforming semantics, or a backend's @safe_log@)

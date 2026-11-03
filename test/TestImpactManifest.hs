@@ -90,8 +90,11 @@ batchedCensusRouting = do
   -- A draw-bound list element: its witness guard is a select over the shape
   -- probe `sample == []`, which the batched backend emits as a Python if.
   demoted <- census <$> load "drawBoundListElementGuardsEmptyTail"
-  -- Its head arm is partial, so the branch the guard selects is split too.
-  assertEqual "a demoted structural select is not certified" [partialSplitLabel, selectDemotionLabel] (batchedUncertifiedConstructs demoted)
+  -- With the recursion typed [(Float, Bool)] rather than the literal's
+  -- NullList (task list-signature-rejected-when-empty-arm-first), the
+  -- forward pass no longer re-tests emptiness inside the cons arm, so no
+  -- partial-arm split remains; listIndexByRecursion below keeps that label.
+  assertEqual "a demoted structural select is not certified" [selectDemotionLabel] (batchedUncertifiedConstructs demoted)
   assertBool "a module without one carries no demotion label" (selectDemotionLabel `notElem` plain)
   -- A list index by recursion: the branch over the index has a partial arm
   -- (task batched-conditional-evaluates-a-partial-arm), split per element.
@@ -100,9 +103,13 @@ batchedCensusRouting = do
     (partialSplitLabel `elem` batchedUncertifiedConstructs indexed)
   assertBool "a module without one carries no partial-arm split label" (partialSplitLabel `notElem` plain)
   -- A prob path calling a recursive deterministic helper's evaluator, and
-  -- one reading a helper's Gaussian parameters: the callee's method body is
-  -- emitted code the fuzz arms (prob/integ bodies only) never ran.
-  forM_ ["recursiveHelperOnlyWhereGuarded", "normalThroughFunctionParam"] $ \n -> do
+  -- one reading a helper's lognormal parameters: the callee's method body is
+  -- emitted code the fuzz arms (prob/integ bodies only) never ran. (A
+  -- helper's Gaussian parameters are no longer called: the Gaussian
+  -- catch-all builds an affine-certified call from the callee's body, task
+  -- gaussian-catch-all-dispatch-on-codegen-law. The lognormal catch-all is
+  -- structural and still calls the helper's normal function.)
+  forM_ ["recursiveHelperOnlyWhereGuarded", "logNormalThroughFunction"] $ \n -> do
     c <- census <$> load n
     assertBool (n ++ " calls a pure callee, so it is not certified: " ++ show c)
       (pureCalleeLabel `elem` batchedUncertifiedConstructs c)

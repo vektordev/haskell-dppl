@@ -1,0 +1,8 @@
+-- The cumulative query of head: head's inverse asks P(head xs <= x) as
+-- xs <= x : ANY, and the constant list arm compared it with list equality,
+-- so P(X <= 2) for a head that is always 1 came out 0. Lists are ordered
+-- componentwise (IRCompiler.Monad.compareValueExpr), so the wildcard tail
+-- bounds nothing and the head is compared with <=. The if-spelling of the
+-- same distribution (main = if Uniform < 2.0 then 1 else 2) agrees.
+-- Task head-cdf-uses-equality.
+main = head (if Uniform < 2.0 then [1, 0] else [2])

@@ -64,6 +64,8 @@ import SPLL.ReservedNames (perValuePointSuffix, perValuePriorSuffix, perValueGiv
                            perValueHelperSuffixes, queryParamName, accProbParamName, topKCutoffParamName, probSuffix)
 import SPLL.Semiring (Semiring(..), mkSemiring, orIR)
 import SPLL.Analysis (annotateEnumsProg)
+import SPLL.IROptimizer (allNamesIR)
+import SPLL.IRUtil (renameVar)
 
 import Data.List (intercalate, nub)
 import Data.Maybe (isJust, listToMaybe, mapMaybe)
@@ -365,7 +367,7 @@ installPerValue conf plans (IREnv groups decls consts) = IREnv (map install grou
         (Left reason, _) -> refused reason
         (Right _, (h, r) : _) -> refused ("the per-value query of '" ++ f ++ "' is built from '" ++ h ++ "', which was not compiled: " ++ r)
         (Right vals, []) ->
-          base { probFun = Just (perValueBody conf pl vals, perValueDoc pl vals)
+          base { probFun = Just (perValueBody conf (fmap fst . (probFun =<<) . groupNamed) pl vals, perValueDoc pl vals)
                , groupDoc = groupDoc g ++ "\nPer-value query over " ++ prettySlotPath (pvPath pl) ++ " of the result ("
                             ++ show (length vals) ++ " values, " ++ (if pvFast pl then "fast path" else "one point query per value") ++ ")" }
 
@@ -376,8 +378,10 @@ perValueDoc pl vals =
   ++ "The sample's own value at that slot is ignored. Returns (probs, (dims, ("
   ++ "imposs, values))) -- with branch counts before imposs under --countBranches -- each a vector in domain order."
 
-perValueBody :: CompilerConfig -> PerValuePlan -> [Value] -> IRExpr
-perValueBody conf pl vals =
+-- | The per-value body. @helperProb@ looks up a helper's (pre-optimizer)
+-- probability function, which the fast path inlines into the element.
+perValueBody :: CompilerConfig -> (String -> Maybe IRExpr) -> PerValuePlan -> [Value] -> IRExpr
+perValueBody conf helperProb pl vals =
   IRLambda queryParamName (accLambda (foldr IRLambda guarded (pvParams pl)))
   where
     f = pvName pl
@@ -415,14 +419,27 @@ perValueBody conf pl vals =
     call name args = foldl IRApply (IRVar (name ++ probSuffix)) args
     pointed = withSlot (pvPath pl) sample
 
+    -- The fast path's two helpers are inlined into the element rather than
+    -- called (task per-value-fast-path-calls-network-per-domain-value). Behind
+    -- a call, everything in them that does not depend on the loop value --
+    -- above all a network read of a parameter, @lmA(ctxA)@ -- ran once per
+    -- domain value; inlined, the optimizer's network sharing lifts such a read
+    -- out of the loop, so a query calls each network once, as the point query
+    -- does. 'inlineCall' falls back to the call when the names do not allow a
+    -- plain renaming.
+    queryName = "l_pv_query"
     element
       | pvFast pl =
           let a = IRVar "l_pv_prior"
               b = IRVar "l_pv_given"
-          in IRLetIn "l_pv_prior" (call (f ++ perValuePriorSuffix) (value : params))
-               (IRLetIn "l_pv_given" (call (f ++ perValueGivenSuffix) (pointed : params ++ [value]))
-                 (product2 a b))
+          in IRLetIn "l_pv_prior" (inlineOrCall (f ++ perValuePriorSuffix) (valName : pvParams pl))
+               (IRLetIn queryName pointed
+                 (IRLetIn "l_pv_given" (inlineOrCall (f ++ perValueGivenSuffix) (queryName : pvParams pl ++ [valName]))
+                   (product2 a b)))
       | otherwise = call (f ++ perValuePointSuffix) (pointed : accArg ++ params)
+    inlineOrCall name args = case helperProb name >>= inlineCall args of
+      Just body -> body
+      Nothing -> call name (map IRVar args)
 
     -- The product of two independent results, field by field as 'prodP' does.
     sr = mkSemiring SRSumProduct (logSpace conf)
@@ -449,3 +466,39 @@ perValueBody conf pl vals =
     anyWith [] = value
     anyWith (SigFst : rest) = IRConstruct TgTuple [anyWith rest, IRConst VAny]
     anyWith (SigSnd : rest) = IRConstruct TgTuple [IRConst VAny, anyWith rest]
+
+-- | A probability function (@\\sample -> \\p1 -> ... -> body@) applied to
+-- variables, by renaming its parameters to them. A let binding per parameter
+-- would not do: a Python comprehension's walrus binds in the enclosing
+-- function, so rebinding @sample@ in the loop body would clobber the outer
+-- query that the next iteration reads. The renaming is plain (scope-blind),
+-- so it is used only when it is safe: no parameter is rebound inside the
+-- body, no argument name occurs in it (else it could be captured), and the
+-- arguments are distinct. Otherwise 'Nothing', and the caller emits the call.
+inlineCall :: [String] -> IRExpr -> Maybe IRExpr
+inlineCall args fun = do
+  let (ps, body) = peel (length args) fun
+      names = allNamesIR body
+      rebound = Set.fromList (binders body)
+      renamed = [ (p, a) | (p, a) <- zip ps args, p /= a ]
+  if length ps == length args
+     && length (nub args) == length args
+     && all (\p -> not (p `Set.member` rebound)) ps
+     && all (\(_, a) -> not (a `Set.member` names)) renamed
+     && all (\(_, a) -> a `notElem` ps) renamed
+    then Just (foldr (\(p, a) acc -> renameVar p a acc) (unguarded (take 1 ps) body) renamed)
+    else Nothing
+  where
+    -- The helper's own query-type guard: redundant here, where the per-value
+    -- body has checked the query and the slot value comes from the slot's
+    -- domain, and a per-element cost (and outside the batched fragment).
+    unguarded qs (IRIf (IRConformsTo _ (IRVar q)) core (IRError _)) | q `elem` qs = core
+    unguarded _ e = e
+    peel :: Int -> IRExpr -> ([String], IRExpr)
+    peel 0 e = ([], e)
+    peel k (IRLambda n b) = let (ns, core) = peel (k - 1) b in (n : ns, core)
+    peel _ e = ([], e)
+    binders e = binder e ++ concatMap binders (getIRSubExprs e)
+    binder (IRLambda n _) = [n]
+    binder (IRLetIn n _ _) = [n]
+    binder _ = []

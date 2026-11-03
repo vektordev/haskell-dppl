@@ -19,7 +19,7 @@
 -- is unaffected) stays a hand-written HUnit group there. This module is for
 -- the common single-diagnostic shape only, filed by dropping in a program
 -- instead of writing new Haskell.
-module TestKnownIssues (knownIssuesTests, performancePinHarnessTests) where
+module TestKnownIssues (knownIssuesTests, performancePinHarnessTests, batchedCompileBudgetTests) where
 
 import Control.Exception (AllocationLimitExceeded(..), SomeException, evaluate, finally, fromException, try)
 import Data.IORef (modifyIORef, newIORef, readIORef)
@@ -41,7 +41,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, testCaseInfo, assertBool, assertEqual, assertFailure)
 
 import SPLL.Lang.Types (CompilerError, Program, GenericValue(..))
-import SPLL.CompilerConfig (CompilerConfig, defaultCompilerConfig)
+import SPLL.CompilerConfig (CompilerConfig(..), defaultCompilerConfig)
 import SPLL.IntermediateRepresentation
   ( IREnv(..), IRValue, lookupIREnv
   , IRFunGroup(..), showRefusal
@@ -50,9 +50,10 @@ import SPLL.IntermediateRepresentation
 import SPLL.Prelude (compile, runProbC, runIntegC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.CodeGenPyTorch (generateFunctions)
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import TestCaseParser
   ( Backend(..), ExpectFailure(..), CodeVariant(..), codeVariantName, TestCase(..), Expectation(..), corpusRoot
-  , GrowthSpec(..), GrowthMetric(..), PointCap(..), CompileFlag(..), applyCompileFlags
+  , GrowthSpec(..), GrowthMetric(..), PointCap(..), CompileFlag(..), applyCompileFlags, isEvalMetric
   , defaultBackends, defaultPointCap
   , parseProgram, parseTestCasesFromString
   )
@@ -307,7 +308,7 @@ queryRows = filter isQuery
 -- only an exact (within-tolerance) match to the idealized row counts as "may
 -- be fixed now".
 assertStillBroken :: Backend -> String -> Program -> CheckedIR -> TestCase -> IO ()
-assertStillBroken Interpreter name prog env (ProbTestCase caseName sample params expct) =
+assertStillBroken Interpreter name prog env (ProbTestCase caseName sample params expct _) =
   checkStillBroken name caseName expct (runProbC prog env params sample)
 assertStillBroken Interpreter name prog env (CumulTestCase caseName sample params expct) =
   checkStillBroken name caseName expct (runIntegC prog env params sample)
@@ -331,7 +332,7 @@ assertStillBroken _ _ _ _ _ = return ()
 -- it. Anything else -- a different value, a crash, a refused query, a
 -- non-prob/dim result -- means the bug moved or was fixed.
 assertStillWrong :: Backend -> String -> Program -> CheckedIR -> TestCase -> IO ()
-assertStillWrong Interpreter name prog env (ProbTestCase caseName sample params expct) =
+assertStillWrong Interpreter name prog env (ProbTestCase caseName sample params expct _) =
   checkStillWrong name caseName expct (runProbC prog env params sample)
 assertStillWrong Interpreter name prog env (CumulTestCase caseName sample params expct) =
   checkStillWrong name caseName expct (runIntegC prog env params sample)
@@ -404,7 +405,7 @@ checkStillWrong name caseName expct er = do
     Right (Right res) -> assertFailure (here ++ "got a non-prob/dim result " ++ show res ++ triage)
 
 rowName :: TestCase -> String
-rowName (ProbTestCase n _ _ _)  = n
+rowName (ProbTestCase n _ _ _ _)  = n
 rowName (CumulTestCase n _ _ _) = n
 rowName _                       = "?"
 
@@ -523,6 +524,8 @@ data Measurement = Measurement
   , mIRChars   :: Integer   -- ^ characters of the shown IR environment (0 unless asked for)
   , mAlloc     :: Integer   -- ^ bytes allocated by this thread during compile + codegen
   , mSeconds   :: Double    -- ^ wall time of compile + codegen
+  , mEvalAlloc :: Integer   -- ^ bytes allocated answering the eval query (0 without one)
+  , mEvalSeconds :: Double  -- ^ wall time of answering it
   }
 
 data PointResult
@@ -538,10 +541,23 @@ data PointResult
 -- forced on this thread, so its work is counted here. Bounding allocation
 -- also bounds what the compile can retain.
 measureCompile :: PointCap -> CompilerConfig -> Program -> IO PointResult
-measureCompile = measureCompileWith False
+measureCompile = measureCompileWith False Nothing
 
-measureCompileWith :: Bool -> PointCap -> CompilerConfig -> Program -> IO PointResult
-measureCompileWith wantIR cap conf prog = do
+-- | The query an @eval-alloc@/@eval-time@ point runs on the compiled program,
+-- on the interpreter.
+type EvalQuery = CheckedIR -> Either CompilerError IRValue
+
+-- | 'measureCompile', optionally showing the IR, and optionally running one
+-- query on the compiled program inside the same cap. The query's own
+-- allocation and time are measured apart from the compile's.
+measureCompileWith :: Bool -> Maybe EvalQuery -> PointCap -> CompilerConfig -> Program -> IO PointResult
+measureCompileWith = measureCompileEmit (Right . generateFunctions True)
+
+-- | 'measureCompileWith' with the emitter chosen: the scalar Python backend,
+-- or the batched one ('generateFunctionsBatched').
+measureCompileEmit :: (CheckedIR -> Either CompilerError [String]) -> Bool -> Maybe EvalQuery -> PointCap
+                   -> CompilerConfig -> Program -> IO PointResult
+measureCompileEmit emit wantIR mQuery cap conf prog = do
   let micros = max 1 (round (capSeconds cap * 1e6))
   r <- try $ timeout micros $ flip finally disableAllocationLimit $ do
     setAllocationCounter (fromInteger (capAllocBytes cap))
@@ -549,14 +565,27 @@ measureCompileWith wantIR cap conf prog = do
     t0 <- getMonotonicTime
     outcome <- case compile conf prog of
       Left err -> return (Left ("refused: " ++ err))
-      Right env -> do
-        code <- evaluate (utf8Length (intercalate "\n" (generateFunctions True env)))
-        ir <- if wantIR then evaluate (toInteger (length (show env))) else return 0
-        return (Right (code, ir))
-    t1 <- getMonotonicTime
+      Right env -> case emit env of
+        Left err -> return (Left ("emit refused: " ++ show err))
+        Right ls -> do
+          code <- evaluate (utf8Length (intercalate "\n" ls))
+          ir <- if wantIR then evaluate (toInteger (length (show (checkedEnv env)))) else return 0
+          tc <- getMonotonicTime
+          ac <- getAllocationCounter
+          evalOutcome <- case mQuery of
+            Nothing -> return (Right (0, 0))
+            Just query -> case query env of
+              Left err -> return (Left ("the query was refused: " ++ err))
+              Right v -> do
+                _ <- evaluate (length (show v))
+                te <- getMonotonicTime
+                ae <- getAllocationCounter
+                return (Right (toInteger (ac - ae), te - tc))
+          return (fmap (\(ea, es) -> (code, ir, ea, es, tc)) evalOutcome)
     left <- getAllocationCounter
     let allocated = capAllocBytes cap - toInteger left
-    return (fmap (\(code, ir) -> Measurement code ir allocated (t1 - t0)) outcome)
+    return (fmap (\(code, ir, ea, es, tc) ->
+                    Measurement code ir (allocated - ea) (tc - t0) ea es) outcome)
   return $ case r of
     Left ex -> case fromException ex of
       Just AllocationLimitExceeded -> PointCapped (showBytes (capAllocBytes cap) ++ " allocated")
@@ -584,6 +613,8 @@ metricMargin MetricCodeSize = 0.25
 metricMargin MetricIRSize = 0.25
 metricMargin MetricAlloc = 0.5
 metricMargin MetricWallTime = 1.0
+metricMargin MetricEvalAlloc = 0.5
+metricMargin MetricEvalTime = 1.0
 
 -- | The metric as the @metric:@ header spells it.
 metricName :: GrowthMetric -> String
@@ -591,6 +622,8 @@ metricName MetricCodeSize = "code-size"
 metricName MetricIRSize = "ir-size"
 metricName MetricAlloc = "alloc"
 metricName MetricWallTime = "wall-time"
+metricName MetricEvalAlloc = "eval-alloc"
+metricName MetricEvalTime = "eval-time"
 
 metricValue :: GrowthMetric -> Measurement -> Double
 metricValue MetricCodeSize = fromInteger . mCodeBytes
@@ -598,6 +631,8 @@ metricValue MetricIRSize = fromInteger . mIRChars
 metricValue MetricAlloc = fromInteger . mAlloc
 -- A floor keeps a sub-millisecond compile from reading as a huge ratio.
 metricValue MetricWallTime = max 0.01 . mSeconds
+metricValue MetricEvalAlloc = fromInteger . mEvalAlloc
+metricValue MetricEvalTime = max 0.01 . mEvalSeconds
 
 -- | A growth pin: expand the template at each knob value in turn and climb
 -- (see "ScalingCheck"). Still exceeding the bound passes; staying within it
@@ -617,8 +652,10 @@ checkGrowthAbove name pplPath spec src = do
       Left err -> recordFail failures (label n ++ ": template: " ++ err)
       Right expanded -> case tryParseProgram (pplPath ++ "@" ++ label n) expanded of
         Left err -> recordFail failures (label n ++ ": parse: " ++ errorBundlePretty err)
-        Right prog -> do
-          res <- measureCompileWith (metric == MetricIRSize) (growthCap spec) conf prog
+        Right prog -> case evalQueryAt prog n of
+         Left err -> recordFail failures (label n ++ ": query: " ++ err)
+         Right mQuery -> do
+          res <- measureCompileWith (metric == MetricIRSize) mQuery (growthCap spec) conf prog
           case res of
             PointDone m -> return (Measured (metricValue metric m))
             PointCapped why -> return (Capped why)
@@ -636,6 +673,20 @@ checkGrowthAbove name pplPath spec src = do
   where
     -- A failed point stops the climb (as a cap would) and is reported above.
     recordFail ref msg = modifyIORef ref (++ [msg]) >> return (Capped "failed")
+    -- An eval metric's query row at one knob value: the template expanded and
+    -- read as a .tst row. Its value is not checked (the pin measures what
+    -- answering costs), so the row is given a placeholder expectation.
+    evalQueryAt prog n
+      | not (isEvalMetric (growthMetric spec)) = Right Nothing
+      | otherwise = case growthQuery spec of
+          Nothing -> Left "an eval metric needs a `query:` line"
+          Just tmpl -> do
+            row <- expandTemplate (growthKnob spec) n (pplPath ++ " (query:)") tmpl
+            (_, _, _, tcs) <- parseTestCasesFromString (pplPath ++ " (query:)") (row ++ "=(0.0, 0.0)\n")
+            case map (shapeNeuralTestCase prog) tcs of
+              [ProbTestCase _ sample params _ _] -> Right (Just (\env -> runProbC prog env params sample))
+              [CumulTestCase _ sample params _] -> Right (Just (\env -> runIntegC prog env params sample))
+              _ -> Left ("`query:` must be one p(...) or cdf(...) query, read as " ++ show tcs)
 
 -- | The harness's own checks: the per-point cap really kills a runaway
 -- compile (both limits), and the performance-pin header lines parse as
@@ -663,14 +714,34 @@ performancePinHarnessTests = testGroup "KnownIssuesHarness"
   , testCase "growth header: knob, metric, long flags, cap" $
       assertEqual "parsed"
         (Right (defaultBackends, False, Just (ExpectGrowthAbove (GrowthSpec 2 "N" [2, 4, 8] MetricAlloc
-                  [FlagOptimizer 0, FlagNoIntegrate, FlagMaterializationBudget 0] (PointCap 2.5 300000000))), 0))
+                  [FlagOptimizer 0, FlagNoIntegrate, FlagMaterializationBudget 0] (PointCap 2.5 300000000) Nothing)), 0))
         (summary (parseTestCasesFromString "h.tst"
           "-- comment\nexpect-failure: growth above polynomial 2\nflags: -O 0 --noIntegrate --materializationBudget 0\n\
           \knob: N = 2, 4, 8\ncap: 2.5 s, 300 MB\nmetric: alloc\n"))
   , testCase "growth header: linear and the defaults" $
       assertEqual "parsed"
-        (Right (defaultBackends, False, Just (ExpectGrowthAbove (GrowthSpec 1 "depth" [1, 2] MetricCodeSize [] defaultPointCap)), 0))
+        (Right (defaultBackends, False, Just (ExpectGrowthAbove (GrowthSpec 1 "depth" [1, 2] MetricCodeSize [] defaultPointCap Nothing)), 0))
         (summary (parseTestCasesFromString "h.tst" "expect-failure: growth above linear\nknob: depth = 1, 2\n"))
+  , testCase "growth header: an eval metric and its query" $
+      assertEqual "parsed"
+        (Right (defaultBackends, False, Just (ExpectGrowthAbove (GrowthSpec 3 "D" [2, 3] MetricEvalAlloc []
+                  defaultPointCap (Just "p(True{{for i in 1..D}}, {{i}}{{end}})"))), 0))
+        (summary (parseTestCasesFromString "h.tst"
+          "expect-failure: growth above polynomial 3\nknob: D = 2, 3\nmetric: eval-alloc\n\
+          \query: p(True{{for i in 1..D}}, {{i}}{{end}})\n"))
+  , testCase "an eval-alloc pin measures the query, not the compile" $ do
+      -- A sum over a 2^N joint enumeration of N flips, compiled in about
+      -- the same time at each N: the query's allocation grows with 2^N.
+      let measureAt n = do
+            let src = "main = " ++ intercalate " + " [ "(if Uniform < 0.5 then 1 else 0)" | _ <- [1 .. n :: Int] ] ++ "\n"
+            prog <- either (fail . errorBundlePretty) return (tryParseProgram "flips.ppl" src)
+            r <- measureCompileWith False (Just (\env -> runProbC prog env [] (VInt 0))) defaultPointCap defaultCompilerConfig prog
+            case r of
+              PointDone m -> return (mEvalAlloc m)
+              _ -> assertFailure ("expected the " ++ show n ++ "-flip program to compile and answer")
+      a <- measureAt 2
+      b <- measureAt 10
+      assertBool ("eval allocation " ++ show a ++ " at 2 flips, " ++ show b ++ " at 10") (a > 0 && b > 4 * a)
   , testCase "code-size header" $
       assertEqual "parsed"
         (Right (defaultBackends, False, Just (ExpectCodeSizeAbove 40000 [FlagPruneAnyChecks] defaultPointCap), 0))
@@ -689,6 +760,9 @@ performancePinHarnessTests = testGroup "KnownIssuesHarness"
         , ("knob on code-size", "expect-failure: code-size above 1 KB\nknob: N = 1, 2\n")
         , ("knob on hang", "expect-failure: hang\nknob: N = 1, 2\n")
         , ("unknown flag", "expect-failure: code-size above 1 KB\nflags: --noIntegrat\n")
+        , ("eval metric without a query", "expect-failure: growth above linear\nknob: N = 1, 2\nmetric: eval-alloc\n")
+        , ("query on a compile metric", "expect-failure: growth above linear\nknob: N = 1, 2\nquery: p(True)\n")
+        , ("query on code-size", "expect-failure: code-size above 1 KB\nquery: p(True)\n")
         , ("two metric lines", "expect-failure: growth above linear\nknob: N = 1, 2\nmetric: alloc\nmetric: ir-size\n")
         , ("missing unit", "expect-failure: code-size above 40\n")
         ]
@@ -708,3 +782,32 @@ performancePinHarnessTests = testGroup "KnownIssuesHarness"
           args = unwords (map show [1 .. n])
           src = "data R = R " ++ fields ++ ", g::Int\n\nmain = R " ++ args ++ " (if Uniform < 0.5 then 1 else 2)\n"
       in either (fail . errorBundlePretty) return (tryParseProgram "wideRecord.ppl" src)
+
+-- | Regression guard (task batched-int-sum-ladder-compile-ooms): a two-operand
+-- Int sum walked onto the Float axis by an if-ladder over the sum domain
+-- compiled under @--batched@ to gigabytes (OOM-kill at 10 digit classes)
+-- because each tuple component re-inlined the whole inner ladder. A plain
+-- corpus entry that regressed would take the whole run down, so it compiles
+-- under the per-compile cap, and the module must stay far below the old size.
+batchedCompileBudgetTests :: TestTree
+batchedCompileBudgetTests = testGroup "BatchedCompileBudget"
+  [ testCase "noisy MNIST sum, 10 classes: batched compile finishes under the cap, small" $ do
+      let classes = 10 :: Int
+          arm d | d == 2 * (classes - 1) = show (fromIntegral d :: Double)
+                | otherwise = "if d == " ++ show d ++ " then " ++ show (fromIntegral d :: Double)
+                              ++ " else " ++ arm (d + 1)
+          src = unlines
+            [ "neural readMNist :: (Symbol -> Int) of [" ++ intercalate ", " (map show [0 .. classes - 1]) ++ "]"
+            , "toF d = " ++ arm 0
+            , "main a b = (toF (readMNist(a) ++ readMNist(b))) + Normal * 0.5"
+            ]
+      prog <- either (assertFailure . ("fixture failed to parse: " ++) . show) return (tryParseProgram "" src)
+      let conf = defaultCompilerConfig { batched = True }
+      r <- measureCompileEmit (generateFunctionsBatched True) False Nothing (PointCap 60 4000000000) conf prog
+      case r of
+        PointDone m -> assertBool ("batched module is " ++ show (mCodeBytes m)
+                                   ++ " bytes; budget 300000 (88 KB when fixed, gigabytes when broken)")
+                                  (mCodeBytes m < 300000)
+        PointCapped why -> assertFailure ("batched compile ran into the cap (" ++ why ++ "): the ladder blowup is back")
+        PointFailed why -> assertFailure ("batched compile failed: " ++ why)
+  ]

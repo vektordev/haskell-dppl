@@ -70,14 +70,33 @@ def safe_log(x):
     return math.log(x)
   return -math.inf if x == 0 else math.nan
 
+# IEEE float division: the IR's OpDiv (the interpreter, Julia) answers a signed
+# infinity at a zero divisor, and NaN for 0/0 or NaN/0, where Python's `/`
+# raises ZeroDivisionError on python numbers (task
+# python-float-division-by-zero-raises). A tensor operand never raises, so it
+# takes the plain operator and keeps its graph.
+def safe_div(a, b):
+  try:
+    return a / b
+  except ZeroDivisionError:
+    if a != a or a == 0:
+      return math.nan
+    return math.copysign(math.inf, a) * math.copysign(1.0, b)
+
+# Floats, never the ints 1/0: an int is not a TFloat (IRConformsTo) and has
+# no signed zero. A NaN falls through both CDF tests to answer itself, as in
+# the interpreter and Julia (task python-uniform-density-and-cdf-answer-ints).
 def density_uniform(x):
-  return 1 if 0 <= x <= 1 else 0
+  return 1.0 if 0 <= x <= 1 else 0.0
 
 def cumulative_uniform(x):
-  return 0 if x < 0 else x if x <= 1 else 1
+  return 0.0 if x < 0 else 1.0 if x > 1 else x
 
+# x * x, not x**2: a float ** raises OverflowError past ~1.3e154 where the
+# product saturates to inf, so the density is 0.0 and its log -inf there
+# (task python-normal-density-overflows-past-1e154).
 def density_normal(x):
-  return 1 / sqrt(2 * pi) * e**(-(x**2)/2)
+  return 1 / sqrt(2 * pi) * e**(-(x * x)/2)
 
 # Phi(x) = erfc(-x / sqrt 2) / 2, not (1 + erf(x / sqrt 2)) / 2: the latter
 # cancels in the lower tail (Phi(-8) came out 6.1e-16 for 6.2e-16), and the
@@ -103,7 +122,7 @@ def log_cumulative_uniform(x):
   return _log_cdf(cumulative_uniform(x))
 
 def log_density_normal(x):
-  return -(x**2) / 2 - 0.5 * math.log(2 * pi)
+  return -(x * x) / 2 - 0.5 * math.log(2 * pi)
 
 def log_cumulative_normal(x):
   return _log_cdf(cumulative_normal(x))
@@ -138,6 +157,91 @@ def logsumexp(xs):
   if m == -math.inf:
     return -math.inf
   return m + math.log(sum(math.exp(x - m) for x in xs))
+
+# --- rank-1 tensor builtins (BReduce, BZip, the gathered BMap) --------------
+#
+# A scalar-mode tensor is a Python list, or whatever vector a network returned
+# (a torch tensor, a numpy array) when a builtin reads that vector directly
+# (task scalar-backend-tensor-ops-lower-to-torch). On a list each helper is
+# the comprehension or builtin the codegen used to emit inline, so a list
+# answers exactly as before, bit for bit. On a torch tensor it is one torch
+# op: at vocabulary scale that is one kernel instead of tens of thousands of
+# boxed floats, and it keeps the autograd graph without a list of 0-d tensors.
+# torch is looked up through `_torch_for`, as above, so the runtime stays
+# torch-free for a caller that never passes a tensor. A list operand meeting a
+# tensor one is lifted to the tensor's dtype (its elements may be 0-d tensors
+# carrying a graph, so they are stacked, not copied as numbers).
+
+def _vec_torch(*xs):
+  for x in xs:
+    if type(x) is not list:
+      t = _torch_for(x)
+      if t is not None:
+        return t
+  return None
+
+def _vec_lift(t, x, like):
+  if t.is_tensor(x):
+    return x
+  return t.stack([e if t.is_tensor(e) else t.tensor(float(e), dtype=like.dtype) for e in x]) \
+    if len(x) else t.zeros(0, dtype=like.dtype)
+
+def _vec_pair(a, b):
+  t = _vec_torch(a, b)
+  if t is None:
+    return None, a, b
+  like = a if t.is_tensor(a) else b
+  return t, _vec_lift(t, a, like), _vec_lift(t, b, like)
+
+def vec_is_torch(x):
+  return _vec_torch(x) is not None
+
+def vec_sum(t):
+  if _vec_torch(t) is not None:
+    return t.sum()
+  return sum(t, 0.0)
+
+def vec_max(t):
+  if _vec_torch(t) is not None:
+    return t.max() if t.numel() else -math.inf
+  return max(t, default=-math.inf)
+
+def vec_logsumexp(t):
+  tt = _vec_torch(t)
+  if tt is not None:
+    return tt.logsumexp(t, 0) if t.numel() else -math.inf
+  return logsumexp(t)
+
+def vec_zip_add(a, b):
+  t, a, b = _vec_pair(a, b)
+  return a + b if t is not None else [x + y for x, y in zip(a, b)]
+
+def vec_zip_sub(a, b):
+  t, a, b = _vec_pair(a, b)
+  return a - b if t is not None else [x - y for x, y in zip(a, b)]
+
+def vec_zip_mul(a, b):
+  t, a, b = _vec_pair(a, b)
+  return a * b if t is not None else [x * y for x, y in zip(a, b)]
+
+def vec_zip_div(a, b):
+  t, a, b = _vec_pair(a, b)
+  return a / b if t is not None else [safe_div(x, y) for x, y in zip(a, b)]
+
+# x[lo:hi] as a tensor: the BMap `\v -> x[v + c]` over a contiguous Int domain.
+# Every position must exist, as the per-element read it replaces required: a
+# slice past the end would silently come back short.
+def vec_slice(x, lo, hi):
+  if isinstance(x, InferenceList):
+    seg = list(itertools.islice(x, lo, hi))
+    if len(seg) != hi - lo:
+      raise IndexError("vec_slice: vector of length " + str(lo + len(seg)) + " read at " + str(hi - 1))
+    return seg
+  n = len(x)
+  if lo < 0 or hi > n:
+    raise IndexError("vec_slice: vector of length " + str(n) + " read at [" + str(lo) + ", " + str(hi) + ")")
+  seg = x[lo:hi]
+  return list(seg) if type(seg) is tuple else seg
 
 def rand():
   return random()
@@ -201,6 +305,12 @@ def isclose(a, b):
 def throw(e):
   raise Exception(e)
 
+# The base of every emitted ADT constructor class, which the query-type guard
+# tests an ADT slot against (an instance of any ADT conforms, as in the
+# interpreter).
+class ADTValue:
+  pass
+
 # Tuple
 class T:
   def __init__(self, t1, t2):
@@ -262,9 +372,11 @@ class InferenceList:
     return NotImplemented
 
   def __len__(self):
+    # Counts the Cons cells only: the EmptyInferenceList terminator is not an
+    # element (task python-empty-list-head-and-tail-answer-none).
     curr = self
     cnt = 0
-    while curr is not None:
+    while isinstance(curr, ConsInferenceList):
       cnt += 1
       curr = curr.next
     return cnt
@@ -279,10 +391,14 @@ class InferenceList:
     if isinstance(index, slice):
       # Tail lists
       if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):
+        # Walking past the end of the list raises, as the interpreter's
+        # "tail of an empty list" does. An ANY list stays a wildcard here.
         current = self
-        for _ in range(index.start - 1):
+        for _ in range(index.start):
+          if isinstance(current, EmptyInferenceList) or current is None:
+            raise IndexError("tail of an empty list")
           current = current.next
-        return current.next
+        return current
       else:
         raise IndexError("Slices may only be used for tail lists")
     if index < 0:
@@ -293,9 +409,12 @@ class InferenceList:
         raise IndexError("LinkedList index out of range")
     current = self
     for _ in range(index):
-      current = current.next
-      if current is None:
+      if isinstance(current, EmptyInferenceList) or current is None:
         raise IndexError("LinkedList index out of range")
+      current = current.next
+    # The terminator holds no element: head of an empty list raises.
+    if isinstance(current, EmptyInferenceList) or current is None:
+      raise IndexError("head of an empty list" if index == 0 else "LinkedList index out of range")
     return current.value
   
   def __eq__(self, other):
@@ -385,7 +504,9 @@ def listProd(lst):
   if isinstance(lst, AnyInferenceList):
     raise ValueError("Element not found in list")
   elif isinstance(lst, EmptyInferenceList):
-    return 1
+    # A float, as the standard library's 1.0: a type-tag check tells an int 1
+    # apart (task julia-listprod-of-an-empty-list-raises).
+    return 1.0
   elif isinstance(lst, ConsInferenceList):
     return lst.value * listProd(lst.next)
     
@@ -405,8 +526,8 @@ def isPossible(multiVal, expr):
     return True
   elif multiVal[0] == "D":
     return expr in multiVal[1]
-  elif multiVal[0] == "T" and isinstance(expr, tuple):
-    return isPossible(multiVal[1][0], expr[0]) and isPossible(multiVal[1][1], expr[1])
+  elif multiVal[0] == "T" and isinstance(expr, T):
+    return isPossible(multiVal[1][0], expr.t1) and isPossible(multiVal[1][1], expr.t2)
   elif multiVal[0] == "E" and isinstance(expr, Left):
     return isPossible(multiVal[1][0], fromLeft(expr))
   elif multiVal[0] == "E" and isinstance(expr, Right):
@@ -422,6 +543,10 @@ def isPossible(multiVal, expr):
           if not isPossible(mf, ef):
             return False
     return foundConstr
+  # A shape the domain does not describe (a tuple domain over a non-tuple,
+  # an Either domain over neither arm) is not possible; never fall off the
+  # end and answer None.
+  return False
   
 # NOTE (task retire-irenumsum): `multiValueToValueList` stood here, deriving a
 # MultiValue's enumerated support at run time (with a memo cache, because a

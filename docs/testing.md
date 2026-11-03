@@ -348,6 +348,8 @@ in `TestKnownIssues.hs`, with the pure half (templates, the verdict) in
 expect-failure: growth above polynomial 2      -- or: growth above linear
 knob: N = 2, 4, 6, 8, 10                       -- required; >= 2 increasing positive values
 metric: code-size                              -- optional: code-size (default) | ir-size | alloc | wall-time
+                                               --   | eval-alloc | eval-time (these two need query:)
+query: p(True{{for i in 1..N}}, {{i}}{{end}})  -- the query an eval metric answers, a template like the .ppl
 flags: -O 0 --noIntegrate                      -- optional, CLI spelling
 cap: 10 s, 8000 MB                             -- optional per-compile cap (these are the defaults)
 
@@ -373,7 +375,8 @@ The harness compiles each knob value in turn and takes the local log-log
 slope `log(f2/f1) / log(n2/n1)` between consecutive points. That slope is the
 apparent polynomial degree: exactly k for `n^k`, and rising with n for an
 exponential. The pin holds once some pair's slope exceeds the degree plus
-a margin (0.25 for code-size and ir-size, 0.5 for alloc, 1.0 for wall-time),
+a margin (0.25 for code-size and ir-size, 0.5 for alloc and eval-alloc, 1.0
+for wall-time and eval-time),
 or once a point hits the cap. The climb stops there, so the expensive points
 are only paid for after a fix. If every pair stays within the bound, the pin
 fails with "may be fixed" and prints the table. A first point that already
@@ -388,6 +391,20 @@ counter, which parallel tests do not disturb), and `wall-time` seconds. A
 wall the optimizer folds away (the module comes out linear, but the
 unoptimized IR does not) is still visible at `-O 0`, or as `alloc` at the
 default `-O2`.
+
+`eval-alloc` and `eval-time` measure the *run* of the compiled program, for a
+wall that compiles fast to a small module whose code is exponential to
+execute (a joint enumeration the compiler should have factorised). Each point
+compiles, then answers the `query:` row on the IR interpreter inside the same
+cap, and the metric is that query's own allocation (or seconds); the
+compile's is not counted. The row is one `p(...)` or `cdf(...)` query with no
+`=` expectation: its value is not checked, since correctness is the ordinary
+corpus's job. It is a template over the knob like the `.ppl`, so its arity
+and neural envelopes can follow the family. The interpreter runs the same
+optimized IR the backends emit, so its allocation tracks the emitted code's
+work: for `defineBoundSumsComparedEvalGrowth` the interpreter's slope over
+the domain size (about 6) matches the emitted Python's wall time. Prefer
+`eval-alloc`; it is near-deterministic.
 
 **Code size.** The program compiles and its emitted Python must still exceed
 the bound. A fix that shrinks it below the bound fails the pin.
@@ -408,8 +425,10 @@ that are already fixed stay `TestInternals` growth tests, as before. The
 known-issues folder holds only open bugs.
 
 The pins today, together about 1.2 s of the default suite:
-`nestedEqualityChainGrowth` (alloc at `-O2`, about 2.2x per level) and
-`gaussianTrajectoryUnprunedModuleSize` (code size). The harness's own tests are
+`nestedEqualityChainGrowth` (alloc at `-O2`, about 2.2x per level),
+`gaussianTrajectoryUnprunedModuleSize` (code size) and
+`defineBoundSumsComparedEvalGrowth` (eval-alloc over the neural domain size),
+among others. The harness's own tests are
 `KnownIssuesScaling` (templates, slopes, the climb) and `KnownIssuesHarness`
 (both caps, header parsing).
 
@@ -644,6 +663,10 @@ programs (`planHelperOnFoldResult*`, `planFoldDisjunction*`, ~10 s per compile)
 and `planEnumRecJointState` are `slow`; their correctness is pinned at small
 depth by the default suite's polynomial-growth tests.
 
+The `Corpus` binary's sweeps have a `Slow` twin over the `slow` programs
+(`Slow.Corpus (slow).*`, built by `corpusGroup` with `slowVariant`; every sweep,
+none left out). It adds about 1 minute of wall time to a `Slow` run.
+
 Most of the corpus is `slow` too: 527 programs whose every HPC tick the
 default tier also executes were demoted (docs-repo task
 `demote-tick-redundant-corpus-programs-to-slow`, from the report of
@@ -728,7 +751,7 @@ its own key (`sourcesFingerprint`), so editing it reruns that sweep only.
 | `End2End.Python WriteLogits` | the exact script `testPythonWriteLogits` runs (the emitted module, the mocks, the row checks), `pythonLib.py`, and `python3`'s path and version |
 | `End2End.Julia WriteLogits` (per program, inside the batch) | the program's module and row checks as `juliaWriteLogitsBody` renders them alone, `juliaLib.jl` and `julia --version` |
 | `SelectPassNoOp`, `PlanEngineMatchesDense`, `BudgetZeroMatchesDefault`, `PlanEngineLogSpaceMatchesLinear`, `NeuralLogSpaceMatchesLinear` | `show` of both compiles the differential compares (scalar and select-passed; budget 0 and dense; budget 0 and default; linear and log space at budget 0 or at the default budget), a refusal included, the program fields, the rows, the tolerance, and the interpreter fingerprint (`differentialKey`) |
-| `BatchedPython.<differential>` (per program, inside each of the four torch batches) | the program's name, batched source, query groups and network mocks as the driver renders them, and the torch fingerprint: `pythonLibBatched.py`, and the torch python's path, Python version and torch version. An all-unchanged differential starts no python |
+| `BatchedPython.<differential>` (per program, inside each of the four torch batches, and `BatchedLogSpace`'s `batched-log-space-vs-expected`, keyed as `BatchedPython.batched-log-space-vs-expected`) | the program's name, batched source, query groups and network mocks as the driver renders them, and the torch fingerprint: `pythonLibBatched.py`, and the torch python's path, Python version and torch version. An all-unchanged differential starts no python |
 | `KnownIssues` (`broken` and `wrong-result` pins) | the `expect-failure` header, the backends checked, the `IREnv` with the program fields and rows, the interpreter fingerprint, and on Python each row's exact script and the Python runtime; `TestKnownIssues.hs` joins the harness |
 | `Corpus.LogSpaceMatchesLinear` (one test per program) | the program's log-space `IREnv`, its fields, its p() rows and the tolerance, and the interpreter fingerprint; `TestCorpus.hs` joins the harness |
 | `Slow.RewriteInvarianceCorpus` | the rows, and for the original and every variant (family and site) its program fields and its compile, a refusal's message included, and the interpreter fingerprint; `TestRewrites.hs` and `Rewrites.hs` join the harness. A variant whose compile timed out, or whose shown environment crashed or timed out, leaves the program unkeyed |

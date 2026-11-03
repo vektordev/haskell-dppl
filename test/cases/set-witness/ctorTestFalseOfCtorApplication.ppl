@@ -1,0 +1,4 @@
+data Chain = Stop | Link lv::Float
+main =
+  draw x = Normal in
+  isStop (Link x)

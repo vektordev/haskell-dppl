@@ -377,7 +377,7 @@ pythonRuntimeClassNames :: [String]
 pythonRuntimeClassNames =
   [ "Module", "Iterable", "T", "Left", "Right", "InferenceList"
   , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "EnumBatch"
-  , "MixedSplit", "MixedAnyUnsupported" ]
+  , "MixedSplit", "MixedAnyUnsupported", "ADTValue" ]
 
 -- | The non-class values the emitted Python module has in scope before any of
 -- its own definitions: everything @from pythonLib import *@ and
@@ -418,7 +418,8 @@ pythonRuntimeValueNames =
   , "split_branch", "split_retry", "split_uniform"
   , "sqrt", "sumprod", "sys", "table_select", "tan", "tanh", "tau", "tensor_index"
   , "tensor_logsumexp", "tensor_sum", "throw", "toList", "torch", "trunc"
-  , "ulp", "where_anchored"
+  , "ulp", "vec_is_torch", "vec_logsumexp", "vec_max", "vec_slice", "vec_sum"
+  , "vec_zip_add", "vec_zip_div", "vec_zip_mul", "vec_zip_sub", "where_anchored"
   ]
 
 -- | Python's builtins (@dir(builtins)@ without the dunders), union over the
@@ -537,7 +538,7 @@ juliaRuntimeNames =
   , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "length"
   , "getindex", "head", "tail", "prepend", "mapList", "eq", "isPossible"
   , "isclose", "indexOf", "listProd", "listConcat", "T", "Either", "Left", "Right"
-  , "fromLeft", "fromRight"
+  , "fromLeft", "fromRight", "ADTValue"
   ]
 
 -- | The names from Julia's @Base@ (and @Core@) that emitted code refers to:

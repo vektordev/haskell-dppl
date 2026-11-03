@@ -50,6 +50,8 @@ pythonPreludeTests = testGroup "PythonPrelude (python-codegen-silent-precision-t
       withTorch "batched ANY list tail" batchedAnyTailList
   , testCase "the scalar query guard admits a 0-d float tensor sample, and its gradient" $
       withTorch "scalar tensor sample" scalarTensorSample
+  , testCase "the scalar agreement product runs on network tensors, and its gradient" $
+      withTorch "scalar agreement on tensors" scalarAgreementTensors
   , testCase "a batched module exports under torch.export and keeps its NaN check" $
       withTorch "batched torch.export" batchedTorchExport
   , testCaseInfo "juliaLib and the Julia query guard pass a dual number through" juliaDualProbe
@@ -107,6 +109,55 @@ scalarTensorSample py = do
     , "        if 'does not conform' not in str(e): raise"
     , "    else:"
     , "        raise SystemExit('the guard admitted ' + repr(bad))"
+    ]
+
+-- | Task scalar-backend-tensor-ops-lower-to-torch: the fused agreement body
+-- reads each network's output vector as one slice and combines the two with
+-- runtime vector ops, which run as torch ops when the networks return
+-- tensors. Every query answers what the same networks returning lists answer,
+-- and the gradient of @p(Right k)@ with respect to a network output is the
+-- central difference -- the lowered path keeps the graph that per-element
+-- indexing into a list of 0-d tensors used to carry.
+scalarAgreementTensors :: FilePath -> IO ()
+scalarAgreementTensors py = do
+  srcLines <- emitted defaultCompilerConfig (Right . generateFunctions True) $ unlines
+    [ "neural camNN   :: (Symbol -> Int) of [0, 1, 2, 3]"
+    , "neural depthNN :: (Symbol -> Int) of [0, 1, 2, 3]"
+    , "main img depth ="
+    , "  draw v = camNN img in"
+    , "  draw w = depthNN depth in"
+    , "  if v == w then right v else left ()" ]
+  runPyScript py "scalar_agreement_tensors.py" srcLines
+    [ "import torch"
+    , "camNN = lambda x: x"
+    , "depthNN = lambda x: x"
+    , "pa, pb = [0.4, 0.3, 0.2, 0.1], [0.1, 0.2, 0.3, 0.4]"
+    , "qs = [Right(0), Right(2), Right(3), Right('ANY'), Left(None), Left('ANY'), 'ANY', Right(7)]"
+    , "for q in qs:"
+    , "    want = main.forward(q, pa, pb)[0]"
+    , "    ta = torch.tensor(pa, dtype=torch.float64, requires_grad=True)"
+    , "    tb = torch.tensor(pb, dtype=torch.float64)"
+    , "    got = main.forward(q, ta, tb)[0]"
+    , "    if abs(float(got) - float(want)) > 1e-12:"
+    , "        raise SystemExit('p(%r): tensors answer %r, lists %r' % (q, float(got), float(want)))"
+    , "ta = torch.tensor(pa, dtype=torch.float64, requires_grad=True)"
+    , "r = main.forward(Right(2), ta, torch.tensor(pb, dtype=torch.float64))[0]"
+    , "if not (torch.is_tensor(r) and r.requires_grad):"
+    , "    raise SystemExit('p(Right 2) is detached from the network output: %r' % (r,))"
+    , "(g,) = torch.autograd.grad(r, ta)"
+    , "h = 1e-6"
+    , "for i in range(4):"
+    , "    up = list(pa); up[i] += h"
+    , "    dn = list(pa); dn[i] -= h"
+    , "    fd = (main.forward(Right(2), up, pb)[0] - main.forward(Right(2), dn, pb)[0]) / (2 * h)"
+    , "    if abs(float(g[i]) - fd) > 1e-6:"
+    , "        raise SystemExit('d p(Right 2) / d pa[%d] = %r, central difference %r' % (i, float(g[i]), fd))"
+    , "ta = torch.tensor(pa, dtype=torch.float64, requires_grad=True)"
+    , "r = main.forward(Left(None), ta, torch.tensor(pb, dtype=torch.float64))[0]"
+    , "(g,) = torch.autograd.grad(r, ta)"
+    , "want = [1.0 - pb[i] for i in range(4)]"
+    , "if any(abs(float(g[i]) - want[i]) > 1e-12 for i in range(4)):"
+    , "    raise SystemExit('d p(Left ()) / d pa = %r, want %r' % (g.tolist(), want))"
     ]
 
 -- | Task emitted-runtime-differentiability-gaps, item 2: @check_result@'s eager

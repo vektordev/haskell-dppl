@@ -24,8 +24,10 @@ library
       SPLL.IRGatherPass
       SPLL.IRLeafTablePass
       SPLL.IROptimizer
+      SPLL.IRReadoutGather
       SPLL.IRSelectPass
       SPLL.IRTypeCheck
+      SPLL.IRUtil
       SPLL.PythonNesting
       SPLL.ReservedNames
       StandardLibrary

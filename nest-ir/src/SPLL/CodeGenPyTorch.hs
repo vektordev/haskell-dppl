@@ -23,12 +23,13 @@ import SPLL.IntermediateRepresentation
 import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, pythonNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
+import SPLL.IRReadoutGather (gatherReadoutsEnv, gatherSlice)
 import SPLL.PythonNesting (tooDeepForPython, spillDeep, adtCallees, renameFree, pythonMaxIndent, blockIndent, bindIterable, hasAssignmentExpr)
 import SPLL.IR.Value
 import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
 import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd, nub)
-import Data.Char (toUpper, isDigit)
+import Data.Char (toUpper, isDigit, isAlphaNum)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -93,6 +94,16 @@ pyOps OpOr = "or"
 pyOps OpAnd = "and"
 pyOps OpEq = "=="
 pyOps x = error $ "Operator has no infix representation: " ++ show x
+
+-- | Whether a float division by this divisor goes through the runtime's
+-- @safe_div@: Python's @/@ raises ZeroDivisionError on a zero divisor, where
+-- the IR (the interpreter, Julia) answers IEEE -- a signed infinity, or NaN
+-- for 0/0 (task python-float-division-by-zero-raises). A nonzero literal
+-- divisor cannot be zero, so it keeps the plain operator and its call-free
+-- cost.
+ieeeDivision :: IRExpr -> Bool
+ieeeDivision (IRConst (VFloat d)) = d == 0
+ieeeDivision _ = True
 
 pyDistName :: Distribution -> String
 pyDistName IRNormal = "normal"
@@ -167,7 +178,23 @@ pyVal x = error ("unknown pyVal for " ++ show x)
 
 pyMultiVal :: GenericMultiValue IRExpr -> String
 pyMultiVal MultiContinuous = "(\"C\", None)"
-pyMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (pyVal . valueToIR) vals) ++ "])"
+-- A domain of plain scalars is a frozenset, so 'isPossible' is one hash
+-- lookup rather than a scan of the list: a V-value neural read's decode
+-- checks its sample against the domain, and inside a per-value or enumeration
+-- loop over that same domain the scan made the loop O(V^2) (task
+-- per-value-fast-path-calls-network-per-domain-value). Membership agrees with
+-- the list's for these values (@==@ and @hash@ agree on int, bool and float).
+pyMultiVal (MultiDiscretes vals)
+  | all hashableScalar ivals = "(\"D\", frozenset([" ++ elems ++ "]))"
+  | otherwise = "(\"D\", [" ++ elems ++ "])"
+  where
+    ivals = map valueToIR vals
+    elems = intercalate ", " (map pyVal ivals)
+    hashableScalar v = case v of
+      VInt _ -> True
+      VBool _ -> True
+      VFloat _ -> True
+      _ -> False
 pyMultiVal (MultiTuple l r) = "(\"T\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"
 pyMultiVal (MultiEither l r) = "(\"E\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"
 pyMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) -> 
@@ -242,7 +269,7 @@ generateFunctionsWith memo genBoil checked =
     -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
     -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
     -- M1, strategy B).
-    let env@(IREnv funcs adtsEnv consts) = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (desugarSelectEnv (retireUnrenderableVariants "Python" env0)))
+    let env@(IREnv funcs adtsEnv consts) = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (gatherReadoutsEnv (desugarSelectEnv (retireUnrenderableVariants "Python" env0))))
         clsName = groupClassName env
         lut = envToLUT env ++ stdLib
         -- A nullary function is referenced in the IR by a bare 'IRVar' (there is
@@ -335,7 +362,7 @@ generateADTClasses decls =
 generateADTClass :: IRADTConstructorDecl -> [String]
 generateADTClass (name, fields) =
   -- Class declaration
-  ["class " ++ cls ++ ":"]++
+  ["class " ++ cls ++ "(ADTValue):"]++
   indentOnce (
     -- Constructor
     ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
@@ -673,6 +700,10 @@ generateExpressionLifted (IROp OpMax l r) = do
   (ls, le) <- generateExpressionLifted l
   (rs, re) <- generateExpressionLifted r
   return (ls ++ rs, str "max(" . le . str ", " . re . str ")")
+generateExpressionLifted (IROp OpDiv l r) | ieeeDivision r = do
+  (ls, le) <- generateExpressionLifted l
+  (rs, re) <- generateExpressionLifted r
+  return (ls ++ rs, str "safe_div(" . le . str ", " . re . str ")")
 generateExpressionLifted (IROp op l r) = do
   (ls, le) <- generateExpressionLifted l
   (rs, re) <- generateExpressionLifted r
@@ -778,9 +809,34 @@ axisUnsupported what ax =
 -- empty iterable raises in real Python, so the call site passes
 -- @default=-inf@, the interpreter's 'reduceIdentity'.
 pyReduceOp :: ReduceOp -> String
-pyReduceOp ROpAdd = "sum"
-pyReduceOp ROpLogSumExp = "logsumexp"
-pyReduceOp ROpMax = "max"
+pyReduceOp ROpAdd = "vec_sum"
+pyReduceOp ROpLogSumExp = "vec_logsumexp"
+pyReduceOp ROpMax = "vec_max"
+
+-- | The runtime helper for a 'BZip' operator, where there is one: a torch op
+-- on tensors, the former comprehension on lists.
+pyZipOp :: Operand -> Maybe String
+pyZipOp OpPlus = Just "vec_zip_add"
+pyZipOp OpSub  = Just "vec_zip_sub"
+pyZipOp OpMult = Just "vec_zip_mul"
+pyZipOp OpDiv  = Just "vec_zip_div"
+pyZipOp _      = Nothing
+
+-- | A 'BMap' body that is elementwise in its variable: built only from the
+-- variable, names and number literals, and operators that broadcast over a
+-- torch tensor exactly as they act on one element. Applied to the whole
+-- tensor it computes the map.
+elementwise :: String -> IRExpr -> Bool
+elementwise v body = readsVar body && go body
+  where
+    readsVar (IRVar x) = x == v
+    readsVar e = any readsVar (getIRSubExprs e)
+    go (IRVar _) = True
+    go (IRConst (VFloat _)) = True
+    go (IRConst (VInt _)) = True
+    go (IROp op a b) = op `elem` [OpPlus, OpSub, OpMult, OpDiv] && go a && go b
+    go (IRUnaryOp op a) = op `elem` [OpNeg, OpExp, OpLog] && go a
+    go _ = False
 
 str :: String -> ShowS
 str = showString
@@ -879,6 +935,7 @@ liftedLine e = do
 --
 -- Anything else is an ordinary let-binding.
 generateSpillStatement :: String -> IRExpr -> GlobalVariableSupply [String]
+generateSpillStatement name e | isJust (gatherSlice e) = generateLetInStatement name e
 generateSpillStatement name (IRBuiltin BMap [IRLambda v body, t]) = do
   (tStmts, tt) <- liftedLine t
   n <- lift demandUniqueNumber
@@ -904,6 +961,10 @@ generateExpression (IROp OpMax left right) = do
   l <- generateExpression left
   r <- generateExpression right
   return ("max(" ++ l ++ ", " ++ r ++ ")")
+generateExpression (IROp OpDiv left right) | ieeeDivision right = do
+  l <- generateExpression left
+  r <- generateExpression right
+  return ("safe_div(" ++ l ++ ", " ++ r ++ ")")
 generateExpression (IROp op left right) = do
   l <- generateExpression left
   r <- generateExpression right
@@ -1028,6 +1089,19 @@ generateExpression (IRBuiltin (BTensor sh) elems)
 generateExpression (IRBuiltin (BIota sh) [])
   | shapeRank sh == 1 = return ("list(range(" ++ show (shapeNumel sh) ++ "))")
   | otherwise = error (rankUnsupported "BIota" (shapeRank sh))
+-- A readout gather ('SPLL.IRReadoutGather'): @x[v + c]@ over a contiguous Int
+-- domain is one slice of @x@ (task scalar-backend-tensor-ops-lower-to-torch).
+generateExpression e@(IRBuiltin BMap _) | Just (x, lo, hi) <- gatherSlice e =
+  return ("vec_slice(" ++ x ++ ", " ++ show lo ++ ", " ++ show hi ++ ")")
+-- An elementwise body over a named tensor (@\c -> Sb - c@, the agreement's
+-- off-diagonal complement) is applied to the whole tensor at once when it is a
+-- torch tensor -- the body's operators broadcast -- and is the comprehension on
+-- a list, which answers exactly as before.
+generateExpression (IRBuiltin BMap [IRLambda v body, IRVar src])
+  | elementwise v body = do
+      b <- generateExpression body
+      bt <- generateExpression (renameFree v src body)
+      return ("(" ++ bt ++ " if vec_is_torch(" ++ src ++ ") else [" ++ b ++ " for " ++ v ++ " in " ++ src ++ "])")
 generateExpression (IRBuiltin BMap [IRLambda v body, t]) = do
   b <- generateExpression body
   tt <- generateExpression t
@@ -1039,10 +1113,14 @@ generateExpression (IRBuiltin BMap [f, t]) = do
 generateExpression (IRBuiltin (BReduce op ax) [t])
   | ax == 0 = do
       tt <- generateExpression t
-      -- max of an empty tensor is the identity -inf (interpreter, Julia's
-      -- init=-Inf), not Python's ValueError.
-      let dflt = if op == ROpMax then ", default=" ++ pyDouble (-1 / 0) else ""
-      return (pyReduceOp op ++ "(" ++ tt ++ dflt ++ ")")
+      -- One runtime call ('vec_sum', 'vec_max', 'vec_logsumexp'): a torch op
+      -- on a tensor, and on a list the builtin this used to emit inline. max
+      -- of an empty tensor is the identity -inf (interpreter, Julia's
+      -- init=-Inf), not Python's ValueError; sum's start is the float 0.0,
+      -- the IR's identity, since the builtin's int start made an empty sum
+      -- the int 0, which has no negative zero (task
+      -- python-empty-sum-answers-an-int).
+      return (pyReduceOp op ++ "(" ++ tt ++ ")")
   | otherwise = error (axisUnsupported "BReduce" ax)
 generateExpression (IRBuiltin (BIndex ax) [t, k])
   | ax == 0 = do
@@ -1057,13 +1135,19 @@ generateExpression (IRBuiltin (BIndex ax) [t, k])
 --
 -- The names are generated rather than fixed so a nested BZip (the agreement
 -- fusion emits `(ta * tb) * tT`) cannot shadow the outer one's bindings.
+generateExpression (IRBuiltin (BZip op) [a, b]) | Just helper <- pyZipOp op = do
+  aa <- generateExpression a
+  bb <- generateExpression b
+  return (helper ++ "(" ++ aa ++ ", " ++ bb ++ ")")
 generateExpression (IRBuiltin (BZip op) [a, b]) = do
   aa <- generateExpression a
   bb <- generateExpression b
   n <- lift demandUniqueNumber
   let (x, y) = ("_z" ++ show n ++ "a", "_z" ++ show n ++ "b")
+  let elemOp = if op == OpDiv then "safe_div(" ++ x ++ ", " ++ y ++ ")"
+               else "((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ "))"
   boundIterable ("zip(" ++ aa ++ ", " ++ bb ++ ")")
-    (\it -> "[((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ ")) for "
+    (\it -> "[" ++ elemOp ++ " for "
             ++ x ++ ", " ++ y ++ " in " ++ it ++ "]")
 -- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep):
 -- one runtime call, so the emitted text is O(1) in the domain size and adds no
@@ -1074,12 +1158,20 @@ generateExpression (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
   return ("categorical_index(" ++ uu ++ ", " ++ ww ++ ", " ++ show start ++ ", " ++ show n ++ ")")
 generateExpression (IRError e) =
   return ("throw(\"" ++ escapeStr e ++ "\")")
--- The check splices its operand textually, and a list or tensor check splices
--- it into a comprehension's iterable, so there an operand carrying a let is
--- bound once first (see 'bindIterable').
+-- The check reads its operand several times (the wildcard test, the tag
+-- test, each component), so an operand that is not a bare name or number
+-- literal is bound once to a fresh temporary first: an operand that draws
+-- draws once, as in the interpreter, and a compound one is evaluated once
+-- (task text-backends-conformsto-reevaluates-its-operand). The binding also
+-- keeps a let's walrus out of the list check's comprehension iterable.
 generateExpression (IRConformsTo t x) = do
   sx <- generateExpression x
-  if checksElements t then boundIterable sx (pyConforms t) else return (pyConforms t sx)
+  if isAtomicOperand sx
+    then return (pyConforms t sx)
+    else do
+      n <- lift demandUniqueNumber
+      let tmp = "_ct" ++ show n
+      return ("((" ++ tmp ++ " := " ++ sx ++ "), " ++ pyConforms t tmp ++ ")[1]")
 generateExpression x =
   error ("Unknown expression in PyTorch codegen: " ++ show x)
 
@@ -1095,8 +1187,8 @@ escapeStr = concatMap esc
 -- | A runtime type-tag check for the query-type guard (see IRConformsTo). Full-depth
 -- structural check mirroring the interpreter's 'valueConformsTo': recurses into tuple
 -- components, either arms, and every list element; precise for float/bool/int and
--- permissive ("True") only for types with no cheap runtime tag (so it never falsely
--- rejects). The marginal-query wildcard (isAny) is accepted at every level, matching
+-- permissive ("True") only for types the interpreter does not check either
+-- (type variables, arrows). The marginal-query wildcard (isAny) is accepted at every level, matching
 -- VAny, and short-circuits before any component accessor is evaluated. The Int arg is
 -- a nesting depth used to name list-comprehension binders uniquely.
 pyConforms :: IRType -> String -> String
@@ -1121,6 +1213,13 @@ pyConformsShape d (ITTensor sh t) e
       let v = "_ce" ++ show d
       in "(isinstance(" ++ e ++ ", list) and len(" ++ e ++ ") == " ++ show (shapeNumel sh)
          ++ " and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
+-- Unit is None and a theta tree a (values, subtrees) tuple, both cheap to
+-- tell. An ADT slot accepts an instance of any ADT constructor (every emitted
+-- constructor class derives the runtime's ADTValue), as the interpreter's
+-- 'valueConformsTo' accepts any 'VADT' whatever its type name.
+pyConformsShape _ ITUnit e = "(" ++ e ++ " is None)"
+pyConformsShape _ ITThetaTree e = "isinstance(" ++ e ++ ", tuple)"
+pyConformsShape _ (ITADT _) e = "isinstance(" ++ e ++ ", ADTValue)"
 pyConformsShape _ _ _ = "True"
 
 -- | An operand as the base of an attribute access (@e.t1@): a number
@@ -1132,13 +1231,16 @@ pyAttrBase :: String -> String
 pyAttrBase e@(c : _) | c == '-' || isDigit c = "(" ++ e ++ ")"
 pyAttrBase e = e
 
--- | Whether 'pyConforms' iterates over (a component of) its operand.
-checksElements :: IRType -> Bool
-checksElements (ITList _) = True
-checksElements (ITTensor _ _) = True
-checksElements (ITTuple a b) = checksElements a || checksElements b
-checksElements (ITEither a b) = checksElements a || checksElements b
-checksElements _ = False
+-- | Whether a rendered operand can be repeated without being bound first: a
+-- name (possibly dotted) or a number literal, which reads no state and has no
+-- effect. A call, a let's walrus or any operator is bound.
+isAtomicOperand :: String -> Bool
+isAtomicOperand s = case s of
+  '-' : r@(c : _) | isDigit c -> all numChar r
+  c : _ | isDigit c -> all numChar s
+  _ : _ -> all (\ch -> isAlphaNum ch || ch == '_' || ch == '.') s
+  [] -> False
+  where numChar ch = isAlphaNum ch || ch == '.' || ch == '+' || ch == '-'
 
 
 -- | 'bindIterable' with a fresh temporary, drawn only when the iterable needs

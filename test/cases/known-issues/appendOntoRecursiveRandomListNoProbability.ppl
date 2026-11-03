@@ -1,0 +1,11 @@
+-- A recursive append whose second argument is a recursively generated random
+-- list: probability is silently absent (generate only, no refusal reason).
+-- The same list spelled with cons, `len (1 : rollout 2) < 2`, compiles and
+-- answers 0.5. The 506f6e2 unrolling (recursive-consumer-of-recursive-random-
+-- list-refused) needs closed-constant arguments, and `rollout 2` is not one.
+-- Idealized: len (app [1] r) < 2 iff r = [], p = 0.5. Verified at 68c184c on
+-- dev. Docs task append-onto-recursive-random-list-no-probability.
+len xs = if isNull xs then 0 else 1 + len (tail xs)
+rollout k = if k == 0 then [] else (if Uniform < 0.5 then [] else 1 : rollout (k - 1))
+app xs ys = if isNull xs then ys else head xs : app (tail xs) ys
+main = len (app [1] (rollout 2)) < 2

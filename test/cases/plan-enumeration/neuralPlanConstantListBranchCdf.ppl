@@ -5,11 +5,10 @@
 -- always False in the interpreter (the arm counted its full mass at every
 -- query) and a TypeError in Python. It now recurses structurally like
 -- compareValueExpr, so a list arm takes the equality indicator.
--- x ~ N(0,1), so each arm has mass 0.5; [0.0] is not <= [q] for q < 0 under
--- either the componentwise order or the equality indicator, so only [Normal]
--- contributes 0.5 * Phi(q). At q = 0 both conventions give 0.5 + 0.25.
--- Rows where the two conventions part (q > 0) are deliberately not pinned
--- (head-cdf-uses-equality).
+-- x ~ N(0,1), so each arm has mass 0.5; [0.0] is <= [q] exactly for q >= 0
+-- (lists are ordered componentwise), and [Normal] contributes 0.5 * Phi(q).
+-- At q = 1 the list equality this used to take answered 0.5 * Phi(1) alone
+-- (task head-cdf-uses-equality).
 -- Task plan-det-guard-compares-composite-values-with-greater-than.
 neural nn :: (Symbol -> Float)
 main s = draw x = nn s in if x < 0.0 then [0.0] else [Normal]

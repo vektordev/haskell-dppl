@@ -456,9 +456,9 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
           Right env -> do
             let src = unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
             assertBool "Python identifier for constructor None was not mangled"
-                       ("class None_:" `isInfixOf` src)
-            assertBool "a bare `class None:` survived; the emitted file cannot parse"
-                       (not ("class None:" `isInfixOf` src))
+                       ("class None_(ADTValue):" `isInfixOf` src)
+            assertBool "a bare `class None(...)` survived; the emitted file cannot parse"
+                       (not ("class None(" `isInfixOf` src))
             -- The refusal must still quote the source name, or Python says
             -- isNone_ where the interpreter says isNone.
             assertBool "the ANY refusal names the mangled identifier instead of the source constructor"
@@ -969,13 +969,17 @@ fstProjectedBottomSrc = "main = fst (Uniform * Uniform, Uniform)"
 
 -- 'f' is refused by the set-witness engine (sqrt is outside the monotone
 -- transport table); 'main' is perfectly tractable apart from calling it.
--- The binding is a call of 'g', not a @draw@: a @draw@ no engine applies to
--- is typed Bottom (task engine-applicability-as-data), so 'f' would not be
--- admitted at all, while a call's binding is still admitted and refused.
+-- The binding is of a call's random /leading/ argument: a @draw@ no engine
+-- applies to is typed Bottom (task engine-applicability-as-data), and so is a
+-- call binding its last argument (task named-callee-binding-not-floored, which
+-- moved this fixture off @f u = g u Normal@), so 'f' would not be admitted at
+-- all, while a leading argument's binding ('IRCompiler.leadingArgBinding') is
+-- still admitted and refused (docs task
+-- leading-argument-binding-not-floored).
 refusedHelperSrc :: String
 refusedHelperSrc = unlines
-  [ "g u x = if sqrt x > u then 1.0 else 0.0"
-  , "f u = g u Normal"
+  [ "g x u = if sqrt x > u then 1.0 else 0.0"
+  , "f u = g Normal u"
   , "main = if Uniform < 0.5 then f 0.5 else 3.0"
   ]
 
@@ -995,6 +999,17 @@ refusedVariantTests = testGroup "RefusedVariant"
                               ("NeST refused to compile it" `isInfixOf` e && "f_prob" `isInfixOf` e)
           Left ex -> assertFailure ("crashed: " ++ show ex)
           Right (Right v) -> assertFailure ("main answered " ++ show v ++ " through a refused helper")
+  , testCase "a named callee's binding no engine applies to is Bottom, with the reason" $
+      -- Task named-callee-binding-not-floored: the engines of the binding a
+      -- call makes are asked at the call, so @g Normal@ (sqrt is outside the
+      -- monotone transport table) is typed Bottom, as a @draw@ is, rather
+      -- than admitted and refused at codegen.
+      withParsed (unlines [ "g x = if sqrt x > 0.5 then 1.0 else 0.0", "main = g Normal" ]) $ \prog -> do
+        let compiled = compile defaultCompilerConfig prog
+        expectVariantRefused "main" "prob" "no inference engine applies to the parameter bound by the call of 'g'" compiled
+        expectVariantRefused "main" "integ" "no inference engine applies to the parameter bound by the call of 'g'" compiled
+        assertBool "generate went down with the refused variants"
+          (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   , testCase "generate survives on both the helper and its caller" $
       withParsed refusedHelperSrc $ \prog -> do
         let compiled = compile defaultCompilerConfig prog
@@ -1032,7 +1047,8 @@ refusedVariantTests = testGroup "RefusedVariant"
         assertBool "generate went down with the refused variants"
           (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   ]
-  where setWitnessDiagnostic' = "set-valued witness construction failed for the binding of 'x'"
+  -- The leading argument's binding names a fresh variable for the parameter.
+  where setWitnessDiagnostic' = "set-valued witness construction failed for the binding of"
 
 generateBackedProjectionTests :: TestTree
 generateBackedProjectionTests = testGroup "GenerateBackedProjection"
@@ -1104,11 +1120,12 @@ generateBackedProjectionTests = testGroup "GenerateBackedProjection"
 
 -- Three lines, no neural network: a constructor test of a field (reached
 -- through head/col) inverts to VAnyExcept on its False branch. The task's
--- original reproducer spelled the test `col (head scene) == Red`; an == step
--- of a point inversion now refuses its False arm at run time instead
--- (task fuzz-unconsumed-vanyexcept-reaches-codegen, 'eqSetWitnessTests'), so
--- that spelling no longer carries the placeholder. The constructor test still
--- does (task point-inversion-vanyexcept-witness-crashes).
+-- original reproducer spelled the test `col (head scene) == Red`. Both
+-- spellings once left the placeholder in the compiled IR; a point inversion
+-- now declines a chain that holds it, and the set-witness engine answers the
+-- complement (task point-inversion-vanyexcept-witness-crashes), so neither
+-- does any more. The refusal stays as the codegen safety net, checked below
+-- on an IR the placeholder is planted in.
 vAnyExceptProgSrc :: String
 vAnyExceptProgSrc = unlines
   [ "data Color = Red | Green"
@@ -1116,12 +1133,7 @@ vAnyExceptProgSrc = unlines
   , "main = draw scene = [if Uniform < 0.5 then Obj Red else Obj Green] in isRed (col (head scene))"
   ]
 
--- | The original reproducer above, spelled with ==. A point inversion through
--- an == observed False recovers only a set, which no engine measures as a
--- point: every engine now refuses that query by name at run time (the
--- interpreter died on a type error), and the module compiles to both text
--- backends, so the True query answers there too (task
--- fuzz-unconsumed-vanyexcept-reaches-codegen).
+-- | The original reproducer above, spelled with ==.
 eqSetWitnessSrc :: String
 eqSetWitnessSrc = unlines
   [ "data Color = Red | Green"
@@ -1129,32 +1141,30 @@ eqSetWitnessSrc = unlines
   , "main = draw scene = [if Uniform < 0.5 then Obj Red else Obj Green] in col (head scene) == Red"
   ]
 
-eqSetWitnessTests :: TestTree
-eqSetWitnessTests = testGroup "EqSetWitness"
-  [ testCase "the False query is refused by name, not a type error" $
-      withParsed eqSetWitnessSrc $ \prog -> do
-        outcome <- try (evaluate (length (show (runProb defaultCompilerConfig prog [] (VBool False)))))
-        case outcome of
-          Right _ -> assertFailure "expected a runtime refusal at False"
-          Left (ex :: SomeException) ->
-            assertBool ("expected the set-witness refusal, got: " ++ show ex)
-              ("any value but one" `isInfixOf` show ex && not ("Type error" `isInfixOf` show ex))
-  , testCase "the True query still answers" $
-      withParsed eqSetWitnessSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VBool True))
-        case res of
-          Left e -> assertFailure ("the True query should answer, got: " ++ show e)
-          Right _ -> return ()
-  , testCase "both text backends compile it" $
-      withParsed eqSetWitnessSrc $ \prog ->
+-- | Both polarities of a reproducer answer 0.5 at dim 0, and its module
+-- carries no placeholder.
+answersBothPolarities :: String -> [TestTree]
+answersBothPolarities src =
+  [ testCase ("p(" ++ show b ++ ") answers 0.5") $
+      withParsed src $ \prog ->
+        case runProb defaultCompilerConfig prog [] (VBool b) of
+          Right (VProbDim p 0) | abs (p - 0.5) < 1e-9 -> return ()
+          other -> assertFailure ("expected (0.5, dim 0), got " ++ show other)
+  | b <- [False, True] ] ++
+  [ testCase "both text backends compile it" $
+      withParsed src $ \prog ->
         case compile defaultCompilerConfig prog of
           Left err -> assertFailure ("compile failed: " ++ show err)
           Right env -> assertEqual "a VAnyExcept survived" Nothing (firstAnyExceptIR env)
+  ]
+
+eqSetWitnessTests :: TestTree
+eqSetWitnessTests = testGroup "EqSetWitness" $
+  answersBothPolarities eqSetWitnessSrc ++
   -- The shrunk program of Slow prop_Fuzz_BackendsAgree
   -- --quickcheck-replay=129863: the same == under `right`, its operand a
-  -- mixture, beside a dead neural binding. Its cumulative function inverted
-  -- the == too, which transports no bound, and is refused outright.
-  , testCase "the fuzz seed's program compiles to both text backends" $
+  -- mixture, beside a dead neural binding.
+  [ testCase "the fuzz seed's program compiles to both text backends" $
       withParsed (unlines
         [ "neural nn :: (Symbol -> Bool)"
         , "main v0 = (\\v1 -> (\\v2 -> right (v2 == 0)) (if Uniform < 0.5 then 2 else 1)) (nn v0)" ]) $ \prog ->
@@ -1164,38 +1174,19 @@ eqSetWitnessTests = testGroup "EqSetWitness"
   ]
 
 vAnyExceptCodegenTests :: TestTree
-vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal"
-  [ testCase "the interpreter answers the reproducer directly (the reference this refusal is measured against)" $
-      withParsed vAnyExceptProgSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VBool True))
-        case res of
-          Left e  -> assertFailure ("interpreter should answer this program, got: " ++ show e)
-          Right _ -> return ()
-  , testCase "the compiled IR does carry a VAnyExcept placeholder (guards against a stale reproducer)" $
+vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal" $
+  answersBothPolarities vAnyExceptProgSrc ++
+  [ testCase ("the " ++ lang ++ " codegen refusal names VAnyExcept, not a value-rendering panic") $
       withParsed vAnyExceptProgSrc $ \prog ->
         case compile defaultCompilerConfig prog of
           Left err -> assertFailure ("compile failed: " ++ show err)
-          Right env -> case firstAnyExceptIR env of
-            Just _  -> return ()
-            Nothing -> assertFailure
-              "expected a VAnyExcept placeholder in the compiled IR; the reproducer may have stopped reproducing"
-  , testCase "Python codegen refuses with a diagnostic naming VAnyExcept, not a pyVal panic" $
-      withParsed vAnyExceptProgSrc $ \prog ->
-        case compile defaultCompilerConfig prog of
-          Left err -> assertFailure ("compile failed: " ++ show err)
-          Right env -> case anyExceptCodegenRefusal "Python" env of
-            Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
-                                    ("VAnyExcept" `isInfixOf` msg)
-            Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
-  , testCase "Julia codegen refuses with a diagnostic naming VAnyExcept, not a juliaVal panic" $
-      withParsed vAnyExceptProgSrc $ \prog ->
-        case compile defaultCompilerConfig prog of
-          Left err -> assertFailure ("compile failed: " ++ show err)
-          Right env -> case anyExceptCodegenRefusal "Julia" env of
-            Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
-                                    ("VAnyExcept" `isInfixOf` msg)
-            Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
-  ]
+          Right (CheckedEnv (IREnv groups decls consts)) -> do
+            let plant g = g { probFun = Just (IRConst (VAnyExcept [IRConst (VBool True)]), "") }
+            case anyExceptCodegenRefusal lang (IREnv (map plant groups) decls consts) of
+              Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
+                                      ("VAnyExcept" `isInfixOf` msg)
+              Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
+  | lang <- ["Python", "Julia"] ]
 
 -- | A wildcard the inversion chain makes up itself (fst's inverse answers
 -- @(s, ANY)@) and an arithmetic step then reads (task
@@ -1251,7 +1242,7 @@ injectedWildcardArithmeticTests = testGroup "InjectedWildcardArithmetic" $
 intractableComparisonSrc :: String
 intractableComparisonSrc = "main = Uniform > exp(Uniform)\n"
 
--- The Gaussian-difference case, which *is* closed-form ('normalDiffCdfAtZero').
+-- The Gaussian-difference case, which *is* closed-form ('normalDiffComparison').
 -- The positive control: it guards the narrowing against over-refusing, which
 -- would be just as wrong and much quieter.
 gaussianComparisonSrc :: String
@@ -1691,6 +1682,19 @@ typeErrorDiagnosticTests = testGroup "TypeErrorDiagnostic"
         (not ("constraints = " `isInfixOf` msg))
       assertBool ("the message is still enormous (" ++ show (length (lines msg)) ++ " lines)")
         (length (lines msg) <= 10)
+
+  , testCase "names the source of both sides, not just the failing constraint's" $ do
+      -- Task type-error-blames-one-side-only: 'Scene' comes from the neural
+      -- read at 5:28, '[Object]' from the cons pattern at 5:20. The pattern's
+      -- constraints do not fail themselves; they bind the variable the read's
+      -- constraint later meets, so the second site is the binder's origin.
+      msg <- typeErrorFor consPatternOnADTSrc
+      assertBool ("expected the neural read's position 5:28 in: " ++ msg)
+        ("prog.spll:5:28" `isInfixOf` msg)
+      assertBool ("expected the cons pattern's position 5:20 in: " ++ msg)
+        ("prog.spll:5:20" `isInfixOf` msg)
+      assertBool ("expected the cons pattern to be named in: " ++ msg)
+        ("h : t" `isInfixOf` msg)
 
   , testCase "the mechanism is general, not keyed to the cons-pattern shape" $ do
       -- An unrelated ill-typed program must gain the same context chain.

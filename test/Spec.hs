@@ -33,8 +33,8 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, batchedPerElementEvaluatorTests, branchCountBackendTests, topKRuntimeCutoffTests, topKWriteLogitsTests)
-import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, neuralLogSpaceTests, batchedPythonTests, batchedLogSpaceTests, slowBatchedPythonTests, slowPlanEngineDifferentialTests, juliaFreeNamesTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, deepIndentationHoistTests, comprehensionIterableLetTests, batchedNestedSelectTests, normalTailPrecisionTests, resultDimIsIntTests, batchedEnumBucketingTests, batchedPerElementEvaluatorTests, branchCountBackendTests, topKRuntimeCutoffTests, topKWriteLogitsTests)
+import TestKnownIssues (knownIssuesTests, performancePinHarnessTests, batchedCompileBudgetTests)
 import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests, rewriteSequenceTests, rewriteIntegrationTests, ofToggleCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
@@ -43,7 +43,7 @@ import TestCLI (cliTests)
 import TestMemoRecursion (memoRecursionTests)
 import BackendCoverage (backendCoverageTests, irGeneratorCoverageTests)
 import GenerateCensus (generateCensusTests)
-import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+import TestFuzz (fuzzTests, samplingCheckTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, paramMainGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests)
 import TestCaseParser (parseProgram, corpusPplPath)
@@ -558,6 +558,7 @@ main = do
   planLog <- planEngineLogSpaceTests corpus manifest
   neuralLog <- neuralLogSpaceTests corpus manifest
   batchedPy <- batchedPythonTests corpus manifest
+  batchedLogSpace <- batchedLogSpaceTests corpus manifest
   branchCountBackends <- branchCountBackendTests
   detTests <- determinismTests corpus
   showcase <- showcaseTests
@@ -636,6 +637,7 @@ main = do
     , paramMainGeneratorTests
     , adtRecursionGeneratorTests
     , errorChannelTests
+    , samplingCheckTests
     , admissionOracleTests
     , fuzzScalingTests
     , injFCatalogTests
@@ -653,6 +655,7 @@ main = do
     , knownIssues
     , scalingCheckTests
     , performancePinHarnessTests
+    , batchedCompileBudgetTests
     , duplicationCensusUnitTests
     , duplicationGrowthTests
     , rewriteTests
@@ -664,6 +667,7 @@ main = do
     , planLog
     , neuralLog
     , batchedPy
+    , batchedLogSpace
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests
     , topKRuntimeCutoffTests

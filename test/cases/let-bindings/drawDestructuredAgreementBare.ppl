@@ -1,0 +1,4 @@
+-- Task bare-equality-of-shared-draw-reads-refused: the bare `a == b` spelling of
+-- drawDestructuredAgreement. A comparison reads its operands many-to-one, like
+-- the `if` that used to be needed here, so the binding is enumerated.
+main = draw (a, b) = (if Uniform < 0.5 then (True, True) else (False, False)) in a == b

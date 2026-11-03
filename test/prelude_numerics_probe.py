@@ -62,6 +62,16 @@ FLOAT_PATH = {
 # logsumexp takes a list; probed separately below.
 LIST_FLOAT_PATH = {"logsumexp"}
 
+# Two-argument float-path functions (safe_div, the scalar OpDiv); probed
+# separately below.
+BINARY_FLOAT_PATH = {"safe_div"}
+
+# The rank-1 tensor builtins (task scalar-backend-tensor-ops-lower-to-torch):
+# a list or a torch tensor in, the same values out, and a tensor argument's
+# graph kept. Probed separately below.
+VECTOR_PATH = {"vec_sum", "vec_max", "vec_logsumexp", "vec_zip_add", "vec_zip_sub",
+               "vec_zip_mul", "vec_zip_div", "vec_slice"}
+
 # Everything else: structure, control flow and sampling, not on the float
 # path -- a tensor never flows through these as a differentiable quantity
 # (listProd multiplies whatever its elements are, and is tensor-transparent).
@@ -71,7 +81,7 @@ NOT_FLOAT_PATH = {
   "rand", "randn", "categorical_index", "isAny", "isFloat", "eq", "isclose", "throw",
   "fromLeft", "fromRight", "toList", "mapList", "indexOf", "listProd",
   "listConcat",
-  "isPossible", "nest_memo", "nest_memo_scope",
+  "isPossible", "nest_memo", "nest_memo_scope", "vec_is_torch",
 }
 
 def public_functions(mod):
@@ -93,7 +103,7 @@ def same_value(a, b, rel=1e-12):
 def scalar_coverage():
   import pythonLib
   have = public_functions(pythonLib)
-  known = set(FLOAT_PATH) | LIST_FLOAT_PATH | NOT_FLOAT_PATH
+  known = set(FLOAT_PATH) | LIST_FLOAT_PATH | BINARY_FLOAT_PATH | VECTOR_PATH | NOT_FLOAT_PATH
   for n in sorted(have - known):
     fail("pythonLib." + n + " is not classified in prelude_numerics_probe.py: "
          "decide whether a tensor can reach it on the float path, and if so "
@@ -139,6 +149,48 @@ def scalar_autograd():
       if math.isfinite(want) and not same_value(g, want, rel=1e-5):
         fail(where + ": gradient " + repr(as_float(g)) + " != finite difference " + repr(want))
 
+  # The vector helpers: the tensor arm answers the list arm's values (within
+  # the reordering of a pairwise sum), and the gradient reaches the input.
+  a, b = [0.5, 0.3, 0.2, 0.0], [0.1, 0.6, 0.3, 0.25]
+  cases = {
+    "vec_sum": (lambda x, y: pythonLib.vec_sum(x), lambda x, y: [sum(x)]),
+    "vec_max": (lambda x, y: pythonLib.vec_max(x), lambda x, y: [max(x)]),
+    "vec_logsumexp": (lambda x, y: pythonLib.vec_logsumexp(x),
+                      lambda x, y: [math.log(sum(math.exp(e) for e in x))]),
+    "vec_zip_add": (pythonLib.vec_zip_add, lambda x, y: [p + q for p, q in zip(x, y)]),
+    "vec_zip_sub": (pythonLib.vec_zip_sub, lambda x, y: [p - q for p, q in zip(x, y)]),
+    "vec_zip_mul": (pythonLib.vec_zip_mul, lambda x, y: [p * q for p, q in zip(x, y)]),
+    "vec_zip_div": (pythonLib.vec_zip_div, lambda x, y: [p / q for p, q in zip(x, y)]),
+    "vec_slice": (lambda x, y: pythonLib.vec_slice(x, 1, 3), lambda x, y: x[1:3]),
+  }
+  for name, (f, want) in cases.items():
+    w = want(a, b)
+    lst = f(a, b)
+    lst = lst if isinstance(lst, list) else [lst]
+    if len(lst) != len(w) or not all(same_value(p, q) for p, q in zip(lst, w)):
+      fail("pythonLib." + name + " on lists = " + repr(lst) + ", want " + repr(w))
+    at = torch.tensor(a, dtype=torch.float64, requires_grad=True)
+    for second in (torch.tensor(b, dtype=torch.float64), b):  # tensor/tensor, tensor/list
+      r = f(at, second)
+      if not torch.is_tensor(r):
+        fail("pythonLib." + name + " returned " + type(r).__name__ + " for a tensor argument")
+        continue
+      got = r.reshape(-1).tolist()
+      if len(got) != len(w) or not all(same_value(p, q) for p, q in zip(got, w)):
+        fail("pythonLib." + name + " on tensors = " + repr(got) + ", want " + repr(w))
+      if not r.requires_grad:
+        fail("pythonLib." + name + ": autograd graph severed")
+  for empty, want in ((pythonLib.vec_sum, 0.0), (pythonLib.vec_max, -math.inf),
+                      (pythonLib.vec_logsumexp, -math.inf)):
+    for e in ([], torch.zeros(0, dtype=torch.float64)):
+      if not same_value(empty(e), want):
+        fail("pythonLib." + empty.__name__ + "(empty) = " + repr(empty(e)))
+  try:
+    pythonLib.vec_slice([1.0, 2.0], 0, 3)
+    fail("pythonLib.vec_slice read past the end without raising")
+  except IndexError:
+    pass
+
   # logsumexp: the log-space enumerated sum. The gradient w.r.t. each element
   # is its softmax weight; a severed inner log/exp leaves only the max
   # element's constant 1.
@@ -166,6 +218,23 @@ def scalar_autograd():
   if float(r) != -math.inf:
     fail("pythonLib.logsumexp([t(-inf)] * 2) = " + repr(as_float(r)))
 
+  # safe_div: the gradient flows through both operands, and the tensor arm
+  # agrees with the float arm, a zero divisor included (IEEE, not a raise).
+  for a, b in [(0.37, 2.5), (-1.5, 0.25), (1.0, 0.0), (-1.0, -0.0), (0.0, 0.0)]:
+    ref = pythonLib.safe_div(a, b)
+    at = torch.tensor(a, dtype=torch.float64, requires_grad=True)
+    bt = torch.tensor(b, dtype=torch.float64, requires_grad=True)
+    r = pythonLib.safe_div(at, bt)
+    where = "pythonLib.safe_div(" + repr(a) + ", " + repr(b) + ")"
+    if not same_value(r, ref):
+      fail(where + ": tensor arm " + repr(as_float(r)) + " != float arm " + repr(ref))
+    if not torch.is_tensor(r) or not r.requires_grad:
+      fail(where + ": autograd graph severed")
+    elif b != 0:
+      ga, gb = torch.autograd.grad(r, (at, bt))
+      if not same_value(ga, 1 / b, rel=1e-9) or not same_value(gb, -a / b ** 2, rel=1e-9):
+        fail(where + ": gradient " + repr((as_float(ga), as_float(gb))) + " != " + repr((1 / b, -a / b ** 2)))
+
 def batched_dtype():
   import torch
   import pythonLib
@@ -185,6 +254,10 @@ def batched_dtype():
     "poison()": lambda: B.poison(),
     "rand(3)": lambda: B.rand(3),
     "randn(3)": lambda: B.randn(3),
+    "log_density_uniform(x)": lambda: B.log_density_uniform(x),
+    "log_cumulative_uniform(x)": lambda: B.log_cumulative_uniform(x),
+    "log_density_normal(x)": lambda: B.log_density_normal(x),
+    "log_cumulative_normal(x)": lambda: B.log_cumulative_normal(x),
   }
   for what, mk in checks.items():
     try:
@@ -205,6 +278,14 @@ def batched_dtype():
     # ... and a live tensor arm is never promoted: the net's dtype is its own.
     if B.where_anchored(True, torch.tensor([1.0], dtype=torch.float32), 0.5).dtype != torch.float32:
       fail("pythonLibBatched.where_anchored promoted a float32 tensor arm")
+  # A select between function values answers by selecting the applied results
+  # (task batched-select-between-functions-raises); unit leaves select to unit.
+  g = B.where_anchored(torch.tensor([True, False]), (lambda v: v + 1.0), (lambda v: v * 2.0))
+  if not callable(g) or g(3.0).tolist() != [4.0, 6.0]:
+    fail("pythonLibBatched.where_anchored over two closures did not select the applied results")
+  u = B.where_anchored(torch.tensor([True, False]), B.T(None, 1.0), B.T(None, 2.0))
+  if u.t1 is not None or u.t2.tolist() != [1.0, 2.0]:
+    fail("pythonLibBatched.where_anchored over tuples holding unit did not select leafwise")
   # A reduction whose elements mix a 0-d constant and a [B] batch broadcasts
   # the constant (task batched-reduction-over-constant-and-batched-elements-fails).
   t = B.tensor_sum([torch.tensor(0.25, dtype=torch.float64), torch.tensor([1.0, 2.0], dtype=torch.float64)])

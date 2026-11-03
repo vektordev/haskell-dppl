@@ -1,0 +1,2 @@
+pair c v = (v, (c, Uniform))
+main = pair 2.0 Uniform

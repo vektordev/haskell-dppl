@@ -1,0 +1,5 @@
+data Color = Red | Green
+data Object = Nil | Obj color::Color, px::Float
+neural readO :: (Symbol -> Object)
+same a s = draw b = readO s in (if isObj a then isObj b else isNil b)
+main s1 s2 = draw a = readO s1 in (same a s2, same a s2)

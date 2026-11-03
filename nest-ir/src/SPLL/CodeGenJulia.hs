@@ -10,7 +10,7 @@ import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import Data.List (intercalate, intersperse, dropWhileEnd)
-import Data.Char (isDigit)
+import Data.Char (isDigit, isAlphaNum)
 import SPLL.IR.Value
 import SPLL.IR.Type (IRType(..), IRADTDecl(..), IRADTConstructorDecl)
 import SPLL.IR.ADT (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
@@ -163,7 +163,7 @@ generateADTClasses decls =
 generateADTClass :: IRADTConstructorDecl -> [String]
 generateADTClass (name, fields) =
   -- Struct declaration
-  ["struct " ++ struct]++
+  ["struct " ++ struct ++ " <: ADTValue"]++
   indentOnce (
     indentOnce fieldNames
   ) ++
@@ -463,9 +463,19 @@ genS (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
     return $ str "categorical_index(" . uu . str ", " . ww . str ", " . str (show start) . str ", " . str (show n) . str ")"
 genS (IRError e) =
     return $ str "throw(\"" . str (escapeStr e) . str "\")"
+-- The check reads its operand several times, so an operand that is not a bare
+-- name or number literal is bound once in a @let@ first: an operand that draws
+-- draws once, as in the interpreter (task
+-- text-backends-conformsto-reevaluates-its-operand).
 genS (IRConformsTo t x) = do
     sx <- genS x
-    return (str (jlConforms t (sx "")))
+    let ex = sx ""
+    if isAtomicOperand ex
+      then return (str (jlConforms t ex))
+      else do
+        n <- lift demandUniqueNumber
+        let tmp = "_ct" ++ show n
+        return (str ("(let " ++ tmp ++ " = " ++ ex ++ "; " ++ jlConforms t tmp ++ " end)"))
 genS x =
     error ("Unknown expression in Julia codegen: " ++ show x)
 
@@ -487,8 +497,8 @@ escapeStr = concatMap esc
 
 -- | Runtime type-tag check for the query-type guard (see IRConformsTo). Full-depth
 -- structural check mirroring the interpreter's 'valueConformsTo': recurses into tuple
--- components, either arms, and every list element; precise for float/bool/int and
--- permissive ("true") only for types with no cheap runtime tag. Note Bool <: Integer
+-- components, either arms, and every list element; permissive ("true") only for
+-- types the interpreter does not check either (type variables, arrows). Note Bool <: Integer
 -- in Julia, so TInt explicitly excludes Bool. The marginal-query wildcard (isAny) is
 -- accepted at every level, matching VAny, and short-circuits before any component
 -- accessor. The Int arg is a nesting depth used to name list-lambda binders uniquely.
@@ -518,7 +528,25 @@ jlConformsShape d (ITTensor sh t) e
       let v = "_ce" ++ show d
       in "((" ++ e ++ " isa AbstractVector) && length(" ++ e ++ ") == " ++ show (shapeNumel sh)
          ++ " && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
+-- Unit is @nothing@ and a theta tree a (values, subtrees) Tuple. An ADT slot
+-- accepts an instance of any ADT constructor (every emitted constructor struct
+-- is a subtype of the runtime's ADTValue), as the interpreter's
+-- 'valueConformsTo' accepts any 'VADT' whatever its type name.
+jlConformsShape _ ITUnit e = "(" ++ e ++ " === nothing)"
+jlConformsShape _ ITThetaTree e = "(" ++ e ++ " isa Tuple)"
+jlConformsShape _ (ITADT _) e = "(" ++ e ++ " isa ADTValue)"
 jlConformsShape _ _ _ = "true"
+
+-- | Whether a rendered operand can be repeated without being bound first: a
+-- name (possibly dotted) or a number literal. See
+-- 'SPLL.CodeGenPyTorch.isAtomicOperand'.
+isAtomicOperand :: String -> Bool
+isAtomicOperand s = case s of
+  '-' : r@(c : _) | isDigit c -> all numChar r
+  c : _ | isDigit c -> all numChar s
+  _ : _ -> all (\ch -> isAlphaNum ch || ch == '_' || ch == '.') s
+  [] -> False
+  where numChar ch = isAlphaNum ch || ch == '.' || ch == '+' || ch == '-'
 
 -- | An operand as the base of a field access (@e.t1@): a number literal is
 -- parenthesised, since @-1.0.t1@ does not parse and @3.t1@ reads as a

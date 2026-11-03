@@ -1,0 +1,2 @@
+h z w = (z * Normal) < (w * Normal + 1.0)
+main = h 0.0 1.0

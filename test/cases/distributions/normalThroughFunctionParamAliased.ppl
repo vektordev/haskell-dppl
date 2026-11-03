@@ -1,0 +1,3 @@
+shifted mu sigma = draw y = mu in Normal * sigma + y
+
+main m = shifted m 2.0 * 3.0

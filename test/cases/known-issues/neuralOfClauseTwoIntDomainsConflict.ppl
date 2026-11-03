@@ -1,0 +1,9 @@
+-- Two Int-valued neural reads over different `of` domains are refused: a
+-- declaration's `of` clause registers its layout for the whole type.
+-- Workaround: declare both over the union domain and pad the oracle with
+-- zeros (experiments_nest llm-noisy-channel-decoding rung 3: an LM over 50
+-- candidates and a glyph reader over 26 letters). Task
+-- neural-of-clause-registers-layout-type-wide.
+neural readD :: (Symbol -> Int) of [0, 1, 2]
+neural readE :: (Symbol -> Int) of [0, 1, 2, 3]
+main a b = readD a + readE b

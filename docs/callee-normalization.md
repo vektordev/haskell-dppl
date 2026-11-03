@@ -153,22 +153,23 @@ sum -- until affine Gaussian marginalisation (`witness-inversion-engines.md`) an
 witness: `arrowApplySelfSum`, `N(0, 2)`.
 
 A second, independent half of the same task: the `PNormal`/`PLogNormal`
-catch-alls in `IRCompiler` now also decline a **local `Var`** and an
-**`IfThenElse`**, neither of which `toIRNormalParams` has any `(mu, sigma)` to
-read off, so the catch-all could only ever reach its fallthrough `error`.
+catch-alls in `IRCompiler` decline a **local `Var`** and an
+**`IfThenElse`**, neither of which has any `(mu, sigma)` to read off.
 A local `Var` is reached by a nested `let` (`let x = Normal in let y = x + 1.0
-in y`: the body-factor fold retypes `x + 1.0` Deterministic but leaves `y`
-labelled `PNormal`), and `hasOwnInferenceHandler` now asks the type environment
-the same `Just (_, False)` question the `Var` equation itself dispatches on. An
-`IfThenElse` is a mixture -- of two Gaussians it is not a Gaussian -- and its
-own equation measures the arms and mixes them, which is right whether the
-condition is deterministic (`ifSelectNormalDet`, which `TestModalityInfer`
-already typed `PNormal` while the pipeline crashed on it) or probabilistic
-(`ifSelectNormalMixture`, an even mixture of `N(1,1)` and `N(0,2)` that now
-answers exactly). `isNormalExtractable`, the mirror predicate gating whether a
-top-level function gets a `normalFun` at all, excludes `IfThenElse` for the same
-reason. Corpus: `letChainNormalVar`, `letChainNormalVarTuple`,
-`ifSelectNormalDet`, `ifSelectNormalMixture`.
+in y`: with `x` recovered, `y`'s value is in scope), and the `Var` equation
+compiles it as the leaf it is. An `IfThenElse` is a mixture -- of two
+Gaussians it is not a Gaussian -- and its own equation measures the arms and
+mixes them, which is right whether the condition is deterministic
+(`ifSelectNormalDet`, which `TestModalityInfer` already typed `PNormal` while
+the pipeline crashed on it) or probabilistic (`ifSelectNormalMixture`, an
+even mixture of `N(1,1)` and `N(0,2)` that answers exactly).
+`isNormalExtractable`, the predicate gating whether a top-level function gets
+a `normalFun` at all, excludes `IfThenElse` for the same reason. Corpus:
+`letChainNormalVar`, `letChainNormalVarTuple`, `ifSelectNormalDet`,
+`ifSelectNormalMixture`. Today the Gaussian catch-all is gated on the node's
+law (`modality-and-admission.md`, "The Gaussian catch-all reads the codegen
+law"): a conditional's law is unjustified, so it is declined by the law, and
+a variable in scope is declined as a node kind.
 
 ## An arrow-typed `if`-mixture is lifted pointwise, not multiplied
 

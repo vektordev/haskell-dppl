@@ -40,6 +40,33 @@ one means deciding whether a tensor can reach it. All but that classification
 check need a torch-enabled python and fail without one, like `BatchedPython`
 (`NEST_SKIP_TORCH=1` skips them).
 
+## Scalar-mode tensors: a list, or the network's own vector
+
+In scalar Python a rank-1 tensor is a Python list, or the vector a network
+returned when a builtin reads it directly (task
+`scalar-backend-tensor-ops-lower-to-torch`). The tensor builtins are runtime
+calls that accept either: `BReduce` is `vec_sum`/`vec_max`/`vec_logsumexp`,
+`BZip` over `+ - * /` is `vec_zip_add`/`_sub`/`_mul`/`_div`, and a `BMap` whose
+body is elementwise arithmetic in its variable over a named tensor is applied
+to the whole tensor when `vec_is_torch` says it is one. On a list each is the
+comprehension or builtin the codegen used to inline, so list callers answer
+bit for bit as before and the runtime stays torch-free; on a torch tensor each
+is one torch op (`.sum()` is pairwise, so a sum differs from the list's in the
+last bits), and the autograd graph is kept.
+
+What makes the network's vector reach those ops is the **readout gather**
+(`SPLL.IRReadoutGather`, applied at the scalar backend's entry only). A map of
+a reader's probability function over a domain,
+`map (\v -> AcFst (camNN_auto_prob(raw)(v))) over [lo..hi]`, is inlined with
+the map's own facts (`v` is not ANY; every domain value is in the reader's
+`of` domain, so its membership guard holds) and optimized. When that reduces
+to exactly `raw[v + c]` over a contiguous domain, the map becomes
+`vec_slice(raw, lo + c, hi + c + 1)`, which raises rather than come back short
+on a too-short vector, and an unread domain literal let is dropped. Anything
+else (a log-space reader, a Gaussian slot, a non-contiguous domain) keeps the
+call per value. For the agreement fusion at V = 10^4 this is ~40 µs per query
+on tensors, from ~175 ms (`benchmarks/stressAgreementProduct.ppl`).
+
 ## Gradients with respect to the sample, export, and Julia AD
 
 Three more gaps blocked gradient or export use of an emitted module without
@@ -217,7 +244,9 @@ pipeline). Docs-repo task `python-nested-conditionals-exceed-indentation-limit`.
 
 Both Python backends lower an expression-position `IRLetIn` to an assignment
 expression, `((v := e), body)[1]`, and `BMap`, `BZip` and a list or tensor
-`IRConformsTo` check to comprehensions. CPython refuses `:=` anywhere inside
+`IRConformsTo` check to comprehensions (a check whose operand is not a bare
+name or number literal binds it to `_ctN` first, see below, so its
+comprehension iterates over a name). CPython refuses `:=` anywhere inside
 a comprehension's iterable, even under a lambda or a nested comprehension
 there, and the optimizer's CSE does put lets there (a cumulative's
 materialized cell list, `[T(((l := ...), ...)[1]), ...]`), so such a module
@@ -261,6 +290,13 @@ is a property of today's set of `InjF` inverses, not an enforced invariant, so
 it is wrapped too. Pinned by `test/cases/distributions/uniformLog.tst`'s `cdf(1000.0)` row and
 `test/cases/arithmetic/multExp.tst`'s `cdf(-5.0)`.
 
+Division follows the same rule. Python's float `/` raises `ZeroDivisionError`
+at a zero divisor where the IR answers a signed infinity (NaN for `0/0`), so
+scalar Python lowers `OpDiv` to `pythonLib.safe_div` unless the divisor is a
+nonzero literal (`CodeGenPyTorch.ieeeDivision`). An `ROpAdd` reduction is
+`sum(xs, 0.0)`: the builtin's int start would make an empty sum the int `0`,
+which has no negative zero.
+
 ## `--memoRecursion`: a per-query table for recursive calls
 
 A recursive probability function called with equal arguments from several
@@ -286,3 +322,19 @@ the path to a call, and by the Julia backend. The CLI warns in both cases.
 Without the flag, and for a program without recursion, the emitted code is
 byte-identical. Tests: `test/TestMemoRecursion.hs` (call counts and exactness
 through the binary) and the `End2End.Python MemoRecursion` corpus sweep.
+
+## A type-tag check reads its operand once
+
+`IRConformsTo t x` tests `x` several times (the wildcard, the tag, each
+component), so both text backends bind an operand that is not a bare name or
+number literal once before the tests: Python `((_ctN := x), check(_ctN))[1]`,
+Julia `(let _ctN = x; check(_ctN) end)`. An operand that draws then draws
+once, as in the interpreter. The check tests what the interpreter's
+`valueConformsTo` does: unit is `None`/`nothing`, a theta tree a tuple, and an
+ADT slot takes an instance of any ADT constructor, which derives the runtime's
+`ADTValue` (Python class, Julia abstract type). Unchecked are type variables
+and arrows, as in the interpreter, and symbols, which have no text-backend
+value. Pinned by the IR fuzz group's "type-tag check of a unit, theta-tree or
+ADT slot, or of a drawn operand" case. Docs-repo tasks
+`text-backends-conformsto-reevaluates-its-operand` and
+`ir-conformsto-lowering-gaps-in-text-backends`.

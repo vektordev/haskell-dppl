@@ -4,7 +4,8 @@
 -- product of the operands' own laws would answer 0.321, so this pins
 -- ModalityInfer's independence check in compareGround. Task
 -- uniform-below-random-threshold-no-forward. Since task
--- engine-applicability-as-data the binding of t is refused first: its body
--- is not conditional, so enumeration does not apply, and no other engine
--- does either, so t is bound sample-only.
-expect-failure: refused "no inference engine applies to the binding of 't'"
+-- engine-applicability-as-data the binding of t was refused first (its body
+-- was not conditional); since a comparison counts as a case split (task
+-- bare-equality-of-shared-draw-reads-refused) t is enumerated, and the
+-- comparison's own refusal is reached again.
+expect-failure: refused "has no closed form for its two random operands"

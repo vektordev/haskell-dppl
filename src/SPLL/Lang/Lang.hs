@@ -28,6 +28,8 @@ module SPLL.Lang.Lang (
 , allNamesExpr
 , substituteVar
 , readOnceInPlace
+, entersInPlace
+, enterInPlace
 , renameFreeVar
 , containsRandomSource
 , predicateExpr
@@ -179,6 +181,29 @@ readOnceInPlace x body = go body == Just (1 :: Int)
       | y /= x, x `Set.member` freeVarsExpr b = Nothing
       | otherwise = go a
     go (Expr _ f) = sum <$> traverse go (foldr (:) [] f)
+
+-- | Can the inner binding @let y = e in b@ be entered in place, as
+-- @b[y := e]@? Where @b@ reads @y@ once with no binder on the way
+-- ('readOnceInPlace'), or where @e@ is a variable that names a value
+-- (@isValue@: a local, not a declaration, which a read re-runs): an alias,
+-- whose every read is that one value, wherever it sits (@draw g = f in
+-- draw x = p in g x@; task
+-- alias-between-curried-lambdas-refuses-enumerable-and-function-arguments).
+-- 'substituteVar' renames any binder on the way that would capture it.
+entersInPlace :: (String -> Bool) -> String -> Expr -> Expr -> Bool
+entersInPlace isValue y e b = readOnceInPlace y b || case e of
+  Expr _ (Var v) -> isValue v
+  _ -> False
+
+-- | An expression with the inner bindings it opens with entered in place
+-- ('entersInPlace'): @let y = e in b@ is @b[y := e]@, repeatedly. The
+-- set-witness walk's entry into an inner binding, for a pattern that matches
+-- the shape of a value: a projection of a literal pair still sees the pair
+-- when a @draw@ binds it first (@fst (draw v = (x, 0.0) in v)@).
+enterInPlace :: (String -> Bool) -> Expr -> Expr
+enterInPlace isValue (Expr _ (Apply (Expr _ (Lambda y b)) e))
+  | entersInPlace isValue y e b = enterInPlace isValue (substituteVar y e b)
+enterInPlace _ e = e
 
 -- | @renameFreeVar old new e@ renames the free occurrences of @old@ in @e@ to
 -- @new@; each keeps its own annotation, so chain names are untouched. The

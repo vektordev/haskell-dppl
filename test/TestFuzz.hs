@@ -45,7 +45,7 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, prepareAgreementCase, prepareAgreementNeighbour, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+module TestFuzz (fuzzTests, samplingCheckTests, prepareAgreementCase, prepareAgreementNeighbour, prepareAgreementBatched, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, paramMainGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests) where
 
@@ -54,14 +54,16 @@ import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup, localOption)
 import Test.Tasty.QuickCheck (testProperties, testProperty, QuickCheckMaxRatio(..))
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
-import Control.Exception (try, evaluate, throwIO, fromException, SomeException, SomeAsyncException(..))
+import Control.Exception (try, evaluate, throwIO, fromException, bracket_, SomeException, SomeAsyncException(..))
 import Control.Monad (replicateM, unless, void, forM_)
 import Control.Monad.Random (evalRandIO)
 import System.Timeout (timeout)
 import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
-import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import Control.Concurrent (threadDelay, ThreadId, myThreadId)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, takeMVar, putMVar)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Text.Read (readMaybe)
@@ -612,6 +614,80 @@ noteExhaustion name budget = do
               ++ fuzzScaleEnvVar ++ ".")
     else return ()
 
+-- ---------------------------------------------------------------------------
+-- The per-case budget is wall-clock, so load can spend it (docs-repo task
+-- fuzz-per-case-budget-load-sensitive).
+--
+-- 'System.Timeout.timeout' measures elapsed time, not the time the case was
+-- actually scheduled. On a shared machine (several workers, another suite's
+-- run) a draw that takes ~1s alone can overrun 5s, and the property then
+-- *fails* with a "did not terminate" counterexample that passes when
+-- replayed alone. Measured: replay 920900 of
+-- 'prop_Fuzz_NeuralMaterializedTwinAgrees' passes in 8s alone and failed
+-- with 8 busy loops sharing its core.
+--
+-- CPU-time accounting would be the precise fix, but GHC offers no per-Haskell-
+-- thread CPU clock: 'getCPUTime' is the whole process (every parallel test
+-- thread), and a thread's OS thread changes under @-N@. So an overrun is
+-- *retried once*, at 'hangCeilingFactor' times the budget, before it is
+-- reported. A slow draw that a load spike pushed over the line finishes on
+-- the retry; a real hang overruns the ceiling as well and is reported as
+-- before, only later. The retry re-runs the same action, and since GHC
+-- suspends rather than discards a thunk interrupted by the timeout, work the
+-- first attempt shared with the retry is resumed, not redone.
+--
+-- Retries take 'retrySlot', so at most one retried case runs at a time across
+-- the fuzz properties (which tasty runs in parallel): when load is what made
+-- several cases overrun together, their retries do not compete with each
+-- other as well. Waiting for the slot is outside the retry's timeout. The slot
+-- is reentrant, because some properties nest a guarded check inside a guarded
+-- case ('prop_Fuzz_AdmissionTotality'): the inner retry of a thread that
+-- already holds the slot runs at once rather than deadlocking on it.
+
+-- | How far past the per-case budget a retried case may run before it is
+-- reported as a hang. Ten covers the repro above (eight busy loops on one
+-- core); a hang costs 11 budgets instead of one, which the property budget
+-- still bounds.
+hangCeilingFactor :: Int
+hangCeilingFactor = 10
+
+{-# NOINLINE retrySlot #-}
+retrySlot :: MVar ()
+retrySlot = unsafePerformIO (newMVar ())
+
+{-# NOINLINE retrySlotHolder #-}
+retrySlotHolder :: IORef (Maybe ThreadId)
+retrySlotHolder = unsafePerformIO (newIORef Nothing)
+
+withRetrySlot :: IO a -> IO a
+withRetrySlot act = do
+  me <- myThreadId
+  holder <- readIORef retrySlotHolder
+  if holder == Just me
+    then act
+    else bracket_ (takeMVar retrySlot >> writeIORef retrySlotHolder (Just me))
+                  (writeIORef retrySlotHolder Nothing >> putMVar retrySlot ())
+                  act
+
+-- | @timeoutRetrying factor budget act@: run @act@ within @budget@
+-- microseconds, and on an overrun run it once more, alone among retries,
+-- within @factor * budget@. 'Nothing' only if both attempts overran.
+timeoutRetrying :: Int -> Int -> IO a -> IO (Maybe a)
+timeoutRetrying factor budget act = do
+  first <- timeout budget act
+  case first of
+    Just r  -> return (Just r)
+    Nothing -> withRetrySlot (timeout (factor * budget) act)
+
+-- | 'timeoutRetrying' at 'hangCeilingFactor', and the message a double
+-- overrun reports.
+perCaseTimeout :: Int -> IO a -> IO (Maybe a)
+perCaseTimeout = timeoutRetrying hangCeilingFactor
+
+hangMessage :: Int -> String
+hangMessage budget = "did not terminate within " ++ show budget ++ "us, nor within "
+  ++ show (hangCeilingFactor * budget) ++ "us on a retry"
+
 withinBudget :: String -> IO Property -> IO Property
 withinBudget name = withinBudgetScaled name 1
 
@@ -627,10 +703,10 @@ withinBudgetScaled name factor act = do
     then noteExhaustion name propertyBudgetMicros >> return discardVacuous
     else do
       let budget = factor * perCaseBudgetMicros
-      result <- timeout budget act
+      result <- perCaseTimeout budget act
       return $ case result of
         Just prop -> prop
-        Nothing -> counterexample ("did not terminate within " ++ show budget ++ "us") False
+        Nothing -> counterexample (hangMessage budget) False
 
 -- ---------------------------------------------------------------------------
 -- Crash-freedom: the compiler must never throw a Haskell exception, only
@@ -811,7 +887,7 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
   forAllShrink typedDraw shrinkDraw $ \d@(p, _) -> ioProperty $ withinBudgetScaled "prop_Fuzz_AdmissionTotality" (argsBudget 4 (fuzzArgSets d)) $ do
     -- Forced inside the timeout so the whole check runs under the budget (see
     -- 'forcedProbAt' for why an unforced result would escape it).
-    checked <- timeout (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros) $ do
+    checked <- perCaseTimeout (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros) $ do
       r <- admissionCheckAt defaultCompilerConfig p (fuzzArgSets d)
       _ <- evaluate (length (show r))
       return r
@@ -825,8 +901,8 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
         compiles <- timeout perCaseBudgetMicros (trySync (evaluate (forceShow (compile defaultCompilerConfig p))))
         return $ case compiles of
           Nothing -> label "compile did not terminate (structured-accessor-compile-blowup)" True
-          Just _  -> counterexample ("admission check did not terminate within " ++ show (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros)
-                                     ++ "us, though the program compiles in time\nPROGRAM:\n" ++ pPrintProg p) False
+          Just _  -> counterexample ("admission check " ++ hangMessage (argsBudget 2 (fuzzArgSets d) * perCaseBudgetMicros)
+                                     ++ ", though the program compiles in time\nPROGRAM:\n" ++ pPrintProg p) False
   where
    judge p report =
     let (known, new) = partitionKnownAdmission (violations report)
@@ -1151,7 +1227,7 @@ runInvariantCase name factor invs d@(p, _) = do
     else do
       let argSets = fuzzArgSets d
           budget = argsBudget factor argSets * perCaseBudgetMicros
-      result <- timeout budget $ do
+      result <- perCaseTimeout budget $ do
         let cfgs = [ c | c <- [minBound .. maxBound], any ((c `elem`) . invConfigs) invs ]
         compiled <- mapM (\k -> (,) k <$> compileSafe (fuzzConfig k) p) (nub (map compileKey cfgs))
         let envOf c = rethreshold c <$> (lookup (compileKey c) compiled >>= id)
@@ -1230,7 +1306,7 @@ reportFailure target o (q, seed) =
   counterexample ("PROGRAM (argument seed " ++ show seed ++ "):\n" ++ pPrintDraw q) False
   where
     describe Hangs = case o of
-      TimedOut b -> "hang: did not terminate within " ++ show b ++ "us"
+      TimedOut b -> "hang: " ++ hangMessage b
       _          -> "hang"
     describe (Breaks n) = "invariant " ++ n ++ " broken: "
       ++ case o of
@@ -2138,9 +2214,7 @@ argGen adtDecls depth rt = case rt of
 -- a raise) is never listed here: it fails the property. Remove an entry when
 -- its ticket is fixed.
 knownBatchedFamilies :: [(String, String)]
-knownBatchedFamilies =
-  [ ("'<' not supported between instances of 'str' and", "cdf-fst-of-nested-tuple-indexes-any")
-  ]
+knownBatchedFamilies = []
 
 knownBatchedFamily :: Disagreement -> Maybe String
 knownBatchedFamily d = case dBackendA d of
@@ -2602,6 +2676,18 @@ arrowGeneratorTests = testGroup "Arrow generator"
                     (injF "neg" [letIn "v0" (var "helper") (apply (var "v0") (constF 1.0))])
       assertEqual "" (Just TyFloat)
         (typedMainCoreTy (Program [("helper", helper), ("main", mainE)] [] [] [] []))
+  , testCase "a helper whose let binds a lambda with a polymorphic body is recoverable" $ do
+      -- Task helper-recovery-flake-polymorphic-injf-free-param: the helper's
+      -- body is a 'genFunctionLet' draw, @(\\h1 -> h1 Uniform) (\\h2 -> ...)@,
+      -- and @neg h2@ over a free @h2@ matches both neg's Float and Int rows.
+      -- Red before 72c3aea, whose 'tyOfArgument' types @h2@ at @h1@'s call
+      -- site (@Uniform@); this pins that shape inside a helper.
+      let helper = "h0" #-># letIn "h1"
+                     ("h2" #-># (injF "neg" [var "h2"] #+# injF "neg" [injF "max" [normal, var "h2"]]))
+                     (apply (var "h1") uniform)
+          mainE = apply (var "helper") (constB True)
+      assertEqual "" (Just TyFloat)
+        (typedMainCoreTy (Program [("helper", helper), ("main", mainE)] [] [] [] []))
   , testProperty "a helper draw's main type is recoverable" $
       forAll (resize fuzzSize genHelperProgram) $ \p ->
         counterexample (show p) (property (isJust (typedMainCoreTy p)))
@@ -3027,6 +3113,15 @@ fuzzScalingTests = testGroup "Fuzz scaling"
   , testProperty "the property budget never scales down either" $
       forAll (choose (0.001, 50)) $ \sc ->
         scaleFuzz (max 1 sc) defaultPropertyBudgetMicros >= defaultPropertyBudgetMicros
+  , testCase "a case that overruns its budget once under load is retried, not failed" $ do
+      -- Simulates a draw slowed past its per-case budget by machine load
+      -- (docs-repo task fuzz-per-case-budget-load-sensitive): the action
+      -- needs 3x the budget, which the escalated retry covers.
+      r <- timeoutRetrying 10 20000 (threadDelay 60000 >> return ())
+      assertEqual "finishes on the retry" (Just ()) r
+  , testCase "a real hang is still reported, at the hard ceiling" $ do
+      r <- timeoutRetrying 10 2000 (threadDelay (10 * 1000 * 1000) >> return ())
+      assertEqual "times out" Nothing r
   , testProperty "a property's first case always runs" $
       -- Even at a zero budget. A property that gave up having executed
       -- nothing would report as a give-up indistinguishable from a picky
@@ -3434,12 +3529,27 @@ dynamicSampleCount p0
   | otherwise = max minSamples (min maxSamples (ceiling (targetHits / p0)))
 
 -- | Does a forward-sampled draw land in the acceptance window around the
--- query point? Exact equality for the discrete leaf types the typed
--- generator produces (Bool, Int); a symmetric epsilon-wide window for Float.
+-- query point? Exact equality for the discrete leaves (Bool, Int, Symbol,
+-- Unit); a symmetric epsilon-wide window for each Float leaf. Structured
+-- values (tuples, Eithers, lists, ADTs) recurse: the same constructor and
+-- spine, and every leaf a hit. The window is then the product of one
+-- eps-wide interval per continuous leaf, which is the box 'drawQueryPoints'
+-- prices as @pr*eps^dim@.
 sampleHit :: Double -> IRValue -> IRValue -> Bool
 sampleHit _ (VBool expected) (VBool actual) = expected == actual
 sampleHit _ (VInt expected) (VInt actual) = expected == actual
+sampleHit _ (VSymbol expected) (VSymbol actual) = expected == actual
+sampleHit _ VUnit VUnit = True
 sampleHit eps (VFloat expected) (VFloat actual) = abs (actual - expected) <= eps / 2
+sampleHit eps (VTuple e1 e2) (VTuple a1 a2) = sampleHit eps e1 a1 && sampleHit eps e2 a2
+sampleHit eps (VEither (Left e)) (VEither (Left a)) = sampleHit eps e a
+sampleHit eps (VEither (Right e)) (VEither (Right a)) = sampleHit eps e a
+sampleHit eps (VList es) (VList as) = listHit es as
+  where
+    listHit EmptyList EmptyList = True
+    listHit (ListCont e es') (ListCont a as') = sampleHit eps e a && listHit es' as'
+    listHit _ _ = False
+sampleHit eps (VADT ce es) (VADT ca as) = ce == ca && length es == length as && and (zipWith (sampleHit eps) es as)
 sampleHit _ _ _ = False
 
 -- | Well-typed scalar fuzzing takes longer here than elsewhere in this module
@@ -3471,10 +3581,10 @@ withinSuperSlowBudget name act = do
   if not hasBudget
     then noteExhaustion name superSlowPropertyBudgetMicros >> return discardVacuous
     else do
-      result <- timeout perCaseSuperSlowBudgetMicros act
+      result <- perCaseTimeout perCaseSuperSlowBudgetMicros act
       return $ case result of
         Just prop -> prop
-        Nothing -> counterexample ("did not terminate within " ++ show perCaseSuperSlowBudgetMicros ++ "us") False
+        Nothing -> counterexample (hangMessage perCaseSuperSlowBudgetMicros) False
 
 -- ---------------------------------------------------------------------------
 -- Statistics: classify an empirical hit rate against the compiler's claimed
@@ -3581,7 +3691,57 @@ windowP0 p args irEnv (VFloat center) pr dim eps =
   case (irInteg p args irEnv (VFloat (center - eps / 2)), irInteg p args irEnv (VFloat (center + eps / 2))) of
     (Just lo, Just hi) -> max 0 (hi - lo)
     _ -> pr * eps ** dim
-windowP0 _ _ _ _ pr dim eps = pr * eps ** dim
+windowP0 p args irEnv s pr dim eps
+  | n > 0 && fromIntegral n == dim = boxMass
+  | otherwise = pr * eps ** dim
+  where
+    -- A structured point (a list, tuple, Either or ADT with continuous
+    -- leaves) has no single CDF to difference, and density*volume fails at a
+    -- support boundary just as it does for a bare Float: @[[Uniform]]@
+    -- queried at 0.02 has a box reaching below 0. So the box's mass is a
+    -- midpoint-rule integral of the claimed density over it, one axis per
+    -- Float leaf, which is exact where the density is locally constant and
+    -- tracks a boundary to within a cell. Only when every Float leaf is a
+    -- density axis (the leaf count is the dimension); otherwise (a constant
+    -- Float leaf beside a random one) it stays the approximation.
+    n = length (floatLeaves s)
+    k = max 2 (floor ((64 :: Double) ** (1 / fromIntegral n))) :: Int
+    offsets = [eps * ((fromIntegral i + 0.5) / fromIntegral k - 0.5) | i <- [0 .. k - 1]]
+    grid = mapM (const offsets) [1 .. n]
+    densityAt shifts = case irProbAt p args irEnv (shiftFloatLeaves shifts s) >>= probDim of
+      Just (d, dim') | dim' == dim -> d
+      _ -> 0
+    boxMass = sum (map densityAt grid) / fromIntegral (length grid) * eps ** dim
+
+-- | The Float leaves of a value, left to right.
+floatLeaves :: IRValue -> [Double]
+floatLeaves v = case v of
+  VFloat x -> [x]
+  VTuple a b -> floatLeaves a ++ floatLeaves b
+  VEither (Left a) -> floatLeaves a
+  VEither (Right a) -> floatLeaves a
+  VList l -> listLeaves l
+  VADT _ fs -> concatMap floatLeaves fs
+  _ -> []
+  where
+    listLeaves (ListCont a rest) = floatLeaves a ++ listLeaves rest
+    listLeaves _ = []
+
+-- | Add one offset to each Float leaf of a value, in 'floatLeaves' order.
+shiftFloatLeaves :: [Double] -> IRValue -> IRValue
+shiftFloatLeaves shifts0 v0 = fst (go shifts0 v0)
+  where
+    go (d : ds) (VFloat x) = (VFloat (x + d), ds)
+    go ds (VTuple a b) = let (a', ds1) = go ds a; (b', ds2) = go ds1 b in (VTuple a' b', ds2)
+    go ds (VEither (Left a)) = let (a', ds1) = go ds a in (VEither (Left a'), ds1)
+    go ds (VEither (Right a)) = let (a', ds1) = go ds a in (VEither (Right a'), ds1)
+    go ds (VList l) = let (l', ds1) = goList ds l in (VList l', ds1)
+    go ds (VADT c fs) = let (fs', ds1) = goFields ds fs in (VADT c fs', ds1)
+    go ds v = (v, ds)
+    goList ds (ListCont a rest) = let (a', ds1) = go ds a; (rest', ds2) = goList ds1 rest in (ListCont a' rest', ds2)
+    goList ds l = (l, ds)
+    goFields ds [] = ([], ds)
+    goFields ds (f : fs) = let (f', ds1) = go ds f; (fs', ds2) = goFields ds1 fs in (f' : fs', ds2)
 
 -- | Draw 'n' independent points from 'generate' and keep only the ones the
 -- compiler assigns a well-formed, positive density to (a point with claimed
@@ -3664,7 +3824,12 @@ fuzzSamplingMatchesPDF :: Property
 -- A parameterised @main@ is checked at each of its argument tuples
 -- ('fuzzArgSets') separately: the points and the batch are both drawn from
 -- @generate(x)@ and judged against @p(. | x)@ at that @x@, never pooled.
-fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink typedDraw shrinkDraw $ \d@(p, _) -> ioProperty $ withinSuperSlowBudget "prop_Fuzz_SamplingMatchesPDF" $ do
+fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink typedDraw shrinkDraw $ \d -> ioProperty $ withinSuperSlowBudget "prop_Fuzz_SamplingMatchesPDF" $ samplingCheckDraw d
+
+-- | One draw's sampling-vs-PDF check: the body of 'fuzzSamplingMatchesPDF',
+-- without its budget, so the default suite can pin it on fixed programs.
+samplingCheckDraw :: Draw -> IO Property
+samplingCheckDraw d@(p, _) = do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous
@@ -3682,6 +3847,34 @@ fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink typedDraw 
 
 superSlowFuzzTests :: TestTree
 superSlowFuzzTests = testGroup "Fuzz" [testProperty "prop_Fuzz_SamplingMatchesPDF" fuzzSamplingMatchesPDF]
+
+-- | The sampling check on structured outputs (task
+-- fuzz-sampling-check-sampleHit-ignores-structured-values): 'sampleHit' once
+-- matched only Bool/Int/Float leaves, so a list- or Either-valued program got
+-- zero hits while every sample was the queried value, and the check failed
+-- on its first draw. Default suite: each program compiles and samples in well
+-- under a second.
+--
+-- The check is a statistical test whose alpha does not cover its own retry
+-- rounds, so a correct program comes out 'Different' now and then (measured
+-- about 1 run in 100 over these three programs). A case therefore passes if
+-- either of two independent attempts does: a systematic miss, such as the
+-- zero hits this pins, fails both, and a chance false red twice in a row is
+-- around 1e-5.
+samplingCheckTests :: TestTree
+samplingCheckTests = testGroup "Sampling check"
+  [ samplingCase "a nested list with a continuous leaf" "main = [[Uniform]]"
+  , samplingCase "an Either of a list of Bool" "main = left [False]"
+  , samplingCase "a tuple mixing a discrete and a continuous leaf" "main = (Uniform < 0.3, Normal)"
+  ]
+  where
+    samplingCase name src = testProperty name $ once $ ioProperty $
+      case tryParseProgram "<sampling>" src of
+        Left e -> return (counterexample (show e) False)
+        Right p -> do
+          first <- samplingCheckDraw (p, 0)
+          ok <- isSuccess <$> quickCheckWithResult stdArgs { chatty = False } (once first)
+          if ok then return first else samplingCheckDraw (p, 0)
 
 
 -- ---------------------------------------------------------------------------
@@ -3768,13 +3961,16 @@ admissionOracleTests = testGroup "Admission oracle"
       -- then known-issues/correlatedGaussianLetSharesLatent until
       -- affine-form-as-law-certificate typed it Bottom, then TestRejection's
       -- nested-let shared occurrence until engine-applicability-as-data typed
-      -- a @draw@ no engine applies to Bottom; a call's binding is still
-      -- admitted.) Not a crash, but
+      -- a @draw@ no engine applies to Bottom, then @g Normal@ with a
+      -- one-parameter @g@ until named-callee-binding-not-floored typed a
+      -- call's binding Bottom too; a random leading argument's binding is
+      -- still admitted, docs task leading-argument-binding-not-floored.)
+      -- Not a crash, but
       -- still a lattice bug, so its own class (task
       -- admission-oracle-promised-variants-present): the non-vacuity check
       -- that the property sees an over-promise, under the over-promise label
       -- and filed in 'knownOverPromises'.
-      rep <- oracleOn "g x = if sqrt x > 0.5 then 1.0 else 0.0\nmain = g Normal"
+      rep <- oracleOn "g x y = if sqrt x > y then 1.0 else 0.0\nmain = g Normal 0.5"
       assertNoViolation rep
       assertEqual "outcomes" [(ModeGenerate, "value"), (ModeProbability, "promised-absent"), (ModeIntegrate, "promised-absent")]
         (outcomesOf "main" rep)

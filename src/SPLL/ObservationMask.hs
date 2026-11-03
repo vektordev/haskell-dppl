@@ -521,17 +521,39 @@ masksOver = map Set.fromList . subsequencesBySize
 holeFor :: Expr -> Expr
 holeFor leaf = Expr (makeTypeInfo { rType = rType (getTypeInfo leaf) }) (Constant VAny)
 
+-- | Drop every let binding (@(\\y -> b) v@) whose variable the body does not
+-- read, innermost first, so a binding read only by a dropped one goes too.
+dropDeadBindings :: Expr -> Expr
+dropDeadBindings e = case e of
+  Expr ti (Apply (Expr lti (Lambda y b)) v) ->
+    let b' = dropDeadBindings b
+    in if y `Set.member` freeVarsExpr b'
+         then Expr ti (Apply (Expr lti (Lambda y b')) (dropDeadBindings v))
+         else b'
+  _ -> setSubExprs e (map dropDeadBindings (getSubExprs e))
+
 -- | Replace every masked leaf's sub-expression by a hole.
 --
 -- Runs after RInfer, so the leaf's 'RType' is available to carry onto the hole.
 -- Slots not in the mask, and everything outside the observation tree, are left
 -- byte-identical — in particular the empty mask is the identity, which is what
 -- makes the all-concrete variant today's body.
+--
+-- A binding whose every reader sat in a masked leaf is dead in the pruned
+-- body, and is dropped ('dropDeadBindings'): its value is never read, and a
+-- binding's value has mass one, so @p(draw y = v in b) = p(b)@. Left in, it
+-- still read the variables its value reads, and an outer binding saw a reader
+-- no engine follows: @draw x = Normal in draw y = (if x > 0.0 then Normal +
+-- 1.0 else Normal) in (x > 0.0, y)@ at @(_, ANY)@ refused the binding of @x@
+-- (task dead-draw-bound-mixture-blocks-shared-condition-inversion). Only a
+-- non-empty mask drops anything, so the empty mask stays the identity.
 pruneObservation :: [ADTDecl] -> Mask -> FnDecl -> FnDecl
-pruneObservation decls m (name, body) = (name, goParams body)
+pruneObservation decls m (name, body)
+  | Set.null m = (name, body)
+  | otherwise  = (name, goParams body)
   where
     goParams (Expr ti (Lambda x b)) = Expr ti (Lambda x (goParams b))
-    goParams e                      = prune [] e
+    goParams e                      = dropDeadBindings (prune [] e)
 
     prune path e = reb (rewrite path core)
       where (_, core, reb) = focus [] e

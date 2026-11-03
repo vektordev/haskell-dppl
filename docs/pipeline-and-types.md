@@ -12,7 +12,7 @@ SPLL source (.spll/.ppl)
   → Analysis.hs (DiscreteValues tags) → DrawSinking.hs (per-operand draws)
   → Typing/ForwardChaining.hs (chain names)
   → Typing/ModalityInfer.hs (PTypes)
-  → IRCompiler.hs → IR (IntermediateRepresentation.hs)
+  → IRCompiler.hs (driver; engines in IRCompiler/*.hs) → IR (IntermediateRepresentation.hs)
      Three compilation branches: generate, probability, integrate
   → IRSelectPass.hs (batched only) → IROptimizer.hs (const folding, CSE, let-in)
   → IRGatherPass.hs (batched only: one-hot neural reads become one gather)

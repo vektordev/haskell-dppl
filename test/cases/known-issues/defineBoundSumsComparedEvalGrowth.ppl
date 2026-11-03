@@ -1,0 +1,7 @@
+neural readD :: (Symbol -> Int) of [{{for i in 0..D-1 sep ", "}}{{i}}{{end}}]
+
+main a b c d e f =
+  draw x1 = readD a in draw x2 = readD b in draw x3 = readD c in
+  draw x4 = readD d in draw x5 = readD e in draw x6 = readD f in
+  define r1 = x1 + x2 in define r2 = x3 + x4 in define r3 = x5 + x6 in
+  if r1 < r2 then r2 < r3 else False

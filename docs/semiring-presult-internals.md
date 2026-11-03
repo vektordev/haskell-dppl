@@ -29,28 +29,28 @@ by an `ROpAdd` count of possible dim-0 terms rather than a max/min reduction,
 because the batched backend refuses `ROpMax`; that is sufficient only because
 a scalar's dim is 0 or 1. Its caller is the mixed enumerate-and-shift/scale
 rule (over the operand's values, or over its draws' cells via
-`IRCompiler.latentCellSum`, `docs/enumeration.md`), whose "continuous" operand is known only to be a `Float` -- it may be a
+`IRCompiler.Enumerate.latentCellSum`, `docs/enumeration.md`), whose "continuous" operand is known only to be a `Float` -- it may be a
 plan-answered discrete count or an atom/density mixture (task
 plan-sum-with-sunk-discrete-draw-reports-density; corpus
 `plan-enumeration/planSumWithSunkDiscreteDraw`,
 `arithmetic/plusEnumMixedAtomDensity`).
 
 `enumMinDimP` is the general form: terms of any dim up to a static bound
-`maxDim` (`IRCompiler.floatLeafBound` of the measured type, the number of
+`maxDim` (`IRCompiler.Enumerate.floatLeafBound` of the measured type, the number of
 `Float` leaves, the larger alternative of a sum type). The lowest possible dim
 is a ladder over `0 .. maxDim - 1`, one `ROpAdd` count of the possible terms
 per rung, so it also builds only from what batched emits. The enumerated sums
-over a `draw` (`IRCompiler.enumerateBinding`, `enumerateCurriedArgument`) use
+over a `draw` (`IRCompiler.Enumerate.enumerateBinding`, `enumerateCurriedArgument`) use
 it through `enumTerm`/`enumSumTerms` whenever the body's dim is not literally
 0 (a forward-and-compare indicator's always is, so those sums emit what they
 did before), and mark a zero-weight value's term impossible so that it cannot
 outvote a density (task enumerated-sum-over-density-body). A type with no
 bound (a list of reals) keeps `enumSumP`, and `dimAwareEnum` tells
-`IRCompiler.forwardOrInfer` that its delegated body still needs the run-time
+`IRCompiler.Enumerate.forwardOrInfer` that its delegated body still needs the run-time
 density guard (`docs/enumeration.md`).
 
 `rProb` is a newtype `P` that only `SPLL.Semiring` can construct, so
-`IRCompiler.hs` must route probabilities through a Semiring-aware
+`IRCompiler` and its engine modules must route probabilities through a Semiring-aware
 combinator or one of two escape hatches: `unsafeLinearP` (a deliberately
 linear-only subsystem — no call site uses it today) or `sealP` (bespoke
 `PResult`s assembled from already-trusted values). Grepping `unsafeLinearP`
@@ -108,6 +108,18 @@ semiring-aware too. Two consequences worth internalising before touching
   (the CDF is increasing), never on the difference. A sum of many
   alternatives outside `mixP` is `sumAllSR`, which let-binds operands and
   partial sums wherever `srPlus` reads its operands twice.
+- **A complement is the other side's weight only under sum-product.**
+  `srConserves` says whether `srComplement` of a *combined* weight (several
+  derivations joined by `srPlus`) is the complementary event's weight. It is
+  for sum-product, not for max-product, where `1 - max` is not the best
+  derivation on the other side. Under max-product a complement is sound only
+  on a single derivation's weight (`IRCompiler.Inference.singleDerivation`: a leaf CDF,
+  a Gaussian closed form, an InjF over one such operand). So an `if`
+  condition's two weights come from `condWeights` (below), a leaf condition
+  with several derivations is compiled at both polarities, and a `gt`/`lt`
+  against a bound whose operand has several derivations sums the operand's
+  enumerated domain instead of complementing its CDF, or is refused (task
+  `map-semiring-complement-and-cdf-wrong`).
 
 ## Dimension Counting
 
@@ -169,7 +181,9 @@ unmodified, so a recursive program's count is its traversed recursion
 depth. An arm whose condition has probability exactly zero contributes 0
 and — via `IRIf`, not a strict multiply — is never evaluated; that
 short-circuit is what makes a recursive program's branch count terminate.
-A pruned `topK` branch likewise contributes 0.
+A pruned `topK` branch likewise contributes 0. A world set (`measureWorlds`, both
+witness engines) is the sum of its worlds' counts, each world's factors
+included; a world whose guards fail counts 0.
 
 `bc` measures the compiled artifact's leaf-evaluation cost, not an
 invariant of the distribution: it is stable under respelling the same leaf
@@ -238,7 +252,7 @@ introduced by a fix that looked local. So (task
   no sub-result and so cannot compound, is copied inline into its readers,
   keeping its constants foldable).
 - World factors (`WFactor`) carry their block as an `Open PResult`;
-  `measureWorld` and `measurePlanWorlds` bind it under the world's guards.
+  `measureWorlds` binds it under the world's guards.
 
 ### Scopes are opaque: the rule by construction
 
@@ -344,16 +358,17 @@ p(0) on a 7-slot count took 34 s against 0.1 s topK-off (task
 A pruned result is a **lower bound** on the exact one, and lower bounds
 compose under products, sums and the lowest-dim-wins mixture — but not under a
 complement or a subtraction: `1 − lower` and `a − lower` are *upper* bounds.
-`IRCompiler.unpruned` (accumulated probability seeded with `∞`, which fails
+`IRCompiler.Monad.unpruned` (accumulated probability seeded with `∞`, which fails
 every "below cutoff" test in both semirings and crosses a call boundary as a
 plain argument) therefore compiles the operand of every such site with pruning
 off, and any new `srComplement`/`srMinus`/CDF-difference site must do the
 same:
 
-- an `IfThenElse` *condition* (its False-weight is the complement of its
-  True-probability — `test/cases/topk-pruning/topKComplementCondition`, the minimized shape
-  of the fuzz counterexample this was found by: a condition that is itself an
-  `if` had its True-probability pruned to `0`, so its else-weight became `1`);
+- a *leaf* `IfThenElse` condition, whose False weight is the complement of
+  its True weight (`test/cases/topk-pruning/topKComplementCondition` is the
+  minimized fuzz counterexample from before the condition pair: a condition
+  that is itself an `if` had its True weight pruned to `0`, so its else-weight
+  became `1`);
 - the integral behind a `gt`/`lt` against a deterministic bound
   (`topKComplementBound`);
 - both operands of the `AnyExcept` subtraction `p(ANY) − p(v)`
@@ -365,9 +380,18 @@ same:
   `1/a` do not);
 - both bounds of a set-witness interval measure (`cdfAtBound`).
 
-The alternative — inferring a condition at both polarities, each pruned — was
-rejected: it is the O(2^d) double compile the `IfThenElse` case retreated from,
-and it would not have helped the subtraction sites anyway.
+A condition that is itself a Bool `if` (or a `not` of one) is not such a
+site. `IRCompiler.Inference.condWeights` compiles it once to its pair
+`(p(True), p(False))`, from its children's pairs:
+`pT = cT⊗aT ⊕ cF⊗bT`, `pF = cT⊗aF ⊕ cF⊗bF`. Each child is compiled once, so
+the compile stays linear in nesting depth (compiling the condition at each
+polarity separately is the O(2^d) of fuzz-qc-compiler-bugs item 3). Each arm's
+pair is bound once under the arm's guard (weight not zero, and under topK
+`acc ⊗ w` at or above the cutoff); a pruned arm contributes zero to both
+weights, so both are lower bounds and the pair nodes compile pruned
+(`topKPrunesInsideCondition`). Only the recursion's leaves complement, and
+they compile unpruned. The same pair is what gives max-product the best
+False derivation instead of `1 - max`.
 
 Separately, an `_integ` function takes no `acc_prob` parameter, so a
 cumulative-mode call into another definition passes only the sample and the

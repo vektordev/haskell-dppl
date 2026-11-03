@@ -48,7 +48,7 @@ module SPLL.Semiring (
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
   prodP, onProb, onDim, onBranches, underLambdas, substResult, errorWhen, constantResult, guardP, zipResult, zip3Result,
-  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumMinDimP, enumSumNode, tensorDomainSR, opaqueMass, closeResult, guardedResult, shareUnlessLeaf,
+  scaleCoV, scaleCoVAtom, anySafe, anySafeShared, enumSumP, enumMixP, enumMinDimP, enumSumNode, tensorDomainSR, opaqueMass, closeResult, closeResults, guardedResult, shareUnlessLeaf,
   packResult, unpackResult, packedProb, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
@@ -68,6 +68,7 @@ import Control.Monad.Writer.Lazy (WriterT, runWriterT, tell, lift)
 import Control.Monad.State (MonadState)
 import Control.Monad.Except (ExceptT, MonadError, runExceptT, throwError)
 import qualified Data.Set as Set
+import Data.List (mapAccumL)
 
 -- | The compiler monad: fresh names ('Supply'), emitted let-bindings (a
 -- writer), and one refusal channel (task static-refusals-become-absent-variants).
@@ -366,8 +367,9 @@ data Semiring = Semiring
   , srTimes    :: IRExpr -> IRExpr -> IRExpr  -- ^ independent conjunction (prodP, change-of-variables scaling)
   , srTimesOp  :: Operand                     -- ^ the 'Operand' 'srTimes' is spelled with, for the same reason 'srReduceOp' exists: an /elementwise/ product over two tensors ('BZip', task categorical-product-ov-fusion) has to name an operator inside a node, which no binary @IRExpr -> IRExpr -> IRExpr@ function can do. Must stay in step with 'srTimes' -- @OpMult@ linear, @OpPlus@ in log space, where getting it wrong silently computes a different number rather than failing
   , srPlus     :: IRExpr -> IRExpr -> IRExpr  -- ^ mixture / alternative sum (mixP). Pairwise only -- 'srReduceOp' is this same operator's identity for 'enumSumP's fold over a whole (possibly large) enumerated domain, kept as a separate field because the fold has to pick an IR *reduction node* (design ir-tensor-values' 'BReduce'), which no binary 'IRExpr -> IRExpr -> IRExpr' function can name.
-  , srMinus    :: IRExpr -> IRExpr -> IRExpr  -- ^ AnyExcept: marginal minus one branch (mixSubP)
+  , srMinus    :: Maybe (IRExpr -> IRExpr -> IRExpr)  -- ^ AnyExcept: marginal minus one branch (mixSubP). 'Nothing' where the family has no subtraction (max-product), and 'mixSubP' then refuses the variant
   , srComplement :: IRExpr -> IRExpr          -- ^ CDF flip under a decreasing transform: 1 - x linear, log(1 - exp x) log
+  , srConserves :: Bool                       -- ^ whether 'srComplement' of a COMBINED weight (one 'srPlus' / 'srReduceOp' over several derivations) is the complementary event's weight. True for sum-product, where an event and its complement add up to one. False for max-product: the complement of the best True derivation is not the best False one (@1 - max@ is not a max), so there 'srComplement' is sound only on a single derivation's weight (a leaf CDF), and a site holding a combined weight must compute the other side directly (task map-semiring-complement-and-cdf-wrong)
   }
 
 -- | Build the 'Semiring' for a family (task semiring-parametric-marginals) and
@@ -393,12 +395,12 @@ mkSemiring SRCounting   _     = error $ "Semiring.mkSemiring: SRCounting has no 
   ++ "never have reached here -- this is a defensive check, not a documented refusal path."
 
 linearSemiring :: Semiring
-linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) OpMult (IROp OpPlus) (IROp OpSub)
-                          (upperTailComplement Linear (IROp OpSub const1))
+linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) OpMult (IROp OpPlus) (Just (IROp OpSub))
+                          (upperTailComplement Linear (IROp OpSub const1)) True
 
 logSemiring :: Semiring
-logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus logSumExpIR logSubExpIR
-                       (upperTailComplement Log logComplement)
+logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus logSumExpIR (Just logSubExpIR)
+                       (upperTailComplement Log logComplement) True
 
 -- | Max-product (MAP/Viterbi), linear domain: independent conjunction is still
 -- plain multiply (maximizing a product of independent factors over independent
@@ -412,11 +414,11 @@ logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus lo
 --
 -- 'srMinus' has no sound definition: max has no inverse (recovering the
 -- runner-up when the excepted branch WAS the max needs more state than a
--- scalar carries), so AnyExcept under this family is refused with a named
--- error at the point it would be compiled -- see 'mapHasNoExcept'.
+-- scalar carries), so it is 'Nothing', and 'mixSubP' refuses the variant at
+-- the point an AnyExcept would be compiled -- see 'mapHasNoExceptReason'.
 maxLinearSemiring :: Semiring
 maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult maxPairIR
-                             mapHasNoExcept (upperTailComplement Linear (IROp OpSub const1))
+                             Nothing (upperTailComplement Linear (IROp OpSub const1)) False
 
 -- | Max-product, log domain: 'srTimes' is add (as in ordinary log-space
 -- sum-product -- independent factors still combine by adding their logs), and
@@ -427,7 +429,7 @@ maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult max
 -- stabilize).
 maxLogSemiring :: Semiring
 maxLogSemiring = Semiring True ROpMax negInfIR const0 (IROp OpPlus) OpPlus maxPairIR
-                          mapHasNoExcept (upperTailComplement Log logComplement)
+                          Nothing (upperTailComplement Log logComplement) False
 
 -- | The log-space complement @log(1 - exp x)@ of a log-probability.
 logComplement :: IRExpr -> IRExpr
@@ -485,14 +487,17 @@ complementWhen sr cond = go
 maxPairIR :: IRExpr -> IRExpr -> IRExpr
 maxPairIR a b = IRIf (IROp OpGreaterThan a b) a b
 
--- | 'srMinus' for both max-product instances: max has no algebraic inverse, so
--- there is no way to recover "the marginal excluding one branch" from the
--- marginal's own max alone (see 'maxLinearSemiring'). Fires as a Haskell
--- 'error' at the point IRCompiler would otherwise build the AnyExcept/mixSubP
--- IR -- i.e. at compile time, on the one program shape (a marginal-except
--- query) that reaches it, not at every compile under this family.
-mapHasNoExcept :: IRExpr -> IRExpr -> IRExpr
-mapHasNoExcept = error $ "Semiring: this program compiles a marginal-except query "
+-- | Why a semiring without 'srMinus' (both max-product instances) refuses an
+-- AnyExcept: max has no algebraic inverse, so there is no way to recover "the
+-- marginal excluding one branch" from the marginal's own max alone (see
+-- 'maxLinearSemiring'). 'mixSubP' refuses the variant with this reason at the
+-- point it would build the AnyExcept IR -- at compile time, on the one program
+-- shape (a marginal-except query) that reaches it, not at every compile under
+-- this family. A refusal, not an 'error': the variant is absent and every
+-- other variant of the program compiles (task
+-- map-semiring-marginal-except-errors-instead-of-refusing).
+mapHasNoExceptReason :: String
+mapHasNoExceptReason = "Semiring: this program compiles a marginal-except query "
   ++ "(AnyExcept -- e.g. P(x != v)), which has no defined meaning under the "
   ++ "max-product (MAP) semiring: max has no subtraction, so \"the best "
   ++ "derivation excluding one specific branch\" cannot be recovered from the "
@@ -1280,6 +1285,44 @@ closeResult sr tag guards (Open r binds)
     -- Guards nest as IRIf, never OpOr/OpAnd -- see 'guardP'.
     guarded orElse e = foldr (\g acc -> IRIf g acc orElse) e guards
 
+-- | 'closeResult' for several results sharing ONE block (the True and False
+-- weights of a condition arm, 'IRCompiler.condWeights'): the block is bound
+-- once, under @guards@, holding only the fields that read it, and every
+-- other field stays inline (guarded as 'closeResult' guards it), so a
+-- statically-known dim, flag or constant weight is not routed through the
+-- tuple where it would no longer fold. At most one reading field takes the
+-- block inline instead, as in 'closeResult'.
+closeResults :: Semiring -> String -> [IRExpr] -> Open [PResult] -> CompilerMonad [PResult]
+closeResults sr tag guards (Open rs binds)
+  | length readers <= 1 = return (map inlined rs)
+  | otherwise = do
+      v <- mkVariable tag
+      let n = length readers
+          fallbacks = [fb | r <- rs, (f, fb) <- zip (fieldsOf r) impossibleFields, reads' f]
+          block = generateLetInExpr binds (packMany readers)
+      setVariables [(v, foldr (\g acc -> IRIf g acc (packMany fallbacks)) block guards)]
+      let field k e orElse
+            | reads' e  = (k + 1, projMany k n (IRVar v))
+            | otherwise = (k, orElse e)
+          rebuild k r =
+            let (k1, p)   = field k  (unP (rProb r)) (guarded (srZero sr))
+                (k2, d)   = field k1 (rDim r)        (guarded dim0)
+                (k3, bc)  = field k2 (rBranches r)   id
+                (k4, imp) = field k3 (rImposs r)     (guarded constTrueIR)
+            in (k4, PResult (P p) d bc imp)
+      return (snd (mapAccumL rebuild 0 rs))
+  where
+    reads' = mentionsAny (map fst binds)
+    fieldsOf r = [unP (rProb r), rDim r, rBranches r, rImposs r]
+    impossibleFields = [srZero sr, dim0, const0, constTrueIR]
+    readers = filter reads' (concatMap fieldsOf rs)
+    wrapIfRead e = if reads' e then generateLetInExpr binds e else e
+    guarded orElse e = foldr (\g acc -> IRIf g acc orElse) e guards
+    inlined r = PResult (P (guarded (srZero sr) (wrapIfRead (unP (rProb r)))))
+                       (guarded dim0 (wrapIfRead (rDim r)))
+                       (wrapIfRead (rBranches r))
+                       (guarded constTrueIR (wrapIfRead (rImposs r)))
+
 -- | Re-attach a sub-result's let-in block: bound once ('closeResult', under
 -- @guards@) when copying it could compound, inline in each reading field when
 -- it cannot. The one sanctioned exception to binding every block (task
@@ -1393,7 +1436,9 @@ mixP sr = mixWith (srPlus sr)
 -- | 'mixP' for the AnyExcept case, where the excepted value's mass is
 -- subtracted from the marginal rather than added.
 mixSubP :: Semiring -> IRExpr -> PResult -> PResult -> CompilerMonad PResult
-mixSubP sr = mixWith (srMinus sr)
+mixSubP sr bc a b = case srMinus sr of
+  Just minus -> mixWith minus bc a b
+  Nothing    -> refuse "" mapHasNoExceptReason
 
 -- | Shared body of 'mixP'/'mixSubP'. Both operands are let-bound first, since
 -- each is read several times by the case analysis below.

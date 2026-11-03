@@ -45,7 +45,7 @@ terms at that dim summed; `docs/semiring-presult-internals.md`). `draw b =
 Uniform < 0.5 in if b then Normal else 3.0` is then the mass 0.5 at 3.0 and the
 density 0.5·φ(x) elsewhere (task `enumerated-sum-over-density-body`, corpus
 `let-bindings/enumLetGatesFresh{Density,MixedDim,TupleDims}`). That needs a
-static bound on the dims (`IRCompiler.floatLeafBound`); under a sum whose body
+static bound on the dims (`IRCompiler.Enumerate.floatLeafBound`); under a sum whose body
 type has none (a list of reals), `CompilerMetadata.dimAwareEnum` is off and the
 delegated probability keeps a run-time guard: a possible result with a non-zero
 dim raises "met a continuous density" rather than being summed as a mass. The
@@ -310,7 +310,12 @@ group's draws itself, outside its applicability guard, when it is nested: a
 table built inside the guard could not leave it. The outermost loop is not
 tabulated, since there the table would only reorder the same reads, and
 neither is `--batched` mode, where `IRLeafTablePass` tabulates nested neural
-leaves as one gathered table. Pinned by
+leaves as one gathered table. Nor is a draw inside a materialized-marginal leaf
+(`pointQueryTable`, `CompilerMetadata.inTabulatedLeaf`): the leaf's compiled
+size decides whether its table is built at all, and with the scalar-only tables
+in it the scalar and batched compiles would answer through different engines
+and prune differently under topK (`Internals.tabulatedLeafBackendIndependent`,
+`neural/noisyIfFoldOfReads`). Pinned by
 `Internals.splitReadFieldLeafTabulated` and `neural/splitReadFieldChain`.
 
 The per-slot chain is then tabulated by Tier 0 materialization *inside* the
@@ -530,8 +535,8 @@ constrains those leaves again. The gate used to be a syntactic reader count
 `g (o1 sc) + ... + g (oN sc)` over a product scene enumerated 3^N worlds and
 OOM-ed at N = 8) and too lax for a helper reading its parameter twice
 (`planHelperReadsPlanParamTwice`, a silent wrong number). Now a merged world
-records the leaves it baked (`pwBaked`); `intersectPlanW`/`addSpecCons` set
-`pwClash` when a baked leaf meets any other constraint or baked set;
+records the leaves it baked (`wBaked`); `intersectPlanW`/`addSpecCons` set
+`wClash` when a baked leaf meets any other constraint or baked set;
 `planWitnessApply` traverses with grouping on and, if a surviving world
 clashed, discards that attempt (bindings via `pass`, name supply rewound) and
 reruns with grouping off -- for a body the reader count already kept
@@ -568,9 +573,9 @@ at N = 5 for a per-slot recolour, and the 10-slot CLEVR scene ran out of 2 GB.
 two fields have several worlds. Constraints its worlds share stay live
 (`planCommonDiscreteCons`). The rest is measured once: as a `WMass` when every
 world is dim 0 and uncoupled, so an enclosing value DP can still merge it, and
-otherwise as a whole `measurePlanWorlds` `PResult` carried as a `WFactor`. By
+otherwise as a whole `measureWorlds` `PResult` carried as a `WFactor`. By
 distributivity, which the dimension-aware `mixP`/`prodP` pair also satisfies,
-the measure is unchanged. The collapsed leaves go into `pwBaked`, like a value
+the measure is unchanged. The collapsed leaves go into `wBaked`, like a value
 group's. `planWitnessApply` therefore tries three attempts in order:
 factoring and grouping, then grouping alone (only if something factored), then
 neither. A body whose fields read the same slot
@@ -615,7 +620,7 @@ product-of-experts shape: the kept mass is `P_a(k)·P_b(k)` per class and
 enumeration, O(V²), evaluating the second expert's marginal V times per
 outer value. Correct, and unusable at the vocabulary scale it exists for.
 
-`IRCompiler.enumerateAgreement` rewrites the double sum into dense vector
+`IRCompiler.Enumerate.enumerateAgreement` rewrites the double sum into dense vector
 algebra over the shared domain. Writing `T`/`E` for the two arms' masses
 against the query and `Sb = Σ_k pb(k)`:
 
@@ -672,7 +677,7 @@ exactly as before:
   "branch counting doesn't change the probability" property into a
   differential test of fused against unfused, which is how the fusion is
   covered at every corpus query point rather than only where a `.tst` says so.
-- **the max-product semiring**, whose `srMinus` is `mapHasNoExcept` for the
+- **the max-product semiring**, which has no `srMinus` (`Nothing`) for the
   same reason the algebra above is sum-product-only.
 - **an arm that reads the inner variable**, where the off-diagonal sum does
   not factor and no O(V) form exists.

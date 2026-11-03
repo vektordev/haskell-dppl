@@ -418,6 +418,19 @@ The per-case budget (`perCaseBudgetMicros`, 5s; 8s in the SuperSlow tier) bounds
 **one case**. It works: a non-terminating draw is cut off, reported as a
 counterexample, and shrunk.
 
+The budget is wall-clock (`System.Timeout.timeout`), so machine load can spend
+it: a draw that takes ~1s alone overran 5s with eight busy loops sharing its
+core, and the property failed on a counterexample that passed when replayed
+alone. GHC has no per-Haskell-thread CPU clock to measure instead (`getCPUTime`
+is the whole process, and a thread's OS thread moves under `-N`), so an overrun
+is **retried once** before it is reported (`timeoutRetrying`), at
+`hangCeilingFactor` (10) times the budget. Retries run one at a time across the
+fuzz properties (a reentrant slot, since `prop_Fuzz_AdmissionTotality` nests a
+guarded check inside a guarded case). A load-slowed draw finishes on the retry;
+a real hang overruns the ceiling too and fails as before, with "did not
+terminate within Bus, nor within 10·Bus on a retry". A hang now costs 11
+budgets rather than one, which the property deadline below still bounds.
+
 It does not bound the **property**. QuickCheck keeps drawing until it has
 `withMaxSuccess` successes or has discarded `maxDiscardRatio` times as many, and
 it re-runs the case for every shrink candidate besides — so a property that
@@ -897,9 +910,7 @@ call). The comparison is `answersAgree`, exact on dim and the flag, and
 float32-aware where the literal is float32: an answer also agrees if it
 matches the interpreter at the point rounded to float32 (`float32Point`).
 A batched raise whose message names a filed family
-(`knownBatchedFamilies`: message needle to ticket; `'<' not supported between
-instances of 'str'` is the marginalised `ANY` being indexed, see
-`known-issues/cdfFstOfNestedTupleIndexesAny`) is tabulated under `known
+(`knownBatchedFamilies`: message needle to ticket, empty today) is tabulated under `known
 batched family` rather than failed, as `knownOverPromises` does for the
 admission oracle; a wrong value always fails. A call that raises reports
 every point in it, so one bad point fails its batch-mates too; a disagreement's minimal repro is a single point, as in
