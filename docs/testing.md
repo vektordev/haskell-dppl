@@ -786,6 +786,12 @@ with a construct outside `certifiedConstructs` keeps its `End2End.Python` and
 `End2End.Julia` checks (and the WriteLogits ones), keyed with the runtime as in
 the table above. `certifiedConstructs` is a static list of what the IR fuzz
 generator's fixed-seed sample reaches, held exact by `Slow.IRGeneratorCoverage`.
+`End2End.Python` routes on `pythonProgramCensus`, which adds `Python:deep line`
+(never certified) when a compile's scalar module reaches CPython's per-line
+limits: a spilled line (`_sN = `), a hoisted block (`def _hN(`), or a line
+still too deep to import. That depends on scale (a domain's width, a chain's
+depth), which no construct names and the fuzzers' small programs never reach.
+Julia has no spill and routes on `programCensus` alone.
 Certification is per construct, and a bug can live in a combination of
 certified constructs. `ConstructCombinations` measures combinations:
 parent/child edges (`IRIf.cond > Op:OpEq`), scoping contexts (a let anywhere

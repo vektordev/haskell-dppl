@@ -159,6 +159,14 @@ checked. Pinned by `End2End`'s
 `deep expression spill` group (hand-built IR: a 300-term sum, with a
 divide-by-zero arm as the laziness canary).
 
+A list constant is one leaf, so no spill can cut it, and its cons spine opens
+one bracket per cell. The scalar `pyVal` therefore spells a list of more than
+32 cells flat, `toList([x1, .., xn])` (with an ANY tail,
+`listConcat(toList([..]), AnyInferenceList())`); shorter lists keep the nested
+spelling. Before, a 250-value domain constant made a module that did not
+import at -O0, and a harness row passing a 250-entry logit vector failed to
+parse. Docs-repo task `python-census-certifies-spilled-modules`.
+
 The batched emitter's one known V-deep line no longer arises: a select chain `x == k0 ? v0 : x == k1 ? v1 : .. : d` with scalar
 constant keys and arms and a pure scrutinee -- what `indexOfChain` makes of a
 read-logits network's value-to-slot lookup for a non-contiguous domain -- is

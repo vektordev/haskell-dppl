@@ -18,12 +18,15 @@ import Test.Tasty.HUnit (testCase, assertBool, assertEqual, (@?=))
 import SPLL.Prelude (compile)
 import SPLL.CompilerConfig (defaultCompilerConfig, CompilerConfig(..))
 import ImpactManifest
-import CertifiedCensus (programCensus, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
+import CertifiedCensus (programCensus, pythonProgramCensus, pythonDeepLineLabel, uncertifiedConstructs, certifiedConstructs, samplingConstructs,
                         batchedProgramCensus, batchedUncertifiedConstructs, batchedCertifiedConstructs, lineSpillLabel, oneHotGatherLabel,
                         selectDemotionLabel, pureCalleeLabel, partialSplitLabel)
 import End2EndTesting (interpreterKey, pythonKey, juliaKey, loadCorpusPair, networkMocks)
 import TestCaseParser (corpusPplPath, isProbTestCase, isCumulTestCase)
 import SPLL.IRTypeCheck (CheckedIR)
+import SPLL.CodeGenPyTorch (pyVal)
+import SPLL.PythonNesting (pythonNestingDepth)
+import SPLL.Lang.Types (GenericValue(..), GenericList(..))
 
 impactManifestTests :: TestTree
 impactManifestTests = testGroup "ImpactManifest"
@@ -37,6 +40,7 @@ impactManifestTests = testGroup "ImpactManifest"
   , testCase "the interpreter closure is the interpreter, not the compiler" closureIsNarrow
   , testCase "M2: a census leaving the certified constructs keeps the text backends" censusRouting
   , testCase "batched compliance: a batched census leaving the certified constructs keeps batched-vs-expected" batchedCensusRouting
+  , testCase "a scalar Python module at CPython's line limits keeps End2End.Python" pythonCensusRouting
   ]
 
 -- | M2 (task impact-analysis-m2-drop-runtime-from-key): a corpus program runs
@@ -59,6 +63,39 @@ censusRouting = do
   assertEqual "a construct the fuzzers never reach is uncertified" ["Accessor:AcNotDrawn"]
     (uncertifiedConstructs ("Accessor:AcNotDrawn" : census))
   assertEqual "the certified list certifies itself" [] (uncertifiedConstructs certifiedConstructs)
+
+-- | Task python-census-certifies-spilled-modules: a program whose scalar
+-- Python module reaches CPython's per-line limits (a spilled line, a hoisted
+-- block, or a line still too deep) runs its rows on scalar Python whatever its
+-- constructs, since the fuzzers' small programs never reach that scale. Only
+-- the Python census carries the label; Julia's routing is 'programCensus'.
+pythonCensusRouting :: IO ()
+pythonCensusRouting = do
+  let load n = do
+        path <- corpusPplPath n
+        fst <$> loadCorpusPair (path, take (length path - 4) path ++ ".tst")
+      compiles p = [compile defaultCompilerConfig p, compile defaultCompilerConfig { optimizerLevel = 0 } p]
+  plain <- compiles <$> load "addNormals"
+  assertEqual "a plain module is certified on Python" [] (uncertifiedConstructs (pythonProgramCensus plain))
+  -- A 250-value neural agreement over a non-contiguous domain: its point
+  -- read is spilled for CPython's bracket limit.
+  wide <- compiles <$> load "batchedMaskVariantNeuralReadTableChain"
+  assertEqual "a module with a spilled line is not certified on Python" [pythonDeepLineLabel]
+    (uncertifiedConstructs (pythonProgramCensus wide))
+  assertEqual "the construct census (Julia's) does not carry the label" [] (uncertifiedConstructs (programCensus wide))
+  -- The same over a contiguous domain. Its -O0 module did not import: the
+  -- 250-value domain constant, spelled as nested cons cells, was a line past
+  -- the limit that no spill can cut (a constant is one leaf). 'pyVal' spells
+  -- a long list flat now, so no line of it is deep and it is certified.
+  let long t = VList (foldr (ListCont . VInt) t [0 .. 249 :: Int])
+  forM_ [EmptyList, AnyList] $ \t ->
+    assertBool ("a 250-cell list constant is spelled flat: " ++ take 80 (pyVal (long t)))
+      (pythonNestingDepth (pyVal (long t)) <= 3)
+  assertEqual "a short list keeps its nested spelling" "ConsInferenceList(1, EmptyInferenceList())"
+    (pyVal (VList (ListCont (VInt 1) EmptyList)))
+  flat <- compiles <$> load "batchedMaskVariantNeuralReadChain"
+  assertEqual "a long list constant no longer puts a line past the limit" []
+    (uncertifiedConstructs (pythonProgramCensus flat))
 
 -- | Batched reference compliance (task batched-backend-reference-compliance):
 -- a @batched@ corpus program's rows run on the batched backend exactly when

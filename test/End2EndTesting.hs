@@ -47,7 +47,7 @@ import MockNN (evaluateMockNN, programMockOracle, mockInputFor, MockSlot(..), pl
 import ImpactManifest
 import CorpusSweep
 import TestDuplicationCensus (duplicationCensusSweep)
-import CertifiedCensus (programCensus, uncertifiedConstructs, batchedProgramCensus, batchedUncertifiedConstructs)
+import CertifiedCensus (programCensus, pythonProgramCensus, uncertifiedConstructs, batchedProgramCensus, batchedUncertifiedConstructs)
 import qualified Data.Map as Map
 import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 
@@ -4614,10 +4614,17 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- sweeps); not one per config (IR fuzz generator M5). A compile that raises
     -- leaves the program uncertified: its text-backend checks then run, and
     -- report it.
+    --
+    -- Per text backend: scalar Python's census also names a module at
+    -- CPython's per-line limits ('pythonProgramCensus'), which says nothing
+    -- about Julia.
     programUncertified e = do
-      let census = uncertifiedConstructs (programCensus [opt e, unopt e])
-      r <- try (evaluate (length (concat census) `seq` census))
-      return (ceName e, either (\ex -> ["(census raised: " ++ takeWhile (/= '\n') (show (ex :: SomeException)) ++ ")"]) id r)
+      let guarded census = do
+            r <- try (evaluate (length (concat census) `seq` census))
+            return (either (\ex -> ["(census raised: " ++ takeWhile (/= '\n') (show (ex :: SomeException)) ++ ")"]) id r)
+      julia <- guarded (uncertifiedConstructs (programCensus [opt e, unopt e]))
+      python <- guarded (uncertifiedConstructs (pythonProgramCensus [opt e, unopt e]))
+      return (ceName e, \b -> if b == Python then python else julia)
     shaped = Map.fromList [ (ceName e, shapedCases e) | e <- entries ]
     opt e = optEnvs Map.! ceName e
     unopt e = unoptEnvs Map.! ceName e
@@ -4631,10 +4638,10 @@ buildEnd2EndTree corpus manifest path treeName tier slowH includeBackends = do
     -- names those backends because the interpreter cannot serve it
     -- ('interpreterServesExempt'). Either way the check is keyed with the
     -- runtime fingerprint, as under M1.
-    textRouted cs b e = (not (interpreterRouted e) && b `elem` ceBackends e) || not (null (uncertified cs e))
+    textRouted cs b e = (not (interpreterRouted e) && b `elem` ceBackends e) || not (null (uncertified cs b e))
     -- No census means not certified (only the slow programs have none, and
     -- the text-backend sweeps skip those before asking).
-    uncertified cs e = Map.findWithDefault ["(no census)"] (ceName e) cs
+    uncertified cs b e = maybe ["(no census)"] ($ b) (Map.lookup (ceName e) cs)
     isQuery x = isProbTestCase x || isCumulTestCase x
     queries e = filter isQuery (rows e)
     hasQueries e = any isQuery (ceCases e)

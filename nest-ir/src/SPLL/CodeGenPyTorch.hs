@@ -139,8 +139,24 @@ pyVal (VList AnyList) = "AnyInferenceList()"
 -- The cons spine is rendered as a difference string: @rest ++ ")"@ at every
 -- cell re-copied the whole tail, quadratic in a long constant list such as a
 -- V-value enumeration domain (task neural-int-read-compile-quadratic-in-domain).
-pyVal (VList l@(ListCont _ _)) = cells l ""
+--
+-- A spine longer than 'pyFlatListThreshold' cells is rendered flat instead,
+-- @toList([x1, ..., xn])@ (with an ANY tail, @listConcat(toList([...]),
+-- AnyInferenceList())@): every cell opens a bracket level, so a 250-value
+-- list (a domain, a row's logit vector) would pass CPython's 200-level
+-- bracket limit and the line would not parse (task
+-- python-census-certifies-spilled-modules). Shorter lists keep the nested
+-- spelling, so every module that parsed before is byte-identical.
+pyVal (VList l@(ListCont _ _))
+  | (xs, rest) <- spine l, length xs > pyFlatListThreshold =
+      let flat = "toList([" ++ intercalate ", " (map pyVal xs) ++ "])"
+      in case rest of
+           AnyList -> "listConcat(" ++ flat ++ ", AnyInferenceList())"
+           _ -> flat
+  | otherwise = cells l ""
   where
+    spine (ListCont x xs) = let (ys, r) = spine xs in (x : ys, r)
+    spine r = ([], r)
     cells (ListCont x xs) = showString "ConsInferenceList(" . showString (pyVal x) . showString ", " . cells xs . showString ")"
     cells rest = showString (pyVal (VList rest))
 pyVal (VInt i) = show i
@@ -175,6 +191,10 @@ pyVal v@(VAnyExcept _) = error (unlines
   , "generateFunctions without that guard."
   , "(task vanyexcept-unrenderable-in-text-backends)" ])
 pyVal x = error ("unknown pyVal for " ++ show x)
+
+-- | The longest list constant 'pyVal' spells as nested cons cells.
+pyFlatListThreshold :: Int
+pyFlatListThreshold = 32
 
 pyMultiVal :: GenericMultiValue IRExpr -> String
 pyMultiVal MultiContinuous = "(\"C\", None)"

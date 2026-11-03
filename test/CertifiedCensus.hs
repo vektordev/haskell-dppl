@@ -34,6 +34,8 @@ module CertifiedCensus
   , samplingConstructs
   , certifiedConstructs
   , programCensus
+  , pythonProgramCensus
+  , pythonDeepLineLabel
   , uncertifiedConstructs
   , batchedCertifiedConstructs
   , batchedReachedNotCompared
@@ -54,6 +56,8 @@ import SPLL.IntermediateRepresentation
 import SPLL.IRGatherPass (usesOneHotGather)
 import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import SPLL.CodeGenPyTorchBatched (usesStructureSplit, usesPartialSplit, usesSelectDemotion, usesPureCallees, generateFunctionsBatched)
+import qualified SPLL.CodeGenPyTorch as Scalar (generateFunctionsWith)
+import SPLL.PythonNesting (tooDeepForPython, pythonMaxIndent)
 import SPLL.Lang.Types (GenericValue(..), GenericList(..))
 
 -- | Every IR construct a body uses, as a label naming its kind:
@@ -188,6 +192,41 @@ programCensus :: [Either e CheckedIR] -> [String]
 programCensus envs =
   sort (nub (concat [ irEnvConstructs allBodies (checkedEnv env) | Right env <- envs ]))
 
+-- | A program's scalar Python census: its 'programCensus', plus
+-- 'pythonDeepLineLabel' when the scalar module of one of the compiles reaches
+-- CPython's per-line limits (task python-census-certifies-spilled-modules).
+-- That is a line spilled into statements (@_sN = ...@) or a block hoisted
+-- into a local function (@def _hN(...)@) to stay inside them
+-- ('SPLL.PythonNesting'), or a line still past them (a module that does not
+-- import). Whether a line gets there depends on the program's scale (a
+-- domain's width, a chain's depth), which no IR construct names and the
+-- agreement fuzzers' small programs never reach, so the label is never
+-- certified and such a program's rows run on @End2End.Python@. The scalar
+-- twin of 'lineSpillLabel'. Julia has no spill and keeps 'programCensus'.
+pythonProgramCensus :: [Either e CheckedIR] -> [String]
+pythonProgramCensus envs =
+  sort (nub (programCensus envs ++ [ pythonDeepLineLabel | any deep [ c | Right c <- envs ] ]))
+  where
+    deep c = any deepLine (concatMap lines (Scalar.generateFunctionsWith False True c))
+    deepLine l = isSpillLine l || isHoistLine l || tooDeepForPython l
+                   || length (takeWhile (== ' ') l) `div` 4 > pythonMaxIndent
+
+-- | The scalar census label of a module at CPython's per-line limits.
+pythonDeepLineLabel :: String
+pythonDeepLineLabel = "Python:deep line"
+
+-- | A statement binding a spilled subterm, @_sN = ...@ (both Python backends).
+isSpillLine :: String -> Bool
+isSpillLine l = case dropWhile isSpace l of
+  '_' : 's' : rest@(c : _) | isDigit c -> " = " `isPrefixOf` dropWhile isDigit rest
+  _ -> False
+
+-- | The header of a block hoisted for the indentation limit, @def _hN(...):@.
+isHoistLine :: String -> Bool
+isHoistLine l = case dropWhile isSpace l of
+  'd' : 'e' : 'f' : ' ' : '_' : 'h' : rest@(c : _) | isDigit c -> "(" `isPrefixOf` dropWhile isDigit rest
+  _ -> False
+
 -- | The constructs of a census the fuzzers do not certify.
 uncertifiedConstructs :: [String] -> [String]
 uncertifiedConstructs census = census \\ certifiedConstructs
@@ -317,9 +356,6 @@ batchedProgramCensus = either (const []) census
                                 ++ [ oneHotGatherLabel | usesOneHotGather env ]))
         spillsALine chk = either (const False) (any isSpillLine . concatMap lines)
                                  (generateFunctionsBatched True chk)
-        isSpillLine l = case dropWhile isSpace l of
-          '_' : 's' : rest@(c : _) | isDigit c -> " = " `isPrefixOf` dropWhile isDigit rest
-          _ -> False
 
 -- | The batched census label of a per-structure split (task
 -- batched-value-dependent-structure-select).
