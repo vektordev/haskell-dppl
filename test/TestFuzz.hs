@@ -983,6 +983,10 @@ knownOverPromises =
     -- function-value-compared-in-probability-mode turned its crash into this
     -- refusal; the lattice still admits the enclosing function).
   , ("yields a value containing a function", "fuzz-admission-over-promises")
+    -- Family 9: a randomly selected function value used other than as the
+    -- whole result of one call (arrow-lifted-mixture-for-function-values,
+    -- 2ac1aef, refuses this before the family above can fire).
+  , ("a randomly selected function value bound to", "fuzz-admission-over-promises")
     -- The joint affine engine (design affine-gaussian-forms M2): the lattice
     -- admits a tuple whose fields share Gaussian latents, but cannot see
     -- coefficients (a singular covariance) or that the joint CDF of
