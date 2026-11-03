@@ -90,7 +90,7 @@ import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.Modality
-import SPLL.Typing.ForwardChaining (FCData(..), ExprInfo(..), InvChain, toInvExprMaybeWith, findEquivalentExpression, untag, isWitnessedLambda, WitnessCert(..), pointWitnessCert, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet, unwrapLambdas)
+import SPLL.Typing.ForwardChaining (FCData(..), ExprInfo(..), InvChain, toInvExprMaybeVia, PointInverses, pointInverseTable, findEquivalentExpression, untag, isWitnessedLambda, WitnessCert(..), pointWitnessCertVia, WorldsShape, WorldsCtx(..), worldsShape, hasRandomLeaf, permissiveDet, unwrapLambdas)
 import PredefinedFunctions (isFieldConstructor, propagateValuesLazily, isCollapse, collapseName)
 
 -- ---------------------------------------------------------------------------
@@ -642,15 +642,24 @@ data ICtx = ICtx
     -- 'letBinding'). A call binding only such variables has an argument
     -- that is a point where it is compiled ('calleeBindingCerts').
   , icPoint :: String -> Bool
+    -- | The point inverses of the program's lambdas, each solved once
+    -- ('pointInverseTable'): shared by every context made from one
+    -- 'ReinferCtx', and by every declaration of one inference pass.
+  , icInverses :: PointInverses
   }
 
 -- | The inference context of the declaration observed at @obsCN@.
 mkICtx :: [ADTDecl] -> FCData -> ChainName -> Program -> ICtx
-mkICtx adtsDecls fcData obsCN prog = ctx
+mkICtx adtsDecls fcData = mkICtxWith (pointInverseTable fcData adtsDecls) adtsDecls fcData
+
+-- | 'mkICtx' sharing a table of point inverses built over the same
+-- forward-chaining data and ADTs.
+mkICtxWith :: PointInverses -> [ADTDecl] -> FCData -> ChainName -> Program -> ICtx
+mkICtxWith invs adtsDecls fcData obsCN prog = ctx
   where
     ctx = ICtx adtsDecls fcData obsCN prog (planReadCNs prog) (isWitnessedLambda fcData adtsDecls obsCN)
             (Map.fromList [ (cnOf e, e) | (_, b) <- functions prog, e <- universe b ])
-            (callSyntaxTable ctx) (const False)
+            (callSyntaxTable ctx) (const False) invs
     universe e = e : concatMap universe (getSubExprs e)
 
 -- | The context with the observation moved to @obsCN@.
@@ -1185,12 +1194,25 @@ planReadCNs prog = Set.fromList [ cnOf e | (_, b) <- functions prog, e <- univer
 -- compiler's refusal stays the net.
 letBinding :: ICtx -> Env -> TypeInfo -> String -> Expr -> Expr -> Law -> (Env, Maybe [EngineCert], (Law, Expr, GAcc))
 letBinding ctx env lti x body arg argLaw
+  -- The joint affine engine's answer is the body inferred under 'jointEnv',
+  -- and its applicability does not depend on whether it is read off that
+  -- inference or off the one under 'env1' (see 'jointAffineSpineCert'). So
+  -- where the spine's syntax admits the engine, the decision is read off
+  -- the joint inference, and the body is inferred once. Deciding off the
+  -- 'env1' inference and then returning the joint one inferred each spine
+  -- body twice, once per binding, which is 2^K in a K-step draw chain (task
+  -- draw-chain-compile-time-polynomial-in-chain-length).
+  | jointSyntax, needsEngineWith jointInferred, (CertJointAffine _ : _) <- certsJ
+  = (jointEnv, Just certsJ, jointInferred)
   | needsEngine, null certs = (floored, Just certs, inferE bctx floored body)
-  | needsEngine, (CertJointAffine _ : _) <- certs = (jointEnv, Just certs, inferE bctx jointEnv body)
+  | needsEngine, (CertJointAffine _ : _) <- certs = (jointEnv, Just certs, jointInferred)
   | needsEngine = (env1, Just certs, inferred)
   | otherwise = (env1, Nothing, inferred)
   where
     env1 = bindParam ctx (chainName lti) x arg argLaw env
+    jointInferred = inferE bctx jointEnv body
+    jointSyntax = isJust (jointAffineSpineCert False x arg argLaw body)
+    certsJ = certsOf jointInferred
     -- The joint affine engine answers the binding: the latents the argument
     -- draws itself are integrated by it ('Joint'). Those it reads through
     -- another variable keep their recovery, so a sharing outside this body
@@ -1201,7 +1223,7 @@ letBinding ctx env lti x body arg argLaw
     jointLatents (Law m (JAffine c)) =
       Law m (JAffine c { acLatents = Map.mapWithKey (\k r -> if r == Marginal && not (k `Set.member` outerLatents) then Joint else r) (acLatents c) })
     jointLatents l = l
-    inferred@(bodyLaw, body', _) = inferE bctx env1 body
+    inferred = inferE bctx env1 body
     -- Read only by a call in the body, so solved only there. The engines'
     -- applicability, read before the body is annotated (the certificates
     -- read the annotated body), and loosely: an enumerable argument, not
@@ -1213,8 +1235,9 @@ letBinding ctx env lti x body arg argLaw
     pointBound = pointHere ctx env arg
               || isJust (enumerableDomain (tags (getTypeInfo arg)))
               || isJust (planProjectedReadOf (icProg ctx) arg)
-              || isJust (toInvExprMaybeWith (const True) (const True) (icFC ctx) (icADTs ctx) (chainName lti))
-    needsEngine = gCap (outerI (lawMod argLaw)) /= Exact
+              || isJust (toInvExprMaybeVia (Just (icInverses ctx)) (const True) (const True) (icFC ctx) (icADTs ctx) (chainName lti))
+    needsEngine = needsEngineWith inferred
+    needsEngineWith (bLaw, _, _) = gCap (outerI (lawMod argLaw)) /= Exact
                && not (isArrow (rType (getTypeInfo arg)))
                && x `Set.member` freeVarsExpr body
                && not (determinedByWitnesses env arg)
@@ -1229,9 +1252,9 @@ letBinding ctx env lti x body arg argLaw
                -- A body whose law is a known point (@0.0 * z@) takes that
                -- value whatever the variable draws: nothing reads the
                -- variable's value, so no engine needs to apply.
-               && not (isJust (lawValue bodyLaw))
-    lam' = Expr (setPType lti (projectI (lawMod bodyLaw))) (Lambda x body')
-    certs = bindingCerts ctx lam' arg argLaw
+               && not (isJust (lawValue bLaw))
+    certsOf (bLaw, bBody, _) = bindingCerts ctx (Expr (setPType lti (projectI (lawMod bLaw))) (Lambda x bBody)) arg argLaw
+    certs = certsOf inferred
     floored = Map.adjust (\(Law m _) -> Law (sampleOnlyI m) JUnjustified) x env1
     isArrow (TArrow _ _) = True
     isArrow _ = False
@@ -1357,7 +1380,7 @@ calleeSyntax ctx headCN
         , occs@(_ : _) <- Map.findWithDefault [] (untag lamCN) (lambdaVarOccurrences fc)
         , let inline = null tag && not (onTopSpine (untag lamCN))
         -> Just CallSyntax
-             { csPoint = toInvExprMaybeWith (const True) (const True) fc (icADTs ctx) headCN
+             { csPoint = toInvExprMaybeVia (Just (icInverses ctx)) (const True) (const True) fc (icADTs ctx) headCN
              , csWorlds = worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) (const True)) occs body
              , csInline = inline
              , csInPlace = inline && readOnceInPlace x body }
@@ -1411,7 +1434,7 @@ bindingCerts ctx lam arg argLaw = mapMaybe certOf engineOrder
     certOf k = case k of
       EnumerationEngine    -> CertEnumerable <$> enumerableApplication fc prog lam arg
       PlanEngine           -> (\(n, _, _, _) -> CertPlan n) <$> planProjectedReadOf prog arg
-      PointInversionEngine -> CertWitnessed <$> pointWitnessCert pointValue fc (icADTs ctx) (icObs ctx) lamCN
+      PointInversionEngine -> CertWitnessed <$> pointWitnessCertVia (Just (icInverses ctx)) pointValue fc (icADTs ctx) (icObs ctx) lamCN
       AffineEngine         -> CertAffine <$> affineBindingCert x arg argLaw body
       JointAffineEngine    -> CertJointAffine <$> jointAffineBindingCert x arg argLaw body
       WorldsEngine         -> CertWorlds <$> worldsShape (WorldsCtx fc (icADTs ctx) (functions prog) permissiveDet) occs body
@@ -1476,7 +1499,17 @@ affineBindingCert x arg argLaw body = case affineOf (cnOf arg) argLaw of
 -- argument's fresh latents 'Joint'. @IRCompiler.jointAffineApplicable@ is the
 -- compiler's twin; keep the two in step.
 jointAffineBindingCert :: String -> Expr -> Law -> Expr -> Maybe AffineCert
-jointAffineBindingCert x arg argLaw body = case affineOf (cnOf arg) argLaw of
+jointAffineBindingCert = jointAffineSpineCert True
+
+-- | 'jointAffineBindingCert', with the inferred laws of the parts that read
+-- no spine variable consulted (@typed@) or not. Untyped, every such part is
+-- accepted, so the answer over-approximates the typed one, and reads only
+-- the syntax: 'letBinding' asks it of a body it has not yet inferred.
+-- Typed, those parts are the only ones whose laws it reads, and none of them
+-- reads a spine variable, so the binder's latent roles ('Joint' or
+-- 'Marginal') cannot change its answer.
+jointAffineSpineCert :: Bool -> String -> Expr -> Law -> Expr -> Maybe AffineCert
+jointAffineSpineCert typed x arg argLaw body = case affineOf (cnOf arg) argLaw of
   Just c | not (Map.null (acLatents c)), not (isArrow (rType (getTypeInfo body)))
          , spine (Set.singleton x) (freeVarsExpr arg) body -> Just c
   _ -> Nothing
@@ -1493,9 +1526,9 @@ jointAffineBindingCert x arg argLaw body = case affineOf (cnOf arg) argLaw of
     tupleFields (Expr _ (InjF (Named "TCons") [a, b])) = tupleFields a ++ tupleFields b
     tupleFields t = [t]
     readsAny names e = not (Set.null (freeVarsExpr e `Set.intersection` names))
-    constant names e = not (readsAny names e) && (pType (getTypeInfo e) == Deterministic || not (hasRandomLeaf e))
+    constant names e = not (readsAny names e) && (not typed || pType (getTypeInfo e) == Deterministic || not (hasRandomLeaf e))
     shaped names e
-      | not (readsAny names e) = pType (getTypeInfo e) `elem` [Deterministic, PNormal] || not (hasRandomLeaf e)
+      | not (readsAny names e) = not typed || pType (getTypeInfo e) `elem` [Deterministic, PNormal] || not (hasRandomLeaf e)
       | otherwise = case e of
           Expr _ (Var n) -> n `Set.member` names
           Expr _ (Apply _ _) -> isCall e
@@ -1535,8 +1568,8 @@ bindingLawEnv :: ReinferCtx -> ChainName -> String -> Expr -> Law -> Env -> Env
 bindingLawEnv rc headCN = bindParam ctx headCN
   where
     ctx = case find (containsCN . snd) (rcDecls rc) of
-      Just (_, b) -> mkICtx (rcADTs rc) (rcFC rc) (cnOf b) (rcProg rc)
-      Nothing     -> mkICtx (rcADTs rc) (rcFC rc) headCN (rcProg rc)
+      Just (_, b) -> rcCtx rc (cnOf b)
+      Nothing     -> rcCtx rc headCN
     containsCN e = cnOf e == headCN || any containsCN (getSubExprs e)
 
 -- | The environment an @if@'s arms are inferred under: every let-bound random
@@ -1907,7 +1940,8 @@ summaries fcData prog = foldl solve Map.empty components
 
     inferDecl env b = fst3 (inferE (declCtx b) env b)
     fst3 (x,_,_) = x
-    declCtx b = mkICtx (adts prog) fcData (cnOf b) prog
+    declCtx b = mkICtxWith invs (adts prog) fcData (cnOf b) prog
+    invs = pointInverseTable fcData (adts prog)
 
 -- ---------------------------------------------------------------------------
 -- Public entry points
@@ -1931,8 +1965,9 @@ inferProgramAcc fcData prog@(Program decls nns adtDecls enc sigs) =
   (Program decls' nns adtDecls enc sigs, concat accs)
   where
     env = summaries fcData prog
-    results = [ (n, inferE (mkICtx adtDecls fcData (cnOf b) prog) env b)
+    results = [ (n, inferE (mkICtxWith invs adtDecls fcData (cnOf b) prog) env b)
               | (n, b) <- decls ]
+    invs = pointInverseTable fcData adtDecls
     decls'  = [ (n, e) | (n, (_, e, _)) <- results ]
     accs    = [ a | (_, (_, _, a)) <- results ]
 
@@ -1953,11 +1988,17 @@ data ReinferCtx = ReinferCtx
   , rcDecls     :: [FnDecl]
   , rcSummaries :: Env
   , rcProg      :: Program
+  , rcInverses  :: PointInverses
   }
 
 reinferCtx :: FCData -> Program -> ReinferCtx
 reinferCtx fcData prog@(Program decls _ adtDecls _ _) =
-  ReinferCtx adtDecls fcData decls (summaries fcData prog) prog
+  ReinferCtx adtDecls fcData decls (summaries fcData prog) prog (pointInverseTable fcData adtDecls)
+
+-- | The inference context of the declaration observed at @obsCN@, sharing
+-- the re-inference context's point inverses.
+rcCtx :: ReinferCtx -> ChainName -> ICtx
+rcCtx rc obsCN = mkICtxWith (rcInverses rc) (rcADTs rc) (rcFC rc) obsCN (rcProg rc)
 
 -- | Re-annotate @target@ as 'inferE' would, given that each of @pins@ names a
 -- variable whose value is known -- recovered from the observation by an
@@ -2004,7 +2045,7 @@ reinferUnder rc pins target = (l, e')
       (b, env) : _ -> (declCtx b, env)
       [] -> (declCtx target, Map.union (annotatedFreeLaws target) (rcSummaries rc))
     (l, e', _) = inferE ctx (Map.union pinMap env0) target
-    declCtx b = mkICtx (rcADTs rc) (rcFC rc) (cnOf b) (rcProg rc)
+    declCtx b = rcCtx rc (cnOf b)
 
 -- | The free variables of an expression at the law their current annotation
 -- projects: the fallback environment of 'reinferGiven' for a node it cannot
@@ -2030,7 +2071,7 @@ envAt ctx pins env cn e
         firstJust
           [ envAt ctx pins env cn arg
           , if cnOf f == cn then Just env else Nothing
-          , envAt ctx pins (pin x (letEnv arg)) cn body ]
+          , envAt ctx pins (pinOr x (letEnv arg)) cn body ]
       Expr ti (Lambda x body) ->
         envAt ctx pins (pin x (Map.insert x (bareLaw (lambdaParamMod ti)) env)) cn body
       Expr _ (IfThenElse c t f) ->
@@ -2039,6 +2080,15 @@ envAt ctx pins env cn e
       _ -> firstJust (map (envAt ctx pins env cn) (getSubExprs e))
   where
     pin x en = if x `Set.member` pins then Map.insert x (bareLaw (IG gExact)) en else en
+    -- A let binder's environment differs from the enclosing one at the
+    -- binder alone ('letBinding'), so a pinned binder takes its pin over
+    -- 'env' without deciding the binding: that decision infers the whole
+    -- body, and asking it at every binder on the way down to every node
+    -- codegen re-infers made a K-step trajectory's compile about K^6 (task
+    -- draw-chain-compile-time-polynomial-in-chain-length).
+    pinOr x en
+      | x `Set.member` pins = Map.insert x (bareLaw (IG gExact)) env
+      | otherwise = en
     letEnv arg = case e of
       Expr _ (Apply (Expr lti (Lambda x body)) _) ->
         let (l, arg', _) = inferE ctx env arg

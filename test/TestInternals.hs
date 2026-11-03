@@ -2113,6 +2113,46 @@ test_gaussianChainIRNotExponential = testGroup "gaussianChainIRNotExponential"
                   ++ " (" ++ show small ++ " -> " ++ show large ++ ")")
         (ratio < 8)
 
+-- | Task draw-chain-compile-time-polynomial-in-chain-length: a K-step
+-- Gaussian draw chain's likelihood has K factors, but its compile time grew
+-- exponentially in K.
+--
+--   * The endpoint query: the modality engine's let rule decided each
+--     binding off the body inferred under the binder's marginal latents, and
+--     then, the joint affine engine applying, inferred the body again under
+--     its joint ones, so every level of the chain inferred the one below it
+--     twice (K=16 took 4.6 s, K=20 74 s at -O0; now K=80 takes 0.7 s).
+--   * The pruned trajectory @(s1, (s2, ..))@: codegen re-infers the laws of
+--     the spine's leaves under the recovered variables, and each
+--     re-inference decided every binding on its way down from scratch,
+--     solving forward chaining for each binding's point inverse each time
+--     (K=14 took 14 s, K=20 over 120 s; now K=20 takes 0.8 s).
+--
+-- Pinned as a compile within 10 s at a length the old compiler could not
+-- reach in minutes.
+test_drawChainCompileTimePolynomial :: TestTree
+test_drawChainCompileTimePolynomial = testGroup "drawChainCompileTimePolynomial"
+  [ testCase "endpoint, K=40" $ compilesWithin defaultCompilerConfig (chain 40 endpoint)
+  , testCase "pruned trajectory, K=16" $
+      compilesWithin defaultCompilerConfig{pruneAnyChecks = True} (chain 16 trajectory)
+  ]
+  where
+    chain k body = unlines $
+      ["main thetas ="]
+      ++ [ "  draw s" ++ show i ++ " = (" ++ prev i ++ " - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in"
+         | i <- [1 .. k] ]
+      ++ ["  " ++ body k]
+    endpoint k = "s" ++ show (k :: Int)
+    trajectory k = foldr1 (\a b -> "(" ++ a ++ ", " ++ b ++ ")") [ "s" ++ show i | i <- [1 .. k] ]
+    prev i = if i == 1 then "3.0" else "s" ++ show (i - 1 :: Int)
+    compilesWithin cfg src = case tryParseProgram "drawChain" src of
+      Left err -> assertFailure ("parse error: " ++ show err)
+      Right prog -> do
+        result <- timeout (10 * 1000000) (evaluate (either (const 0) (length . show) (compile cfg prog)))
+        case result of
+          Nothing -> assertFailure "the draw chain did not compile within 10 s"
+          Just n -> assertBool "the draw chain did not compile" (n > 0)
+
 -- | Task short-gaussian-trajectory-module-larger-than-long: a function with at
 -- most @--marginalSlots@ correlated slots gets a probability variant per mask,
 -- each compiled from the program with the masked slots unobserved. The
@@ -6993,6 +7033,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_gaussianChainIRNotExponential
+  , test_drawChainCompileTimePolynomial
   , test_shortGaussianTrajectoryVariantsCompact
   , test_nestedEqualityChainAnyArmConstant
   , test_setWitnessNestedDrawIfLinear
