@@ -10,6 +10,10 @@ module SPLL.Typing.ForwardChaining
   , toInvExpr
   , toInvExprMaybe
   , toInvExprMaybeWith
+  , toInvExprMaybeVia
+  , PointInverses
+  , pointInverseTable
+  , lookupPointInverse
   , witnessPath
   , IfCond(..)
   , ifConditionVars
@@ -25,6 +29,7 @@ module SPLL.Typing.ForwardChaining
   , isWitnessedLambda
   , WitnessCert(..)
   , pointWitnessCert
+  , pointWitnessCertVia
   , WorldsShape(..)
   , WorldsCtx(..)
   , worldsShape
@@ -51,6 +56,7 @@ import Data.Containers.ListUtils (nubOrd, nubOrdOn)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
+import qualified Data.Map.Lazy as LMap
 import Data.Maybe
 import Control.Monad (mfilter)
 import SPLL.Typing.Typing (setChainName)
@@ -288,10 +294,15 @@ data WitnessCert = WitnessCert
 -- the way to an if-then-else are known points ('toInvExprMaybeWith'), by
 -- their law.
 pointWitnessCert :: (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe WitnessCert
-pointWitnessCert valueKnown fcData adtsDecls obsCN headCN
+pointWitnessCert = pointWitnessCertVia Nothing
+
+-- | 'pointWitnessCert', reading the point inverse from a table where one is
+-- given ('toInvExprMaybeVia').
+pointWitnessCertVia :: Maybe PointInverses -> (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe WitnessCert
+pointWitnessCertVia tbl valueKnown fcData adtsDecls obsCN headCN
   | isNothing (Map.lookup headCN (chainNameInfo fcData)) = Nothing
   | otherwise = do
-      chain <- toInvExprMaybeWith (const True) valueKnown fcData adtsDecls headCN
+      chain <- toInvExprMaybeVia tbl (const True) valueKnown fcData adtsDecls headCN
       Just (WitnessCert chain (isWitnessedLambda fcData adtsDecls obsCN headCN))
 
 -- | The set-witness engine's certificate (design set-valued-witnesses): how
@@ -597,47 +608,87 @@ toInvExprMaybe = toInvExprMaybeWith (const True) (const True)
 -- the set-witness engine turns that polarity into an exclusion set and
 -- answers both (task point-inversion-vanyexcept-witness-crashes).
 toInvExprMaybeWith :: (ChainName -> Bool) -> (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
-toInvExprMaybeWith condKnown valueKnown fcData adtsDecls lambdaCN = mfilter (not . hasAnyExceptExpr . invValue) $ do
-  (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
-  let seeded occs seed =
-        case informative (mapMaybe (toValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
-          []  -> throughIf occs seed
-          ves -> Just (mergeExpr toInvVarName lambdaCN occs ves)
-      throughIf occs seed = splitIf occs seed <|> throughLet occs seed
-      -- A @let@ whose value reads none of the occurrences: its body is
-      -- observed as the application is, so the occurrences are recovered
-      -- from the body. The binding's value must be known here, as an @if@'s
-      -- condition must (a condition reading the let-bound variable is known
-      -- exactly when the value is): a @draw c = 0.2 < 0.5@ ahead of
-      -- @if c then .. else ..@ splits as the inline condition does (task
-      -- if-split-ignores-draw-bound-point-condition).
-      throughLet occs seed = do
-        ls <- Map.lookup (untag seed) (fcLetSteps fcData)
-        let tag = getTag seed
-        if lsValueRandom ls || any ((`Set.member` lsValueNodes ls) . untag) occs || not (valueKnown (lsValue ls))
-          then Nothing
-          else do
-            c <- seeded occs (lsBody ls ++ tag)
-            let at field = IRLetIn (lsBody ls ++ tag) (IRVar seed) (field c)
-            Just InvChain { invValue = at invValue, invCoV = at invCoV, invGuard = at invGuard
-                          , invReadsAny = at invReadsAny, invCumValue = at invCumValue
-                          , invCumGuard = at invCumGuard }
-      splitIf occs seed = do
-        ic <- Map.lookup (untag seed) (fcIfConds fcData)
-        let tag = getTag seed
-            inside nodes = filter ((`Set.member` nodes) . untag) occs
-        if icCondRandom ic || not (condKnown (icCond ic)) || not (null (inside (icCondNodes ic)))
-          then Nothing
-          else do
-            ct <- seeded (inside (icThenNodes ic)) (icThen ic ++ tag)
-            cf <- seeded (inside (icElseNodes ic)) (icElse ic ++ tag)
-            let sel field = IRIf (IRVar (icCond ic ++ tag))
-                                 (IRLetIn (icThen ic ++ tag) (IRVar seed) (field ct))
-                                 (IRLetIn (icElse ic ++ tag) (IRVar seed) (field cf))
-            Just InvChain { invValue = sel invValue, invCoV = sel invCoV, invGuard = sel invGuard
-                          , invReadsAny = sel invReadsAny, invCumValue = sel invCumValue
-                          , invCumGuard = sel invCumGuard }
-  seeded toInvCNs (conclusion paramClause)
+toInvExprMaybeWith = toInvExprMaybeVia Nothing
+
+-- | The point inverse of the variable a lambda binds, where it reads neither
+-- predicate of 'toInvExprMaybeWith': the lambda has no inversion setup, or
+-- an occurrence of its variable is recovered from the body directly, with
+-- no split through an @if@ or step through a @let@. 'Nothing' where the
+-- answer depends on the predicates.
+directPointInverse :: FCData -> [ADTDecl] -> ChainName -> Maybe (Maybe InvChain)
+directPointInverse fcData adtsDecls lambdaCN = case inversionSetup fcData lambdaCN of
+  Nothing -> Just Nothing
+  Just (toInvVarName, toInvCNs, paramClause) ->
+    case informative (mapMaybe (toValueExpr (hornClauses fcData) [ParameterHornClause (conclusion paramClause)] adtsDecls) toInvCNs) of
+      [] -> Nothing
+      ves -> Just (mfilter (not . hasAnyExceptExpr . invValue) (Just (mergeExpr toInvVarName lambdaCN toInvCNs ves)))
+
+-- | 'directPointInverse' of every node of a program, lazy in its values, so
+-- each lambda's inverse is solved at most once however often the modality
+-- engine asks about its binding: it asks at every inference of the body
+-- around it, and the codegen re-inferences ('ModalityInfer.reinferGiven')
+-- re-infer those bodies once per node they are asked about (task
+-- draw-chain-compile-time-polynomial-in-chain-length).
+newtype PointInverses = PointInverses (LMap.Map ChainName (Maybe (Maybe InvChain)))
+
+pointInverseTable :: FCData -> [ADTDecl] -> PointInverses
+pointInverseTable fcData adtsDecls =
+  PointInverses (LMap.mapWithKey (\cn _ -> directPointInverse fcData adtsDecls cn) (chainNameInfo fcData))
+
+-- | A table's entry, solved afresh for a chain name the table lacks.
+lookupPointInverse :: PointInverses -> FCData -> [ADTDecl] -> ChainName -> Maybe (Maybe InvChain)
+lookupPointInverse (PointInverses tbl) fcData adtsDecls cn =
+  fromMaybe (directPointInverse fcData adtsDecls cn) (LMap.lookup cn tbl)
+
+-- | 'toInvExprMaybeWith', reading its predicate-free answer from a table
+-- built over the same forward-chaining data and ADTs where one is given.
+toInvExprMaybeVia :: Maybe PointInverses -> (ChainName -> Bool) -> (ChainName -> Bool) -> FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
+toInvExprMaybeVia tbl condKnown valueKnown fcData adtsDecls lambdaCN =
+  case maybe directPointInverse lookupPointInverse tbl fcData adtsDecls lambdaCN of
+    Just answer -> answer
+    Nothing -> splitting
+  where
+    splitting = mfilter (not . hasAnyExceptExpr . invValue) $ do
+      (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
+      let seeded occs seed =
+            case informative (mapMaybe (toValueExpr (hornClauses fcData) [ParameterHornClause seed] adtsDecls) occs) of
+              []  -> throughIf occs seed
+              ves -> Just (mergeExpr toInvVarName lambdaCN occs ves)
+          throughIf occs seed = splitIf occs seed <|> throughLet occs seed
+          -- A @let@ whose value reads none of the occurrences: its body is
+          -- observed as the application is, so the occurrences are recovered
+          -- from the body. The binding's value must be known here, as an @if@'s
+          -- condition must (a condition reading the let-bound variable is known
+          -- exactly when the value is): a @draw c = 0.2 < 0.5@ ahead of
+          -- @if c then .. else ..@ splits as the inline condition does (task
+          -- if-split-ignores-draw-bound-point-condition).
+          throughLet occs seed = do
+            ls <- Map.lookup (untag seed) (fcLetSteps fcData)
+            let tag = getTag seed
+            if lsValueRandom ls || any ((`Set.member` lsValueNodes ls) . untag) occs || not (valueKnown (lsValue ls))
+              then Nothing
+              else do
+                c <- seeded occs (lsBody ls ++ tag)
+                let at field = IRLetIn (lsBody ls ++ tag) (IRVar seed) (field c)
+                Just InvChain { invValue = at invValue, invCoV = at invCoV, invGuard = at invGuard
+                              , invReadsAny = at invReadsAny, invCumValue = at invCumValue
+                              , invCumGuard = at invCumGuard }
+          splitIf occs seed = do
+            ic <- Map.lookup (untag seed) (fcIfConds fcData)
+            let tag = getTag seed
+                inside nodes = filter ((`Set.member` nodes) . untag) occs
+            if icCondRandom ic || not (condKnown (icCond ic)) || not (null (inside (icCondNodes ic)))
+              then Nothing
+              else do
+                ct <- seeded (inside (icThenNodes ic)) (icThen ic ++ tag)
+                cf <- seeded (inside (icElseNodes ic)) (icElse ic ++ tag)
+                let sel field = IRIf (IRVar (icCond ic ++ tag))
+                                     (IRLetIn (icThen ic ++ tag) (IRVar seed) (field ct))
+                                     (IRLetIn (icElse ic ++ tag) (IRVar seed) (field cf))
+                Just InvChain { invValue = sel invValue, invCoV = sel invCoV, invGuard = sel invGuard
+                              , invReadsAny = sel invReadsAny, invCumValue = sel invCumValue
+                              , invCumGuard = sel invCumGuard }
+      seeded toInvCNs (conclusion paramClause)
 
 -- | The chain names the point inverse of the variable bound by the lambda at
 -- @lambdaCN@ ('toInvExprMaybe') computes its value from: the needed steps of
@@ -1108,7 +1159,7 @@ toValuePath clauses paramClauses = \startCN ->
     augmentedClauseSet = map (:[]) paramClauses ++ clauses
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
-    sortedClauses = topSortDAG solvedClauses
+    sortedClauses = topSortDAGKeyed conclusion premises solvedClauses
     -- 'findConcludingHornClause' (the first clause concluding a name),
     -- indexed once for every start the partial application is asked about.
     concluding = Map.fromListWith (\_later earlier -> earlier) [ (conclusion c, c) | c <- solvedClauses ]

@@ -477,12 +477,24 @@ jointAffineApplicable meta rt b
   , not (isTArrowType rt)
   , Just cert <- affineOf (chainName (getTypeInfo v)) (nodeLaw meta v)
   , not (Map.null (acLatents cert))
+  , terminalFits (Set.insert (bindVar b) envNames) (bindBody b)
   , isAffineOver meta envNames v
   = walk (Set.insert (bindVar b) envNames) (freeVarsExpr v) [] (bindBody b)
   | otherwise = Nothing
   where
     v = bindArg b
     envNames = affineVars meta
+    -- The walk's count of the terminal's affine fields, read off the syntax
+    -- first: the names a walk reaching the terminal holds are the spine's
+    -- binders, and a count out of range answers Nothing whatever the walk
+    -- finds on its way. Asking each spine value's laws first
+    -- ('isAffineOver', a codegen re-inference per leaf) made a long
+    -- trajectory's compile a power of its length slower (task
+    -- draw-chain-compile-time-polynomial-in-chain-length).
+    terminalFits names (Expr _ (Apply (Expr _ (Lambda y inner)) _)) = terminalFits (Set.insert y names) inner
+    terminalFits names t =
+      let n = length (filter (readsAffine names . snd) (tupleFieldPaths t))
+      in n > 0 && n <= ModalityInfer.jointAffineMaxSlots
     -- @bound@ holds the free variables of the values met so far: their forms
     -- are built in their own scope and read at the fields, so a binder in
     -- between must not shadow one.
