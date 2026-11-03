@@ -71,7 +71,10 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   use a module-scoped `OPTIONS_GHC` with a comment explaining why (today:
   `test/ArbitrarySPLL.hs` `-Wno-orphans`, `IRCompiler.Generate` and `IRCompiler.Plan` `-fmax-pmcheck-models`).
 - **Test tiers.** Default `stack test` must be green after every step.
-  `NEST_SLOW_TESTS=1` must be green before a merge or push. Impact analysis
+  `NEST_SLOW_TESTS=1` must be green before a merge or push, run under a
+  memory cap: `systemd-run --user --scope -q -p MemoryMax=9G -p
+  MemorySwapMax=0 ...` (the main binary peaks near 8 GB; `docs/testing.md`,
+  "Test suite memory"). Impact analysis
   stays on for both; `NEST_FULL_TESTS=1` is not required (use it when a change
   touches the manifest keys or the harness that computes them).
   `NEST_ASPIRATIONAL_TESTS=1` holds tests known to be red. A test your change

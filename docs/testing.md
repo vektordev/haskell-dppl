@@ -973,6 +973,11 @@ the test running when the unit was OOM-killed (`KILLED`). Set
 measured. Both pass `NEST_*`/`TASTY_*` through, and run one unit at a time
 by default so the figures are not shared.
 
+**The bound.** A full `NEST_SLOW_TESTS=1` run of the main binary stays
+under 8 GB (8.09 GB peak measured under an 8 GB cap, 2026-11-02). Run it
+under `MemoryMax=9G` with no swap; a run that is OOM-killed under that cap
+is a regression of the suite, to be found with the tool above.
+
 What it found the first time, and the rules that follow:
 
 - **A runaway compile is a memory problem before it is a time problem.** A
