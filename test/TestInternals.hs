@@ -34,6 +34,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.CompilerConfig
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IRGatherPass (gatherPassExpr)
+import IRInterpreter (valueConformsTo)
 import SPLL.IRLeafTablePass (leafTablePassExpr)
 import SPLL.IROptimizer (defaultOptimizerConfig, postProcess, optimizeEnv, shareNetworkCallsCounted, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, prepBatchedBody, structural)
@@ -6970,6 +6971,7 @@ internalsGroup untaggedShortCircuit structuralPropagation = testGroup "Internals
   , scalarDiffusionSamplerTest
   , categoricalIndexTests
   , gatherPassTests
+  , conformsToListElementTests
   , leafTablePassTests
   , untaggedShortCircuit
   , annotationSpellingTests
@@ -7828,4 +7830,18 @@ tensorGaussianHeadTests = testGroup "tensor Gaussian heads"
       s64 <- size 64
       assertBool ("emitted Python grew from " ++ show s4 ++ " to " ++ show s64 ++ " bytes")
         (s4 > 0 && abs (s64 - s4) < 200)
+  ]
+
+-- | Task irfuzz-conforms-to-non-conforming-list-coverage: 'IRConformsTo' answers
+-- False on a list holding a non-conforming element. The IR checker rejects such
+-- a literal, so the IRFuzz rows cannot reach it; this calls the interpreter's
+-- check on a hand-built value.
+conformsToListElementTests :: TestTree
+conformsToListElementTests = testGroup "IRConformsTo list elements"
+  [ testCase "a well-typed list conforms" $
+      assertBool "expected True" (valueConformsTo (ITList (ITADT "Rt")) (VList (ListCont (VADT "Ra" [VFloat 1.0]) (ListCont (VADT "Ra" [VFloat 2.0]) EmptyList)) :: IRValue))
+  , testCase "a list mixing an ADT value and an Int does not conform" $
+      assertBool "expected False" (not (valueConformsTo (ITList (ITADT "Rt")) (VList (ListCont (VADT "Ra" [VFloat 1.0]) (ListCont (VInt 0) EmptyList)) :: IRValue)))
+  , testCase "a non-conforming first element does not conform" $
+      assertBool "expected False" (not (valueConformsTo (ITList ITFloat) (VList (ListCont (VInt 0) EmptyList) :: IRValue)))
   ]

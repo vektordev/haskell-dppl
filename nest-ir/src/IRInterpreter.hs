@@ -4,7 +4,8 @@ module IRInterpreter (
 generateDet,
 generateRand,
 generateRandE,
-generateReplay
+generateReplay,
+valueConformsTo
 ) where
 
 import Statistics.Distribution (quantile)
