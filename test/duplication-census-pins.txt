@@ -43,7 +43,7 @@ clevrEqualLargeMetalSphereNatural main.integ=4 main.prob=4 total.prob=4
 clevrSceneEnumAttrs color.integ=4 color.prob=4 shape.integ=4 shape.prob=4
 collapseGivenParam main.prob=3
 collapseMixture main.integ=3 main.prob=4
-comparisonOfTwoWitnessedLatents main__m001.prob=5
+comparisonOfTwoWitnessedLatents main__m001.prob=5 main__m011.prob=4
 constantListCdfComponentwise main.integ=4 main.prob=8
 countFoldRelateDigitEncoded hit.integ=4 hit.prob=4 main.integ=10 main.prob=10
 ctorTestBesideFstOfPairedDraw main__m01.prob=5
