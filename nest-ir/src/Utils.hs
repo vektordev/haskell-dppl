@@ -18,10 +18,14 @@ module Utils
   , evalSupply
   , DAGEdge(..)
   , topSortDAG
+  , topSortDAGKeyed
   ) where
 
 import Control.Monad.State
 import Data.Graph
+import qualified Data.Sequence as Seq
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.List (isPrefixOf)
 import Data.Functor ((<&>))
 
@@ -112,3 +116,20 @@ topSortDAG lst = sortedLst
     graph = buildG (0, length lst - 1) edgeList
     sorted = topSort graph
     sortedLst = map (lst !!) sorted
+
+-- | 'topSortDAG' for an edge relation given by keys: @x@ precedes @y@ iff
+-- @key x@ is among @deps y@. The answer is 'topSortDAG''s for that relation,
+-- element for element, but the edges come from an index of who depends on
+-- each key rather than a test of every pair, and the elements from a sequence,
+-- so a sort costs about linearly in the edges instead of quadratically in
+-- the elements.
+topSortDAGKeyed :: Ord k => (a -> k) -> (a -> [k]) -> [a] -> [a]
+topSortDAGKeyed key deps lst = map (Seq.index arr) (topSort graph)
+  where
+    n = length lst
+    arr = Seq.fromList lst
+    zippedIndices = zip [0..] lst
+    dependents = Map.fromListWith (flip (++))
+      [ (k, [j]) | (j, y) <- zippedIndices, k <- Set.toList (Set.fromList (deps y)) ]
+    edgeList = [ (i, j) | (i, x) <- zippedIndices, j <- Map.findWithDefault [] (key x) dependents ]
+    graph = buildG (0, n - 1) edgeList

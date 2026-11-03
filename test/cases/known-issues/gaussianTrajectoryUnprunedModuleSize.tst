@@ -4,5 +4,5 @@
 -- it, so the module is quadratic in the chain length: 110 KB here at
 -- 5c4627b, against 19 KB with --pruneAnyChecks (73 / 110 / 155 KB at
 -- K = 6 / 8 / 10, against 15 / 19 / 24 KB). Docs task
--- draw-chain-compile-time-polynomial-in-chain-length.
+-- unpruned-gaussian-trajectory-module-quadratic.
 expect-failure: code-size above 60 KB
