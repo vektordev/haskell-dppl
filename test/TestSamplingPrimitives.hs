@@ -37,6 +37,7 @@ import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.IR.Neural (noNeurals)
 import IRInterpreter (generateDet)
+import SPLL.IRTypeCheck (CheckedIR, checkIR, showIRTypeError)
 
 -- | One @categorical_index(u, w, start, n)@ call.
 data CatCase = CatCase { ccU :: Double, ccW :: [Double], ccStart :: Int, ccN :: Int }
@@ -54,7 +55,7 @@ catCases =
 -- | What the interpreter answers for a case: the reference.
 interpreterIndex :: CatCase -> Either String Integer
 interpreterIndex (CatCase u w s n) =
-  case generateDet noNeurals (IREnv [] [] []) [] (IRBuiltin (BCategoricalIndex s n) [IRConst (VFloat u), wl]) of
+  case generateDet noNeurals emptyChecked [] (IRBuiltin (BCategoricalIndex s n) [IRConst (VFloat u), wl]) of
     Right (VInt k) -> Right (fromIntegral k)
     other -> Left ("the interpreter answered " ++ show other)
   where wl = IRConst (VList (foldr (ListCont . VFloat) EmptyList w))
@@ -269,3 +270,7 @@ juliaScript cwd = unlines
   , "moments(\"randn\", randn, x -> ccall((:erfc, Base.Math.libm), Float64, (Float64,), -x / sqrt(2.0)) / 2.0, " ++ show drawCount ++ ")"
   ]
   where jlList w = "[" ++ intercalate ", " (map show w) ++ "]"
+
+-- | The empty environment, checked.
+emptyChecked :: CheckedIR
+emptyChecked = either (error . showIRTypeError) id (checkIR [] (IREnv [] [] []))

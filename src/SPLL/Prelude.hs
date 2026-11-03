@@ -129,6 +129,9 @@ import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.PerValue (validateSignatures, expandPerValue, perValuePlans, checkSignatureTypes, dropSlotProbes, installPerValue)
 import IRInterpreter (generateRand, generateDet, generateRandE)
 import MockNN (programMockOracle)
+import Data.Bifunctor (first)
+import SPLL.IRTypeCheck (CheckedIR, checkIR, checkedEnv, passOver, IRTypeError, showIRTypeError)
+import SPLL.IR.Neural (oracleSignatures)
 import Control.Monad.Random (Rand, RandomGen, evalRand)
 import System.Random (mkStdGen)
 import SPLL.IRCompiler
@@ -395,7 +398,7 @@ resolveNeuralDecls p = do
       Right mv -> Right (name, ty, Just mv)
       Left err -> Left ("Compiler Error: " ++ err)
 
-compile :: CompilerConfig -> Program -> Either CompilerError IREnv
+compile :: CompilerConfig -> Program -> Either CompilerError CheckedIR
 compile conf p0 = evalStaged (frontEndS conf p0 >>= compileRTypedS conf)
 
 -- | 'compile', keeping every stage's output: the programs and environments
@@ -406,7 +409,7 @@ compile conf p0 = evalStaged (frontEndS conf p0 >>= compileRTypedS conf)
 -- ("SPLL.StageDiff"); since 'compile' is this function's second component,
 -- the snapshots are the compile's own intermediates, not a re-derivation.
 compileStages :: CompilerConfig -> Program -> ([StageSnapshot], Either CompilerError IREnv)
-compileStages conf p0 = runStaged (frontEndS conf p0 >>= compileRTypedS conf)
+compileStages conf p0 = fmap (fmap checkedEnv) (runStaged (frontEndS conf p0 >>= compileRTypedS conf))
 
 -- | One stage's output, as 'compileStages' records it.
 data StageSnapshot = StageSnapshot { snapLabel :: String, snapValue :: StageValue }
@@ -526,10 +529,10 @@ frontEndS conf p0 = do
 -- from, and it cannot re-enter at the top, since 'validateProgram' forbids the
 -- @Constant VAny@ the hole is spelled with. Everything below runs on it
 -- unchanged, which is the design's central claim.
-compileRTyped :: CompilerConfig -> Program -> Either CompilerError IREnv
+compileRTyped :: CompilerConfig -> Program -> Either CompilerError CheckedIR
 compileRTyped conf = evalStaged . compileRTypedS conf
 
-compileRTypedS :: CompilerConfig -> Program -> Staged IREnv
+compileRTypedS :: CompilerConfig -> Program -> Staged CheckedIR
 compileRTypedS conf rtypedWithSigs = do
   -- Signatures are consumed here: checked against the inferred types, and
   -- each per-value function planned. Cleared before compiling, so the
@@ -554,8 +557,15 @@ compileRTypedS conf rtypedWithSigs = do
   -- family into 'BReduce'/'BMap'/'BTensor' (design ir-tensor-values). Task
   -- retire-irenumsum deleted the family, and 'SPLL.Semiring' now builds that
   -- form directly, so there is nothing left to lower and the stage is gone.
-  let selected = if batched conf then selectPassEnv stripped else stripped
-  stageIR conf "After Select Pass" selected
+  --
+  -- The handover (design ir-package-boundary, C3): the IR is checked once,
+  -- here, the last frontend stage that writes it. The select pass, the
+  -- optimizer, the batched post-passes and the backends accept only a
+  -- 'CheckedIR'. IR the checker rejects is a compile error.
+  checkedStripped <- liftE (first (irContractViolation "after IR compilation")
+                              (checkIR (oracleSignatures (programMockOracle rtyped)) stripped))
+  let selected = if batched conf then selectPassEnv checkedStripped else checkedStripped
+  stageIR conf "After Select Pass" (checkedEnv selected)
 
   let optimized = optimizeEnvWith (optimizerConfig conf) (Set.fromList [n | (n, _, _) <- neurals rtyped]) selected
       -- Batched only: a one-hot sum reading a logit tensor at a contiguous
@@ -569,9 +579,9 @@ compileRTypedS conf rtypedWithSigs = do
                    then leafTablePassEnv (Set.fromList [n | (n, _, _) <- neurals rtyped]) (gatherPassEnv optimized)
                    else optimized
   printIfVerbose conf "\n=== Compiled Program ==="
-  pPrintIfMoreVerbose conf compiled
-  printIfVerbose conf (pPrintIREnv compiled)
-  stageIR conf "After Optimization" compiled
+  pPrintIfMoreVerbose conf (checkedEnv compiled)
+  printIfVerbose conf (pPrintIREnv (checkedEnv compiled))
+  stageIR conf "After Optimization" (checkedEnv compiled)
   return compiled
 
 -- | IR compilation of an RType-inferred program, before the optimizer: the
@@ -691,6 +701,13 @@ batchedRefusal conf p =
   where
     quiet = conf{batched = True, verbose = 0, showIntermediates = False, optStats = False}
 
+-- | The compile error for IR the checker rejected at the handover. A frontend
+-- bug, not a user error, so the text says so.
+irContractViolation :: String -> IRTypeError -> CompilerError
+irContractViolation when err =
+  "internal compiler error: the IR " ++ when ++ " violates the IR contract (design ir-package-boundary):\n"
+  ++ showIRTypeError err
+
 -- | A backend 'codeGenToLang' emits source for.
 data CodeGenTarget = TargetPython | TargetJulia deriving (Show, Eq, Enum, Bounded)
 
@@ -708,15 +725,15 @@ codeGenToLang target truncOut conf prog = compile conf prog >>= emitCompiled tar
 
 -- | The emitting half of 'codeGenToLang', for an 'IREnv' already compiled under
 -- @conf@. Pure string building: it needs no Python or Julia installed.
-emitCompiled :: CodeGenTarget -> Bool -> CompilerConfig -> IREnv -> Either CompilerError String
+emitCompiled :: CodeGenTarget -> Bool -> CompilerConfig -> CheckedIR -> Either CompilerError String
 emitCompiled target truncOut conf compiled = case target of
   TargetPython
     | batched conf -> intercalate "\n" <$> generateFunctionsBatchedWith memo (not truncOut) compiled
     | otherwise    -> do
-        anyExceptCodegenRefusal "Python" compiled
+        anyExceptCodegenRefusal "Python" (checkedEnv compiled)
         Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctionsWith memo (not truncOut) compiled)
   TargetJulia -> do
-    anyExceptCodegenRefusal "Julia" compiled
+    anyExceptCodegenRefusal "Julia" (checkedEnv compiled)
     Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
 
   where memo = memoRecursionActive conf
@@ -767,10 +784,10 @@ runWriteLogits conf p target outerArgs = do
 -- Variants of the run* functions that take an already-compiled IREnv, so that
 -- callers issuing many queries against the same program pay for compilation once.
 
-runGenC :: (RandomGen g) => Program -> IREnv -> [IRValue] -> Rand g IRValue
+runGenC :: (RandomGen g) => Program -> CheckedIR -> [IRValue] -> Rand g IRValue
 runGenC p compiled = runGenNamedC p compiled "main"
 
-runProbC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runProbC :: Program -> CheckedIR -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runProbC p compiled = runProbNamedC p compiled "main"
 
 -- | Like 'runGenC'/'runProbC'/'runIntegC', but selects the compiled function
@@ -778,18 +795,18 @@ runProbC p compiled = runProbNamedC p compiled "main"
 -- compiled into its own 'IRFunGroup' keyed by its name, so these drive any
 -- definition directly -- used by the showcase drift guard to freeze the
 -- behaviour of individual documented definitions, not just @main@.
-runGenNamedC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g IRValue
+runGenNamedC :: (RandomGen g) => Program -> CheckedIR -> String -> [IRValue] -> Rand g IRValue
 runGenNamedC p compiled name args =
-  case genFun (lookupIREnv name compiled) of
+  case genFun (lookupIREnv name (checkedEnv compiled)) of
     Just (gen, _) -> generateRand (programMockOracle p) compiled (map IRConst args) gen
     -- Unlike the prob/integ runners there is no error channel in the return
     -- type to report this through.
-    Nothing -> error (missingVariant "generate" "gen" (lookupIREnv name compiled))
+    Nothing -> error (missingVariant "generate" "gen" (lookupIREnv name (checkedEnv compiled)))
 
-runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runProbNamedC :: Program -> CheckedIR -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runProbNamedC p compiled name args x =
-  case probFun (lookupIREnv name compiled) of
-    Nothing -> Left (missingVariant "probability" "prob" (lookupIREnv name compiled))
+  case probFun (lookupIREnv name (checkedEnv compiled)) of
+    Nothing -> Left (missingVariant "probability" "prob" (lookupIREnv name (checkedEnv compiled)))
     Just (prob, _) -> generateDet (programMockOracle p) compiled (map IRConst args') prob
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with the semiring's multiplicative
@@ -806,8 +823,11 @@ runProbNamedC p compiled name args x =
 -- The IRCompiler emits the TOP_K_CUTOFF constant iff topKThreshold was set,
 -- so a compiled IREnv carries its own marker for the extra acc_prob and
 -- top_k_cutoff parameters, and the cutoff value to pass for the latter.
-topKCutoff :: IREnv -> Maybe IRValue
-topKCutoff (IREnv _ _ consts) = lookup topKCutoffName consts
+topKCutoff :: CheckedIR -> Maybe IRValue
+topKCutoff checked = lookup topKCutoffName (envConsts (checkedEnv checked))
+
+envConsts :: IREnv -> [(String, IRValue)]
+envConsts (IREnv _ _ consts) = consts
 
 -- | Re-threshold a topK compile without recompiling it (task
 -- runtime-parametric-topk-threshold): every pruning guard compares against
@@ -817,10 +837,13 @@ topKCutoff (IREnv _ _ consts) = lookup topKCutoffName consts
 -- space here (@log t@ under logSpace, recognised by ACC_PROB_INIT being the
 -- log semiring's one, 0). Calling it on a compile without topK is a caller
 -- bug -- that compile has no guards to re-threshold -- and is an error.
-withTopKCutoff :: Double -> IREnv -> IREnv
-withTopKCutoff thresh env@(IREnv funcs adtDecls consts) = case topKCutoff env of
+withTopKCutoff :: Double -> CheckedIR -> CheckedIR
+withTopKCutoff thresh env = case topKCutoff env of
   Nothing -> error "withTopKCutoff: the IREnv was compiled without topKThreshold, so it has no cutoff to set"
-  Just _  -> IREnv funcs adtDecls [ if n == topKCutoffName then (n, VFloat cutoff) else (n, v) | (n, v) <- consts ]
+  Just _  -> passOver "top-K cutoff update"
+               (\(IREnv funcs adtDecls consts) ->
+                  IREnv funcs adtDecls [ if n == topKCutoffName then (n, VFloat cutoff) else (n, v) | (n, v) <- consts ])
+               env
   where
     cutoff = case accProbInit env of
       VFloat one | one == 0 -> log thresh
@@ -829,19 +852,19 @@ withTopKCutoff thresh env@(IREnv funcs adtDecls consts) = case topKCutoff env of
 -- The IRCompiler emits ACC_PROB_INIT alongside TOP_K_CUTOFF, in the same
 -- space (linear 1.0 / log-space 0.0), so the caller never has to know
 -- separately whether the compilation was log-space.
-accProbInit :: IREnv -> IRValue
-accProbInit (IREnv _ _ consts) = fromMaybe (VFloat 1.0) (lookup accProbInitName consts)
+accProbInit :: CheckedIR -> IRValue
+accProbInit checked = fromMaybe (VFloat 1.0) (lookup accProbInitName (envConsts (checkedEnv checked)))
 
-runIntegC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runIntegC :: Program -> CheckedIR -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegC p compiled = runIntegNamedC p compiled "main"
 
-runIntegNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runIntegNamedC :: Program -> CheckedIR -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegNamedC p compiled name args sample =
-  case integFun (lookupIREnv name compiled) of
+  case integFun (lookupIREnv name (checkedEnv compiled)) of
     -- A topK-compiled integrate function takes the runtime cutoff right
     -- after the sample (no acc_prob: its root seeds its own).
     Just (integ, _) -> generateDet (programMockOracle p) compiled (map IRConst (sample : maybeToList (topKCutoff compiled) ++ args)) integ
-    Nothing -> Left (missingVariant "integrate" "integ" (lookupIREnv name compiled))
+    Nothing -> Left (missingVariant "integrate" "integ" (lookupIREnv name (checkedEnv compiled)))
 
 -- | Modality inference decides per definition which of the three variants are
 -- tractable, and the --noGenerate/--noProbability/--noIntegrate flags suppress
@@ -872,18 +895,18 @@ missingVariant variant lbl grp = case lookup lbl (refusedVariants grp) of
 -- probability exactly zero), which hold iid noise (task writelogits-dead-arm-nan).  This
 -- runner draws that noise from a fixed seed, so it is a pure function of its arguments;
 -- 'runWriteLogitsRandC' draws it from the caller's generator.
-runWriteLogitsC :: Program -> IREnv -> String -> [IRValue] -> Either CompilerError IRValue
+runWriteLogitsC :: Program -> CheckedIR -> String -> [IRValue] -> Either CompilerError IRValue
 runWriteLogitsC p compiled target outerArgs =
   evalRand (runWriteLogitsRandC p compiled target outerArgs) (mkStdGen 0)
 
 -- | 'runWriteLogitsC' with the dead-arm noise drawn from the caller's generator.
-runWriteLogitsRandC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g (Either CompilerError IRValue)
+runWriteLogitsRandC :: (RandomGen g) => Program -> CheckedIR -> String -> [IRValue] -> Rand g (Either CompilerError IRValue)
 runWriteLogitsRandC p compiled target outerArgs =
-  case validateWriteLogitsGaussian (adts p) (writeLogitsDecls p) (neurals p) compiled >> findEnc of
+  case validateWriteLogitsGaussian (adts p) (writeLogitsDecls p) (neurals p) (checkedEnv compiled) >> findEnc of
     Left err  -> return (Left err)
     Right enc -> generateRandE (programMockOracle p) compiled (map IRConst outerArgs) enc
   where
-    IREnv groups _ _ = compiled
+    IREnv groups _ _ = checkedEnv compiled
     findEnc = case find ((== target) . groupName) groups of
       Nothing  -> Left ("No function group named " ++ show target ++ " in compiled program")
       Just grp -> case writeLogitsFun grp of
@@ -1195,8 +1218,8 @@ programWarnings conf p = case rtypedProgram p of
 -- The latent walk needs the chain-named program, so it is only run when some
 -- function both has a writeLogits and is a constructor tree; most programs
 -- stop at the cheap test.
-compiledWarnings :: CompilerConfig -> Program -> IREnv -> [CompileWarning]
-compiledWarnings _ p (IREnv groups _ _)
+compiledWarnings :: CompilerConfig -> Program -> CheckedIR -> [CompileWarning]
+compiledWarnings _ p checked
   | null candidates = []
   | otherwise = case rtypedProgram p of
       Left _ -> []
@@ -1222,6 +1245,7 @@ compiledWarnings _ p (IREnv groups _ _)
            , let unverified = snd (fitPlanToSupport (getValuesFromExpr (stripLambdas body)) plan)
            , not (null unverified) ]
   where
+    IREnv groups _ _ = checkedEnv checked
     candidates = [ groupName g | g <- groups, isJust (writeLogitsFun g) ]
     isTree ObsCon{} = True
     isTree _        = False
@@ -1230,7 +1254,7 @@ compiledWarnings _ p (IREnv groups _ _)
 
 -- | Every compile-time warning of a program and its compile: 'programWarnings'
 -- then 'compiledWarnings'. The entry point for library callers.
-compileWarnings :: CompilerConfig -> Program -> IREnv -> [CompileWarning]
+compileWarnings :: CompilerConfig -> Program -> CheckedIR -> [CompileWarning]
 compileWarnings conf p compiled = programWarnings conf p ++ compiledWarnings conf p compiled
 
 -- | Compile every function's per-mask variants and turn its probability and

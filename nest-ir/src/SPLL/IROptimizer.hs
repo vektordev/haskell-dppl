@@ -4,6 +4,7 @@ module SPLL.IROptimizer (
 , defaultOptimizerConfig
 , optimizeEnv
 , optimizeEnvWith
+, optimizeIREnv
 , shareNetworkCallsCounted
 , postProcess
 , OptStats(..)
@@ -21,6 +22,7 @@ module SPLL.IROptimizer (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (CheckedIR, passOver)
 import SPLL.IR.ADT (fieldAccessorOwners)
 import SPLL.IR.Type (IRADTDecl(..))
 import Data.Number.Erf (erfc)
@@ -49,13 +51,17 @@ data OptimizerConfig = OptimizerConfig
 defaultOptimizerConfig :: OptimizerConfig
 defaultOptimizerConfig = OptimizerConfig {optLevel = 2, optPruneAnyChecks = False, optVerbose = 0, optShowStats = False}
 
-optimizeEnv :: OptimizerConfig -> IREnv -> IREnv
+optimizeEnv :: OptimizerConfig -> CheckedIR -> CheckedIR
 optimizeEnv conf = optimizeEnvWith conf Set.empty
 
 -- | 'optimizeEnv' told the program's declared network names, so it can share
 -- repeated calls of one network on one argument ('shareNetworkCallsCounted').
-optimizeEnvWith :: OptimizerConfig -> Set.Set Varname -> IREnv -> IREnv
-optimizeEnvWith conf neuralNames (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv funcs' adtsDecl consts)
+optimizeEnvWith :: OptimizerConfig -> Set.Set Varname -> CheckedIR -> CheckedIR
+optimizeEnvWith conf neuralNames = passOver "optimizer" (optimizeIREnv conf neuralNames)
+
+-- | 'optimizeEnvWith' on the bare environment.
+optimizeIREnv :: OptimizerConfig -> Set.Set Varname -> IREnv -> IREnv
+optimizeIREnv conf neuralNames (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv funcs' adtsDecl consts)
   where
     optGroup :: IRFunGroup -> State [(String, OptStats)] IRFunGroup
     (funcs', report) = runState (mapM optGroup funcs) []

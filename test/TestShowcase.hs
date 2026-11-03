@@ -36,7 +36,8 @@ import Text.Megaparsec (ParseErrorBundle, errorBundlePretty)
 import SPLL.Lang.Types
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, runGenC, runProbC, runIntegC, runProbNamedC, runIntegNamedC)
-import SPLL.IntermediateRepresentation (IREnv, IRValue, pattern VProbDim)
+import SPLL.IntermediateRepresentation (IRValue, pattern VProbDim)
+import SPLL.IRTypeCheck (CheckedIR)
 import SPLL.CompilerConfig (defaultCompilerConfig)
 import TestCaseParser (TestCase(..), expectationProb, parseTestCasesFromString,
                        FreezeCase(..), FreezeMode(..), parseFreezeCasesFromString)
@@ -102,7 +103,7 @@ freezeLabel (FreezeCase name args mode sample _) =
         modeStr FreezeProb = "p"
         modeStr FreezeCdf  = "cdf"
 
-assertFreeze :: IREnv -> Program -> FreezeCase -> IO ()
+assertFreeze :: CheckedIR -> Program -> FreezeCase -> IO ()
 assertFreeze env p c@(FreezeCase name args mode sample expected) =
   checkQuery (modeName mode) (freezeLabel c) result expected
   where
@@ -175,7 +176,7 @@ assertTstMatches cases p = case compile defaultCompilerConfig p of
   Left err -> assertFailure ("Compilation failed:\n" ++ show err)
   Right env -> forM_ cases (checkCase p env)
 
-checkCase :: Program -> IREnv -> TestCase -> IO ()
+checkCase :: Program -> CheckedIR -> TestCase -> IO ()
 checkCase p env (ProbTestCase name sample params expct _) =
   checkQuery "probability" name (runProbC p env params sample) (expectationProb expct)
 checkCase p env (CumulTestCase name sample params expct) =

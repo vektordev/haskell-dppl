@@ -52,6 +52,7 @@ import Data.List (isPrefixOf, nub, sort, (\\))
 
 import SPLL.IntermediateRepresentation
 import SPLL.IRGatherPass (usesOneHotGather)
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import SPLL.CodeGenPyTorchBatched (usesStructureSplit, usesPartialSplit, usesSelectDemotion, usesPureCallees, generateFunctionsBatched)
 import SPLL.Lang.Types (GenericValue(..), GenericList(..))
 
@@ -183,9 +184,9 @@ certifiedConstructs =
 -- | A program's census: the constructs of every body of each of the compiles
 -- the text backends run (-O2 and -O0; a compile the compiler refuses
 -- contributes nothing, since nothing of it is run).
-programCensus :: [Either e IREnv] -> [String]
+programCensus :: [Either e CheckedIR] -> [String]
 programCensus envs =
-  sort (nub (concat [ irEnvConstructs allBodies env | Right env <- envs ]))
+  sort (nub (concat [ irEnvConstructs allBodies (checkedEnv env) | Right env <- envs ]))
 
 -- | The constructs of a census the fuzzers do not certify.
 uncertifiedConstructs :: [String] -> [String]
@@ -305,17 +306,17 @@ batchedReachedNotCompared =
 -- than one value read term by term, which the fuzz arms' programs do not
 -- build, so the census names it (task
 -- batched-mask-variant-neural-read-nests-v-deep).
-batchedProgramCensus :: Either e IREnv -> [String]
+batchedProgramCensus :: Either e CheckedIR -> [String]
 batchedProgramCensus = either (const []) census
-  where census env = sort (nub (irEnvConstructs inferenceBodies env
+  where census checked = let env = checkedEnv checked in sort (nub (irEnvConstructs inferenceBodies env
                                 ++ [ structureSplitLabel | usesStructureSplit env ]
                                 ++ [ partialSplitLabel | usesPartialSplit env ]
                                 ++ [ selectDemotionLabel | usesSelectDemotion env ]
                                 ++ [ pureCalleeLabel | usesPureCallees env ]
-                                ++ [ lineSpillLabel | spillsALine env ]
+                                ++ [ lineSpillLabel | spillsALine checked ]
                                 ++ [ oneHotGatherLabel | usesOneHotGather env ]))
-        spillsALine env = either (const False) (any isSpillLine . concatMap lines)
-                                 (generateFunctionsBatched True env)
+        spillsALine chk = either (const False) (any isSpillLine . concatMap lines)
+                                 (generateFunctionsBatched True chk)
         isSpillLine l = case dropWhile isSpace l of
           '_' : 's' : rest@(c : _) | isDigit c -> " = " `isPrefixOf` dropWhile isDigit rest
           _ -> False

@@ -62,6 +62,7 @@ import TestTolerances (probTolerance)
 import End2EndTesting (networkMocks, pythonTestScript, resolveNeuralTestCase, shapeNeuralTestCase, programRuntimeFields,
                        batchedEligibility, batchedDriver, findTorchPython, noTorch, BatchGroup)
 import ImpactManifest
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 
 knownIssuesDir :: FilePath
 knownIssuesDir = corpusRoot </> "known-issues"
@@ -191,7 +192,7 @@ checkExpectFailure name prog _ (ExpectRefused needle) _ = do
                                  \refused outright: " ++ err)
       Right env ->
         let reasons = [ groupName g ++ "." ++ lbl ++ ": " ++ showRefusal r
-                      | g <- envGroups env, (lbl, r) <- refusedVariants g ]
+                      | g <- envGroups (checkedEnv env), (lbl, r) <- refusedVariants g ]
         in assertBool (name ++ ": expected a variant refused with a reason containing \""
                        ++ needle ++ "\", but the recorded refusals are: "
                        ++ (if null reasons then "(none) -- the bug it pins may be fixed; if so, \
@@ -306,7 +307,7 @@ queryRows = filter isQuery
 -- time), a refused query, or a non-prob/dim result are all still "broken";
 -- only an exact (within-tolerance) match to the idealized row counts as "may
 -- be fixed now".
-assertStillBroken :: Backend -> String -> Program -> IREnv -> TestCase -> IO ()
+assertStillBroken :: Backend -> String -> Program -> CheckedIR -> TestCase -> IO ()
 assertStillBroken Interpreter name prog env (ProbTestCase caseName sample params expct _) =
   checkStillBroken name caseName expct (runProbC prog env params sample)
 assertStillBroken Interpreter name prog env (CumulTestCase caseName sample params expct) =
@@ -330,7 +331,7 @@ assertStillBroken _ _ _ _ _ = return ()
 -- | One pinned (wrong) row on one backend: assert the result still matches
 -- it. Anything else -- a different value, a crash, a refused query, a
 -- non-prob/dim result -- means the bug moved or was fixed.
-assertStillWrong :: Backend -> String -> Program -> IREnv -> TestCase -> IO ()
+assertStillWrong :: Backend -> String -> Program -> CheckedIR -> TestCase -> IO ()
 assertStillWrong Interpreter name prog env (ProbTestCase caseName sample params expct _) =
   checkStillWrong name caseName expct (runProbC prog env params sample)
 assertStillWrong Interpreter name prog env (CumulTestCase caseName sample params expct) =
@@ -414,7 +415,7 @@ rowName _                       = "?"
 -- module loaded and the row matched within tolerance. Output is captured, not
 -- echoed: a still-broken pin failing to load is the expected outcome here.
 -- A Haskell-side codegen crash counts as "does not match".
-pythonRowMatches :: Program -> IREnv -> TestCase -> IO Bool
+pythonRowMatches :: Program -> CheckedIR -> TestCase -> IO Bool
 pythonRowMatches prog env tc = do
   projectDir <- getCurrentDirectory
   let script = pythonTestScript projectDir (networkMocks prog) env [resolveNeuralTestCase prog (shapeNeuralTestCase prog tc)]
@@ -464,7 +465,7 @@ forced = try . evaluate . length . show
 -- | 'ExpectCrash'/'ExpectDiagnostic': the known issue must still crash at
 -- compile time. A graceful @Left@ does not count -- that is an intended
 -- refusal, not the bug this folder pins.
-assertCrashes :: String -> Either CompilerError IREnv -> Maybe String -> IO ()
+assertCrashes :: String -> Either CompilerError CheckedIR -> Maybe String -> IO ()
 assertCrashes name compiled mNeedle = do
   result <- forced compiled
   case result of
@@ -544,7 +545,7 @@ measureCompile = measureCompileWith False Nothing
 
 -- | The query an @eval-alloc@/@eval-time@ point runs on the compiled program,
 -- on the interpreter.
-type EvalQuery = IREnv -> Either CompilerError IRValue
+type EvalQuery = CheckedIR -> Either CompilerError IRValue
 
 -- | 'measureCompile', optionally showing the IR, and optionally running one
 -- query on the compiled program inside the same cap. The query's own
@@ -554,7 +555,7 @@ measureCompileWith = measureCompileEmit (Right . generateFunctions True)
 
 -- | 'measureCompileWith' with the emitter chosen: the scalar Python backend,
 -- or the batched one ('generateFunctionsBatched').
-measureCompileEmit :: (IREnv -> Either CompilerError [String]) -> Bool -> Maybe EvalQuery -> PointCap
+measureCompileEmit :: (CheckedIR -> Either CompilerError [String]) -> Bool -> Maybe EvalQuery -> PointCap
                    -> CompilerConfig -> Program -> IO PointResult
 measureCompileEmit emit wantIR mQuery cap conf prog = do
   let micros = max 1 (round (capSeconds cap * 1e6))
@@ -568,7 +569,7 @@ measureCompileEmit emit wantIR mQuery cap conf prog = do
         Left err -> return (Left ("emit refused: " ++ show err))
         Right ls -> do
           code <- evaluate (utf8Length (intercalate "\n" ls))
-          ir <- if wantIR then evaluate (toInteger (length (show env))) else return 0
+          ir <- if wantIR then evaluate (toInteger (length (show (checkedEnv env)))) else return 0
           tc <- getMonotonicTime
           ac <- getAllocationCounter
           evalOutcome <- case mQuery of

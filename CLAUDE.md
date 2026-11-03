@@ -102,12 +102,17 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
 source → Parser → Validator → PerValue (helper expansion) → CalleeNormalize
   → RInfer (let-generalisation + Monomorphize) → Analysis (DiscreteValues) → DrawSinking
   → ForwardChaining → ModalityInfer
-  → IRCompiler (generate / probability / integrate) → PerValue (install)
+  → IRCompiler (generate / probability / integrate) → PerValue (install) → checkIR
   → IRSelectPass (batched only) → IROptimizer → IRGatherPass, IRLeafTablePass (batched only)
   → CodeGen{PyTorch,PyTorchBatched,Julia}
 ```
 
 `SPLL.Prelude.compile` is the authority on stage order.
+
+`checkIR` is the handover from the frontend to the IR: it yields a `CheckedIR`
+(constructor hidden), and the passes, the interpreter and the codegens accept
+nothing else. IR the checker rejects is a hard compile error, not a fallback.
+Each pass checks its own output (`passOver`) and raises, naming the pass.
 
 ## Modules
 
@@ -176,7 +181,7 @@ the frontend is a sign something belongs IR-side: put the vocabulary in
 `nest-ir/src/SPLL/`:
 
 - `IntermediateRepresentation` — `IRExpr` and `IRFunGroup`.
-- `IRTypeCheck` — the IR's type contract: `IRType` and an inference checker over an `IREnv`.
+- `IRTypeCheck` — the IR's type contract: `IRType`, an inference checker over an `IREnv`, and `CheckedIR` (an environment the checker accepted; `checkIR` is the only way in, `passOver` lifts a pass).
 - `IRSelectPass` — `IRIf` → `IRSelect` for batched mode.
 - `IRGatherPass` — batched only: a one-hot sum reading a logit tensor over a contiguous key range → one guarded `nn_gather`.
 - `IRLeafTablePass` — batched only: a neural leaf decode a nested enumeration loop reads per world → one table bound ahead of the outer loop.

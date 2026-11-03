@@ -29,6 +29,7 @@ import SPLL.Lang.Types (GenericValue(..), CompilerError)
 import SPLL.DuplicationCensus
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile)
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 
 -- | A closed arithmetic chain of @2n+1@ nodes over its argument.
 chain :: Int -> IRExpr -> IRExpr
@@ -76,7 +77,7 @@ mainProbCopies src = case tryParseProgram "census" src of
   Left err -> assertFailure ("parse error: " ++ show err) >> return 0
   Right prog -> case compile defaultCompilerConfig { optimizerLevel = 0, noIntegrate = True } prog of
     Left e -> assertFailure ("compile error: " ++ e) >> return 0
-    Right env -> case [ c | c <- censusEnv defaultMinSize env, fcGroup c == "main", fcVariant c == "prob" ] of
+    Right env -> case [ c | c <- censusEnv defaultMinSize (checkedEnv env), fcGroup c == "main", fcVariant c == "prob" ] of
       [c] -> return (maxCopies c)
       _ -> assertFailure "no main probability body" >> return 0
 
@@ -161,7 +162,7 @@ bodyName c = fcGroup c ++ "." ++ fcVariant c
 -- subtree; a body below its pin fails too, so a pin goes down in the same
 -- commit as the fix that lowers it. A program that does not compile has
 -- nothing to count and passes.
-duplicationCensusSweep :: Corpus -> String -> (CorpusEntry -> Either CompilerError IREnv) -> IO TestTree
+duplicationCensusSweep :: Corpus -> String -> (CorpusEntry -> Either CompilerError CheckedIR) -> IO TestTree
 duplicationCensusSweep corpus path unopt = do
   pinsE <- parsePins <$> readFile duplicationPinsFile
   let pins = either (\e -> error (duplicationPinsFile ++ ": " ++ e)) id pinsE
@@ -176,7 +177,7 @@ duplicationCensusSweep corpus path unopt = do
   where
     minus xs ys = filter (`notElem` ys) xs
     checkProgram pinned e = do
-      r <- try (evaluate (forceCensus (either (const Nothing) (Just . censusEnv defaultMinSize) (unopt e))))
+      r <- try (evaluate (forceCensus (either (const Nothing) (Just . censusEnv defaultMinSize . checkedEnv) (unopt e))))
       case r of
         Left (ex :: SomeException) -> return ("compile raised, nothing to count: " ++ takeWhile (/= '\n') (show ex))
         Right Nothing -> return "does not compile, nothing to count"

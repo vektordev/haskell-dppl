@@ -45,7 +45,7 @@ import Test.QuickCheck.Random (mkQCGen)
 import SPLL.Lang.Types
 import SPLL.Typing.PType (PType(..))
 import SPLL.Lang.Lang (freeVarsExpr, getTypeInfo)
-import SPLL.IntermediateRepresentation (IREnv, IRValue, pattern VProbDim, pattern VProbDimBC)
+import SPLL.IntermediateRepresentation (IRValue, pattern VProbDim, pattern VProbDimBC)
 import SPLL.CompilerConfig (CompilerConfig(..), defaultCompilerConfig)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, compileStages, runProbC, runGenC, rtypedProgram, StageSnapshot(..), StageValue(..))
@@ -56,6 +56,7 @@ import TestTolerances (probTolerance, samplingTolerance)
 import Rewrites
 import ImpactManifest
 import End2EndTesting (programRuntimeFields)
+import SPLL.IRTypeCheck (CheckedIR)
 
 -- ---------------------------------------------------------------------------
 -- Promotion and known divergences
@@ -250,11 +251,11 @@ runQueries p qs = compileTimed p >>= \c -> runCompiled p c qs
 -- 20 s timeout. 'Left' is the message 'runQueries' reports for a refusal, a
 -- crash or a timeout. The environment itself stays lazy, as the queries
 -- force it: forcing all of it could crash on a part no query reads.
-compileTimed :: Program -> IO (Either String IREnv)
+compileTimed :: Program -> IO (Either String CheckedIR)
 compileTimed = compileTimedWith defaultCompilerConfig
 
 -- | 'compileTimed' under another config.
-compileTimedWith :: CompilerConfig -> Program -> IO (Either String IREnv)
+compileTimedWith :: CompilerConfig -> Program -> IO (Either String CheckedIR)
 compileTimedWith conf p = do
   r <- timedTry (20 * 1000000) (evaluate (compile conf p))
   return $ case r of
@@ -264,7 +265,7 @@ compileTimedWith conf p = do
     Just (Right (Right env)) -> Right env
 
 -- | Answer every query on a compile from 'compileTimed', under a 20 s timeout.
-runCompiled :: Program -> Either String IREnv -> [Query] -> IO Outcome
+runCompiled :: Program -> Either String CheckedIR -> [Query] -> IO Outcome
 runCompiled _ (Left why) _ = return (Refused why)
 runCompiled p (Right env) qs = do
   r <- timedTry (20 * 1000000) (evaluate (forceOutcome (answer p env qs)))
@@ -293,7 +294,7 @@ firstLine = shorten . takeWhile (/= '\n')
 shorten :: String -> String
 shorten m = if length m > 160 then take 160 m ++ "..." else m
 
-answer :: Program -> IREnv -> [Query] -> Outcome
+answer :: Program -> CheckedIR -> [Query] -> Outcome
 answer p env qs = either (Refused . ("refused: " ++) . shorten . takeWhile (/= '\n')) Answered
                     (mapM (\(s, params) -> runProbC p env params s >>= probDim) qs)
   where
@@ -341,14 +342,14 @@ judge prog fam site origOut rewritten qs = do
   judgeCompiled prog fam site origOut rewritten c qs
 
 -- | 'judge' on the rewritten program's compile from 'compileTimed'.
-judgeCompiled :: String -> Family -> String -> Outcome -> Program -> Either String IREnv -> [Query] -> IO Verdict
+judgeCompiled :: String -> Family -> String -> Outcome -> Program -> Either String CheckedIR -> [Query] -> IO Verdict
 judgeCompiled prog fam site = judgeWith (refusalIsHard fam) (knownDivergence prog fam site) site
 
 -- | The oracle, given whether a refusal is hard and the known divergence the
 -- pair is, if any. A mismatch carries where the stage-diff driver
 -- ("SPLL.StageDiff") places it: the whole stage report for a new one, the
 -- first diverging stage for a known one.
-judgeWith :: Bool -> Maybe Known -> String -> Outcome -> Program -> Either String IREnv -> [Query] -> IO Verdict
+judgeWith :: Bool -> Maybe Known -> String -> Outcome -> Program -> Either String CheckedIR -> [Query] -> IO Verdict
 judgeWith hardRefusal known site origOut rewritten compiled qs = do
   out <- runCompiled rewritten compiled qs
   case (origOut, out) of
@@ -370,7 +371,7 @@ judgeWith hardRefusal known site origOut rewritten compiled qs = do
 -- query point where a window estimate is meaningful (a scalar or a tuple of
 -- scalars, with dim 0 or dim equal to the continuous coordinate count, and at
 -- most 1 -- a higher-dimensional estimate needs prohibitively many draws).
-samplingCheck :: Program -> IREnv -> [(Query, (Double, Int))] -> IO Verdict
+samplingCheck :: Program -> CheckedIR -> [(Query, (Double, Int))] -> IO Verdict
 samplingCheck p env rows = do
     results <- forM rows $ \((s, params), (pr, d)) ->
       if not (estimable s d) then return Nothing
@@ -415,14 +416,14 @@ sweep prog p qs = do
 
 -- | The default compile ('compileTimed') of a program and of every variant of
 -- every family of it, the variants concurrently.
-compileSweep :: Program -> IO (Either String IREnv, [(Variant, Either String IREnv)])
+compileSweep :: Program -> IO (Either String CheckedIR, [(Variant, Either String CheckedIR)])
 compileSweep p = do
   orig <- compileTimed p
   vs <- concurrently [ (,) v <$> compileTimed (variantProgram v) | fam <- allFamilies, v <- variants fam p ]
   return (orig, vs)
 
 -- | 'sweep' on the compiles from 'compileSweep'.
-sweepCompiled :: String -> Program -> [Query] -> Either String IREnv -> [(Variant, Either String IREnv)] -> IO [(Family, Verdict)]
+sweepCompiled :: String -> Program -> [Query] -> Either String CheckedIR -> [(Variant, Either String CheckedIR)] -> IO [(Family, Verdict)]
 sweepCompiled prog p qs orig vs = do
   origOut <- runCompiled p orig qs
   concurrently [ (,) (variantFamily v) <$> (judgeCompiled prog (variantFamily v) (variantSite v) origOut (variantProgram v) c qs
@@ -1091,7 +1092,7 @@ rewriteIntegrationTests corpus = corpusSweep corpus SweepSpec
 
 -- | Cross one variant: (hard failures, log lines, the known config
 -- divergences it matched, whether it was crossed at all).
-integrate :: String -> Outcome -> Maybe [Double] -> Maybe PType -> [Query] -> [Bool] -> Variant -> Either String IREnv
+integrate :: String -> Outcome -> Maybe [Double] -> Maybe PType -> [Query] -> [Bool] -> Variant -> Either String CheckedIR
           -> IO ([String], [String], [KnownConfig], Bool)
 integrate prog origOut origBC origPT qs sf v c = do
   out <- runCompiled rp c qs
@@ -1129,7 +1130,7 @@ integrate prog origOut origBC origPT qs sf v c = do
 
 -- | The branch count at each row, on a 'branchCountConfig' compile, if it
 -- answers them all.
-branchCounts :: Program -> Either String IREnv -> [Query] -> IO (Maybe [Double])
+branchCounts :: Program -> Either String CheckedIR -> [Query] -> IO (Maybe [Double])
 branchCounts _ (Left _) _ = return Nothing
 branchCounts p (Right env) qs = do
   r <- timedTry (20 * 1000000) (evaluate (forceBCs (mapM (\(s, params) -> either (const Nothing) bcOf (runProbC p env params s)) qs)))
@@ -1160,7 +1161,7 @@ rewriteCheckVersion = "rewrite-invariance-v1"
 -- its message, as it is deterministic. A compile that timed out, or whose
 -- environment crashes or runs out of time while shown, leaves the program
 -- without a key, so the sweep runs.
-rewriteKey :: Manifest -> Program -> [Query] -> Either String IREnv -> [(Variant, Either String IREnv)] -> IO (Maybe String)
+rewriteKey :: Manifest -> Program -> [Query] -> Either String CheckedIR -> [(Variant, Either String CheckedIR)] -> IO (Maybe String)
 rewriteKey m p qs orig vs
   | any timedOut (orig : map snd vs) = return Nothing
   | otherwise = do

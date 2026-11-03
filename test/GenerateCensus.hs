@@ -25,6 +25,7 @@
 -- task document, not here.
 module GenerateCensus (generateCensusTests, samplingConstructs, generateOnlyConstructs) where
 
+import SPLL.IRTypeCheck (checkedEnv)
 import Control.Exception (SomeException, try, evaluate)
 import Control.Monad (forM)
 import Data.List (sort, nub, (\\), intercalate)
@@ -62,7 +63,7 @@ generateCensusTests corpusIn = corpusSweepAll corpusIn SweepSpec
   [ testCase "generate-body constructs that are neither sampling nor in an inference body are exactly generateOnlyConstructs" $ do
       progs <- fmap concat $ forM es $ \e -> do
         let compiled = compile defaultCompilerConfig (ceProgram e)
-            census which = either (const []) (irEnvConstructs which) compiled
+            census which = either (const []) (irEnvConstructs which . checkedEnv) compiled
         r <- timeout (30 * 1000 * 1000) $ try (evaluate (forced (census genBodies, census inferenceBodies)))
         return $ case r of
           Just (Right cs) -> [(ceName e, cs)]

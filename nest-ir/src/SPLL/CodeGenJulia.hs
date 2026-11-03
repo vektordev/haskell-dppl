@@ -6,6 +6,7 @@ module SPLL.CodeGenJulia (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import SPLL.ReservedNames (juliaKeywords, juliaNeedsEscape, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import Data.List (intercalate, intersperse, dropWhileEnd)
@@ -199,8 +200,9 @@ generateADTAccessor fieldName ctorName =
              , "return x." ++ juliaMangle fieldName ] ++
   ["end"]
 
-generateFunctions :: IREnv -> [String]
-generateFunctions env0 = do
+generateFunctions :: CheckedIR -> [String]
+generateFunctions checked = do
+  let env0 = checkedEnv checked
   -- Scalar backend: lower any IRSelect back to IRIf up front (pytorch-tensorizer
   -- M1, strategy B), so the rest of codegen never encounters it.
   let IREnv funcs adtDecls consts = mangleUserIdentifiers juliaMangle (renameADTIdentifiers juliaMangle (desugarSelectEnv (retireUnrenderableVariants "Julia" env0)))

@@ -27,6 +27,7 @@ import SPLL.Prelude (compile, runProb, runInteg, runGen, uniform, constB, constF
 import SPLL.IntermediateRepresentation (firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
 import SPLL.CompilerConfig (CompilerConfig(..), defaultCompilerConfig)
 import SPLL.IRCompiler (requireNoGenerateBacked, symbolCdfMessage)
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv, pattern CheckedEnv)
 import TestSupport (expectVariantRefused)
 import Data.Maybe (isJust, isNothing)
 import SPLL.Typing.Infer (addTypeInfo)
@@ -844,9 +845,9 @@ readNNDeterministicSymbolSrc = unlines
   ]
 
 -- | Whether @main@ got a probability, an integrate and a generate function.
-mainVariants :: Either CompilerError IREnv -> IO (Bool, Bool, Bool)
+mainVariants :: Either CompilerError CheckedIR -> IO (Bool, Bool, Bool)
 mainVariants (Left e) = assertFailure ("compile refused: " ++ e) >> return (False, False, False)
-mainVariants (Right (IREnv groups _ _)) = case filter ((== "main") . groupName) groups of
+mainVariants (Right (CheckedEnv (IREnv groups _ _))) = case filter ((== "main") . groupName) groups of
   (g : _) -> return (isJust (probFun g), isJust (integFun g), isJust (genFun g))
   [] -> assertFailure "no main group" >> return (False, False, False)
 
@@ -870,7 +871,7 @@ generateBackedReadNNSymbolTests = testGroup "GenerateBackedReadNNSymbol"
         assertBool "a randomly-chosen Symbol argument lost its probability function" hasProb
         assertBool "a randomly-chosen Symbol argument lost its integrate function" hasInteg
         assertBool "generate was lost" hasGen
-        case compile defaultCompilerConfig prog >>= requireNoGenerateBacked defaultCompilerConfig of
+        case compile defaultCompilerConfig prog >>= requireNoGenerateBacked defaultCompilerConfig . checkedEnv of
           Left e  -> assertFailure ("an inference body samples which network input to read: " ++ e)
           Right _ -> return ()
   , testCase "a deterministic Symbol argument to ReadNN still compiles" $
@@ -1180,7 +1181,7 @@ vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal" $
       withParsed vAnyExceptProgSrc $ \prog ->
         case compile defaultCompilerConfig prog of
           Left err -> assertFailure ("compile failed: " ++ show err)
-          Right (IREnv groups decls consts) -> do
+          Right (CheckedEnv (IREnv groups decls consts)) -> do
             let plant g = g { probFun = Just (IRConst (VAnyExcept [IRConst (VBool True)]), "") }
             case anyExceptCodegenRefusal lang (IREnv (map plant groups) decls consts) of
               Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)

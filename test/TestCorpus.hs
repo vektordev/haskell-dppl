@@ -1,4 +1,5 @@
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE PatternSynonyms #-}
 -- | The @Corpus@ tasty group: metamorphic properties driven by the whole
 -- @test/cases/**/*.ppl@+@.tst@ corpus (validation, sampling-vs-PDF, topK, branch
 -- counting, P(ANY)=1, log-space vs linear, -O0 vs the default -O2, and operand
@@ -44,6 +45,7 @@ module TestCorpus
   , CorpusProbCase
   ) where
 
+import SPLL.IRTypeCheck (CheckedIR)
 import Test.QuickCheck hiding (verbose)
 import Test.Tasty (TestTree, testGroup, localOption)
 import Test.Tasty.QuickCheck (testProperty, QuickCheckMaxRatio(..))
@@ -329,7 +331,7 @@ logSpaceCheckVersion = "corpus-log-space-v1"
 -- expectation) and the tolerance, with the interpreter fingerprint; this
 -- module's source joins the harness. A refused compile has no key, so the
 -- check runs (and fails, as it always did).
-logSpaceKey :: Manifest -> Program -> Either CompilerError IREnv -> [(Program, IRValue, [IRValue], (Double, Int))] -> IO (Maybe String)
+logSpaceKey :: Manifest -> Program -> Either CompilerError CheckedIR -> [(Program, IRValue, [IRValue], (Double, Int))] -> IO (Maybe String)
 logSpaceKey _ _ (Left _) _ = return Nothing
 logSpaceKey m p (Right env) rows = do
   h <- harnessFingerprint m
@@ -425,7 +427,7 @@ knownOperandOrderDependent =
 -- swapped program's topK compile against the original's, at threshold 0
 -- (must agree) and 0.1 (logged). A side that refuses, crashes or times out
 -- is logged; there is nothing to compare.
-checkTopKOperandOrder :: Maybe String -> Either CompilerError IREnv -> Program -> [(IRValue, [IRValue])] -> IO String
+checkTopKOperandOrder :: Maybe String -> Either CompilerError CheckedIR -> Program -> [(IRValue, [IRValue])] -> IO String
 checkTopKOperandOrder known origCompiled p rows = do
   origAt <- mapM (\t -> answerAt p (Right =<< origCompiled) t) thresholds
   verdicts <- mapM (\(site, p') -> do
@@ -445,7 +447,7 @@ checkTopKOperandOrder known origCompiled p rows = do
            ++ concatMap ("\n    " ++) logged
   where
     thresholds = [0.0, 0.1]
-    timed :: Either CompilerError IREnv -> IO (Either String IREnv)
+    timed :: Either CompilerError CheckedIR -> IO (Either String CheckedIR)
     timed c = do
       r <- timeout (20 * 1000000) (try (evaluate c))
       return $ case r of
@@ -453,7 +455,7 @@ checkTopKOperandOrder known origCompiled p rows = do
         Just (Left ex) -> Left ("compile crash: " ++ firstLine (show (ex :: SomeException)))
         Just (Right (Left err)) -> Left ("refused: " ++ firstLine err)
         Just (Right (Right env)) -> Right env
-    answerAt :: Program -> Either String IREnv -> Double -> IO (Either String [(Double, Int)])
+    answerAt :: Program -> Either String CheckedIR -> Double -> IO (Either String [(Double, Int)])
     answerAt _ (Left why) _ = return (Left why)
     answerAt q (Right env) t = do
       let env' = withTopKCutoff t env
@@ -495,7 +497,7 @@ checkProbAny envs n (p, _, params, _) = ioProperty $ do
 -- corpus invariants each needing their own config, compiling per-line-per-invariant
 -- (as irDensity does) redoes the same compile ~5N times over. compile only depends
 -- on (config, program), never on the queried sample/params, so this is pure waste.
-type CompiledPrograms = Map.Map String (Either CompilerError IREnv)
+type CompiledPrograms = Map.Map String (Either CompilerError CheckedIR)
 
 uniqueCorpusPrograms :: [CorpusProbCase] -> [(String, Program)]
 uniqueCorpusPrograms pool = nubBy ((==) `on` fst) [(n, p) | (n, (p, _, _, _)) <- pool]
@@ -503,7 +505,7 @@ uniqueCorpusPrograms pool = nubBy ((==) `on` fst) [(n, p) | (n, (p, _, _, _)) <-
 compileCorpusPrograms :: CompilerConfig -> [(String, Program)] -> CompiledPrograms
 compileCorpusPrograms conf progs = Map.fromList [(n, compile conf p) | (n, p) <- progs]
 
-lookupCompiled :: CompiledPrograms -> String -> Either CompilerError IREnv
+lookupCompiled :: CompiledPrograms -> String -> Either CompilerError CheckedIR
 lookupCompiled envs n = fromMaybe (error ("no compiled entry for corpus program " ++ n)) (Map.lookup n envs)
 
 irDensityC :: CompiledPrograms -> String -> Program -> [IRValue] -> IRValue -> IRValue

@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -48,6 +49,7 @@ module TestFuzz (fuzzTests, samplingCheckTests, prepareAgreementCase, prepareAgr
                  neuralGeneratorTests, arrowGeneratorTests, paramMainGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests) where
 
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv, pattern CheckedEnv)
 import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup, localOption)
 import Test.Tasty.QuickCheck (testProperties, testProperty, QuickCheckMaxRatio(..))
@@ -150,9 +152,9 @@ trySync act = do
 -- which care about topK/branch-counting/normalization behaviour on programs
 -- that *did* compile, not about crash-freedom (that's
 -- 'prop_Fuzz_TypedCompileNeverCrashes'’s job).
-compileSafe :: CompilerConfig -> Program -> IO (Maybe IREnv)
+compileSafe :: CompilerConfig -> Program -> IO (Maybe CheckedIR)
 compileSafe conf p = do
-  r <- trySync (evaluate (forceShow (compile conf p))) :: IO (Either SomeException (Either CompilerError IREnv))
+  r <- trySync (evaluate (forceShow (compile conf p))) :: IO (Either SomeException (Either CompilerError CheckedIR))
   return $ case r of
     Right (Right irEnv) -> Just irEnv
     _ -> Nothing
@@ -243,11 +245,11 @@ showArgs :: [IRValue] -> String
 showArgs [] = ""
 showArgs xs = " at main args " ++ show xs
 
-drawSample :: Program -> IREnv -> IO IRValue
+drawSample :: Program -> CheckedIR -> IO IRValue
 drawSample p compiled = drawSampleAt p (fuzzArgs p) compiled
 
 -- | A forward sample of @main@ at the given arguments.
-drawSampleAt :: Program -> [IRValue] -> IREnv -> IO IRValue
+drawSampleAt :: Program -> [IRValue] -> CheckedIR -> IO IRValue
 drawSampleAt p args compiled = evalRandIO (runGenC p compiled args)
 
 -- | A draw on which the sampled program itself failed at run time -- a
@@ -268,14 +270,14 @@ isRuntimeFailure _ = False
 -- what these invariant properties are about, so check for a probability
 -- function up front and discard (property True) rather than let it surface
 -- as an unrelated crash in every prob-based invariant below.
-hasProbFun :: IREnv -> Bool
+hasProbFun :: CheckedIR -> Bool
 hasProbFun compiled = isJust (probFun (lookupIREnv "main" compiled))
 
-irProb :: Program -> IREnv -> IRValue -> Maybe IRValue
+irProb :: Program -> CheckedIR -> IRValue -> Maybe IRValue
 irProb p = irProbAt p (fuzzArgs p)
 
 -- | 'irProb' at the given arguments: @p(sample | args)@.
-irProbAt :: Program -> [IRValue] -> IREnv -> IRValue -> Maybe IRValue
+irProbAt :: Program -> [IRValue] -> CheckedIR -> IRValue -> Maybe IRValue
 irProbAt p args compiled sample
   | not (hasProbFun compiled) = Nothing
   | otherwise = either (const Nothing) Just (runProbC p compiled args sample)
@@ -311,7 +313,7 @@ irProbAt p args compiled sample
 -- redden every invariant for one bug while hiding the one each exists to
 -- check behind it, which is the masking the twin oracle's guard was
 -- introduced to undo.
-forcedProbAt :: Show a => Program -> IREnv -> (IRValue -> a) -> IO (Maybe (IRValue, a))
+forcedProbAt :: Show a => Program -> CheckedIR -> (IRValue -> a) -> IO (Maybe (IRValue, a))
 forcedProbAt p genEnv k = do
   drawn <- trySync $ do
     sample <- drawSample p genEnv
@@ -322,12 +324,12 @@ forcedProbAt p genEnv k = do
     Left _  -> Nothing
     Right r -> r
 
-hasIntegFun :: IREnv -> Bool
+hasIntegFun :: CheckedIR -> Bool
 hasIntegFun compiled = isJust (integFun (lookupIREnv "main" compiled))
 
 -- | The CDF at a point, i.e. P(X <= x), used by 'windowP0' below to compute
 -- an exact window-hit probability instead of a density*width approximation.
-irInteg :: Program -> [IRValue] -> IREnv -> IRValue -> Maybe Double
+irInteg :: Program -> [IRValue] -> CheckedIR -> IRValue -> Maybe Double
 irInteg p args compiled x
   | not (hasIntegFun compiled) = Nothing
   | otherwise = case runIntegC p compiled args x of
@@ -765,7 +767,7 @@ prop_Fuzz_ExtremeMagnitudeNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllS
 -- compile under @batched = True@, which is why the callers budget two compiles
 -- per draw. A refusal ('Left') passes; a Haskell exception fails, naming the
 -- backend. Nothing is executed, so no Python or Julia install is involved.
-emitEveryBackend :: CompilerConfig -> Program -> IREnv -> IO Property
+emitEveryBackend :: CompilerConfig -> Program -> CheckedIR -> IO Property
 emitEveryBackend conf p irEnv = conjoin <$> mapM emitOne
   [ ("Python", emitCompiled TargetPython False conf irEnv)
   , ("Julia", emitCompiled TargetJulia False conf irEnv)
@@ -805,7 +807,7 @@ prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess (fuzzCases 3000) $
   forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_ProbNeverGenerateBacked" $ do
     r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
     return $ case r of
-      Right (Right irEnv) -> case generateBackedSites irEnv of
+      Right (Right irEnv) -> case generateBackedSites (checkedEnv irEnv) of
         []  -> property True
         bad -> counterexample ("GENERATE-BACKED: " ++ show bad ++ "\nPROGRAM: " ++ show p) False
       _ -> property True
@@ -825,7 +827,7 @@ prop_Fuzz_DuplicationLinearInSize = withMaxSuccess (fuzzCases 300) $
     return $ case r of
       Right (Right irEnv) ->
         let size = sum [ exprNodes b | (_, b) <- functions p ]
-            worst = [ c | c <- censusEnv defaultMinSize irEnv, maxCopies c > duplicationPerSourceNode * size ]
+            worst = [ c | c <- censusEnv defaultMinSize (checkedEnv irEnv), maxCopies c > duplicationPerSourceNode * size ]
         in case worst of
           [] -> property True
           (c : _) -> counterexample ("DUPLICATION: " ++ show (maxCopies c) ++ " copies in a program of " ++ show size
@@ -1078,7 +1080,7 @@ compileKey :: FuzzConfig -> FuzzConfig
 compileKey CfgTopK0 = CfgTopK01
 compileKey c        = c
 
-rethreshold :: FuzzConfig -> IREnv -> IREnv
+rethreshold :: FuzzConfig -> CheckedIR -> CheckedIR
 rethreshold CfgTopK0 = withTopKCutoff 0.0
 rethreshold _        = id
 
@@ -1093,12 +1095,12 @@ rethreshold _        = id
 data InvariantCase = InvariantCase
   { icProgram :: Program
   , icMainArgs :: [IRValue]
-  , icEnv     :: FuzzConfig -> Maybe IREnv
+  , icEnv     :: FuzzConfig -> Maybe CheckedIR
   , icSample  :: Maybe IRValue
   }
 
 -- | @p(sample | x)@ under a case's own arguments.
-icProb :: InvariantCase -> IREnv -> IRValue -> Maybe IRValue
+icProb :: InvariantCase -> CheckedIR -> IRValue -> Maybe IRValue
 icProb c = irProbAt (icProgram c) (icMainArgs c)
 
 -- | An invariant's verdict on one case. 'Vacuous' is "nothing to check here"
@@ -2093,7 +2095,7 @@ agreementGenQueries = 3
 --
 -- @reference@ is the interpreter's run, 'Nothing' where it raised or a
 -- sample is not a renderable value.
-genQueries :: Program -> IREnv -> Int -> [IRValue] -> Maybe [IRValue] -> IO [Query]
+genQueries :: Program -> CheckedIR -> Int -> [IRValue] -> Maybe [IRValue] -> IO [Query]
 genQueries p env seed args reference = case (reference, mainSampleType p) of
   (Just ss@(_ : _), Just rt)
     | hasProbFun env, isJust (genFun (lookupIREnv "main" env)), decodable rt -> do
@@ -2142,8 +2144,8 @@ mainSampleType p = do
 --   variable) is skipped. Its parameters take no network input (only a
 --   neural @main@ reads one), so its interpreter and backend arguments
 --   coincide.
-bodyQueries :: Program -> IREnv -> Int -> [IRValue] -> [IRValue] -> [(Query, [IRValue])]
-bodyQueries p (IREnv gs _ _) seed mainArgs mainBackendArgs =
+bodyQueries :: Program -> CheckedIR -> Int -> [IRValue] -> [IRValue] -> [(Query, [IRValue])]
+bodyQueries p (CheckedEnv (IREnv gs _ _)) seed mainArgs mainBackendArgs =
   [ (mk (groupName g) bargs, iargs)
   | (gi, g) <- zip [0 :: Int ..] gs
   , groupName g `elem` map fst (functions p)
@@ -2383,7 +2385,7 @@ prop_Fuzz_IRBackendsAgree = withMaxSuccess (fuzzCases irFuzzBatches) $
             $ tabulate "batched arm" [batchedArm]
             $ tabulate "batched eligibility of a case" [ either id (const "compared") r | r <- batchedPrep ]
             $ tabulate "batched point" bL
-            $ tabulate "IR construct in a batched-compared body" (concat [ irEnvConstructs inferenceBodies (bicEnv b) | b <- bcases ])
+            $ tabulate "IR construct in a batched-compared body" (concat [ irEnvConstructs inferenceBodies (checkedEnv (bicEnv b)) | b <- bcases ])
             $ maybe id (\msg -> const (counterexample msg False)) noTorchFailure
             $ tabulate "IR construct in a drawn body" (concatMap checkedIRConstructs batch)
             $ counterexample (show (length newD) ++ " disagreement(s), " ++ show (length unknown)
@@ -3684,7 +3686,7 @@ data QueryPoint = QueryPoint
 -- since PNormal/PLogNormal/Integrate all guarantee a closed-form CDF -- see
 -- docs/pipeline-and-types.md's PType section -- but 'drawQueryPoints' filters query points
 -- via 'irProb', not 'irInteg', so this stays defensive rather than partial).
-windowP0 :: Program -> [IRValue] -> IREnv -> IRValue -> Double -> Double -> Double -> Double
+windowP0 :: Program -> [IRValue] -> CheckedIR -> IRValue -> Double -> Double -> Double -> Double
 windowP0 p args irEnv (VFloat center) pr dim eps =
   case (irInteg p args irEnv (VFloat (center - eps / 2)), irInteg p args irEnv (VFloat (center + eps / 2))) of
     (Just lo, Just hi) -> max 0 (hi - lo)
@@ -3747,7 +3749,7 @@ shiftFloatLeaves shifts0 v0 = fst (go shifts0 v0)
 -- carries no meaningful empirical rate to test against). Drawing the points
 -- via 'generate' rather than e.g. a deterministic grid keeps them always
 -- in-support, mirroring every other property in this module.
-drawQueryPoints :: Program -> [IRValue] -> IREnv -> Int -> IO [QueryPoint]
+drawQueryPoints :: Program -> [IRValue] -> CheckedIR -> Int -> IO [QueryPoint]
 drawQueryPoints p args irEnv n = do
   samples <- replicateM n (drawSampleAt p args irEnv)
   return
@@ -3771,7 +3773,7 @@ drawQueryPoints p args irEnv n = do
 -- budget or equivalence margin needs revisiting). If some points are still
 -- 'Unclear' and retries remain, double the batch and try again -- mirrors
 -- the retry-doubling in Spec.hs's 'testSamplingProb'.
-runSamplingCheck :: Program -> [IRValue] -> IREnv -> [QueryPoint] -> Int -> Int -> IO Property
+runSamplingCheck :: Program -> [IRValue] -> CheckedIR -> [QueryPoint] -> Int -> Int -> IO Property
 runSamplingCheck p args irEnv points batchSize retriesLeft = do
   batch <- replicateM batchSize (drawSampleAt p args irEnv)
   let classified =
@@ -3942,7 +3944,7 @@ admissionOracleTests = testGroup "Admission oracle"
       rep <- oracleOn src
       assertNoViolation rep
       p <- either (\e -> assertFailure (show e) >> error "unreachable") return (tryParseProgram "<admission>" src)
-      IREnv groups _ _ <- either (\e -> assertFailure e >> error "unreachable") return (compile defaultCompilerConfig p)
+      CheckedEnv (IREnv groups _ _) <- either (\e -> assertFailure e >> error "unreachable") return (compile defaultCompilerConfig p)
       case [ g | g <- groups, groupName g == "loop" ] of
         [g] -> do
           assertBool "loop generates" (isJust (genFun g))

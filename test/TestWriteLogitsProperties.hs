@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- Aspirational test suite for AutoNeural writeLogits.
 --
 -- OUT OF SCOPE (intentional — not tested here):
@@ -51,6 +52,7 @@ import TestCaseParser (TestCase(..), Backend(..))
 import TestTolerances (probTolerance)
 import CorpusSweep
 import End2EndTesting (writeLogitsArgsFor, endpointPlan, shapeNeuralParams, envelopesShapeable)
+import SPLL.IRTypeCheck (CheckedIR, pattern CheckedEnv)
 
 ------------------------------------------------------------------------
 -- Internal helpers
@@ -935,7 +937,7 @@ collapseTests = testGroup "collapse"
       -- The PType of collapse's result is PNormal: its function gets a normal-parameter
       -- function, and a sum with a further Gaussian stays Gaussian.
       prog <- parseOrFail "main = collapse (if Uniform < 0.5 then Normal else Normal + 2.0) + Normal * 3.0"
-      IREnv groups _ _ <- compileOrFail prog
+      CheckedEnv (IREnv groups _ _) <- compileOrFail prog
       assertBool "main has a normal-parameter function"
         (maybe False (isJust . normalFun) (find ((== "main") . groupName) groups))
       writeLogitsSlots prog [] >>= checkVector "sum" [1.0, sqrt 11.0]
@@ -944,7 +946,7 @@ collapseTests = testGroup "collapse"
       -- condition that is a mixture of two Gaussians again, which has no density here:
       -- main generates, but has no probability function and no writeLogits.
       prog <- parseOrFail "main = draw c = Uniform < 0.5 in collapse (if c then Normal else Normal + 3.0)"
-      IREnv groups _ _ <- compileOrFail prog
+      CheckedEnv (IREnv groups _ _) <- compileOrFail prog
       case find ((== "main") . groupName) groups of
         Nothing -> assertFailure "no main group"
         Just g -> do
@@ -1112,7 +1114,7 @@ isReadLogitsPassthrough p = case lookup "main" (functions p) of
   Just (Expr _ (Lambda s (Expr _ (ReadNN _ (Expr _ (Var s')))))) -> s == s'
   _                                                              -> False
 
-compileOrFail :: Program -> IO IREnv
+compileOrFail :: Program -> IO CheckedIR
 compileOrFail p = either (\e -> assertFailure ("compile failed: " ++ show e) >> return undefined)
                          return (compile defaultCompilerConfig p)
 
@@ -1121,7 +1123,7 @@ compileOrFail p = either (\e -> assertFailure ("compile failed: " ++ show e) >> 
 -- refused (no writeLogits built), so its program is skipped here rather than asserted broken.
 writeLogitsGenerated :: Program -> String -> Bool
 writeLogitsGenerated p target = case compile defaultCompilerConfig p of
-  Right (IREnv groups _ _) -> maybe False (isJust . writeLogitsFun) (find ((== target) . groupName) groups)
+  Right (CheckedEnv (IREnv groups _ _)) -> maybe False (isJust . writeLogitsFun) (find ((== target) . groupName) groups)
   Left _                   -> False
 
 -- Whether the compile warns that the endpoint's writeLogits encodes correlated slots

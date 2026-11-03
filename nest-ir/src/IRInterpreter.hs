@@ -9,6 +9,7 @@ generateReplay
 
 import Statistics.Distribution (quantile)
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (CheckedIR, checkedEnv)
 import SPLL.IR.Value
 import StandardLibrary
 import SPLL.IR.Neural (NeuralOracle, NeuralPrimitive(..), lookupNeuralPrimitive)
@@ -105,8 +106,8 @@ lookupVar name globals env = case lookup name env of
 --
 -- 'IRError' is unchanged: it is a node the compiler emitted on purpose and
 -- 'generate' still throws on it (see there).
-generateRand :: (RandomGen g) => NeuralOracle -> IREnv -> [IRExpr]-> IRExpr -> Rand g IRValue
-generateRand oracle env params e =
+generateRand :: (RandomGen g) => NeuralOracle -> CheckedIR -> [IRExpr]-> IRExpr -> Rand g IRValue
+generateRand oracle checked params e =
   either VError id <$> runExceptT (generate f oracle adts' (globalEnvFrom startingEnv) [] params e)
   where
     f :: RandomGen g => RandomFunctions (ExceptT String (Rand g)) a
@@ -115,6 +116,7 @@ generateRand oracle env params e =
       normalGen = lift (irSample IRNormal),
       failWith = error,
       raise = throwError}
+    env = checkedEnv checked
     startingEnv = reduceIREnv env ++ standardEnv ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
@@ -123,8 +125,8 @@ generateRand oracle env params e =
 -- writeLogits vector's dead-arm slots (task writelogits-dead-arm-nan) -- where
 -- 'generateDet' would refuse the draw and 'generateRand' would throw on a compiler-level
 -- failure instead of reporting it.
-generateRandE :: (RandomGen g) => NeuralOracle -> IREnv -> [IRExpr] -> IRExpr -> Rand g (Either String IRValue)
-generateRandE oracle env params e =
+generateRandE :: (RandomGen g) => NeuralOracle -> CheckedIR -> [IRExpr] -> IRExpr -> Rand g (Either String IRValue)
+generateRandE oracle checked params e =
   runExceptT (generate f oracle adts' (globalEnvFrom startingEnv) [] params e)
   where
     f :: RandomGen g => RandomFunctions (ExceptT String (Rand g)) a
@@ -133,6 +135,7 @@ generateRandE oracle env params e =
       normalGen = lift (irSample IRNormal),
       failWith = throwError,
       raise = throwError}
+    env = checkedEnv checked
     startingEnv = reduceIREnv env ++ standardEnv ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
@@ -143,8 +146,8 @@ generateRandE oracle env params e =
 -- draws through the interpreter (the IR fuzz generator's generate bodies), so
 -- a backend's sample can be checked against the interpreter's value under the
 -- same randomness, in the interpreter's evaluation order.
-generateReplay :: NeuralOracle -> IREnv -> ([Double], [Double]) -> [IRExpr] -> IRExpr -> Either String (IRValue, Int)
-generateReplay oracle env (us0, ns0) params e =
+generateReplay :: NeuralOracle -> CheckedIR -> ([Double], [Double]) -> [IRExpr] -> IRExpr -> Either String (IRValue, Int)
+generateReplay oracle checked (us0, ns0) params e =
   (\(v, (n, _, _)) -> (v, n)) <$> runStateT (generate f oracle adts' (globalEnvFrom startingEnv) [] params e) (0, us0, ns0)
   where
     f :: RandomFunctions (StateT (Int, [Double], [Double]) (Either String)) a
@@ -161,18 +164,20 @@ generateReplay oracle env (us0, ns0) params e =
           [] -> throwError "draw stream exhausted",
       failWith = throwError,
       raise = throwError}
+    env = checkedEnv checked
     startingEnv = reduceIREnv env ++ standardEnv ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
-generateDet :: NeuralOracle -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
+generateDet :: NeuralOracle -> CheckedIR -> [IRExpr]-> IRExpr -> Either String IRValue
 --generateDet oracle env params e | traceShow e False = undefined
-generateDet oracle env = generate f oracle adts' (globalEnvFrom startingEnv) []
+generateDet oracle checked = generate f oracle adts' (globalEnvFrom startingEnv) []
   where
     f = RandomFunctions {
       uniformGen = Left "Uniform Gen is not det",
       normalGen = Left "Normal Gen is not det",
       failWith = Left,
       raise = Left}
+    env = checkedEnv checked
     startingEnv = reduceIREnv env ++ standardEnv ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 

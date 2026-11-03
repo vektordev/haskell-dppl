@@ -3,6 +3,7 @@ module Main (main) where
 import Options.Applicative
 import SPLL.Lang.Lang (Program)
 import SPLL.IntermediateRepresentation
+import SPLL.IRTypeCheck (checkedEnv)
 import SPLL.CompilerConfig
 import SPLL.Parser
 import Data.Char (toLower)
@@ -409,4 +410,4 @@ reportDuplicationCensus False _ _ = return ()
 reportDuplicationCensus True conf prog =
   case compile conf { optimizerLevel = 0, showIntermediates = False, verbose = 0 } prog of
     Left err -> handleError err
-    Right env -> putStr (renderCensus defaultMinSize 3 (censusEnv defaultMinSize env))
+    Right env -> putStr (renderCensus defaultMinSize 3 (censusEnv defaultMinSize (checkedEnv env)))
