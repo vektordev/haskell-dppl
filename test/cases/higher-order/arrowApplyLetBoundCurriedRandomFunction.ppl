@@ -1,0 +1,1 @@
+main = draw f = if Uniform < 0.5 then (\x -> \y -> x + y) else (\x -> if Uniform < 0.5 then (\y -> y) else (\y -> x)) in f 1.0 3.0

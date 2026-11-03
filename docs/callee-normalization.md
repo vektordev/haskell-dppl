@@ -193,25 +193,37 @@ the branch degrades to just the Apply-is-equivalent-to-its-body clause (no
 tagging) rather than erroring -- sound because nothing on the mixture's own
 compilation path below ever consults that tagging for this shape.
 
-`toIRInference`'s `IfThenElse` equation now dispatches on the arms' `rType`: for
-`TArrow`, it builds a **new closure** over a fresh argument, whose body opens
-each arm's own closure at that argument (`unpackResult (IRApply armClosure z)`,
-let-bound once each to avoid `unpackResult`'s four-way destructuring
-duplicating a possibly-expensive call) and runs the *ordinary* scalar
-`weighByCond`/`mixP` combinators on the opened, scalar results --
-`mix(p_c, t, g) == \z -> mix(p_c, unpack(t z), unpack(g z))`. `closeResult`'s
-existing dead-arm guard carries over unchanged, so an arm whose condition
-cannot hold is still never evaluated. topK pruning is not implemented on this
-path (it always computes the exact, unpruned mixture -- a valid refinement of
-what pruning would have approximated, never a regression from the pre-fix
-crash) and the scalar path is untouched. Corpus:
-`arrowApplyLetBoundRandomFunction`.
+`toIRInference`'s `IfThenElse` equation dispatches on the arms' `rType`: for
+`TArrow`, it builds a **new closure** over one fresh argument per arrow of
+the arms' type, whose body applies each arm's own closure to all of them
+(`unpackResult (IRApply (IRApply armClosure z1) z2 ..)`, let-bound once each
+to avoid `unpackResult`'s four-way destructuring duplicating a
+possibly-expensive call) and runs the *ordinary* scalar `weighByCond`/`mixP`
+combinators on the opened, scalar results --
+`mix(p_c, t, g) == \z -> mix(p_c, unpack(t z), unpack(g z))`. An arm is
+opened only once fully applied, so a curried selection works too.
+`closeResult`'s dead-arm guard carries over unchanged, so an arm whose
+condition cannot hold is still never evaluated. topK pruning is not
+implemented on this path (it always computes the exact, unpruned mixture).
+Corpus: `arrowApplyLetBoundRandomFunction`,
+`arrowApplyLetBoundCurriedRandomFunction`.
 
-Two closely related shapes are deliberately **not** covered yet and are filed
-separately, since they turned out to be blocked by different bugs, not by this
-mechanism: a curried multi-argument selection in callee position (blocked by
-`CalleeNormalize`'s own curried-spine gap) and a *named function's* call
-resolving to an if-selected lambda, even with no randomness involved (a
-different `ForwardChaining` crash, in the `l`-side resolution of the same
-`constructEquivalenceClauses` function). See task
-`arrow-lifted-mixture-for-function-values` and its `depends_on`.
+The closure answers only a **deterministic argument**: it maps an argument to
+the selected arm's packed result *at that point*. `toIRInference`'s
+probabilistic-bound-expression arm runs the binder's body forward with the
+closure in place of the function, which is the answer exactly when the body is
+one call of the bound function with deterministic arguments
+(`forwardOneCall`). Any other body is refused by name: a random argument
+(`draw f = if .. in f Normal`, pinned as
+`known-issues/drawBoundRandomFunctionRandomArg`) needs the observation
+inverted through each arm's lambda, which forward chaining cannot reach
+through the selection, and a second use (`(f 1.0, f 2.0)`) needs the
+selection mixed once over the whole body. Both need the same mechanism,
+mixing the selection over the body with each arm's lambda visible.
+
+That is also why the `if`-distribution rule above stays: in callee position
+it is what answers a random argument (`arrowApplyIfSelected`,
+`arrowApplyRandomFunctionNormalArg`, and through the arrow-result eta
+expansion `namedHelperReturnsSelectedLambda`). With the rule disabled those
+three are refused, while the deterministic-argument
+`arrowApplyRandomFunction` still answers through the lifted mixture.

@@ -329,6 +329,23 @@ def _anchor(x):
     return torch.tensor(x, dtype=DTYPE)
   return x
 
+def _apply_spine(g, a):
+  # Apply g to the argument tuple a, whatever g's own arity: a function of k
+  # positional parameters takes the first k and the closure it returns takes
+  # the rest; given fewer than k, the result waits for the remainder. A
+  # function with *args (a select's own closure), or one without __code__,
+  # takes them all.
+  while True:
+    code = getattr(g, '__code__', None)
+    if code is None or code.co_flags & 0x04:
+      return g(*a)
+    k = code.co_argcount
+    if k == len(a):
+      return g(*a)
+    if k > len(a):
+      return lambda *b, g=g, a=a: _apply_spine(g, a + b)
+    g, a = g(*a[:k]), a[k:]
+
 def where_anchored(c, t, f):
   # The emitted form of every value-dependent select (CodeGenPyTorchBatched's
   # torchWhere). torch.where on two python-float arms has no dtype anchor and
@@ -345,7 +362,12 @@ def where_anchored(c, t, f):
     # A select between two function values: select the applied results.
     # Both arms run, as for every select here (task
     # batched-select-between-functions-raises).
-    return lambda *a: where_anchored(c, t(*a), f(*a))
+    # The call site may pass a whole curried spine at once (the backend
+    # uncurries a literal `\x -> \y -> ..` into `lambda x, y:`), while the
+    # other arm takes fewer arguments and returns a closure for the rest
+    # (task arrow-lifted-mixture-for-function-values), so each arm is applied
+    # through _apply_spine rather than given every argument in one call.
+    return lambda *a: where_anchored(c, _apply_spine(t, a), _apply_spine(f, a))
   if t is None and f is None:
     return None  # unit (VUnit) in a tuple leaf: nothing to select
   if isinstance(t, T) and isinstance(f, T):
