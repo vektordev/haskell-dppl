@@ -42,6 +42,7 @@ import TestSamplingPrimitives (samplingPrimitiveTests)
 import TestCLI (cliTests)
 import TestMemoRecursion (memoRecursionTests)
 import BackendCoverage (backendCoverageTests, irGeneratorCoverageTests)
+import ConstructCombinations (constructCombinationProbe)
 import GenerateCensus (generateCensusTests)
 import TestFuzz (fuzzTests, samplingCheckTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, paramMainGeneratorTests, fuzzScalingTests,
@@ -599,6 +600,8 @@ main = do
   backendCoverage <- backendCoverageTests corpus
   irGeneratorCoverage <- irGeneratorCoverageTests corpus
   generateCensus <- generateCensusTests corpus
+  -- Opt-in measurement (NEST_COMBINATION_PROBE=<dir>), not a tier.
+  combinationProbe <- constructCombinationProbe corpus
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   let slow = testGroup "Slow" $
         if isNothing runSlow then [] else [slowInternals, slowIrContract, slowE2e, slowBatchedPy, slowPlanDiff, slowVariants, juliaFreeNames, rewriteCorpus, rewriteSequences, rewriteIntegration, ofToggleCorpus, fuzzTests, backendCoverage, irGeneratorCoverage, generateCensus]
@@ -626,6 +629,7 @@ main = do
   -- (CorpusSweep) is printed after it.
   flip finally (flushManifest manifest >> reportSweeps corpus) $ defaultMain $ timeWholeRun corpus $ testGroup "Tests"
     [ specTests
+    , combinationProbe
     , parserTests
     , internals
     , observationMaskTests

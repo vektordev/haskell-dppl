@@ -786,6 +786,17 @@ with a construct outside `certifiedConstructs` keeps its `End2End.Python` and
 `End2End.Julia` checks (and the WriteLogits ones), keyed with the runtime as in
 the table above. `certifiedConstructs` is a static list of what the IR fuzz
 generator's fixed-seed sample reaches, held exact by `Slow.IRGeneratorCoverage`.
+Certification is per construct, and a bug can live in a combination of
+certified constructs. `ConstructCombinations` measures combinations:
+parent/child edges (`IRIf.cond > Op:OpEq`), scoping contexts (a let anywhere
+inside a map's iterable) and a few bug shapes, over the corpus's emitted IR
+and the two fuzzers' samples. It is an opt-in probe, not a check:
+`NEST_COMBINATION_PROBE=<dir> stack test haskell-dppl:test:haskell-dppl-test --ta '-p /Probe/'`
+writes per-source counts (`scalar.tsv`, `batched.tsv`) and per-program
+features there (`NEST_COMBINATION_PROBE_ALL=1` takes the `slow` programs too).
+Findings: docs-repo investigation
+`ir-fuzz-certification-covers-real-construct-combinations`.
+
 Two checks stay on the text backends regardless:
 
 - `End2End.Python Unoptimized` and `End2End.Julia Unoptimized`, the -O0
