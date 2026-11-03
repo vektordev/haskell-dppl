@@ -987,6 +987,11 @@ knownOverPromises =
     -- whole result of one call (arrow-lifted-mixture-for-function-values,
     -- 2ac1aef, refuses this before the family above can fire).
   , ("a randomly selected function value bound to", "fuzz-admission-over-promises")
+    -- Family 10: affineFormOf (IRCompiler.Gaussian) refuses a non-affine
+    -- operand (e.g. a discrete if) the lattice let through to the Normal
+    -- engine; the replay of family 9 (seed 66397) shrinks into it once
+    -- family 9 is tolerated.
+  , ("affineFormOf: not an affine Gaussian form", "fuzz-admission-over-promises")
     -- The joint affine engine (design affine-gaussian-forms M2): the lattice
     -- admits a tuple whose fields share Gaussian latents, but cannot see
     -- coefficients (a singular covariance) or that the joint CDF of
