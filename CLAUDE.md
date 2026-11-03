@@ -39,6 +39,10 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
   the run. `NEST_FULL_TESTS=1` executes everything. See `docs/testing.md`,
   "Impact analysis".
 
+- A run killed for low memory is a suite fault. `scripts/test-memory/test_memory.py`
+  measures each group (`groups`) or each test of one group (`trace`) under a
+  hard cap. See `docs/testing.md`, "Test suite memory".
+
 - `stack test` runs three test binaries: `haskell-dppl-test` (everything),
   `haskell-dppl-test-corpus` (the `Corpus` group) and `nest-ir:test:nest-ir-test`
   (the IR checker's own suite, in the `nest-ir` package). A bare `--ta PATTERN`
@@ -212,7 +216,7 @@ stdlib), `Utils`.
 | `neural.md` | neural declarations, input types (`Tensor`), `of` annotations, the categorical sampler, sharing one network call per argument, readLogits/writeLogits |
 | `batched-mode-pytorch-tensorizer.md` | batched backend, dense mode, refusals |
 | `backends.md` | runtime libraries under torch, float literals, Python nesting spill, safe unary math |
-| `testing.md` | suite layout, corpus sweeps (the registry and its cost table), `.tst` format and expectations, the known-issues corpus and its performance pins (growth over a templated family, code size), the duplication census, rewrite invariance, tiers, impact analysis (skipping unchanged checks), suite time, coverage-informed tiering, benchmarks |
+| `testing.md` | suite layout, corpus sweeps (the registry and its cost table), `.tst` format and expectations, the known-issues corpus and its performance pins (growth over a templated family, code size), the duplication census, rewrite invariance, tiers, impact analysis (skipping unchanged checks), suite time, coverage-informed tiering, suite memory (per-group and per-test measurement, allocation caps), benchmarks |
 | `fuzz-testing.md` | generators, shrinking, coverage, budgets, the admission-totality and backend-agreement properties |
 
 Design, task and investigation documents live in the separate
