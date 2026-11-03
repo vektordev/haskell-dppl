@@ -136,7 +136,7 @@ rowProperty ((inp, _), verdict) = counterexample ("row p(" ++ show inp ++ ")") $
 
 -- | Bump when the sampler checks' logic changes.
 samplingCheckVersion, supportCheckVersion :: String
-samplingCheckVersion = "corpus-sampling-v2"
+samplingCheckVersion = "corpus-sampling-v3"
 supportCheckVersion = "corpus-support-v1"
 
 -- | Key of a sampler check on one program: its default compile, its runtime
@@ -839,10 +839,24 @@ judgeSampledRow mayFail (Draws samples drawn raised) (inp, (out, outDim))
       RowFail ("the sampler raised on " ++ show (length raised) ++ " of " ++ show samples ++ " draws: " ++ head raised)
   | outDim > length continuous && out > 0 = RowSkip "density of a null event"
   | any (\e -> abs (e - out) <= samplingTolerance) estimates = RowPass
+  | atBoundary = RowSkip "point on a support boundary or density jump"
   | otherwise = RowFail ("Sampled PDF is: " ++ show estimates ++ ", but should be: " ++ show out
                          ++ " (" ++ show samples ++ " draws)")
   where
     epsilon = if outDim == 0 then atomWindow else 0.05
+    -- A one-coordinate window straddling a support edge or a jump estimates the
+    -- average of its two sides. The two half windows tell: draws matching the
+    -- discrete part, on each side of the point, differ sharply (one may be
+    -- empty). Only consulted once the estimate has missed.
+    atBoundary = case (outDim, continuous) of
+      (1, [c]) ->
+        let e = fromMaybe 0 (lookup c queried)
+            offsets = [ a - e | d <- drawn, sampleMatchesWith (const Nothing) inp d
+                              , Just a <- [lookup c (floatCoordValues inp d)] ]
+            lft = length [ o | o <- offsets, o < 0, o >= negate (epsilon / 2) ]
+            rgt = length [ o | o <- offsets, o > 0, o <= epsilon / 2 ]
+        in max lft rgt >= 10 && 3 * min lft rgt < max lft rgt
+      _ -> False
     queried = floatCoordValues inp inp
     atomic = [ i | (i, e) <- queried
                  , any (\d -> any (\(j, a) -> j == i && abs (a - e) <= atomWindow / 2) (floatCoordValues inp d)) drawn ]
