@@ -698,7 +698,7 @@ modalityInferGroup corpusPartialSet = testGroup "ModalityInfer"
           assertEqual "" Integrate $
             mainPType "main = draw b = Uniform < 0.5 in (if b then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
       , testCase "a draw-bound random function applied to a Normal is Integrate" $
-          -- refused (generate-backed guard): ticket arrow-lifted-mixture-for-function-values
+          -- the probability is refused by name: known-issues/drawBoundRandomFunctionRandomArg
           assertEqual "" Integrate $
             mainPType "main = draw f = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) in f Normal"
       , testCase "a let-chained PNormal variable keeps the family" $

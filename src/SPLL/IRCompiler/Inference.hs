@@ -426,12 +426,12 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
     -- directly: mix(p_c, t, g) == \z -> mix(p_c, unpack(t z), unpack(g z)).
     -- Build a NEW closure over a fresh argument 'z' whose body, once applied,
     -- reduces to the ordinary scalar mixture of each arm's own
-    -- (prob, dim, bc, imposs) AT that point -- ordinary, because opening a
-    -- closure at one concrete 'z' always yields a plain value's PResult (a
-    -- still-arrow-typed result, i.e. a curried multi-argument mixture,
-    -- recurses through this very equation the next time IT is combined --
-    -- not handled here; see task callee-normalize-curried-and-accessor-gaps
-    -- and the arrow-lift task's own declined-scope note).
+    -- (prob, dim, bc, imposs) AT that point. A curried selection
+    -- (@if c then \\x -> \\y -> .. else ..@) gets one fresh argument per
+    -- arrow of the arms' type, and each arm's closure is applied to all of
+    -- them: opened only at a non-function result, the arms' packed results
+    -- are plain values again. Opening them after the first argument alone
+    -- left a closure where 'unpackResult' expects a tuple, an ill-typed IR.
     --
     -- topK pruning is NOT implemented for this path: the pruned selection
     -- above picks among three PRE-COMPUTED packed alternatives, and here the
@@ -445,12 +445,13 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
       let metaFalse = meta { accProb = srTimes sr (accProb meta) (IRVar var_condF_p) }
       trueClosure  <- toIRInference metaTrue  cumulative left  sample
       falseClosure <- toIRInference metaFalse cumulative right sample
-      zVar <- mkVariable "argZ"
+      zVars <- mapM (const (mkVariable "argZ")) (arrowArgs rt)
+      let applyAll c = foldl (\acc z -> IRApply acc (IRVar z)) c zVars
       closureBody <- scoped (do
         trueCallV  <- mkVariable "armTcall"
         falseCallV <- mkVariable "armFcall"
-        let trueBind  = (trueCallV,  IRApply (unP (rProb trueClosure))  (IRVar zVar))
-            falseBind = (falseCallV, IRApply (unP (rProb falseClosure)) (IRVar zVar))
+        let trueBind  = (trueCallV,  applyAll (unP (rProb trueClosure)))
+            falseBind = (falseCallV, applyAll (unP (rProb falseClosure)))
         -- Let-bind each arm's application ONCE (mirroring the ReadNN/curried-
         -- call-spine idiom elsewhere in this module) rather than calling
         -- 'unpackResult' directly on the raw 'IRApply': that destructures its
@@ -466,7 +467,7 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
             branchesZ = IROp OpPlus (zeroCheckBC condTrueV  (rBranches weighedTrue))
                                     (zeroCheckBC condFalseV (rBranches weighedFalse))
         mixP sr branchesZ weighedTrue weighedFalse) <&> generateLetInBlock meta
-      return (detP (IRLambda zVar closureBody))
+      return (detP (foldr IRLambda closureBody zVars))
     _ -> do
       -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
       let thr = topKThreshold (compilerConfig meta)
@@ -916,7 +917,28 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply l v)) sample 
         Left _ -> enumerateCurriedArgument meta False mkBody ai sample
     _ -> viaBinding
 -- Probabilistic bound expression
-toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
+toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=cnApp} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
+  -- The code below runs the binder's body forward ('toIRGenerate') with the
+  -- random function value's inference closure in place of the function: the
+  -- closure maps an argument to the packed result of the selected arm at that
+  -- argument (the lifted mixture of the 'IfThenElse' equation), so the body's
+  -- forward value IS the answer exactly when the body is one call of the bound
+  -- function with deterministic arguments. Any other body is refused here:
+  -- with a random argument (@draw f = if .. in f Normal@) the forward run
+  -- samples it, and the probability would be refused only by the central
+  -- generate-backed guard; with a second use (@(f 1.0, f 2.0)@) the closure's
+  -- packed results end up as tuple fields and the program failed at run time.
+  -- Answering either needs the selection mixed once over the whole body with
+  -- each arm's lambda visible to forward chaining (task
+  -- arrow-lifted-mixture-for-function-values, "known boundary"; task
+  -- shared-draw-of-random-function-value).
+  case node l of
+    Lambda f fBody
+      | not (forwardOneCall f fBody) ->
+          refuse cnApp ("a randomly selected function value bound to '" ++ f
+            ++ "' is used other than as the whole result of one call with deterministic arguments; "
+            ++ "a random argument or a second use needs the selection mixed over the whole body, which is not supported")
+    _ -> return ()
   lIR <- toIRGenerate meta l
   vIR <- (unP . rProb) <$> toIRInference meta cumulative v sample
   -- The result is not a tuple if the return value is a closure, as in the
@@ -1824,6 +1846,23 @@ runtimeZeroFactor a b = case (det a, det b) of
     isZeroLit (VFloat 0) = True
     isZeroLit (VInt 0) = True
     isZeroLit _ = False
+
+-- | Whether @body@ is one call of the binder @f@ -- @f a1 .. an@, @n >= 1@ --
+-- with every argument deterministic and free of @f@: the one body shape whose
+-- forward run, with @f@ bound to a random function value's inference closure,
+-- returns the closure's packed result unchanged (the probabilistic bound
+-- expression arm of 'toIRInference').
+forwardOneCall :: String -> Expr -> Bool
+forwardOneCall f e = case flattenApplySpine e of
+  (Expr _ (Var g), args@(_:_)) ->
+    g == f && all (\a -> pType (getTypeInfo a) == Deterministic && not (f `Set.member` freeVarsExpr a)) args
+  _ -> False
+
+-- | The argument types of a curried function type, outermost first: @[a, b]@
+-- for @a -> b -> c@ where @c@ is not itself a function.
+arrowArgs :: RType -> [RType]
+arrowArgs (TArrow a b) = a : arrowArgs b
+arrowArgs _            = []
 
 -- | Whether a value of this type has a function anywhere inside it.
 containsArrow :: RType -> Bool
